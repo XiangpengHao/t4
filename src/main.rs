@@ -1,3 +1,3 @@
 fn main() {
-    println!("Hello, world!");
+    println!("t4 library crate; see tests for usage");
 }
