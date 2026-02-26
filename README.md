@@ -8,14 +8,14 @@ It behaves like a key-value store and is optimized for larger payloads (roughly 
 
 - Single-file storage layout
 - `io_uring` for all I/O
+- 1 request = 1 I/O
 
 ## Usage
 
 Values are written and read by key. Reads support full-value and range access.
 
 ```rust
-// async example (runtime-agnostic futures; poll with your executor)
-let store = t4::Store::mount("your-data.t4").await?;
+let store = t4::mount("your-data.t4").await?;
 
 store
     .put(b"greeting".to_vec(), b"Hello, world!".to_vec())
@@ -34,7 +34,7 @@ assert!(removed);
 For tests or environments where `O_DIRECT` / `O_DSYNC` are not available, use mount options:
 
 ```rust
-let store = t4::Store::mount_with_options(
+let store = t4::mount_with_options(
     "your-data.t4",
     t4::MountOptions {
         queue_depth: 32,
@@ -51,4 +51,3 @@ let store = t4::Store::mount_with_options(
 2. Production mount defaults use `O_DIRECT` and `O_DSYNC`.
 3. Deletes append tombstones; space is not reclaimed in v1.
 4. Metadata lives in linked 4 KB index pages and is rebuilt into memory on mount.
-

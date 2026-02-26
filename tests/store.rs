@@ -1,4 +1,5 @@
-use t4::{Engine, MountOptions};
+use pollster::block_on;
+use t4::{MountOptions, Store};
 
 fn test_options() -> MountOptions {
     MountOptions {
@@ -8,8 +9,8 @@ fn test_options() -> MountOptions {
     }
 }
 
-fn mount_or_skip(path: &std::path::Path) -> Option<Engine> {
-    match Engine::mount_with_options(path, test_options()) {
+fn mount_or_skip(path: &std::path::Path) -> Option<Store> {
+    match block_on(t4::mount_with_options(path, test_options())) {
         Ok(engine) => Some(engine),
         Err(t4::Error::Io(err)) if matches!(err.raw_os_error(), Some(code) if code == libc::EPERM || code == libc::ENOSYS) =>
         {
@@ -26,31 +27,52 @@ fn engine_roundtrip_range_remove_and_remount() {
     let path = dir.path().join("roundtrip.t4");
 
     {
-        let Some(mut engine) = mount_or_skip(&path) else {
+        let Some(store) = mount_or_skip(&path) else {
             return;
         };
-        engine.put(b"a", b"small").unwrap();
-        engine.put(b"b", &vec![7_u8; 5000]).unwrap();
-        engine.put(b"c", b"").unwrap();
+        block_on(store.put(b"a".to_vec(), b"small".to_vec())).unwrap();
+        block_on(store.put(b"b".to_vec(), vec![7_u8; 5000])).unwrap();
+        block_on(store.put(b"c".to_vec(), Vec::new())).unwrap();
 
-        assert_eq!(engine.get(b"a").unwrap(), b"small");
-        assert_eq!(engine.get(b"b").unwrap(), vec![7_u8; 5000]);
-        assert_eq!(engine.get(b"c").unwrap(), Vec::<u8>::new());
-        assert_eq!(engine.get_range(b"b", 100, 64).unwrap(), vec![7_u8; 64]);
-        assert!(engine.remove(b"a").unwrap());
-        assert!(!engine.remove(b"missing").unwrap());
-        assert!(matches!(engine.get(b"a"), Err(t4::Error::NotFound)));
-        engine.sync().unwrap();
+        assert_eq!(block_on(store.get(b"a".to_vec())).unwrap(), b"small");
+        assert_eq!(
+            block_on(store.get(b"b".to_vec())).unwrap(),
+            vec![7_u8; 5000]
+        );
+        assert_eq!(
+            block_on(store.get(b"c".to_vec())).unwrap(),
+            Vec::<u8>::new()
+        );
+        assert_eq!(
+            block_on(store.get_range(b"b".to_vec(), 100, 64)).unwrap(),
+            vec![7_u8; 64]
+        );
+        assert!(block_on(store.remove(b"a".to_vec())).unwrap());
+        assert!(!block_on(store.remove(b"missing".to_vec())).unwrap());
+        assert!(matches!(
+            block_on(store.get(b"a".to_vec())),
+            Err(t4::Error::NotFound)
+        ));
+        block_on(store.sync()).unwrap();
     }
 
     {
-        let Some(mut engine) = mount_or_skip(&path) else {
+        let Some(store) = mount_or_skip(&path) else {
             return;
         };
-        assert!(matches!(engine.get(b"a"), Err(t4::Error::NotFound)));
-        assert_eq!(engine.get(b"b").unwrap(), vec![7_u8; 5000]);
-        assert_eq!(engine.get(b"c").unwrap(), Vec::<u8>::new());
-        assert_eq!(engine.len(), 2);
+        assert!(matches!(
+            block_on(store.get(b"a".to_vec())),
+            Err(t4::Error::NotFound)
+        ));
+        assert_eq!(
+            block_on(store.get(b"b".to_vec())).unwrap(),
+            vec![7_u8; 5000]
+        );
+        assert_eq!(
+            block_on(store.get(b"c".to_vec())).unwrap(),
+            Vec::<u8>::new()
+        );
+        assert_eq!(block_on(store.len()).unwrap(), 2);
     }
 }
 
@@ -60,30 +82,33 @@ fn index_page_growth_across_many_entries() {
     let path = dir.path().join("growth.t4");
 
     {
-        let Some(mut engine) = mount_or_skip(&path) else {
+        let Some(store) = mount_or_skip(&path) else {
             return;
         };
         for i in 0..300_u32 {
             let key = format!("key-{i:04}");
             let val = vec![(i % 255) as u8; 128];
-            engine.put(key.as_bytes(), &val).unwrap();
+            block_on(store.put(key.into_bytes(), val)).unwrap();
         }
 
         for i in [0_u32, 17, 149, 299] {
             let key = format!("key-{i:04}");
             assert_eq!(
-                engine.get(key.as_bytes()).unwrap(),
+                block_on(store.get(key.into_bytes())).unwrap(),
                 vec![(i % 255) as u8; 128]
             );
         }
-        engine.sync().unwrap();
+        block_on(store.sync()).unwrap();
     }
 
     {
-        let Some(mut engine) = mount_or_skip(&path) else {
+        let Some(store) = mount_or_skip(&path) else {
             return;
         };
-        assert_eq!(engine.len(), 300);
-        assert_eq!(engine.get(b"key-0299").unwrap(), vec![44_u8; 128]);
+        assert_eq!(block_on(store.len()).unwrap(), 300);
+        assert_eq!(
+            block_on(store.get(b"key-0299".to_vec())).unwrap(),
+            vec![44_u8; 128]
+        );
     }
 }

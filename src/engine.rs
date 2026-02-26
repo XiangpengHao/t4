@@ -43,10 +43,6 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn mount(path: impl AsRef<Path>) -> Result<Self> {
-        Self::mount_with_options(path, MountOptions::default())
-    }
-
     pub fn mount_with_options(path: impl AsRef<Path>, options: MountOptions) -> Result<Self> {
         let mut open = OpenOptions::new();
         open.read(true).write(true).create(true);
@@ -201,10 +197,6 @@ impl Engine {
 
     pub fn is_empty(&self) -> bool {
         self.index.is_empty()
-    }
-
-    pub fn bump_pointer(&self) -> u64 {
-        self.bump_pointer
     }
 
     fn fd(&self) -> RawFd {

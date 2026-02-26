@@ -37,10 +37,6 @@ impl IndexEntry {
         }
     }
 
-    pub fn is_tombstone(&self) -> bool {
-        self.flags == FLAG_TOMBSTONE
-    }
-
     pub fn serialized_len(&self) -> usize {
         ENTRY_HEADER_SIZE + self.key.len()
     }
