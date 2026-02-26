@@ -8,8 +8,10 @@ name = "t4"
 path = "src/lib.rs"
 
 [dependencies]
-io-uring = "0.7"
 libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7"
 
 [dev-dependencies]
 pollster = "0.4"

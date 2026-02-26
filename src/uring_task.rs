@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::os::fd::RawFd;
 use std::pin::Pin;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -82,19 +81,16 @@ pub(crate) fn worker_disconnected_error() -> Error {
 
 pub(crate) enum WorkerRequest {
     Read {
-        fd: RawFd,
         buf: AlignedBuf,
         offset: u64,
         completion: ReadCompletion,
     },
     Write {
-        fd: RawFd,
         buf: AlignedBuf,
         offset: u64,
         completion: WriteCompletion,
     },
     Fsync {
-        fd: RawFd,
         completion: FsyncCompletion,
     },
     Shutdown,
@@ -103,7 +99,6 @@ pub(crate) enum WorkerRequest {
 #[derive(Debug)]
 struct PendingRead {
     tx: mpsc::Sender<WorkerRequest>,
-    fd: RawFd,
     buf: Option<AlignedBuf>,
     offset: u64,
 }
@@ -119,16 +114,10 @@ enum FileReadTaskState {
 }
 
 impl FileReadTask {
-    pub(crate) fn new(
-        tx: mpsc::Sender<WorkerRequest>,
-        fd: RawFd,
-        buf: AlignedBuf,
-        offset: u64,
-    ) -> Self {
+    pub(crate) fn new(tx: mpsc::Sender<WorkerRequest>, buf: AlignedBuf, offset: u64) -> Self {
         Self {
             state: FileReadTaskState::Init(PendingRead {
                 tx,
-                fd,
                 buf: Some(buf),
                 offset,
             }),
@@ -147,7 +136,6 @@ impl Future for FileReadTask {
                 FileReadTaskState::Init(pending) => {
                     let completion = Arc::new(TaskCompletion::new(cx.waker().clone()));
                     let request = WorkerRequest::Read {
-                        fd: pending.fd,
                         buf: pending.buf.take().expect("read task buffer missing"),
                         offset: pending.offset,
                         completion: Arc::clone(&completion),
@@ -175,7 +163,6 @@ impl Future for FileReadTask {
 #[derive(Debug)]
 struct PendingWrite {
     tx: mpsc::Sender<WorkerRequest>,
-    fd: RawFd,
     buf: Option<AlignedBuf>,
     offset: u64,
 }
@@ -191,16 +178,10 @@ enum FileWriteTaskState {
 }
 
 impl FileWriteTask {
-    pub(crate) fn new(
-        tx: mpsc::Sender<WorkerRequest>,
-        fd: RawFd,
-        buf: AlignedBuf,
-        offset: u64,
-    ) -> Self {
+    pub(crate) fn new(tx: mpsc::Sender<WorkerRequest>, buf: AlignedBuf, offset: u64) -> Self {
         Self {
             state: FileWriteTaskState::Init(PendingWrite {
                 tx,
-                fd,
                 buf: Some(buf),
                 offset,
             }),
@@ -219,7 +200,6 @@ impl Future for FileWriteTask {
                 FileWriteTaskState::Init(pending) => {
                     let completion = Arc::new(TaskCompletion::new(cx.waker().clone()));
                     let request = WorkerRequest::Write {
-                        fd: pending.fd,
                         buf: pending.buf.take().expect("write task buffer missing"),
                         offset: pending.offset,
                         completion: Arc::clone(&completion),
@@ -247,7 +227,6 @@ impl Future for FileWriteTask {
 #[derive(Debug)]
 struct PendingFsync {
     tx: mpsc::Sender<WorkerRequest>,
-    fd: RawFd,
 }
 
 pub(crate) struct FileFsyncTask {
@@ -261,9 +240,9 @@ enum FileFsyncTaskState {
 }
 
 impl FileFsyncTask {
-    pub(crate) fn new(tx: mpsc::Sender<WorkerRequest>, fd: RawFd) -> Self {
+    pub(crate) fn new(tx: mpsc::Sender<WorkerRequest>) -> Self {
         Self {
-            state: FileFsyncTaskState::Init(PendingFsync { tx, fd }),
+            state: FileFsyncTaskState::Init(PendingFsync { tx }),
         }
     }
 }
@@ -279,7 +258,6 @@ impl Future for FileFsyncTask {
                 FileFsyncTaskState::Init(pending) => {
                     let completion = Arc::new(TaskCompletion::new(cx.waker().clone()));
                     let request = WorkerRequest::Fsync {
-                        fd: pending.fd,
                         completion: Arc::clone(&completion),
                     };
                     if pending.tx.send(request).is_err() {

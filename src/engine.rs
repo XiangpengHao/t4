@@ -1,8 +1,9 @@
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs::OpenOptions;
 use std::path::Path;
+
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
 
 use crate::error::{Error, Result};
 use crate::format::{FLAG_TOMBSTONE, IndexEntry, IndexPage, PAGE_SIZE, PAGE_SIZE_U64};
@@ -72,7 +73,6 @@ impl TailIndexPage {
 
 #[derive(Debug)]
 pub struct Engine {
-    file: File,
     uring: UringWorker,
     index: HashMap<Vec<u8>, ValueRef>,
     bump_pointer: u64,
@@ -84,25 +84,28 @@ impl Engine {
         let mut open = OpenOptions::new();
         open.read(true).write(true).create(true);
 
-        let mut custom_flags = 0;
-        if options.direct_io {
-            custom_flags |= libc::O_DIRECT;
+        #[cfg(target_os = "linux")]
+        {
+            let mut custom_flags = 0;
+            if options.direct_io {
+                custom_flags |= libc::O_DIRECT;
+            }
+            if options.dsync {
+                custom_flags |= libc::O_DSYNC;
+            }
+            open.custom_flags(custom_flags);
         }
-        if options.dsync {
-            custom_flags |= libc::O_DSYNC;
-        }
-        open.custom_flags(custom_flags);
 
         let file = open.open(path)?;
-        let uring = UringWorker::new(options.queue_depth)?;
-        let mut index = HashMap::new();
         let len = file.metadata()?.len();
+        let uring = UringWorker::new(options.queue_depth, file)?;
+        let mut index = HashMap::new();
 
         let (bump_pointer, tail_index_page) = if len == 0 {
             let page = IndexPage::empty();
             let mut page_buf = AlignedBuf::new_zeroed(PAGE_SIZE)?;
             page_buf.as_mut_slice().copy_from_slice(&page.to_bytes()?);
-            uring.write_all_at(file.as_raw_fd(), page_buf, 0).await?;
+            uring.write_all_at(page_buf, 0).await?;
             (PAGE_SIZE_U64, TailIndexPage::new(0, page))
         } else {
             if len < PAGE_SIZE_U64 {
@@ -113,7 +116,7 @@ impl Engine {
 
             let mut offset = 0_u64;
             let (last_offset, last_page) = loop {
-                let page = Self::read_index_page_inner(&file, &uring, offset).await?;
+                let page = Self::read_index_page_inner(&uring, offset).await?;
                 for entry in &page.entries {
                     if entry.flags == FLAG_TOMBSTONE {
                         index.remove(entry.key.as_slice());
@@ -139,7 +142,6 @@ impl Engine {
         };
 
         Ok(Self {
-            file,
             uring,
             index,
             bump_pointer,
@@ -157,8 +159,7 @@ impl Engine {
         if !value.is_empty() {
             let buf = AlignedBuf::from_padded_slice(value)?;
             let padded_len = buf.len() as u64;
-            let fd = self.fd();
-            self.uring.write_all_at(fd, buf, self.bump_pointer).await?;
+            self.uring.write_all_at(buf, self.bump_pointer).await?;
             self.bump_pointer += padded_len;
         }
 
@@ -180,9 +181,8 @@ impl Engine {
             return Ok(Vec::new());
         }
         let padded = align_up_usize(value.length as usize, PAGE_SIZE);
-        let fd = self.fd();
         let buf = AlignedBuf::new_zeroed(padded)?;
-        let buf = self.uring.read_exact_at(fd, buf, value.offset).await?;
+        let buf = self.uring.read_exact_at(buf, value.offset).await?;
         Ok(buf.as_slice()[..value.length as usize].to_vec())
     }
 
@@ -209,9 +209,8 @@ impl Engine {
         let aligned_start = align_down_u64(abs_start, PAGE_SIZE_U64);
         let aligned_end = align_up_u64(abs_end, PAGE_SIZE_U64);
         let read_len = (aligned_end - aligned_start) as usize;
-        let fd = self.fd();
         let buf = AlignedBuf::new_zeroed(read_len)?;
-        let buf = self.uring.read_exact_at(fd, buf, aligned_start).await?;
+        let buf = self.uring.read_exact_at(buf, aligned_start).await?;
 
         let slice_start = (abs_start - aligned_start) as usize;
         let slice_end = slice_start + range_len as usize;
@@ -229,7 +228,7 @@ impl Engine {
     }
 
     pub async fn sync(&self) -> Result<()> {
-        self.uring.fsync(self.fd()).await
+        self.uring.fsync().await
     }
 
     pub fn len(&self) -> usize {
@@ -238,10 +237,6 @@ impl Engine {
 
     pub fn is_empty(&self) -> bool {
         self.index.is_empty()
-    }
-
-    fn fd(&self) -> RawFd {
-        self.file.as_raw_fd()
     }
 
     async fn append_index_entry(&mut self, entry: IndexEntry) -> Result<()> {
@@ -275,19 +270,15 @@ impl Engine {
         Ok(())
     }
 
-    async fn read_index_page_inner(
-        file: &File,
-        uring: &UringWorker,
-        offset: u64,
-    ) -> Result<IndexPage> {
+    async fn read_index_page_inner(uring: &UringWorker, offset: u64) -> Result<IndexPage> {
         let buf = AlignedBuf::new_zeroed(PAGE_SIZE)?;
-        let buf = uring.read_exact_at(file.as_raw_fd(), buf, offset).await?;
+        let buf = uring.read_exact_at(buf, offset).await?;
         IndexPage::from_bytes(buf.as_slice())
     }
 
     async fn write_index_page(&mut self, offset: u64, page: &IndexPage) -> Result<()> {
         let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE)?;
         buf.as_mut_slice().copy_from_slice(&page.to_bytes()?);
-        self.uring.write_all_at(self.fd(), buf, offset).await
+        self.uring.write_all_at(buf, offset).await
     }
 }
