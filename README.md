@@ -1,14 +1,11 @@
 # `t4`
 
-`t4` is a local, single-file object store implemented in user space.
-
-It behaves like a key-value store and is optimized for larger payloads (roughly `>4 KB`).
+`t4` is a local, single-file, high-performance object store.
 
 ## Features
 
-- Single-file storage layout
-- `io_uring` for all I/O
-- 1 request = 1 I/O
+- `io_uring` for all I/O, scale to modern SSDs.
+- Deterministic, predictable performance, one request is one I/O.
 
 ## Usage
 
@@ -51,3 +48,4 @@ let store = t4::mount_with_options(
 2. Production mount defaults use `O_DIRECT` and `O_DSYNC`.
 3. Deletes append tombstones; space is not reclaimed in v1.
 4. Metadata lives in linked 4 KB index pages and is rebuilt into memory on mount.
+

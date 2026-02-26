@@ -1,9 +1,9 @@
 mod engine;
 mod error;
 mod format;
-mod future;
 mod io;
-mod uring;
+mod uring_task;
+mod uring_worker;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -39,11 +39,11 @@ impl Store {
         options: MountOptions,
     ) -> impl std::future::Future<Output = Result<Self>> {
         let path = path.as_ref().to_path_buf();
-        future::leaf(move || {
+        async move {
             Ok(Self {
-                inner: Arc::new(Mutex::new(Engine::mount_with_options(path, options)?)),
+                inner: Arc::new(Mutex::new(Engine::mount_with_options(path, options).await?)),
             })
-        })
+        }
     }
 
     fn lock_engine(&self) -> Result<MutexGuard<'_, Engine>> {
@@ -56,18 +56,18 @@ impl Store {
         value: Vec<u8>,
     ) -> impl std::future::Future<Output = Result<()>> {
         let this = self.clone();
-        future::leaf(move || {
+        async move {
             let mut engine = this.lock_engine()?;
-            engine.put(&key, &value)
-        })
+            engine.put(&key, &value).await
+        }
     }
 
     pub fn get(&self, key: Vec<u8>) -> impl std::future::Future<Output = Result<Vec<u8>>> {
         let this = self.clone();
-        future::leaf(move || {
+        async move {
             let mut engine = this.lock_engine()?;
-            engine.get(&key)
-        })
+            engine.get(&key).await
+        }
     }
 
     pub fn get_range(
@@ -77,41 +77,41 @@ impl Store {
         range_len: u64,
     ) -> impl std::future::Future<Output = Result<Vec<u8>>> {
         let this = self.clone();
-        future::leaf(move || {
+        async move {
             let mut engine = this.lock_engine()?;
-            engine.get_range(&key, range_start, range_len)
-        })
+            engine.get_range(&key, range_start, range_len).await
+        }
     }
 
     pub fn remove(&self, key: Vec<u8>) -> impl std::future::Future<Output = Result<bool>> {
         let this = self.clone();
-        future::leaf(move || {
+        async move {
             let mut engine = this.lock_engine()?;
-            engine.remove(&key)
-        })
+            engine.remove(&key).await
+        }
     }
 
     pub fn sync(&self) -> impl std::future::Future<Output = Result<()>> {
         let this = self.clone();
-        future::leaf(move || {
+        async move {
             let mut engine = this.lock_engine()?;
-            engine.sync()
-        })
+            engine.sync().await
+        }
     }
 
     pub fn len(&self) -> impl std::future::Future<Output = Result<usize>> {
         let this = self.clone();
-        future::leaf(move || {
+        async move {
             let engine = this.lock_engine()?;
             Ok(engine.len())
-        })
+        }
     }
 
     pub fn is_empty(&self) -> impl std::future::Future<Output = Result<bool>> {
         let this = self.clone();
-        future::leaf(move || {
+        async move {
             let engine = this.lock_engine()?;
             Ok(engine.is_empty())
-        })
+        }
     }
 }

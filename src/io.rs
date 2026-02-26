@@ -26,6 +26,10 @@ pub struct AlignedBuf {
     layout: Option<Layout>,
 }
 
+// `AlignedBuf` owns its allocation and exposes mutation only through `&mut self`,
+// so moving it across threads preserves Rust's aliasing guarantees.
+unsafe impl Send for AlignedBuf {}
+
 impl AlignedBuf {
     pub fn new_zeroed(len: usize) -> Result<Self> {
         if len == 0 {

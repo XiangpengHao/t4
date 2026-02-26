@@ -7,7 +7,7 @@ use std::path::Path;
 use crate::error::{Error, Result};
 use crate::format::{FLAG_TOMBSTONE, IndexEntry, IndexPage, PAGE_SIZE, PAGE_SIZE_U64};
 use crate::io::{AlignedBuf, align_down_u64, align_up_u64, align_up_usize};
-use crate::uring::UringDriver;
+use crate::uring_worker::UringWorker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ValueRef {
@@ -33,17 +33,54 @@ impl Default for MountOptions {
 }
 
 #[derive(Debug)]
+struct TailIndexPage {
+    offset: u64,
+    page: IndexPage,
+}
+
+impl TailIndexPage {
+    fn new(offset: u64, page: IndexPage) -> Self {
+        Self { offset, page }
+    }
+
+    fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    fn can_fit(&self, entry: &IndexEntry) -> bool {
+        self.page.can_fit(entry)
+    }
+
+    fn append(&mut self, entry: IndexEntry) {
+        let pushed = self.page.push(entry);
+        debug_assert!(pushed, "caller must check page capacity before append");
+    }
+
+    fn set_next_page(&mut self, next_page_offset: u64) {
+        self.page.next_page = next_page_offset;
+    }
+
+    fn snapshot(&self) -> IndexPage {
+        self.page.clone()
+    }
+
+    fn advance_to(&mut self, offset: u64, page: IndexPage) {
+        self.offset = offset;
+        self.page = page;
+    }
+}
+
+#[derive(Debug)]
 pub struct Engine {
     file: File,
-    uring: UringDriver,
+    uring: UringWorker,
     index: HashMap<Vec<u8>, ValueRef>,
     bump_pointer: u64,
-    last_index_page_offset: u64,
-    last_index_page: IndexPage,
+    tail_index_page: TailIndexPage,
 }
 
 impl Engine {
-    pub fn mount_with_options(path: impl AsRef<Path>, options: MountOptions) -> Result<Self> {
+    pub async fn mount_with_options(path: impl AsRef<Path>, options: MountOptions) -> Result<Self> {
         let mut open = OpenOptions::new();
         open.read(true).write(true).create(true);
 
@@ -57,16 +94,16 @@ impl Engine {
         open.custom_flags(custom_flags);
 
         let file = open.open(path)?;
-        let mut uring = UringDriver::new(options.queue_depth)?;
+        let uring = UringWorker::new(options.queue_depth)?;
         let mut index = HashMap::new();
         let len = file.metadata()?.len();
 
-        let (bump_pointer, last_index_page_offset, last_index_page) = if len == 0 {
+        let (bump_pointer, tail_index_page) = if len == 0 {
             let page = IndexPage::empty();
             let mut page_buf = AlignedBuf::new_zeroed(PAGE_SIZE)?;
             page_buf.as_mut_slice().copy_from_slice(&page.to_bytes()?);
-            uring.write_all_at(file.as_raw_fd(), &page_buf, 0)?;
-            (PAGE_SIZE_U64, 0, page)
+            uring.write_all_at(file.as_raw_fd(), page_buf, 0).await?;
+            (PAGE_SIZE_U64, TailIndexPage::new(0, page))
         } else {
             if len < PAGE_SIZE_U64 {
                 return Err(Error::Format(
@@ -76,7 +113,7 @@ impl Engine {
 
             let mut offset = 0_u64;
             let (last_offset, last_page) = loop {
-                let page = Self::read_index_page_inner(&file, &mut uring, offset)?;
+                let page = Self::read_index_page_inner(&file, &uring, offset).await?;
                 for entry in &page.entries {
                     if entry.flags == FLAG_TOMBSTONE {
                         index.remove(entry.key.as_slice());
@@ -95,7 +132,10 @@ impl Engine {
                 }
                 offset = page.next_page;
             };
-            (align_up_u64(len, PAGE_SIZE_U64), last_offset, last_page)
+            (
+                align_up_u64(len, PAGE_SIZE_U64),
+                TailIndexPage::new(last_offset, last_page),
+            )
         };
 
         Ok(Self {
@@ -103,12 +143,11 @@ impl Engine {
             uring,
             index,
             bump_pointer,
-            last_index_page_offset,
-            last_index_page,
+            tail_index_page,
         })
     }
 
-    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+    pub async fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         if key.len() > u16::MAX as usize {
             return Err(Error::KeyTooLarge(key.len()));
         }
@@ -117,13 +156,14 @@ impl Engine {
         let value_len = value.len() as u64;
         if !value.is_empty() {
             let buf = AlignedBuf::from_padded_slice(value)?;
-            self.uring
-                .write_all_at(self.fd(), &buf, self.bump_pointer)?;
-            self.bump_pointer += buf.len() as u64;
+            let padded_len = buf.len() as u64;
+            let fd = self.fd();
+            self.uring.write_all_at(fd, buf, self.bump_pointer).await?;
+            self.bump_pointer += padded_len;
         }
 
         let entry = IndexEntry::live(key.to_vec(), value_offset, value_len);
-        self.append_index_entry(entry)?;
+        self.append_index_entry(entry).await?;
         self.index.insert(
             key.to_vec(),
             ValueRef {
@@ -134,19 +174,24 @@ impl Engine {
         Ok(())
     }
 
-    pub fn get(&mut self, key: &[u8]) -> Result<Vec<u8>> {
+    pub async fn get(&mut self, key: &[u8]) -> Result<Vec<u8>> {
         let value = *self.index.get(key).ok_or(Error::NotFound)?;
         if value.length == 0 {
             return Ok(Vec::new());
         }
         let padded = align_up_usize(value.length as usize, PAGE_SIZE);
-        let mut buf = AlignedBuf::new_zeroed(padded)?;
-        self.uring
-            .read_exact_at(self.fd(), &mut buf, value.offset)?;
+        let fd = self.fd();
+        let buf = AlignedBuf::new_zeroed(padded)?;
+        let buf = self.uring.read_exact_at(fd, buf, value.offset).await?;
         Ok(buf.as_slice()[..value.length as usize].to_vec())
     }
 
-    pub fn get_range(&mut self, key: &[u8], range_start: u64, range_len: u64) -> Result<Vec<u8>> {
+    pub async fn get_range(
+        &mut self,
+        key: &[u8],
+        range_start: u64,
+        range_len: u64,
+    ) -> Result<Vec<u8>> {
         let value = *self.index.get(key).ok_or(Error::NotFound)?;
         let range_end = range_start
             .checked_add(range_len)
@@ -169,26 +214,27 @@ impl Engine {
         let aligned_start = align_down_u64(abs_start, PAGE_SIZE_U64);
         let aligned_end = align_up_u64(abs_end, PAGE_SIZE_U64);
         let read_len = (aligned_end - aligned_start) as usize;
-        let mut buf = AlignedBuf::new_zeroed(read_len)?;
-        self.uring
-            .read_exact_at(self.fd(), &mut buf, aligned_start)?;
+        let fd = self.fd();
+        let buf = AlignedBuf::new_zeroed(read_len)?;
+        let buf = self.uring.read_exact_at(fd, buf, aligned_start).await?;
 
         let slice_start = (abs_start - aligned_start) as usize;
         let slice_end = slice_start + range_len as usize;
         Ok(buf.as_slice()[slice_start..slice_end].to_vec())
     }
 
-    pub fn remove(&mut self, key: &[u8]) -> Result<bool> {
+    pub async fn remove(&mut self, key: &[u8]) -> Result<bool> {
         if key.len() > u16::MAX as usize {
             return Err(Error::KeyTooLarge(key.len()));
         }
         let existed = self.index.remove(key).is_some();
-        self.append_index_entry(IndexEntry::tombstone(key.to_vec()))?;
+        self.append_index_entry(IndexEntry::tombstone(key.to_vec()))
+            .await?;
         Ok(existed)
     }
 
-    pub fn sync(&mut self) -> Result<()> {
-        self.uring.fsync(self.fd())
+    pub async fn sync(&mut self) -> Result<()> {
+        self.uring.fsync(self.fd()).await
     }
 
     pub fn len(&self) -> usize {
@@ -203,11 +249,12 @@ impl Engine {
         self.file.as_raw_fd()
     }
 
-    fn append_index_entry(&mut self, entry: IndexEntry) -> Result<()> {
-        if self.last_index_page.can_fit(&entry) {
-            self.last_index_page.push(entry);
-            let page = self.last_index_page.clone();
-            self.write_index_page(self.last_index_page_offset, &page)?;
+    async fn append_index_entry(&mut self, entry: IndexEntry) -> Result<()> {
+        if self.tail_index_page.can_fit(&entry) {
+            self.tail_index_page.append(entry);
+            let page = self.tail_index_page.snapshot();
+            let offset = self.tail_index_page.offset();
+            self.write_index_page(offset, &page).await?;
             return Ok(());
         }
 
@@ -217,9 +264,10 @@ impl Engine {
             .checked_add(PAGE_SIZE_U64)
             .ok_or_else(|| Error::Format("bump pointer overflow".into()))?;
 
-        self.last_index_page.next_page = new_page_offset;
-        let prev_page = self.last_index_page.clone();
-        self.write_index_page(self.last_index_page_offset, &prev_page)?;
+        self.tail_index_page.set_next_page(new_page_offset);
+        let prev_page = self.tail_index_page.snapshot();
+        let prev_offset = self.tail_index_page.offset();
+        self.write_index_page(prev_offset, &prev_page).await?;
 
         let mut new_page = IndexPage::empty();
         if !new_page.push(entry) {
@@ -227,25 +275,24 @@ impl Engine {
                 "entry does not fit in empty index page".into(),
             ));
         }
-        self.write_index_page(new_page_offset, &new_page)?;
-        self.last_index_page_offset = new_page_offset;
-        self.last_index_page = new_page;
+        self.write_index_page(new_page_offset, &new_page).await?;
+        self.tail_index_page.advance_to(new_page_offset, new_page);
         Ok(())
     }
 
-    fn read_index_page_inner(
+    async fn read_index_page_inner(
         file: &File,
-        uring: &mut UringDriver,
+        uring: &UringWorker,
         offset: u64,
     ) -> Result<IndexPage> {
-        let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE)?;
-        uring.read_exact_at(file.as_raw_fd(), &mut buf, offset)?;
+        let buf = AlignedBuf::new_zeroed(PAGE_SIZE)?;
+        let buf = uring.read_exact_at(file.as_raw_fd(), buf, offset).await?;
         IndexPage::from_bytes(buf.as_slice())
     }
 
-    fn write_index_page(&mut self, offset: u64, page: &IndexPage) -> Result<()> {
+    async fn write_index_page(&mut self, offset: u64, page: &IndexPage) -> Result<()> {
         let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE)?;
         buf.as_mut_slice().copy_from_slice(&page.to_bytes()?);
-        self.uring.write_all_at(self.fd(), &buf, offset)
+        self.uring.write_all_at(self.fd(), buf, offset).await
     }
 }
