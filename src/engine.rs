@@ -174,7 +174,7 @@ impl Engine {
         Ok(())
     }
 
-    pub async fn get(&mut self, key: &[u8]) -> Result<Vec<u8>> {
+    pub async fn get(&self, key: &[u8]) -> Result<Vec<u8>> {
         let value = *self.index.get(key).ok_or(Error::NotFound)?;
         if value.length == 0 {
             return Ok(Vec::new());
@@ -186,12 +186,7 @@ impl Engine {
         Ok(buf.as_slice()[..value.length as usize].to_vec())
     }
 
-    pub async fn get_range(
-        &mut self,
-        key: &[u8],
-        range_start: u64,
-        range_len: u64,
-    ) -> Result<Vec<u8>> {
+    pub async fn get_range(&self, key: &[u8], range_start: u64, range_len: u64) -> Result<Vec<u8>> {
         let value = *self.index.get(key).ok_or(Error::NotFound)?;
         let range_end = range_start
             .checked_add(range_len)
@@ -233,7 +228,7 @@ impl Engine {
         Ok(existed)
     }
 
-    pub async fn sync(&mut self) -> Result<()> {
+    pub async fn sync(&self) -> Result<()> {
         self.uring.fsync(self.fd()).await
     }
 

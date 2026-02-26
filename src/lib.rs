@@ -6,7 +6,7 @@ mod uring_task;
 mod uring_worker;
 
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::engine::Engine;
 
@@ -15,7 +15,7 @@ pub use error::{Error, Result};
 
 #[derive(Clone, Debug)]
 pub struct Store {
-    inner: Arc<Mutex<Engine>>,
+    inner: Arc<RwLock<Engine>>,
 }
 
 pub fn mount(path: impl AsRef<Path>) -> impl std::future::Future<Output = Result<Store>> {
@@ -41,13 +41,19 @@ impl Store {
         let path = path.as_ref().to_path_buf();
         async move {
             Ok(Self {
-                inner: Arc::new(Mutex::new(Engine::mount_with_options(path, options).await?)),
+                inner: Arc::new(RwLock::new(
+                    Engine::mount_with_options(path, options).await?,
+                )),
             })
         }
     }
 
-    fn lock_engine(&self) -> Result<MutexGuard<'_, Engine>> {
-        self.inner.lock().map_err(|_| Error::LockPoisoned)
+    fn read_engine(&self) -> Result<RwLockReadGuard<'_, Engine>> {
+        self.inner.read().map_err(|_| Error::LockPoisoned)
+    }
+
+    fn write_engine(&self) -> Result<RwLockWriteGuard<'_, Engine>> {
+        self.inner.write().map_err(|_| Error::LockPoisoned)
     }
 
     pub fn put(
@@ -57,7 +63,7 @@ impl Store {
     ) -> impl std::future::Future<Output = Result<()>> {
         let this = self.clone();
         async move {
-            let mut engine = this.lock_engine()?;
+            let mut engine = this.write_engine()?;
             engine.put(&key, &value).await
         }
     }
@@ -65,7 +71,7 @@ impl Store {
     pub fn get(&self, key: Vec<u8>) -> impl std::future::Future<Output = Result<Vec<u8>>> {
         let this = self.clone();
         async move {
-            let mut engine = this.lock_engine()?;
+            let engine = this.read_engine()?;
             engine.get(&key).await
         }
     }
@@ -78,7 +84,7 @@ impl Store {
     ) -> impl std::future::Future<Output = Result<Vec<u8>>> {
         let this = self.clone();
         async move {
-            let mut engine = this.lock_engine()?;
+            let engine = this.read_engine()?;
             engine.get_range(&key, range_start, range_len).await
         }
     }
@@ -86,7 +92,7 @@ impl Store {
     pub fn remove(&self, key: Vec<u8>) -> impl std::future::Future<Output = Result<bool>> {
         let this = self.clone();
         async move {
-            let mut engine = this.lock_engine()?;
+            let mut engine = this.write_engine()?;
             engine.remove(&key).await
         }
     }
@@ -94,7 +100,7 @@ impl Store {
     pub fn sync(&self) -> impl std::future::Future<Output = Result<()>> {
         let this = self.clone();
         async move {
-            let mut engine = this.lock_engine()?;
+            let engine = this.read_engine()?;
             engine.sync().await
         }
     }
@@ -102,7 +108,7 @@ impl Store {
     pub fn len(&self) -> impl std::future::Future<Output = Result<usize>> {
         let this = self.clone();
         async move {
-            let engine = this.lock_engine()?;
+            let engine = this.read_engine()?;
             Ok(engine.len())
         }
     }
@@ -110,7 +116,7 @@ impl Store {
     pub fn is_empty(&self) -> impl std::future::Future<Output = Result<bool>> {
         let this = self.clone();
         async move {
-            let engine = this.lock_engine()?;
+            let engine = this.read_engine()?;
             Ok(engine.is_empty())
         }
     }
