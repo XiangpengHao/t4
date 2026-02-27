@@ -77,7 +77,7 @@ fn engine_roundtrip_range_remove_and_remount() {
 }
 
 #[test]
-fn index_page_growth_across_many_entries() {
+fn wal_page_growth_across_many_entries() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("growth.t4");
 

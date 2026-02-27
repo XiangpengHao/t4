@@ -1,6 +1,6 @@
 # `t4`
 
-`t4` is a local, single-file, high-performance object store.
+`t4` is a local, high-performance object store.
 
 ## Features
 

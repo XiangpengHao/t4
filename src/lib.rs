@@ -4,6 +4,7 @@ mod format;
 mod io;
 mod uring_task;
 mod uring_worker;
+mod wal;
 
 use std::path::Path;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};

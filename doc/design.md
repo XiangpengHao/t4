@@ -10,29 +10,17 @@ Core design goals:
 - Keep the on-disk format simple and easy to rebuild
 - Optimize for append-heavy workloads and point lookups
 
-## What It Is Not (v1)
-
-- No on-disk hash/tree index
-- No space reuse / compaction
-- No checksums
-- No key iteration / scans
-- No synchronous `pread`/`pwrite` fallback path
 
 ## File Layout (Single File)
 
-The store is one file split into:
-
-1. `Index pages` (4 KB each, linked list)
-2. `Data region` (value bytes, padded to 4 KB)
-
-Conceptually:
+The store is one file. On disk, there is no separate index — only a write-ahead log (WAL) and data blocks. The WAL is a linked list of 4 KB pages that record every mutation (puts and deletes). On startup, the WAL is replayed to build an in-memory `HashMap` for point lookups.
 
 ```text
 offset 0
 +-------------------+
-| index page 0      |
+| WAL page 0        |
 +-------------------+
-| index page N      |  (linked by next_page offsets)
+| WAL page N        |  (linked by next_page offsets)
 +-------------------+
 | data region       |  (append-only values, 4 KB aligned)
 +-------------------+
@@ -41,17 +29,17 @@ offset 0
 Important details:
 
 - Page size is fixed at `4096` bytes
-- The first index page is always at offset `0`
-- New index pages are appended when the current page is full
+- The first WAL page is always at offset `0`
+- New WAL pages are appended when the current page is full
 - Values are appended and padded to a 4 KB boundary for direct I/O alignment
 
-## Index Page Format
+## WAL Page Format
 
-Each index page stores:
+Each WAL page stores:
 
 - `magic`
 - `version`
-- `next_page` (offset of next index page, `0` if none)
+- `next_page` (offset of next WAL page, `0` if none)
 - `entry_count`
 - variable-length entries
 
@@ -63,17 +51,17 @@ Each entry stores:
 - `length`
 - `key bytes`
 
-This acts like a durable append log for metadata.
+The WAL is a durable append log for metadata.
 
 ## In-Memory State (Built at Mount)
 
-On mount, `t4` walks all index pages and rebuilds:
+On mount, `t4` replays all WAL pages and rebuilds:
 
 - `HashMap<Vec<u8>, ValueRef>` for point lookups
 - `bump pointer` (next append offset)
-- current/last index page state
+- current/last WAL page state
 
-Tombstones remove keys from the in-memory map during rebuild.
+Tombstones remove keys from the in-memory map during replay.
 
 ## I/O Model (`io_uring` First)
 
@@ -90,19 +78,19 @@ Why this matters:
 ### `mount`
 
 - Open/create store file (targeting `O_DIRECT` + `O_DSYNC` in production)
-- If empty: write an empty index page at offset `0`
-- If existing: scan linked index pages and rebuild the in-memory map
+- If empty: write an empty WAL page at offset `0`
+- If existing: replay WAL pages and rebuild the in-memory map
 
 ### `put(key, value)`
 
 1. Append value bytes to the data region (4 KB padded)
-2. Append a live index entry `(key, offset, length)`
+2. Append a live WAL entry `(key, offset, length)`
 3. Update in-memory `HashMap`
 
-If the current index page is full:
+If the current WAL page is full:
 
-- Allocate and write a new index page at end-of-file
-- Update previous page’s `next_page`
+- Allocate and write a new WAL page at end-of-file
+- Update previous page's `next_page`
 
 ### `get(key)`
 
@@ -117,7 +105,7 @@ If the current index page is full:
 
 ### `remove(key)`
 
-- Append a tombstone index entry for the key
+- Append a tombstone WAL entry for the key
 - Remove key from in-memory `HashMap`
 - Old value bytes remain on disk (no reclaim in v1)
 
@@ -137,7 +125,7 @@ assert_eq!(value, b"Alice");
 What happens internally:
 
 - `"Alice"` is appended to the data region (4 KB padded on disk)
-- A metadata entry for `user:42` is appended to the current index page
+- A WAL entry for `user:42` is appended to the current WAL page
 - The in-memory `HashMap` is updated to point to the new value
 
 ### Example: Range read
@@ -162,15 +150,15 @@ assert!(removed);
 
 What persists on disk:
 
-- A tombstone entry for `user:42`
+- A tombstone WAL entry for `user:42`
 - The old value bytes are still present but no longer visible
 
-After remount, scanning the index pages rebuilds the `HashMap` and keeps the key deleted.
+After remount, replaying the WAL rebuilds the `HashMap` and keeps the key deleted.
 
 ## Important Constraints / Tradeoffs
 
 - **Append-only growth**: file size only increases in v1
-- **Mount cost grows with metadata history**: full index-page scan is required
+- **Mount cost grows with WAL history**: full WAL replay is required
 - **Deletes do not reclaim space**: tombstones only affect visibility
 - **Point lookups are fast** after mount because they hit the in-memory `HashMap`
 - **Range reads must honor alignment** because of direct I/O constraints
@@ -183,10 +171,3 @@ The intended model is pinned worker threads (thread-per-core):
 - Avoid shared-ring contention in v1
 - Define routing/ownership strategy before multi-worker access to one store file
 
-## Future Work (Expected)
-
-- Compaction / space reclamation
-- Checksums and corruption detection
-- Iteration / scans
-- Stronger concurrency coordination across workers
-- Optional async runtime integrations (without changing on-disk format)
