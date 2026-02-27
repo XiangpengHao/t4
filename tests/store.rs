@@ -34,23 +34,17 @@ fn engine_roundtrip_range_remove_and_remount() {
         block_on(store.put(b"b".to_vec(), vec![7_u8; 5000])).unwrap();
         block_on(store.put(b"c".to_vec(), Vec::new())).unwrap();
 
-        assert_eq!(block_on(store.get(b"a".to_vec())).unwrap(), b"small");
+        assert_eq!(block_on(store.get(b"a")).unwrap(), b"small");
+        assert_eq!(block_on(store.get(b"b")).unwrap(), vec![7_u8; 5000]);
+        assert_eq!(block_on(store.get(b"c")).unwrap(), Vec::<u8>::new());
         assert_eq!(
-            block_on(store.get(b"b".to_vec())).unwrap(),
-            vec![7_u8; 5000]
-        );
-        assert_eq!(
-            block_on(store.get(b"c".to_vec())).unwrap(),
-            Vec::<u8>::new()
-        );
-        assert_eq!(
-            block_on(store.get_range(b"b".to_vec(), 100, 64)).unwrap(),
+            block_on(store.get_range(b"b", 100, 64)).unwrap(),
             vec![7_u8; 64]
         );
-        assert!(block_on(store.remove(b"a".to_vec())).unwrap());
-        assert!(!block_on(store.remove(b"missing".to_vec())).unwrap());
+        assert!(block_on(store.remove(b"a")).unwrap());
+        assert!(!block_on(store.remove(b"missing")).unwrap());
         assert!(matches!(
-            block_on(store.get(b"a".to_vec())),
+            block_on(store.get(b"a")),
             Err(t4::Error::NotFound)
         ));
         block_on(store.sync()).unwrap();
@@ -61,17 +55,11 @@ fn engine_roundtrip_range_remove_and_remount() {
             return;
         };
         assert!(matches!(
-            block_on(store.get(b"a".to_vec())),
+            block_on(store.get(b"a")),
             Err(t4::Error::NotFound)
         ));
-        assert_eq!(
-            block_on(store.get(b"b".to_vec())).unwrap(),
-            vec![7_u8; 5000]
-        );
-        assert_eq!(
-            block_on(store.get(b"c".to_vec())).unwrap(),
-            Vec::<u8>::new()
-        );
+        assert_eq!(block_on(store.get(b"b")).unwrap(), vec![7_u8; 5000]);
+        assert_eq!(block_on(store.get(b"c")).unwrap(), Vec::<u8>::new());
         assert_eq!(block_on(store.len()).unwrap(), 2);
     }
 }
@@ -94,7 +82,7 @@ fn wal_page_growth_across_many_entries() {
         for i in [0_u32, 17, 149, 299] {
             let key = format!("key-{i:04}");
             assert_eq!(
-                block_on(store.get(key.into_bytes())).unwrap(),
+                block_on(store.get(key.as_bytes())).unwrap(),
                 vec![(i % 255) as u8; 128]
             );
         }
@@ -106,9 +94,6 @@ fn wal_page_growth_across_many_entries() {
             return;
         };
         assert_eq!(block_on(store.len()).unwrap(), 300);
-        assert_eq!(
-            block_on(store.get(b"key-0299".to_vec())).unwrap(),
-            vec![44_u8; 128]
-        );
+        assert_eq!(block_on(store.get(b"key-0299")).unwrap(), vec![44_u8; 128]);
     }
 }

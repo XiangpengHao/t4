@@ -14,7 +14,7 @@ use crate::engine::Engine;
 
 pub use engine::MountOptions;
 pub use error::{Error, Result};
-pub use types::{T4Key, T4Value};
+pub use types::{T4Key, T4KeyRef, T4Value};
 
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -51,10 +51,12 @@ impl Store {
 
     pub fn put(
         &self,
-        key: Vec<u8>,
-        value: Vec<u8>,
+        key: impl Into<Vec<u8>>,
+        value: impl Into<Vec<u8>>,
     ) -> impl std::future::Future<Output = Result<()>> {
         let this = self.clone();
+        let key = key.into();
+        let value = value.into();
         async move {
             let key = crate::types::T4Key::try_from(key)?;
             let value = crate::types::T4Value::try_from(value)?;
@@ -62,29 +64,35 @@ impl Store {
         }
     }
 
-    pub fn get(&self, key: Vec<u8>) -> impl std::future::Future<Output = Result<Vec<u8>>> {
+    pub fn get<'a>(
+        &'a self,
+        key: &'a [u8],
+    ) -> impl std::future::Future<Output = Result<Vec<u8>>> + 'a {
         let this = self.clone();
         async move {
-            let key = crate::types::T4Key::try_from(key)?;
-            this.inner.get(&key).await
+            let key = crate::types::T4KeyRef::try_from(key)?;
+            this.inner.get(key).await
         }
     }
 
-    pub fn get_range(
-        &self,
-        key: Vec<u8>,
+    pub fn get_range<'a>(
+        &'a self,
+        key: &'a [u8],
         range_start: u64,
         range_len: u64,
-    ) -> impl std::future::Future<Output = Result<Vec<u8>>> {
+    ) -> impl std::future::Future<Output = Result<Vec<u8>>> + 'a {
         let this = self.clone();
         async move {
-            let key = crate::types::T4Key::try_from(key)?;
+            let key = crate::types::T4KeyRef::try_from(key)?;
             let range = crate::types::RangeRequest::new(range_start, range_len)?;
-            this.inner.get_range(&key, range).await
+            this.inner.get_range(key, range).await
         }
     }
 
-    pub fn remove(&self, key: Vec<u8>) -> impl std::future::Future<Output = Result<bool>> {
+    pub fn remove<'a>(
+        &'a self,
+        key: &'a [u8],
+    ) -> impl std::future::Future<Output = Result<bool>> + 'a {
         let this = self.clone();
         async move {
             let key = crate::types::T4Key::try_from(key)?;

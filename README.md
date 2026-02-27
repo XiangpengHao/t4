@@ -6,6 +6,7 @@
 
 - `io_uring` for all I/O, scale to modern SSDs.
 - Deterministic, predictable performance, one request is one I/O.
+- Runtime-agnostic async API.
 
 ## Usage
 
@@ -14,32 +15,16 @@ Values are written and read by key. Reads support full-value and range access.
 ```rust
 let store = t4::mount("your-data.t4").await?;
 
-store
-    .put(b"greeting".to_vec(), b"Hello, world!".to_vec())
-    .await?;
+store.put(b"a.txt", b"Hello, world!").await?;
 
-let content = store.get(b"greeting".to_vec()).await?;
+let content = store.get(b"a.txt").await?;
 assert_eq!(content, b"Hello, world!");
 
-let slice = store.get_range(b"greeting".to_vec(), 7, 5).await?;
+let slice = store.get_range(b"a.txt", 7, 5).await?;
 assert_eq!(slice, b"world");
 
-let removed = store.remove(b"greeting".to_vec()).await?;
+let removed = store.remove(b"a.txt").await?;
 assert!(removed);
-```
-
-To tune I/O behavior, use mount options:
-
-```rust
-let store = t4::mount_with_options(
-    "your-data.t4",
-    t4::MountOptions {
-        queue_depth: 32,
-        direct_io: false,
-        dsync: false,
-    },
-)
-.await?;
 ```
 
 ## Notes

@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::format::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U64};
 use crate::io::{AlignedBuf, align_down_u64, align_up_u32, align_up_u64};
 use crate::io_worker::IoWorker;
-use crate::types::{RangeRequest, T4Key, T4Value};
+use crate::types::{RangeRequest, T4Key, T4KeyRef, T4Value};
 use crate::wal::{ValueRef, Wal};
 
 #[derive(Debug, Clone, Copy)]
@@ -84,10 +84,10 @@ impl Engine {
         Ok(())
     }
 
-    pub async fn get(&self, key: &T4Key) -> Result<Vec<u8>> {
+    pub async fn get(&self, key: T4KeyRef<'_>) -> Result<Vec<u8>> {
         let value = {
             let index = self.read_index()?;
-            *index.get(key).ok_or(Error::NotFound)?
+            *index.get(key.as_bytes()).ok_or(Error::NotFound)?
         };
         let Some(value_len_u32) = NonZeroU32::new(value.length) else {
             return Ok(Vec::new());
@@ -100,10 +100,10 @@ impl Engine {
         Ok(buf.as_slice()[..value_len].to_vec())
     }
 
-    pub async fn get_range(&self, key: &T4Key, range: RangeRequest) -> Result<Vec<u8>> {
+    pub async fn get_range(&self, key: T4KeyRef<'_>, range: RangeRequest) -> Result<Vec<u8>> {
         let value = {
             let index = self.read_index()?;
-            *index.get(key).ok_or(Error::NotFound)?
+            *index.get(key.as_bytes()).ok_or(Error::NotFound)?
         };
 
         let range = range.checked_against(value.length)?;

@@ -280,7 +280,9 @@ impl Wal {
             max_wal_end = max_wal_end.max(wal_end);
 
             for entry in &page.entries {
-                if let Some(prev_lsn) = last_lsn && entry.lsn <= prev_lsn {
+                if let Some(prev_lsn) = last_lsn
+                    && entry.lsn <= prev_lsn
+                {
                     return Err(Error::Format(format!(
                         "non-monotonic wal lsn: previous {prev_lsn}, got {}",
                         entry.lsn

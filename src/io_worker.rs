@@ -383,8 +383,12 @@ mod linux_impl {
                     let user_data = token as u64;
                     let is_last = index + 1 == step_count;
                     let push_result = if is_last {
-                        self.ring
-                            .push_write(self.file.as_raw_fd(), &step.buf, step.offset, user_data)
+                        self.ring.push_write(
+                            self.file.as_raw_fd(),
+                            &step.buf,
+                            step.offset,
+                            user_data,
+                        )
                     } else {
                         self.ring.push_write_link(
                             self.file.as_raw_fd(),
@@ -431,7 +435,9 @@ mod linux_impl {
                 return;
             };
 
-            if let Err(err) = result && active.error.is_none() {
+            if let Err(err) = result
+                && active.error.is_none()
+            {
                 active.error = Some(err);
             }
 

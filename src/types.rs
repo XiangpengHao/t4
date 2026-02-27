@@ -1,3 +1,5 @@
+use std::borrow::Borrow;
+
 use crate::error::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -31,6 +33,12 @@ impl AsRef<[u8]> for T4Key {
     }
 }
 
+impl Borrow<[u8]> for T4Key {
+    fn borrow(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
 impl TryFrom<Vec<u8>> for T4Key {
     type Error = Error;
 
@@ -47,6 +55,40 @@ impl TryFrom<&[u8]> for T4Key {
 
     fn try_from(value: &[u8]) -> Result<Self> {
         Self::try_from(value.to_vec())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct T4KeyRef<'a>(&'a [u8]);
+
+impl<'a> T4KeyRef<'a> {
+    pub fn as_bytes(self) -> &'a [u8] {
+        self.0
+    }
+
+    pub fn len(self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<'a> AsRef<[u8]> for T4KeyRef<'a> {
+    fn as_ref(&self) -> &[u8] {
+        self.0
+    }
+}
+
+impl<'a> TryFrom<&'a [u8]> for T4KeyRef<'a> {
+    type Error = Error;
+
+    fn try_from(value: &'a [u8]) -> Result<Self> {
+        if value.len() > u16::MAX as usize {
+            return Err(Error::KeyTooLarge(value.len()));
+        }
+        Ok(Self(value))
     }
 }
 
