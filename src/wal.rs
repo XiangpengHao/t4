@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::error::{Error, Result};
 use crate::format::{MAGIC, PAGE_SIZE, PAGE_SIZE_U64, VERSION};
 use crate::io::AlignedBuf;
-use crate::uring_worker::UringWorker;
+use crate::io_worker::IoWorker;
 
 const WAL_PAGE_HEADER_SIZE: usize = 32;
 const ENTRY_HEADER_SIZE: usize = 20;
@@ -192,7 +192,7 @@ impl WalPage {
 
 #[derive(Debug)]
 pub struct Wal {
-    uring: UringWorker,
+    io: IoWorker,
     bump_pointer: u64,
     tail: WalPage,
     tail_offset: u64,
@@ -200,13 +200,13 @@ pub struct Wal {
 
 impl Wal {
     /// Initialize the WAL for a newly created (empty) file.
-    pub async fn create(uring: UringWorker) -> Result<Self> {
+    pub async fn create(io: IoWorker) -> Result<Self> {
         let page = WalPage::empty();
         let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE)?;
         buf.as_mut_slice().copy_from_slice(&page.to_bytes()?);
-        uring.write_all_at(buf, 0).await?;
+        io.write_all_at(buf, 0).await?;
         Ok(Self {
-            uring,
+            io,
             bump_pointer: PAGE_SIZE_U64,
             tail: page,
             tail_offset: 0,
@@ -215,7 +215,7 @@ impl Wal {
 
     /// Replay an existing WAL, rebuilding the in-memory index.
     pub async fn replay(
-        uring: UringWorker,
+        io: IoWorker,
         file_len: u64,
     ) -> Result<(Self, HashMap<Vec<u8>, ValueRef>)> {
         if file_len < PAGE_SIZE_U64 {
@@ -227,7 +227,7 @@ impl Wal {
         let mut index = HashMap::new();
         let mut offset = 0_u64;
         let (last_offset, last_page) = loop {
-            let page = Self::read_page(&uring, offset).await?;
+            let page = Self::read_page(&io, offset).await?;
             for entry in &page.entries {
                 if entry.flags == FLAG_TOMBSTONE {
                     index.remove(entry.key.as_slice());
@@ -249,7 +249,7 @@ impl Wal {
 
         let bump_pointer = align_up(file_len, PAGE_SIZE_U64);
         let wal = Self {
-            uring,
+            io,
             bump_pointer,
             tail: last_page,
             tail_offset: last_offset,
@@ -268,7 +268,7 @@ impl Wal {
         let offset = self.bump_pointer;
         let buf = AlignedBuf::from_padded_slice(value)?;
         let padded_len = buf.len() as u64;
-        self.uring.write_all_at(buf, offset).await?;
+        self.io.write_all_at(buf, offset).await?;
         self.bump_pointer += padded_len;
         Ok(offset)
     }
@@ -285,12 +285,12 @@ impl Wal {
 
     /// Read value bytes from the data region.
     pub async fn read_exact(&self, buf: AlignedBuf, offset: u64) -> Result<AlignedBuf> {
-        self.uring.read_exact_at(buf, offset).await
+        self.io.read_exact_at(buf, offset).await
     }
 
     /// fsync the underlying file.
     pub async fn fsync(&self) -> Result<()> {
-        self.uring.fsync().await
+        self.io.fsync().await
     }
 
     // -- private -------------------------------------------------------------
@@ -328,16 +328,16 @@ impl Wal {
         Ok(())
     }
 
-    async fn read_page(uring: &UringWorker, offset: u64) -> Result<WalPage> {
+    async fn read_page(io: &IoWorker, offset: u64) -> Result<WalPage> {
         let buf = AlignedBuf::new_zeroed(PAGE_SIZE)?;
-        let buf = uring.read_exact_at(buf, offset).await?;
+        let buf = io.read_exact_at(buf, offset).await?;
         WalPage::from_bytes(buf.as_slice())
     }
 
     async fn write_page(&self, offset: u64, page: &WalPage) -> Result<()> {
         let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE)?;
         buf.as_mut_slice().copy_from_slice(&page.to_bytes()?);
-        self.uring.write_all_at(buf, offset).await
+        self.io.write_all_at(buf, offset).await
     }
 }
 

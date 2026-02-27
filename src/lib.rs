@@ -2,8 +2,8 @@ mod engine;
 mod error;
 mod format;
 mod io;
-mod uring_task;
-mod uring_worker;
+mod io_task;
+mod io_worker;
 mod wal;
 
 use std::path::Path;

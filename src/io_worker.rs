@@ -6,7 +6,7 @@ use std::thread;
 
 use crate::error::{Error, Result};
 use crate::io::AlignedBuf;
-use crate::uring_task::{
+use crate::io_task::{
     FileFsyncTask, FileReadTask, FileWriteTask, WorkerRequest, worker_disconnected_error,
 };
 
@@ -22,6 +22,16 @@ fn complete_request_with_error(request: WorkerRequest, err: Error) {
     }
 }
 
+trait IoBackend: Sized + Send + 'static {
+    fn new(
+        file: File,
+        queue_depth: u32,
+        rx: mpsc::Receiver<WorkerRequest>,
+    ) -> Result<Self>;
+
+    fn run(self);
+}
+
 #[cfg(target_os = "linux")]
 mod linux_impl {
     use std::collections::VecDeque;
@@ -32,11 +42,12 @@ mod linux_impl {
     use io_uring::{IoUring, opcode, types};
 
     use super::{
-        File, complete_request_with_error, worker_disconnected_error, worker_failed_error,
+        File, IoBackend, complete_request_with_error, worker_disconnected_error,
+        worker_failed_error,
     };
     use crate::error::{Error, Result};
     use crate::io::AlignedBuf;
-    use crate::uring_task::{FsyncCompletion, ReadCompletion, WorkerRequest, WriteCompletion};
+    use crate::io_task::{FsyncCompletion, ReadCompletion, WorkerRequest, WriteCompletion};
 
     #[derive(Debug, Clone, Copy)]
     struct CompletionEvent {
@@ -57,9 +68,6 @@ mod linux_impl {
 
     impl UringDriver {
         fn new(queue_depth: u32) -> Result<Self> {
-            if queue_depth == 0 {
-                return Err(Error::InvalidArgument("queue_depth must be > 0"));
-            }
             Ok(Self {
                 ring: IoUring::new(queue_depth)?,
             })
@@ -168,7 +176,7 @@ mod linux_impl {
         complete_submitted_with_result(submitted, decode_cqe_result(cqe_result));
     }
 
-    struct WorkerThread {
+    pub(super) struct UringBackend {
         receiver: mpsc::Receiver<WorkerRequest>,
         file: File,
         ring: UringDriver,
@@ -180,11 +188,11 @@ mod linux_impl {
         inflight: usize,
     }
 
-    impl WorkerThread {
+    impl IoBackend for UringBackend {
         fn new(
-            receiver: mpsc::Receiver<WorkerRequest>,
             file: File,
             queue_depth: u32,
+            rx: mpsc::Receiver<WorkerRequest>,
         ) -> Result<Self> {
             let ring = UringDriver::new(queue_depth)?;
             let queue_depth = queue_depth as usize;
@@ -194,7 +202,7 @@ mod linux_impl {
             submitted_tasks.resize_with(queue_depth, || None);
 
             Ok(Self {
-                receiver,
+                receiver: rx,
                 file,
                 ring,
                 tokens,
@@ -206,6 +214,12 @@ mod linux_impl {
             })
         }
 
+        fn run(mut self) {
+            self.thread_loop();
+        }
+    }
+
+    impl UringBackend {
         fn thread_loop(&mut self) {
             loop {
                 self.block_for_one_request_if_idle();
@@ -413,110 +427,100 @@ mod linux_impl {
             self.inflight = 0;
         }
     }
+}
 
-    pub(super) fn worker_main(
-        queue_depth: u32,
+#[cfg(not(target_os = "linux"))]
+mod blocking_impl {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::sync::mpsc;
+
+    use super::{File, IoBackend, complete_request_with_error, worker_disconnected_error};
+    use crate::error::{Error, Result};
+    use crate::io_task::WorkerRequest;
+
+    pub(super) struct BlockingBackend {
+        receiver: mpsc::Receiver<WorkerRequest>,
         file: File,
-        rx: mpsc::Receiver<WorkerRequest>,
-        init_tx: mpsc::SyncSender<Result<()>>,
-    ) {
-        let mut worker = match WorkerThread::new(rx, file, queue_depth) {
-            Ok(worker) => {
-                let _ = init_tx.send(Ok(()));
-                worker
-            }
-            Err(err) => {
-                let _ = init_tx.send(Err(err));
-                return;
-            }
-        };
-
-        worker.thread_loop();
     }
-}
 
-#[cfg(not(target_os = "linux"))]
-fn blocking_read_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut clone = file.try_clone()?;
-    clone.seek(SeekFrom::Start(offset))?;
-    clone.read(buf)
-}
+    impl IoBackend for BlockingBackend {
+        fn new(
+            file: File,
+            _queue_depth: u32,
+            rx: mpsc::Receiver<WorkerRequest>,
+        ) -> Result<Self> {
+            Ok(Self { receiver: rx, file })
+        }
 
-#[cfg(not(target_os = "linux"))]
-fn blocking_write_at(file: &File, buf: &[u8], offset: u64) -> std::io::Result<usize> {
-    use std::io::{Seek, SeekFrom, Write};
-    let mut clone = file.try_clone()?;
-    clone.seek(SeekFrom::Start(offset))?;
-    clone.write(buf)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn worker_main(
-    file: File,
-    _queue_depth: u32,
-    rx: mpsc::Receiver<WorkerRequest>,
-    init_tx: mpsc::SyncSender<Result<()>>,
-) {
-    let _ = init_tx.send(Ok(()));
-
-    while let Ok(request) = rx.recv() {
-        match request {
-            WorkerRequest::Read {
-                mut buf,
-                offset,
-                completion,
-            } => {
-                let result = blocking_read_at(&file, buf.as_mut_slice(), offset)
-                    .map_err(Error::from)
-                    .map(|n| (buf, n));
-                completion.complete(result);
+        fn run(self) {
+            while let Ok(request) = self.receiver.recv() {
+                match request {
+                    WorkerRequest::Read {
+                        mut buf,
+                        offset,
+                        completion,
+                    } => {
+                        let result = read_at(&self.file, buf.as_mut_slice(), offset)
+                            .map_err(Error::from)
+                            .map(|n| (buf, n));
+                        completion.complete(result);
+                    }
+                    WorkerRequest::Write {
+                        buf,
+                        offset,
+                        completion,
+                    } => {
+                        let result =
+                            write_at(&self.file, buf.as_slice(), offset).map_err(Error::from);
+                        completion.complete(result);
+                    }
+                    WorkerRequest::Fsync { completion } => {
+                        completion.complete(self.file.sync_all().map_err(Error::from));
+                    }
+                }
             }
-            WorkerRequest::Write {
-                buf,
-                offset,
-                completion,
-            } => {
-                let result = blocking_write_at(&file, buf.as_slice(), offset).map_err(Error::from);
-                completion.complete(result);
-            }
-            WorkerRequest::Fsync { completion } => {
-                completion.complete(file.sync_all().map_err(Error::from));
+
+            while let Ok(request) = self.receiver.try_recv() {
+                complete_request_with_error(request, worker_disconnected_error());
             }
         }
     }
 
-    while let Ok(request) = rx.try_recv() {
-        complete_request_with_error(request, worker_disconnected_error());
+    fn read_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+        let mut clone = file.try_clone()?;
+        clone.seek(SeekFrom::Start(offset))?;
+        clone.read(buf)
+    }
+
+    fn write_at(file: &File, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+        let mut clone = file.try_clone()?;
+        clone.seek(SeekFrom::Start(offset))?;
+        clone.write(buf)
     }
 }
 
 #[cfg(target_os = "linux")]
-fn worker_main(
-    file: File,
-    queue_depth: u32,
-    rx: mpsc::Receiver<WorkerRequest>,
-    init_tx: mpsc::SyncSender<Result<()>>,
-) {
-    linux_impl::worker_main(queue_depth, file, rx, init_tx);
-}
+type SelectedBackend = linux_impl::UringBackend;
 
-/// Handle to the io_uring worker thread.
+#[cfg(not(target_os = "linux"))]
+type SelectedBackend = blocking_impl::BlockingBackend;
+
+/// Handle to the I/O worker thread.
 ///
 /// Cloning shares the same underlying worker. The worker thread exits
 /// automatically once every clone is dropped (channel disconnects).
 #[derive(Clone)]
-pub struct UringWorker {
+pub struct IoWorker {
     tx: Arc<mpsc::Sender<WorkerRequest>>,
 }
 
-impl fmt::Debug for UringWorker {
+impl fmt::Debug for IoWorker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("UringWorker").finish_non_exhaustive()
+        f.debug_struct("IoWorker").finish_non_exhaustive()
     }
 }
 
-impl UringWorker {
+impl IoWorker {
     pub fn new(queue_depth: u32, file: File) -> Result<Self> {
         if queue_depth == 0 {
             return Err(Error::InvalidArgument("queue_depth must be > 0"));
@@ -525,7 +529,19 @@ impl UringWorker {
         let (tx, rx) = mpsc::channel::<WorkerRequest>();
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<()>>(1);
 
-        thread::spawn(move || worker_main(file, queue_depth, rx, init_tx));
+        thread::spawn(move || {
+            let backend = match SelectedBackend::new(file, queue_depth, rx) {
+                Ok(backend) => {
+                    let _ = init_tx.send(Ok(()));
+                    backend
+                }
+                Err(err) => {
+                    let _ = init_tx.send(Err(err));
+                    return;
+                }
+            };
+            backend.run();
+        });
 
         match init_rx.recv() {
             Ok(Ok(())) => Ok(Self { tx: Arc::new(tx) }),

@@ -167,7 +167,7 @@ After remount, replaying the WAL rebuilds the `HashMap` and keeps the key delete
 
 The intended model is pinned worker threads (thread-per-core):
 
-- Each worker owns its own `IoUring`
+- Each worker owns its own I/O backend (e.g. `io_uring` on Linux)
 - Avoid shared-ring contention in v1
 - Define routing/ownership strategy before multi-worker access to one store file
 

@@ -8,7 +8,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use crate::error::{Error, Result};
 use crate::format::{PAGE_SIZE, PAGE_SIZE_U64};
 use crate::io::{AlignedBuf, align_down_u64, align_up_u64, align_up_usize};
-use crate::uring_worker::UringWorker;
+use crate::io_worker::IoWorker;
 use crate::wal::{ValueRef, Wal};
 
 #[derive(Debug, Clone, Copy)]
@@ -53,13 +53,13 @@ impl Engine {
 
         let file = open.open(path)?;
         let len = file.metadata()?.len();
-        let uring = UringWorker::new(options.queue_depth, file)?;
+        let io = IoWorker::new(options.queue_depth, file)?;
 
         let (wal, index) = if len == 0 {
-            let wal = Wal::create(uring).await?;
+            let wal = Wal::create(io).await?;
             (wal, HashMap::new())
         } else {
-            Wal::replay(uring, len).await?
+            Wal::replay(io, len).await?
         };
 
         Ok(Self { wal, index })
