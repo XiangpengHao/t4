@@ -93,7 +93,6 @@ pub(crate) enum WorkerRequest {
     Fsync {
         completion: FsyncCompletion,
     },
-    Shutdown,
 }
 
 #[derive(Debug)]

@@ -199,7 +199,7 @@ pub struct Wal {
 }
 
 impl Wal {
-    /// Initialise the WAL for a newly created (empty) file.
+    /// Initialize the WAL for a newly created (empty) file.
     pub async fn create(uring: UringWorker) -> Result<Self> {
         let page = WalPage::empty();
         let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE)?;

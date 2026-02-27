@@ -1,7 +1,8 @@
 use std::fmt;
 use std::fs::File;
 use std::sync::mpsc;
-use std::thread::{self, JoinHandle};
+use std::sync::Arc;
+use std::thread;
 
 use crate::error::{Error, Result};
 use crate::io::AlignedBuf;
@@ -18,7 +19,6 @@ fn complete_request_with_error(request: WorkerRequest, err: Error) {
         WorkerRequest::Read { completion, .. } => completion.complete(Err(err)),
         WorkerRequest::Write { completion, .. } => completion.complete(Err(err)),
         WorkerRequest::Fsync { completion, .. } => completion.complete(Err(err)),
-        WorkerRequest::Shutdown => {}
     }
 }
 
@@ -235,7 +235,6 @@ mod linux_impl {
                 }
             }
 
-            self.shutting_down = true;
             self.drain_requests();
             self.reject_queued_disconnected();
             self.reject_submitted_disconnected();
@@ -247,7 +246,6 @@ mod linux_impl {
             }
 
             match self.receiver.recv() {
-                Ok(WorkerRequest::Shutdown) => self.shutting_down = true,
                 Ok(request) => self.queued.push_back(request),
                 Err(_) => self.shutting_down = true,
             }
@@ -256,7 +254,6 @@ mod linux_impl {
         fn drain_requests(&mut self) {
             loop {
                 match self.receiver.try_recv() {
-                    Ok(WorkerRequest::Shutdown) => self.shutting_down = true,
                     Ok(request) if self.shutting_down => {
                         complete_request_with_error(request, worker_disconnected_error());
                     }
@@ -302,10 +299,6 @@ mod linux_impl {
                     completion.complete(Ok(0));
                     return Ok(false);
                 }
-                WorkerRequest::Shutdown => {
-                    self.shutting_down = true;
-                    return Ok(false);
-                }
                 other => other,
             };
 
@@ -327,7 +320,6 @@ mod linux_impl {
                 WorkerRequest::Fsync { .. } => {
                     self.ring.push_fsync(self.file.as_raw_fd(), user_data)
                 }
-                WorkerRequest::Shutdown => unreachable!(),
             };
 
             if let Err(err) = push_result {
@@ -353,7 +345,6 @@ mod linux_impl {
                     completion,
                 },
                 WorkerRequest::Fsync { completion, .. } => SubmittedOp::Fsync { completion },
-                WorkerRequest::Shutdown => unreachable!(),
             });
             self.inflight += 1;
             Ok(true)
@@ -399,7 +390,6 @@ mod linux_impl {
 
             loop {
                 match self.receiver.try_recv() {
-                    Ok(WorkerRequest::Shutdown) => {}
                     Ok(request) => {
                         complete_request_with_error(request, worker_failed_error(msg.clone()))
                     }
@@ -493,7 +483,6 @@ fn worker_main(
             WorkerRequest::Fsync { completion } => {
                 completion.complete(file.sync_all().map_err(Error::from));
             }
-            WorkerRequest::Shutdown => break,
         }
     }
 
@@ -512,9 +501,13 @@ fn worker_main(
     linux_impl::worker_main(queue_depth, file, rx, init_tx);
 }
 
+/// Handle to the io_uring worker thread.
+///
+/// Cloning shares the same underlying worker. The worker thread exits
+/// automatically once every clone is dropped (channel disconnects).
+#[derive(Clone)]
 pub struct UringWorker {
-    tx: mpsc::Sender<WorkerRequest>,
-    thread: Option<JoinHandle<()>>,
+    tx: Arc<mpsc::Sender<WorkerRequest>>,
 }
 
 impl fmt::Debug for UringWorker {
@@ -532,34 +525,25 @@ impl UringWorker {
         let (tx, rx) = mpsc::channel::<WorkerRequest>();
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<()>>(1);
 
-        let thread = thread::spawn(move || worker_main(file, queue_depth, rx, init_tx));
+        thread::spawn(move || worker_main(file, queue_depth, rx, init_tx));
 
         match init_rx.recv() {
-            Ok(Ok(())) => Ok(Self {
-                tx,
-                thread: Some(thread),
-            }),
-            Ok(Err(err)) => {
-                let _ = thread.join();
-                Err(err)
-            }
-            Err(_) => {
-                let _ = thread.join();
-                Err(worker_disconnected_error())
-            }
+            Ok(Ok(())) => Ok(Self { tx: Arc::new(tx) }),
+            Ok(Err(err)) => Err(err),
+            Err(_) => Err(worker_disconnected_error()),
         }
     }
 
     pub fn read_at(&self, buf: AlignedBuf, offset: u64) -> FileReadTask {
-        FileReadTask::new(self.tx.clone(), buf, offset)
+        FileReadTask::new((*self.tx).clone(), buf, offset)
     }
 
     pub fn write_at(&self, buf: AlignedBuf, offset: u64) -> FileWriteTask {
-        FileWriteTask::new(self.tx.clone(), buf, offset)
+        FileWriteTask::new((*self.tx).clone(), buf, offset)
     }
 
     pub fn fsync(&self) -> FileFsyncTask {
-        FileFsyncTask::new(self.tx.clone())
+        FileFsyncTask::new((*self.tx).clone())
     }
 
     pub async fn read_exact_at(&self, buf: AlignedBuf, offset: u64) -> Result<AlignedBuf> {
@@ -592,14 +576,5 @@ impl UringWorker {
             )));
         }
         Ok(())
-    }
-}
-
-impl Drop for UringWorker {
-    fn drop(&mut self) {
-        let _ = self.tx.send(WorkerRequest::Shutdown);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
     }
 }
