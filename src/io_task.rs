@@ -321,18 +321,16 @@ impl Future for FileWalAppendTask {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        loop {
-            match &mut this.state {
-                FileWalAppendTaskState::Waiting(completion) => {
-                    let completion = Arc::clone(completion);
-                    let poll = completion.poll_result(cx);
-                    if poll.is_ready() {
-                        this.state = FileWalAppendTaskState::Done;
-                    }
-                    return poll;
+        match &mut this.state {
+            FileWalAppendTaskState::Waiting(completion) => {
+                let completion = Arc::clone(completion);
+                let poll = completion.poll_result(cx);
+                if poll.is_ready() {
+                    this.state = FileWalAppendTaskState::Done;
                 }
-                FileWalAppendTaskState::Done => panic!("FileWalAppendTask polled after completion"),
+                poll
             }
+            FileWalAppendTaskState::Done => panic!("FileWalAppendTask polled after completion"),
         }
     }
 }

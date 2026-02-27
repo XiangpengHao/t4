@@ -136,8 +136,8 @@ mod linux_impl {
         }
 
         fn drain_completions(&mut self, out: &mut Vec<CompletionEvent>) {
-            let mut cq = self.ring.completion();
-            while let Some(cqe) = cq.next() {
+            let cq = self.ring.completion();
+            for cqe in cq {
                 out.push(CompletionEvent {
                     user_data: cqe.user_data(),
                     result: cqe.result(),
@@ -360,72 +360,66 @@ mod linux_impl {
         }
 
         fn submit_next_wal_step(&mut self) -> Result<bool> {
-            if self.active_wal_append.is_none() {
-                if let Some(pending) = self.pending_wal_appends.pop_front() {
-                    if self.tokens.len() < pending.writes.len() {
-                        self.pending_wal_appends.push_front(pending);
-                        return Ok(false);
-                    }
-
-                    let step_count = pending.writes.len();
-                    self.active_wal_append = Some(ActiveWalAppend {
-                        remaining: step_count,
-                        completion: pending.completion,
-                        error: None,
-                    });
-
-                    let mut submitted_steps = 0_usize;
-                    for (index, step) in pending.writes.into_iter().enumerate() {
-                        let token = self
-                            .tokens
-                            .pop_front()
-                            .expect("token pool unexpectedly empty");
-                        let user_data = token as u64;
-                        let is_last = index + 1 == step_count;
-                        let push_result = if is_last {
-                            self.ring.push_write(
-                                self.file.as_raw_fd(),
-                                &step.buf,
-                                step.offset,
-                                user_data,
-                            )
-                        } else {
-                            self.ring.push_write_link(
-                                self.file.as_raw_fd(),
-                                &step.buf,
-                                step.offset,
-                                user_data,
-                            )
-                        };
-
-                        if let Err(err) = push_result {
-                            self.tokens.push_front(token);
-                            if submitted_steps == 0 {
-                                if let Some(active) = self.active_wal_append.take() {
-                                    active.completion.complete(Err(err));
-                                }
-                            } else if let Some(active) = self.active_wal_append.as_mut() {
-                                active.remaining = submitted_steps;
-                                if active.error.is_none() {
-                                    active.error = Some(err);
-                                }
-                            }
-                            return Ok(submitted_steps > 0);
-                        }
-
-                        let slot = self
-                            .submitted_tasks
-                            .get_mut(token)
-                            .expect("token out of range for submitted_tasks");
-                        debug_assert!(slot.is_none(), "token reused before completion");
-                        *slot = Some(SubmittedOp::WalStep {
-                            expected: step.buf.len(),
-                        });
-                        self.inflight += 1;
-                        submitted_steps += 1;
-                    }
-                    return Ok(true);
+            if self.active_wal_append.is_none()
+                && let Some(pending) = self.pending_wal_appends.pop_front()
+            {
+                if self.tokens.len() < pending.writes.len() {
+                    self.pending_wal_appends.push_front(pending);
+                    return Ok(false);
                 }
+
+                let step_count = pending.writes.len();
+                self.active_wal_append = Some(ActiveWalAppend {
+                    remaining: step_count,
+                    completion: pending.completion,
+                    error: None,
+                });
+
+                for (index, step) in pending.writes.into_iter().enumerate() {
+                    let token = self
+                        .tokens
+                        .pop_front()
+                        .expect("token pool unexpectedly empty");
+                    let user_data = token as u64;
+                    let is_last = index + 1 == step_count;
+                    let push_result = if is_last {
+                        self.ring
+                            .push_write(self.file.as_raw_fd(), &step.buf, step.offset, user_data)
+                    } else {
+                        self.ring.push_write_link(
+                            self.file.as_raw_fd(),
+                            &step.buf,
+                            step.offset,
+                            user_data,
+                        )
+                    };
+
+                    if let Err(err) = push_result {
+                        self.tokens.push_front(token);
+                        if index == 0 {
+                            if let Some(active) = self.active_wal_append.take() {
+                                active.completion.complete(Err(err));
+                            }
+                        } else if let Some(active) = self.active_wal_append.as_mut() {
+                            active.remaining = index;
+                            if active.error.is_none() {
+                                active.error = Some(err);
+                            }
+                        }
+                        return Ok(index > 0);
+                    }
+
+                    let slot = self
+                        .submitted_tasks
+                        .get_mut(token)
+                        .expect("token out of range for submitted_tasks");
+                    debug_assert!(slot.is_none(), "token reused before completion");
+                    *slot = Some(SubmittedOp::WalStep {
+                        expected: step.buf.len(),
+                    });
+                    self.inflight += 1;
+                }
+                return Ok(true);
             }
 
             Ok(false)
@@ -437,10 +431,8 @@ mod linux_impl {
                 return;
             };
 
-            if let Err(err) = result {
-                if active.error.is_none() {
-                    active.error = Some(err);
-                }
+            if let Err(err) = result && active.error.is_none() {
+                active.error = Some(err);
             }
 
             if active.remaining > 0 {
@@ -579,13 +571,8 @@ mod linux_impl {
             }
             self.inflight = 0;
 
-            loop {
-                match self.receiver.try_recv() {
-                    Ok(request) => {
-                        complete_request_with_error(request, worker_failed_error(msg.clone()))
-                    }
-                    Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-                }
+            while let Ok(request) = self.receiver.try_recv() {
+                complete_request_with_error(request, worker_failed_error(msg.clone()));
             }
         }
 
