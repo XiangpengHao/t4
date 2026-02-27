@@ -4,6 +4,7 @@ mod format;
 mod io;
 mod io_task;
 mod io_worker;
+mod types;
 mod wal;
 
 use std::path::Path;
@@ -13,6 +14,7 @@ use crate::engine::Engine;
 
 pub use engine::MountOptions;
 pub use error::{Error, Result};
+pub use types::{T4Key, T4Value};
 
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -53,12 +55,19 @@ impl Store {
         value: Vec<u8>,
     ) -> impl std::future::Future<Output = Result<()>> {
         let this = self.clone();
-        async move { this.inner.put(&key, &value).await }
+        async move {
+            let key = crate::types::T4Key::try_from(key)?;
+            let value = crate::types::T4Value::try_from(value)?;
+            this.inner.put(key, value).await
+        }
     }
 
     pub fn get(&self, key: Vec<u8>) -> impl std::future::Future<Output = Result<Vec<u8>>> {
         let this = self.clone();
-        async move { this.inner.get(&key).await }
+        async move {
+            let key = crate::types::T4Key::try_from(key)?;
+            this.inner.get(&key).await
+        }
     }
 
     pub fn get_range(
@@ -68,12 +77,19 @@ impl Store {
         range_len: u64,
     ) -> impl std::future::Future<Output = Result<Vec<u8>>> {
         let this = self.clone();
-        async move { this.inner.get_range(&key, range_start, range_len).await }
+        async move {
+            let key = crate::types::T4Key::try_from(key)?;
+            let range = crate::types::RangeRequest::new(range_start, range_len)?;
+            this.inner.get_range(&key, range).await
+        }
     }
 
     pub fn remove(&self, key: Vec<u8>) -> impl std::future::Future<Output = Result<bool>> {
         let this = self.clone();
-        async move { this.inner.remove(&key).await }
+        async move {
+            let key = crate::types::T4Key::try_from(key)?;
+            this.inner.remove(key).await
+        }
     }
 
     pub fn sync(&self) -> impl std::future::Future<Output = Result<()>> {

@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 
 use crate::error::{Error, Result};
-use crate::format::{MAGIC, PAGE_SIZE, PAGE_SIZE_U64, VERSION};
+use crate::format::{MAGIC, PAGE_SIZE, PAGE_SIZE_NZ_U32, PAGE_SIZE_U32, PAGE_SIZE_U64, VERSION};
 use crate::io::AlignedBuf;
 use crate::io_task::WalWriteOp;
 use crate::io_worker::IoWorker;
+use crate::types::{T4Key, T4Value};
 
 const WAL_PAGE_HEADER_SIZE: usize = 32;
 const ENTRY_HEADER_SIZE: usize = 28;
@@ -16,7 +17,7 @@ const FLAG_TOMBSTONE: u8 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ValueRef {
     pub offset: u64,
-    pub length: u64,
+    pub length: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -25,15 +26,15 @@ pub struct ValueRef {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WalEntry {
-    key: Vec<u8>,
+    key: T4Key,
     offset: u64,
-    length: u64,
+    length: u32,
     lsn: u64,
     flags: u8,
 }
 
 impl WalEntry {
-    fn live(key: Vec<u8>, offset: u64, length: u64, lsn: u64) -> Self {
+    fn live(key: T4Key, offset: u64, length: u32, lsn: u64) -> Self {
         Self {
             key,
             offset,
@@ -43,7 +44,7 @@ impl WalEntry {
         }
     }
 
-    fn tombstone(key: Vec<u8>, lsn: u64) -> Self {
+    fn tombstone(key: T4Key, lsn: u64) -> Self {
         Self {
             key,
             offset: 0,
@@ -58,11 +59,7 @@ impl WalEntry {
     }
 
     fn encode_into(&self, dst: &mut [u8]) -> Result<usize> {
-        let key_len: u16 = self
-            .key
-            .len()
-            .try_into()
-            .map_err(|_| Error::KeyTooLarge(self.key.len()))?;
+        let key_len = self.key.len() as u16;
         let total = self.serialized_len();
         if dst.len() < total {
             return Err(Error::Format("entry buffer too small".into()));
@@ -71,9 +68,9 @@ impl WalEntry {
         dst[2] = self.flags;
         dst[3] = 0;
         dst[4..12].copy_from_slice(&self.offset.to_le_bytes());
-        dst[12..20].copy_from_slice(&self.length.to_le_bytes());
+        dst[12..20].copy_from_slice(&u64::from(self.length).to_le_bytes());
         dst[20..28].copy_from_slice(&self.lsn.to_le_bytes());
-        dst[28..28 + self.key.len()].copy_from_slice(&self.key);
+        dst[28..28 + self.key.len()].copy_from_slice(self.key.as_bytes());
         Ok(total)
     }
 
@@ -88,9 +85,12 @@ impl WalEntry {
         }
         let flags = src[2];
         let offset = u64::from_le_bytes(src[4..12].try_into().unwrap());
-        let length = u64::from_le_bytes(src[12..20].try_into().unwrap());
+        let length_u64 = u64::from_le_bytes(src[12..20].try_into().unwrap());
+        let length: u32 = length_u64
+            .try_into()
+            .map_err(|_| Error::Format("value length exceeds u32".into()))?;
         let lsn = u64::from_le_bytes(src[20..28].try_into().unwrap());
-        let key = src[28..28 + key_len].to_vec();
+        let key = T4Key::from_wal_bytes(src[28..28 + key_len].to_vec())?;
         Ok((
             Self {
                 key,
@@ -200,12 +200,12 @@ impl WalPage {
 
 enum AppendEntry {
     Live {
-        key: Vec<u8>,
+        key: T4Key,
         offset: u64,
-        length: u64,
+        length: u32,
     },
     Tombstone {
-        key: Vec<u8>,
+        key: T4Key,
     },
 }
 
@@ -245,7 +245,7 @@ impl Wal {
     /// Initialize the WAL for a newly created (empty) file.
     pub async fn create(io: IoWorker) -> Result<Self> {
         let page = WalPage::empty();
-        let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE)?;
+        let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32)?;
         buf.as_mut_slice().copy_from_slice(&page.to_bytes()?);
         io.write_all_at(buf, 0).await?;
         Ok(Self {
@@ -260,7 +260,7 @@ impl Wal {
     }
 
     /// Replay an existing WAL, rebuilding the in-memory index.
-    pub async fn replay(io: IoWorker, file_len: u64) -> Result<(Self, HashMap<Vec<u8>, ValueRef>)> {
+    pub async fn replay(io: IoWorker, file_len: u64) -> Result<(Self, HashMap<T4Key, ValueRef>)> {
         if file_len < PAGE_SIZE_U64 {
             return Err(Error::Format(
                 "store file shorter than first WAL page".into(),
@@ -291,7 +291,7 @@ impl Wal {
 
                 match entry.flags {
                     FLAG_TOMBSTONE => {
-                        index.remove(entry.key.as_slice());
+                        index.remove(&entry.key);
                     }
                     FLAG_LIVE => {
                         index.insert(
@@ -301,7 +301,7 @@ impl Wal {
                                 length: entry.length,
                             },
                         );
-                        let padded_len = align_up(entry.length, PAGE_SIZE_U64)?;
+                        let padded_len = align_up(u64::from(entry.length), PAGE_SIZE_U64)?;
                         let data_end = entry
                             .offset
                             .checked_add(padded_len)
@@ -337,13 +337,16 @@ impl Wal {
     }
 
     /// Write value bytes into data space and append a live WAL entry.
-    pub async fn put(&self, key: Vec<u8>, value: &[u8]) -> Result<ValueRef> {
-        Self::validate_key(&key)?;
-
-        let value_len = value.len() as u64;
-        let value_offset = self.reserve_value_space(value_len)?;
-        let buf = AlignedBuf::from_padded_slice(value)?;
-        self.io.write_all_at(buf, value_offset).await?;
+    pub async fn put(&self, key: T4Key, value: &T4Value) -> Result<ValueRef> {
+        let value_len = value.len_u32();
+        let value_offset = if value_len == 0 {
+            0
+        } else {
+            let buf = AlignedBuf::from_padded_slice(value.as_bytes())?;
+            let value_offset = self.reserve_value_space(buf.len_u32())?;
+            self.io.write_all_at(buf, value_offset).await?;
+            value_offset
+        };
 
         self.append_entry(AppendEntry::Live {
             key,
@@ -359,36 +362,26 @@ impl Wal {
     }
 
     /// Append a tombstone entry to the WAL.
-    pub async fn tombstone(&self, key: Vec<u8>) -> Result<()> {
-        Self::validate_key(&key)?;
+    pub async fn tombstone(&self, key: T4Key) -> Result<()> {
         self.append_entry(AppendEntry::Tombstone { key }).await
     }
 
     // -- private -------------------------------------------------------------
 
-    fn validate_key(key: &[u8]) -> Result<()> {
-        let _: u16 = key
-            .len()
-            .try_into()
-            .map_err(|_| Error::KeyTooLarge(key.len()))?;
-        Ok(())
-    }
-
     fn lock_state(&self) -> Result<MutexGuard<'_, WalState>> {
         self.state.lock().map_err(|_| Error::LockPoisoned)
     }
 
-    fn reserve_value_space(&self, value_len: u64) -> Result<u64> {
-        let padded_len = align_up(value_len, PAGE_SIZE_U64)?;
+    fn reserve_value_space(&self, padded_len: u32) -> Result<u64> {
         let mut state = self.lock_state()?;
         Self::reserve_space_locked(&mut state, padded_len)
     }
 
-    fn reserve_space_locked(state: &mut WalState, len: u64) -> Result<u64> {
+    fn reserve_space_locked(state: &mut WalState, len: u32) -> Result<u64> {
         let offset = state.file_tail;
         state.file_tail = state
             .file_tail
-            .checked_add(len)
+            .checked_add(u64::from(len))
             .ok_or_else(|| Error::Format("file tail overflow".into()))?;
         Ok(offset)
     }
@@ -413,7 +406,7 @@ impl Wal {
                 vec![self.encode_page_write(state.tail_offset, &state.tail)?]
             } else {
                 // Current page is full — allocate a new WAL page.
-                let new_page_offset = Self::reserve_space_locked(&mut state, PAGE_SIZE_U64)?;
+                let new_page_offset = Self::reserve_space_locked(&mut state, PAGE_SIZE_U32)?;
 
                 // Link the old tail to the new page and rewrite it.
                 let old_tail_offset = state.tail_offset;
@@ -444,13 +437,13 @@ impl Wal {
     }
 
     fn encode_page_write(&self, offset: u64, page: &WalPage) -> Result<WalWriteOp> {
-        let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE)?;
+        let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32)?;
         buf.as_mut_slice().copy_from_slice(&page.to_bytes()?);
         Ok(WalWriteOp { buf, offset })
     }
 
     async fn read_page(io: &IoWorker, offset: u64) -> Result<WalPage> {
-        let buf = AlignedBuf::new_zeroed(PAGE_SIZE)?;
+        let buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32)?;
         let buf = io.read_exact_at(buf, offset).await?;
         WalPage::from_bytes(buf.as_slice())
     }
@@ -476,8 +469,16 @@ mod tests {
     fn page_round_trip() {
         let mut page = WalPage::empty();
         page.next_page = 8192;
-        assert!(page.push(WalEntry::live(b"alpha".to_vec(), 4096, 123, 0)));
-        assert!(page.push(WalEntry::tombstone(b"beta".to_vec(), 1)));
+        assert!(page.push(WalEntry::live(
+            T4Key::try_from(b"alpha".to_vec()).unwrap(),
+            4096,
+            123,
+            0,
+        )));
+        assert!(page.push(WalEntry::tombstone(
+            T4Key::try_from(b"beta".to_vec()).unwrap(),
+            1,
+        )));
 
         let bytes = page.to_bytes().unwrap();
         let decoded = WalPage::from_bytes(&bytes).unwrap();
@@ -488,10 +489,20 @@ mod tests {
     fn page_overflow_detection() {
         let mut page = WalPage::empty();
         let mut i = 0_u64;
-        while page.push(WalEntry::live(vec![b'k'; 64], i * 4096, 64, i)) {
+        while page.push(WalEntry::live(
+            T4Key::try_from(vec![b'k'; 64]).unwrap(),
+            i * 4096,
+            64,
+            i,
+        )) {
             i += 1;
         }
         assert!(i > 0);
-        assert!(!page.can_fit(&WalEntry::live(vec![1; 128], 0, 1, i + 1)));
+        assert!(!page.can_fit(&WalEntry::live(
+            T4Key::try_from(vec![1; 128]).unwrap(),
+            0,
+            1,
+            i + 1,
+        )));
     }
 }

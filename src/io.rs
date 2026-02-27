@@ -1,8 +1,9 @@
 use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::num::NonZeroU32;
 use std::ptr::NonNull;
 
 use crate::error::{Error, Result};
-use crate::format::PAGE_SIZE;
+use crate::format::{PAGE_SIZE, PAGE_SIZE_NZ_U32};
 
 pub fn align_up_u64(value: u64, alignment: u64) -> u64 {
     debug_assert!(alignment.is_power_of_two());
@@ -14,16 +15,22 @@ pub fn align_down_u64(value: u64, alignment: u64) -> u64 {
     value & !(alignment - 1)
 }
 
-pub fn align_up_usize(value: usize, alignment: usize) -> usize {
+pub fn align_up_u32(value: NonZeroU32, alignment: NonZeroU32) -> Result<NonZeroU32> {
+    let value = value.get();
+    let alignment = alignment.get();
     debug_assert!(alignment.is_power_of_two());
-    (value + (alignment - 1)) & !(alignment - 1)
+    let sum = value
+        .checked_add(alignment - 1)
+        .ok_or(Error::InvalidArgument("value overflow while aligning"))?;
+    let aligned = sum & !(alignment - 1);
+    NonZeroU32::new(aligned).ok_or(Error::InvalidArgument("aligned value unexpectedly zero"))
 }
 
 #[derive(Debug)]
 pub struct AlignedBuf {
     ptr: NonNull<u8>,
-    len: usize,
-    layout: Option<Layout>,
+    len_u32: NonZeroU32,
+    layout: Layout,
 }
 
 // `AlignedBuf` owns its allocation and exposes mutation only through `&mut self`,
@@ -31,14 +38,8 @@ pub struct AlignedBuf {
 unsafe impl Send for AlignedBuf {}
 
 impl AlignedBuf {
-    pub fn new_zeroed(len: usize) -> Result<Self> {
-        if len == 0 {
-            return Ok(Self {
-                ptr: NonNull::dangling(),
-                len: 0,
-                layout: None,
-            });
-        }
+    pub fn new_zeroed(len_u32: NonZeroU32) -> Result<Self> {
+        let len = len_u32.get() as usize;
         let layout = Layout::from_size_align(len, PAGE_SIZE)
             .map_err(|_| Error::InvalidArgument("invalid aligned buffer layout"))?;
         let ptr = unsafe { alloc_zeroed(layout) };
@@ -50,30 +51,36 @@ impl AlignedBuf {
         })?;
         Ok(Self {
             ptr,
-            len,
-            layout: Some(layout),
+            len_u32,
+            layout,
         })
     }
 
     pub fn from_padded_slice(src: &[u8]) -> Result<Self> {
-        let padded_len = if src.is_empty() {
-            0
-        } else {
-            align_up_usize(src.len(), PAGE_SIZE)
-        };
-        let mut buf = Self::new_zeroed(padded_len)?;
-        if !src.is_empty() {
-            buf.as_mut_slice()[..src.len()].copy_from_slice(src);
+        if src.is_empty() {
+            return Err(Error::InvalidArgument(
+                "padded buffer source must be non-empty",
+            ));
         }
+        let src_len_u32: u32 = src
+            .len()
+            .try_into()
+            .map_err(|_| Error::InvalidArgument("aligned buffer length exceeds u32"))?;
+        let src_len_u32 = NonZeroU32::new(src_len_u32)
+            .ok_or(Error::InvalidArgument("aligned buffer length must be > 0"))?;
+        let padded_len_u32 = align_up_u32(src_len_u32, PAGE_SIZE_NZ_U32)?;
+        let mut buf = Self::new_zeroed(padded_len_u32)?;
+        let src_len = src_len_u32.get() as usize;
+        buf.as_mut_slice()[..src_len].copy_from_slice(src);
         Ok(buf)
     }
 
     pub fn len(&self) -> usize {
-        self.len
+        self.len_u32.get() as usize
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
+    pub(crate) fn len_u32(&self) -> u32 {
+        self.len_u32.get()
     }
 
     pub fn as_ptr(&self) -> *const u8 {
@@ -85,24 +92,16 @@ impl AlignedBuf {
     }
 
     pub fn as_slice(&self) -> &[u8] {
-        if self.len == 0 {
-            return &[];
-        }
-        unsafe { std::slice::from_raw_parts(self.as_ptr(), self.len) }
+        unsafe { std::slice::from_raw_parts(self.as_ptr(), self.len()) }
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        if self.len == 0 {
-            return &mut [];
-        }
-        unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), self.len) }
+        unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), self.len()) }
     }
 }
 
 impl Drop for AlignedBuf {
     fn drop(&mut self) {
-        if let Some(layout) = self.layout {
-            unsafe { dealloc(self.ptr.as_ptr(), layout) };
-        }
+        unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
     }
 }

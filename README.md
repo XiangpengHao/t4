@@ -50,3 +50,7 @@ let store = t4::mount_with_options(
 4. Deletes append tombstones; space is not reclaimed in v1.
 5. Metadata lives in linked 4 KB WAL pages and is rebuilt into memory on mount.
 6. WAL manager is the single allocator for both WAL-page and value-page growth.
+
+## Limitations
+
+Currently it only supports files up to 4 GB.

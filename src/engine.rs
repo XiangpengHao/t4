@@ -1,13 +1,15 @@
 use std::collections::HashMap;
 use std::fs::OpenOptions;
+use std::num::NonZeroU32;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::error::{Error, Result};
-use crate::format::{PAGE_SIZE, PAGE_SIZE_U64};
-use crate::io::{AlignedBuf, align_down_u64, align_up_u64, align_up_usize};
+use crate::format::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U64};
+use crate::io::{AlignedBuf, align_down_u64, align_up_u32, align_up_u64};
 use crate::io_worker::IoWorker;
+use crate::types::{RangeRequest, T4Key, T4Value};
 use crate::wal::{ValueRef, Wal};
 
 #[derive(Debug, Clone, Copy)]
@@ -31,7 +33,7 @@ impl Default for MountOptions {
 pub struct Engine {
     io: IoWorker,
     wal: Wal,
-    index: RwLock<HashMap<Vec<u8>, ValueRef>>,
+    index: RwLock<HashMap<T4Key, ValueRef>>,
 }
 
 impl Engine {
@@ -50,7 +52,9 @@ impl Engine {
 
         let file = open.open(path)?;
         let len = file.metadata()?.len();
-        let io = IoWorker::new(options.queue_depth, file)?;
+        let queue_depth = NonZeroU32::new(options.queue_depth)
+            .ok_or(Error::InvalidArgument("queue_depth must be > 0"))?;
+        let io = IoWorker::new(queue_depth, file)?;
 
         let (wal, index) = if len == 0 {
             let wal = Wal::create(io.clone()).await?;
@@ -66,71 +70,85 @@ impl Engine {
         })
     }
 
-    fn read_index(&self) -> Result<RwLockReadGuard<'_, HashMap<Vec<u8>, ValueRef>>> {
+    fn read_index(&self) -> Result<RwLockReadGuard<'_, HashMap<T4Key, ValueRef>>> {
         self.index.read().map_err(|_| Error::LockPoisoned)
     }
 
-    fn write_index(&self) -> Result<RwLockWriteGuard<'_, HashMap<Vec<u8>, ValueRef>>> {
+    fn write_index(&self) -> Result<RwLockWriteGuard<'_, HashMap<T4Key, ValueRef>>> {
         self.index.write().map_err(|_| Error::LockPoisoned)
     }
 
-    pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let value_ref = self.wal.put(key.to_vec(), value).await?;
-        self.write_index()?.insert(key.to_vec(), value_ref);
+    pub async fn put(&self, key: T4Key, value: T4Value) -> Result<()> {
+        let value_ref = self.wal.put(key.clone(), &value).await?;
+        self.write_index()?.insert(key, value_ref);
         Ok(())
     }
 
-    pub async fn get(&self, key: &[u8]) -> Result<Vec<u8>> {
+    pub async fn get(&self, key: &T4Key) -> Result<Vec<u8>> {
         let value = {
             let index = self.read_index()?;
             *index.get(key).ok_or(Error::NotFound)?
         };
-        if value.length == 0 {
+        let Some(value_len_u32) = NonZeroU32::new(value.length) else {
             return Ok(Vec::new());
-        }
-        let padded = align_up_usize(value.length as usize, PAGE_SIZE);
-        let buf = AlignedBuf::new_zeroed(padded)?;
+        };
+        let padded_u32 = align_up_u32(value_len_u32, PAGE_SIZE_NZ_U32)
+            .map_err(|_| Error::Format("value length exceeds io buffer limit".into()))?;
+        let buf = AlignedBuf::new_zeroed(padded_u32)?;
         let buf = self.io.read_exact_at(buf, value.offset).await?;
-        Ok(buf.as_slice()[..value.length as usize].to_vec())
+        let value_len = value_len_u32.get() as usize;
+        Ok(buf.as_slice()[..value_len].to_vec())
     }
 
-    pub async fn get_range(&self, key: &[u8], range_start: u64, range_len: u64) -> Result<Vec<u8>> {
+    pub async fn get_range(&self, key: &T4Key, range: RangeRequest) -> Result<Vec<u8>> {
         let value = {
             let index = self.read_index()?;
             *index.get(key).ok_or(Error::NotFound)?
         };
-        let range_end = range_start
-            .checked_add(range_len)
-            .ok_or(Error::RangeOutOfBounds)?;
-        if range_end > value.length {
-            return Err(Error::RangeOutOfBounds);
-        }
-        if range_len == 0 {
+
+        let range = range.checked_against(value.length)?;
+        if range.is_empty() {
             return Ok(Vec::new());
         }
 
         let abs_start = value
             .offset
-            .checked_add(range_start)
+            .checked_add(u64::from(range.start()))
             .ok_or(Error::RangeOutOfBounds)?;
-        let abs_end = abs_start
-            .checked_add(range_len)
+        let abs_end = value
+            .offset
+            .checked_add(u64::from(range.end()))
             .ok_or(Error::RangeOutOfBounds)?;
 
         let aligned_start = align_down_u64(abs_start, PAGE_SIZE_U64);
         let aligned_end = align_up_u64(abs_end, PAGE_SIZE_U64);
-        let read_len = (aligned_end - aligned_start) as usize;
-        let buf = AlignedBuf::new_zeroed(read_len)?;
+        let read_len_u64 = aligned_end
+            .checked_sub(aligned_start)
+            .ok_or(Error::RangeOutOfBounds)?;
+        let read_len_u32: u32 = read_len_u64
+            .try_into()
+            .map_err(|_| Error::RangeOutOfBounds)?;
+        let read_len_u32 = NonZeroU32::new(read_len_u32).ok_or(Error::RangeOutOfBounds)?;
+        let buf = AlignedBuf::new_zeroed(read_len_u32)?;
         let buf = self.io.read_exact_at(buf, aligned_start).await?;
 
-        let slice_start = (abs_start - aligned_start) as usize;
-        let slice_end = slice_start + range_len as usize;
+        let slice_start_u64 = abs_start
+            .checked_sub(aligned_start)
+            .ok_or(Error::RangeOutOfBounds)?;
+        let slice_start_u32: u32 = slice_start_u64
+            .try_into()
+            .map_err(|_| Error::RangeOutOfBounds)?;
+        let slice_start = slice_start_u32 as usize;
+        let slice_len = range.len() as usize;
+        let slice_end = slice_start
+            .checked_add(slice_len)
+            .ok_or(Error::RangeOutOfBounds)?;
         Ok(buf.as_slice()[slice_start..slice_end].to_vec())
     }
 
-    pub async fn remove(&self, key: &[u8]) -> Result<bool> {
-        self.wal.tombstone(key.to_vec()).await?;
-        let existed = self.write_index()?.remove(key).is_some();
+    pub async fn remove(&self, key: T4Key) -> Result<bool> {
+        self.wal.tombstone(key.clone()).await?;
+        let existed = self.write_index()?.remove(&key).is_some();
         Ok(existed)
     }
 

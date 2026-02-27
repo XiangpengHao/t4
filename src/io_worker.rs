@@ -1,5 +1,6 @@
 use std::fmt;
 use std::fs::File;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
@@ -80,10 +81,7 @@ mod linux_impl {
             offset: u64,
             user_data: u64,
         ) -> Result<()> {
-            let len_u32: u32 = buf
-                .len()
-                .try_into()
-                .map_err(|_| Error::InvalidArgument("read buffer exceeds u32"))?;
+            let len_u32 = buf.len_u32();
             let entry = opcode::Read::new(types::Fd(fd), buf.as_mut_ptr(), len_u32)
                 .offset(offset)
                 .build()
@@ -98,10 +96,7 @@ mod linux_impl {
             offset: u64,
             user_data: u64,
         ) -> Result<()> {
-            let len_u32: u32 = buf
-                .len()
-                .try_into()
-                .map_err(|_| Error::InvalidArgument("write buffer exceeds u32"))?;
+            let len_u32 = buf.len_u32();
             let entry = opcode::Write::new(types::Fd(fd), buf.as_ptr(), len_u32)
                 .offset(offset)
                 .build()
@@ -116,10 +111,7 @@ mod linux_impl {
             offset: u64,
             user_data: u64,
         ) -> Result<()> {
-            let len_u32: u32 = buf
-                .len()
-                .try_into()
-                .map_err(|_| Error::InvalidArgument("write buffer exceeds u32"))?;
+            let len_u32 = buf.len_u32();
             let entry = opcode::Write::new(types::Fd(fd), buf.as_ptr(), len_u32)
                 .offset(offset)
                 .build()
@@ -468,19 +460,6 @@ mod linux_impl {
 
         fn submit_one(&mut self, request: WorkerRequest) -> Result<bool> {
             let mut request = match request {
-                WorkerRequest::Read {
-                    buf, completion, ..
-                } if buf.is_empty() => {
-                    completion.complete(Ok((buf, 0)));
-                    return Ok(false);
-                }
-                WorkerRequest::Write {
-                    buf, completion, ..
-                } if buf.is_empty() => {
-                    let _keep_alive = buf;
-                    completion.complete(Ok(0));
-                    return Ok(false);
-                }
                 WorkerRequest::WalAppend { .. } => {
                     debug_assert!(false, "wal append should not be submitted directly");
                     return Ok(false);
@@ -650,10 +629,8 @@ impl fmt::Debug for IoWorker {
 }
 
 impl IoWorker {
-    pub fn new(queue_depth: u32, file: File) -> Result<Self> {
-        if queue_depth == 0 {
-            return Err(Error::InvalidArgument("queue_depth must be > 0"));
-        }
+    pub fn new(queue_depth: NonZeroU32, file: File) -> Result<Self> {
+        let queue_depth = queue_depth.get();
 
         let (tx, rx) = mpsc::channel::<WorkerRequest>();
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<()>>(1);
@@ -704,10 +681,6 @@ impl IoWorker {
     }
 
     pub async fn read_exact_at(&self, buf: AlignedBuf, offset: u64) -> Result<AlignedBuf> {
-        if buf.is_empty() {
-            return Ok(buf);
-        }
-
         let expected = buf.len();
         let (buf, n) = self.read_at(buf, offset).await?;
         if n != expected {
@@ -720,10 +693,6 @@ impl IoWorker {
     }
 
     pub async fn write_all_at(&self, buf: AlignedBuf, offset: u64) -> Result<()> {
-        if buf.is_empty() {
-            return Ok(());
-        }
-
         let expected = buf.len();
         let n = self.write_at(buf, offset).await?;
         if n != expected {
