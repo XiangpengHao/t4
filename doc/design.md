@@ -49,6 +49,7 @@ Each entry stores:
 - `flags` (`live` or `tombstone`)
 - `offset`
 - `length`
+- `lsn` (global monotonic log sequence number)
 - `key bytes`
 
 The WAL is a durable append log for metadata.
@@ -65,13 +66,14 @@ Tombstones remove keys from the in-memory map during replay.
 
 ## I/O Model (`io_uring` First)
 
-All disk I/O goes through raw `io-uring` operations (`Read`, `Write`, `Fsync`).
+All disk I/O goes through raw `io_uring` operations (`Read`, `Write`, `Fsync`).
 
 Why this matters:
 
 - No split implementation between sync I/O and `io_uring`
 - Direct control over queue depth and submission/completion flow
 - Better fit for a pinned worker / thread-per-core execution model
+- Linux-only implementation
 
 ## Core Operations
 
@@ -84,7 +86,7 @@ Why this matters:
 ### `put(key, value)`
 
 1. Append value bytes to the data region (4 KB padded)
-2. Append a live WAL entry `(key, offset, length)`
+2. Append a live WAL entry `(key, offset, length, lsn)`
 3. Update in-memory `HashMap`
 
 If the current WAL page is full:
@@ -167,7 +169,6 @@ After remount, replaying the WAL rebuilds the `HashMap` and keeps the key delete
 
 The intended model is pinned worker threads (thread-per-core):
 
-- Each worker owns its own I/O backend (e.g. `io_uring` on Linux)
+- Each worker owns its own `io_uring` backend
 - Avoid shared-ring contention in v1
 - Define routing/ownership strategy before multi-worker access to one store file
-

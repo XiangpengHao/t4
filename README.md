@@ -1,6 +1,6 @@
 # `t4`
 
-`t4` is a local, high-performance object store.
+`t4` is a local, embedded, high-performance object store.
 
 ## Features
 
@@ -28,7 +28,7 @@ let removed = store.remove(b"greeting".to_vec()).await?;
 assert!(removed);
 ```
 
-For tests or environments where `O_DIRECT` / `O_DSYNC` are not available, use mount options:
+To tune I/O behavior, use mount options:
 
 ```rust
 let store = t4::mount_with_options(
@@ -45,7 +45,7 @@ let store = t4::mount_with_options(
 ## Notes
 
 1. `t4` targets `io_uring` for all reads and writes.
-2. Production mount defaults use `O_DIRECT` and `O_DSYNC`.
-3. Deletes append tombstones; space is not reclaimed in v1.
-4. Metadata lives in linked 4 KB index pages and is rebuilt into memory on mount.
-
+2. `t4` supports Linux hosts only.
+3. Production mount defaults use `O_DIRECT` and `O_DSYNC`.
+4. Deletes append tombstones; space is not reclaimed in v1.
+5. Metadata lives in linked 4 KB index pages and is rebuilt into memory on mount.

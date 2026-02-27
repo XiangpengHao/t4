@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::path::Path;
-
-#[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::error::{Error, Result};
 use crate::format::{PAGE_SIZE, PAGE_SIZE_U64};
@@ -31,7 +30,7 @@ impl Default for MountOptions {
 #[derive(Debug)]
 pub struct Engine {
     wal: Wal,
-    index: HashMap<Vec<u8>, ValueRef>,
+    index: RwLock<HashMap<Vec<u8>, ValueRef>>,
 }
 
 impl Engine {
@@ -39,17 +38,14 @@ impl Engine {
         let mut open = OpenOptions::new();
         open.read(true).write(true).create(true);
 
-        #[cfg(target_os = "linux")]
-        {
-            let mut custom_flags = 0;
-            if options.direct_io {
-                custom_flags |= libc::O_DIRECT;
-            }
-            if options.dsync {
-                custom_flags |= libc::O_DSYNC;
-            }
-            open.custom_flags(custom_flags);
+        let mut custom_flags = 0;
+        if options.direct_io {
+            custom_flags |= libc::O_DIRECT;
         }
+        if options.dsync {
+            custom_flags |= libc::O_DSYNC;
+        }
+        open.custom_flags(custom_flags);
 
         let file = open.open(path)?;
         let len = file.metadata()?.len();
@@ -62,24 +58,33 @@ impl Engine {
             Wal::replay(io, len).await?
         };
 
-        Ok(Self { wal, index })
+        Ok(Self {
+            wal,
+            index: RwLock::new(index),
+        })
     }
 
-    pub async fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+    fn read_index(&self) -> Result<RwLockReadGuard<'_, HashMap<Vec<u8>, ValueRef>>> {
+        self.index.read().map_err(|_| Error::LockPoisoned)
+    }
+
+    fn write_index(&self) -> Result<RwLockWriteGuard<'_, HashMap<Vec<u8>, ValueRef>>> {
+        self.index.write().map_err(|_| Error::LockPoisoned)
+    }
+
+    pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         if key.len() > u16::MAX as usize {
             return Err(Error::KeyTooLarge(key.len()));
         }
 
-        let value_offset = self.wal.bump_pointer();
         let value_len = value.len() as u64;
-        if !value.is_empty() {
-            self.wal.write_value(value).await?;
-        }
+        let value_offset = self.wal.reserve_value_space(value_len)?;
+        self.wal.write_value_at(value_offset, value).await?;
 
         self.wal
             .append_put(key.to_vec(), value_offset, value_len)
             .await?;
-        self.index.insert(
+        self.write_index()?.insert(
             key.to_vec(),
             ValueRef {
                 offset: value_offset,
@@ -90,7 +95,10 @@ impl Engine {
     }
 
     pub async fn get(&self, key: &[u8]) -> Result<Vec<u8>> {
-        let value = *self.index.get(key).ok_or(Error::NotFound)?;
+        let value = {
+            let index = self.read_index()?;
+            *index.get(key).ok_or(Error::NotFound)?
+        };
         if value.length == 0 {
             return Ok(Vec::new());
         }
@@ -101,7 +109,10 @@ impl Engine {
     }
 
     pub async fn get_range(&self, key: &[u8], range_start: u64, range_len: u64) -> Result<Vec<u8>> {
-        let value = *self.index.get(key).ok_or(Error::NotFound)?;
+        let value = {
+            let index = self.read_index()?;
+            *index.get(key).ok_or(Error::NotFound)?
+        };
         let range_end = range_start
             .checked_add(range_len)
             .ok_or(Error::RangeOutOfBounds)?;
@@ -131,12 +142,12 @@ impl Engine {
         Ok(buf.as_slice()[slice_start..slice_end].to_vec())
     }
 
-    pub async fn remove(&mut self, key: &[u8]) -> Result<bool> {
+    pub async fn remove(&self, key: &[u8]) -> Result<bool> {
         if key.len() > u16::MAX as usize {
             return Err(Error::KeyTooLarge(key.len()));
         }
-        let existed = self.index.remove(key).is_some();
         self.wal.append_tombstone(key.to_vec()).await?;
+        let existed = self.write_index()?.remove(key).is_some();
         Ok(existed)
     }
 
@@ -144,11 +155,11 @@ impl Engine {
         self.wal.fsync().await
     }
 
-    pub fn len(&self) -> usize {
-        self.index.len()
+    pub fn len(&self) -> Result<usize> {
+        Ok(self.read_index()?.len())
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.index.is_empty()
+    pub fn is_empty(&self) -> Result<bool> {
+        Ok(self.read_index()?.is_empty())
     }
 }

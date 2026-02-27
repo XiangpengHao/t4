@@ -8,8 +8,6 @@ name = "t4"
 path = "src/lib.rs"
 
 [dependencies]
-
-[target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 io-uring = "0.7"
 

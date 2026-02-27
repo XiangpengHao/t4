@@ -1,13 +1,14 @@
 use std::fmt;
 use std::fs::File;
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::thread;
 
 use crate::error::{Error, Result};
 use crate::io::AlignedBuf;
 use crate::io_task::{
-    FileFsyncTask, FileReadTask, FileWriteTask, WorkerRequest, worker_disconnected_error,
+    FileFsyncTask, FileReadTask, FileWalAppendTask, FileWriteTask, WalWriteOp, WorkerRequest,
+    worker_disconnected_error,
 };
 
 fn worker_failed_error(message: impl Into<String>) -> Error {
@@ -19,22 +20,18 @@ fn complete_request_with_error(request: WorkerRequest, err: Error) {
         WorkerRequest::Read { completion, .. } => completion.complete(Err(err)),
         WorkerRequest::Write { completion, .. } => completion.complete(Err(err)),
         WorkerRequest::Fsync { completion, .. } => completion.complete(Err(err)),
+        WorkerRequest::WalAppend { completion, .. } => completion.complete(Err(err)),
     }
 }
 
 trait IoBackend: Sized + Send + 'static {
-    fn new(
-        file: File,
-        queue_depth: u32,
-        rx: mpsc::Receiver<WorkerRequest>,
-    ) -> Result<Self>;
+    fn new(file: File, queue_depth: u32, rx: mpsc::Receiver<WorkerRequest>) -> Result<Self>;
 
     fn run(self);
 }
 
-#[cfg(target_os = "linux")]
 mod linux_impl {
-    use std::collections::VecDeque;
+    use std::collections::{BTreeMap, VecDeque};
     use std::os::fd::AsRawFd;
     use std::sync::mpsc;
     use std::sync::mpsc::TryRecvError;
@@ -47,7 +44,10 @@ mod linux_impl {
     };
     use crate::error::{Error, Result};
     use crate::io::AlignedBuf;
-    use crate::io_task::{FsyncCompletion, ReadCompletion, WorkerRequest, WriteCompletion};
+    use crate::io_task::{
+        FsyncCompletion, ReadCompletion, WalAppendCompletion, WalWriteOp, WorkerRequest,
+        WriteCompletion,
+    };
 
     #[derive(Debug, Clone, Copy)]
     struct CompletionEvent {
@@ -109,6 +109,25 @@ mod linux_impl {
             self.push_entry(entry)
         }
 
+        fn push_write_link(
+            &mut self,
+            fd: i32,
+            buf: &AlignedBuf,
+            offset: u64,
+            user_data: u64,
+        ) -> Result<()> {
+            let len_u32: u32 = buf
+                .len()
+                .try_into()
+                .map_err(|_| Error::InvalidArgument("write buffer exceeds u32"))?;
+            let entry = opcode::Write::new(types::Fd(fd), buf.as_ptr(), len_u32)
+                .offset(offset)
+                .build()
+                .flags(io_uring::squeue::Flags::IO_LINK)
+                .user_data(user_data);
+            self.push_entry(entry)
+        }
+
         fn push_fsync(&mut self, fd: i32, user_data: u64) -> Result<()> {
             let entry = opcode::Fsync::new(types::Fd(fd))
                 .build()
@@ -160,6 +179,22 @@ mod linux_impl {
         Fsync {
             completion: FsyncCompletion,
         },
+        WalStep {
+            expected: usize,
+        },
+    }
+
+    struct PendingWalAppend {
+        writes: Vec<WalWriteOp>,
+        completion: WalAppendCompletion,
+        lsn: u64,
+    }
+
+    struct ActiveWalAppend {
+        remaining: usize,
+        completion: WalAppendCompletion,
+        error: Option<Error>,
+        lsn: u64,
     }
 
     fn complete_submitted_with_result(submitted: SubmittedOp, result: Result<usize>) {
@@ -169,6 +204,7 @@ mod linux_impl {
             } => completion.complete(result.map(|n| (buf, n))),
             SubmittedOp::Write { completion, .. } => completion.complete(result),
             SubmittedOp::Fsync { completion, .. } => completion.complete(result.map(|_| ())),
+            SubmittedOp::WalStep { .. } => {}
         }
     }
 
@@ -183,17 +219,16 @@ mod linux_impl {
         tokens: VecDeque<usize>,
         submitted_tasks: Vec<Option<SubmittedOp>>,
         queued: VecDeque<WorkerRequest>,
+        pending_wal_appends: BTreeMap<u64, PendingWalAppend>,
+        active_wal_append: Option<ActiveWalAppend>,
+        next_wal_lsn: Option<u64>,
         cqe_buf: Vec<CompletionEvent>,
         shutting_down: bool,
         inflight: usize,
     }
 
     impl IoBackend for UringBackend {
-        fn new(
-            file: File,
-            queue_depth: u32,
-            rx: mpsc::Receiver<WorkerRequest>,
-        ) -> Result<Self> {
+        fn new(file: File, queue_depth: u32, rx: mpsc::Receiver<WorkerRequest>) -> Result<Self> {
             let ring = UringDriver::new(queue_depth)?;
             let queue_depth = queue_depth as usize;
 
@@ -208,6 +243,9 @@ mod linux_impl {
                 tokens,
                 submitted_tasks,
                 queued: VecDeque::new(),
+                pending_wal_appends: BTreeMap::new(),
+                active_wal_append: None,
+                next_wal_lsn: None,
                 cqe_buf: Vec::with_capacity(queue_depth),
                 shutting_down: false,
                 inflight: 0,
@@ -232,7 +270,12 @@ mod linux_impl {
 
                 self.poll_completions();
 
-                if self.shutting_down && self.queued.is_empty() && self.inflight == 0 {
+                if self.shutting_down
+                    && self.queued.is_empty()
+                    && self.pending_wal_appends.is_empty()
+                    && self.active_wal_append.is_none()
+                    && self.inflight == 0
+                {
                     break;
                 }
 
@@ -244,7 +287,12 @@ mod linux_impl {
                     self.poll_completions();
                 }
 
-                if self.shutting_down && self.queued.is_empty() && self.inflight == 0 {
+                if self.shutting_down
+                    && self.queued.is_empty()
+                    && self.pending_wal_appends.is_empty()
+                    && self.active_wal_append.is_none()
+                    && self.inflight == 0
+                {
                     break;
                 }
             }
@@ -255,7 +303,12 @@ mod linux_impl {
         }
 
         fn block_for_one_request_if_idle(&mut self) {
-            if self.shutting_down || !self.queued.is_empty() || self.inflight != 0 {
+            if self.shutting_down
+                || !self.queued.is_empty()
+                || !self.pending_wal_appends.is_empty()
+                || self.active_wal_append.is_some()
+                || self.inflight != 0
+            {
                 return;
             }
 
@@ -284,11 +337,44 @@ mod linux_impl {
         fn drain_submissions(&mut self) -> Result<()> {
             let mut submitted_any = false;
 
-            while !self.queued.is_empty() && !self.tokens.is_empty() {
+            while !self.queued.is_empty() {
                 let request = self.queued.pop_front().expect("queued request missing");
-                if self.submit_one(request)? {
-                    submitted_any = true;
+                match request {
+                    WorkerRequest::WalAppend {
+                        lsn,
+                        writes,
+                        completion,
+                    } => {
+                        if writes.is_empty() {
+                            completion.complete(Ok(()));
+                        } else {
+                            let replaced = self.pending_wal_appends.insert(
+                                lsn,
+                                PendingWalAppend {
+                                    writes,
+                                    completion,
+                                    lsn,
+                                },
+                            );
+                            if replaced.is_some() {
+                                return Err(Error::Format(format!("duplicate wal lsn {lsn}")));
+                            }
+                        }
+                    }
+                    other => {
+                        if self.tokens.is_empty() {
+                            self.queued.push_front(other);
+                            break;
+                        }
+                        if self.submit_one(other)? {
+                            submitted_any = true;
+                        }
+                    }
                 }
+            }
+
+            if self.submit_next_wal_step()? {
+                submitted_any = true;
             }
 
             if submitted_any {
@@ -296,6 +382,115 @@ mod linux_impl {
             }
 
             Ok(())
+        }
+
+        fn submit_next_wal_step(&mut self) -> Result<bool> {
+            if self.active_wal_append.is_none() {
+                if self.next_wal_lsn.is_none() {
+                    self.next_wal_lsn = self.pending_wal_appends.first_key_value().map(|(k, _)| *k);
+                }
+                let Some(expected_lsn) = self.next_wal_lsn else {
+                    return Ok(false);
+                };
+                if let Some(pending) = self.pending_wal_appends.remove(&expected_lsn) {
+                    if self.tokens.len() < pending.writes.len() {
+                        self.pending_wal_appends.insert(pending.lsn, pending);
+                        return Ok(false);
+                    }
+
+                    let step_count = pending.writes.len();
+                    self.active_wal_append = Some(ActiveWalAppend {
+                        remaining: step_count,
+                        completion: pending.completion,
+                        error: None,
+                        lsn: pending.lsn,
+                    });
+
+                    let mut submitted_steps = 0_usize;
+                    for (index, step) in pending.writes.into_iter().enumerate() {
+                        let token = self
+                            .tokens
+                            .pop_front()
+                            .expect("token pool unexpectedly empty");
+                        let user_data = token as u64;
+                        let is_last = index + 1 == step_count;
+                        let push_result = if is_last {
+                            self.ring.push_write(
+                                self.file.as_raw_fd(),
+                                &step.buf,
+                                step.offset,
+                                user_data,
+                            )
+                        } else {
+                            self.ring.push_write_link(
+                                self.file.as_raw_fd(),
+                                &step.buf,
+                                step.offset,
+                                user_data,
+                            )
+                        };
+
+                        if let Err(err) = push_result {
+                            self.tokens.push_front(token);
+                            if submitted_steps == 0 {
+                                if let Some(active) = self.active_wal_append.take() {
+                                    active.completion.complete(Err(err));
+                                }
+                            } else if let Some(active) = self.active_wal_append.as_mut() {
+                                active.remaining = submitted_steps;
+                                if active.error.is_none() {
+                                    active.error = Some(err);
+                                }
+                            }
+                            return Ok(submitted_steps > 0);
+                        }
+
+                        let slot = self
+                            .submitted_tasks
+                            .get_mut(token)
+                            .expect("token out of range for submitted_tasks");
+                        debug_assert!(slot.is_none(), "token reused before completion");
+                        *slot = Some(SubmittedOp::WalStep {
+                            expected: step.buf.len(),
+                        });
+                        self.inflight += 1;
+                        submitted_steps += 1;
+                    }
+                    return Ok(true);
+                }
+            }
+
+            Ok(false)
+        }
+
+        fn complete_wal_step(&mut self, result: Result<usize>) {
+            let Some(active) = self.active_wal_append.as_mut() else {
+                debug_assert!(false, "wal step completion with no active wal append");
+                return;
+            };
+
+            if let Err(err) = result {
+                if active.error.is_none() {
+                    active.error = Some(err);
+                }
+            }
+
+            if active.remaining > 0 {
+                active.remaining -= 1;
+            }
+            if active.remaining == 0 {
+                let active = self
+                    .active_wal_append
+                    .take()
+                    .expect("active wal append missing");
+                match active.error {
+                    Some(err) => active.completion.complete(Err(err)),
+                    None => {
+                        active.completion.complete(Ok(()));
+                        self.next_wal_lsn = active.lsn.checked_add(1);
+                    }
+                }
+            }
         }
 
         fn submit_one(&mut self, request: WorkerRequest) -> Result<bool> {
@@ -311,6 +506,10 @@ mod linux_impl {
                 } if buf.is_empty() => {
                     let _keep_alive = buf;
                     completion.complete(Ok(0));
+                    return Ok(false);
+                }
+                WorkerRequest::WalAppend { .. } => {
+                    debug_assert!(false, "wal append should not be submitted directly");
                     return Ok(false);
                 }
                 other => other,
@@ -334,6 +533,7 @@ mod linux_impl {
                 WorkerRequest::Fsync { .. } => {
                     self.ring.push_fsync(self.file.as_raw_fd(), user_data)
                 }
+                WorkerRequest::WalAppend { .. } => unreachable!("handled above"),
             };
 
             if let Err(err) = push_result {
@@ -359,6 +559,7 @@ mod linux_impl {
                     completion,
                 },
                 WorkerRequest::Fsync { completion, .. } => SubmittedOp::Fsync { completion },
+                WorkerRequest::WalAppend { .. } => unreachable!("handled above"),
             });
             self.inflight += 1;
             Ok(true)
@@ -367,8 +568,9 @@ mod linux_impl {
         fn poll_completions(&mut self) {
             self.cqe_buf.clear();
             self.ring.drain_completions(&mut self.cqe_buf);
+            let completions: Vec<_> = self.cqe_buf.drain(..).collect();
 
-            for cqe in self.cqe_buf.drain(..) {
+            for cqe in completions {
                 let token = cqe.user_data as usize;
                 let Some(slot) = self.submitted_tasks.get_mut(token) else {
                     debug_assert!(false, "cqe token out of range: {}", cqe.user_data);
@@ -381,7 +583,21 @@ mod linux_impl {
 
                 self.inflight = self.inflight.saturating_sub(1);
                 self.tokens.push_back(token);
-                complete_submitted_from_cqe(submitted, cqe.result);
+                if let SubmittedOp::WalStep { expected } = submitted {
+                    let result = decode_cqe_result(cqe.result).and_then(|n| {
+                        if n == expected {
+                            Ok(n)
+                        } else {
+                            Err(Error::Io(std::io::Error::new(
+                                std::io::ErrorKind::WriteZero,
+                                format!("short write: expected {expected}, got {n}"),
+                            )))
+                        }
+                    });
+                    self.complete_wal_step(result);
+                } else {
+                    complete_submitted_from_cqe(submitted, cqe.result);
+                }
             }
         }
 
@@ -390,6 +606,15 @@ mod linux_impl {
 
             while let Some(request) = self.queued.pop_front() {
                 complete_request_with_error(request, worker_failed_error(msg.clone()));
+            }
+
+            while let Some((_, wal)) = self.pending_wal_appends.pop_first() {
+                wal.completion
+                    .complete(Err(worker_failed_error(msg.clone())));
+            }
+            if let Some(wal) = self.active_wal_append.take() {
+                wal.completion
+                    .complete(Err(worker_failed_error(msg.clone())));
             }
 
             for slot in &mut self.submitted_tasks {
@@ -416,6 +641,12 @@ mod linux_impl {
             while let Some(request) = self.queued.pop_front() {
                 complete_request_with_error(request, worker_disconnected_error());
             }
+            while let Some((_, wal)) = self.pending_wal_appends.pop_first() {
+                wal.completion.complete(Err(worker_disconnected_error()));
+            }
+            if let Some(wal) = self.active_wal_append.take() {
+                wal.completion.complete(Err(worker_disconnected_error()));
+            }
         }
 
         fn reject_submitted_disconnected(&mut self) {
@@ -428,82 +659,7 @@ mod linux_impl {
         }
     }
 }
-
-#[cfg(not(target_os = "linux"))]
-mod blocking_impl {
-    use std::io::{Read, Seek, SeekFrom, Write};
-    use std::sync::mpsc;
-
-    use super::{File, IoBackend, complete_request_with_error, worker_disconnected_error};
-    use crate::error::{Error, Result};
-    use crate::io_task::WorkerRequest;
-
-    pub(super) struct BlockingBackend {
-        receiver: mpsc::Receiver<WorkerRequest>,
-        file: File,
-    }
-
-    impl IoBackend for BlockingBackend {
-        fn new(
-            file: File,
-            _queue_depth: u32,
-            rx: mpsc::Receiver<WorkerRequest>,
-        ) -> Result<Self> {
-            Ok(Self { receiver: rx, file })
-        }
-
-        fn run(self) {
-            while let Ok(request) = self.receiver.recv() {
-                match request {
-                    WorkerRequest::Read {
-                        mut buf,
-                        offset,
-                        completion,
-                    } => {
-                        let result = read_at(&self.file, buf.as_mut_slice(), offset)
-                            .map_err(Error::from)
-                            .map(|n| (buf, n));
-                        completion.complete(result);
-                    }
-                    WorkerRequest::Write {
-                        buf,
-                        offset,
-                        completion,
-                    } => {
-                        let result =
-                            write_at(&self.file, buf.as_slice(), offset).map_err(Error::from);
-                        completion.complete(result);
-                    }
-                    WorkerRequest::Fsync { completion } => {
-                        completion.complete(self.file.sync_all().map_err(Error::from));
-                    }
-                }
-            }
-
-            while let Ok(request) = self.receiver.try_recv() {
-                complete_request_with_error(request, worker_disconnected_error());
-            }
-        }
-    }
-
-    fn read_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
-        let mut clone = file.try_clone()?;
-        clone.seek(SeekFrom::Start(offset))?;
-        clone.read(buf)
-    }
-
-    fn write_at(file: &File, buf: &[u8], offset: u64) -> std::io::Result<usize> {
-        let mut clone = file.try_clone()?;
-        clone.seek(SeekFrom::Start(offset))?;
-        clone.write(buf)
-    }
-}
-
-#[cfg(target_os = "linux")]
 type SelectedBackend = linux_impl::UringBackend;
-
-#[cfg(not(target_os = "linux"))]
-type SelectedBackend = blocking_impl::BlockingBackend;
 
 /// Handle to the I/O worker thread.
 ///
@@ -560,6 +716,10 @@ impl IoWorker {
 
     pub fn fsync(&self) -> FileFsyncTask {
         FileFsyncTask::new((*self.tx).clone())
+    }
+
+    pub fn wal_append(&self, lsn: u64, writes: Vec<WalWriteOp>) -> FileWalAppendTask {
+        FileWalAppendTask::new((*self.tx).clone(), lsn, writes)
     }
 
     pub async fn read_exact_at(&self, buf: AlignedBuf, offset: u64) -> Result<AlignedBuf> {
