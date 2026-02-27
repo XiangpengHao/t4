@@ -29,6 +29,7 @@ impl Default for MountOptions {
 
 #[derive(Debug)]
 pub struct Engine {
+    io: IoWorker,
     wal: Wal,
     index: RwLock<HashMap<Vec<u8>, ValueRef>>,
 }
@@ -52,13 +53,14 @@ impl Engine {
         let io = IoWorker::new(options.queue_depth, file)?;
 
         let (wal, index) = if len == 0 {
-            let wal = Wal::create(io).await?;
+            let wal = Wal::create(io.clone()).await?;
             (wal, HashMap::new())
         } else {
-            Wal::replay(io, len).await?
+            Wal::replay(io.clone(), len).await?
         };
 
         Ok(Self {
+            io,
             wal,
             index: RwLock::new(index),
         })
@@ -79,7 +81,8 @@ impl Engine {
 
         let value_len = value.len() as u64;
         let value_offset = self.wal.reserve_value_space(value_len)?;
-        self.wal.write_value_at(value_offset, value).await?;
+        let buf = AlignedBuf::from_padded_slice(value)?;
+        self.io.write_all_at(buf, value_offset).await?;
 
         self.wal
             .append_put(key.to_vec(), value_offset, value_len)
@@ -104,7 +107,7 @@ impl Engine {
         }
         let padded = align_up_usize(value.length as usize, PAGE_SIZE);
         let buf = AlignedBuf::new_zeroed(padded)?;
-        let buf = self.wal.read_exact(buf, value.offset).await?;
+        let buf = self.io.read_exact_at(buf, value.offset).await?;
         Ok(buf.as_slice()[..value.length as usize].to_vec())
     }
 
@@ -135,7 +138,7 @@ impl Engine {
         let aligned_end = align_up_u64(abs_end, PAGE_SIZE_U64);
         let read_len = (aligned_end - aligned_start) as usize;
         let buf = AlignedBuf::new_zeroed(read_len)?;
-        let buf = self.wal.read_exact(buf, aligned_start).await?;
+        let buf = self.io.read_exact_at(buf, aligned_start).await?;
 
         let slice_start = (abs_start - aligned_start) as usize;
         let slice_end = slice_start + range_len as usize;
@@ -152,7 +155,7 @@ impl Engine {
     }
 
     pub async fn sync(&self) -> Result<()> {
-        self.wal.fsync().await
+        self.io.fsync().await
     }
 
     pub fn len(&self) -> Result<usize> {

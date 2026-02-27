@@ -303,13 +303,6 @@ impl Wal {
         self.reserve_space(padded_len)
     }
 
-    /// Write value bytes to an already-reserved location.
-    pub async fn write_value_at(&self, offset: u64, value: &[u8]) -> Result<()> {
-        let buf = AlignedBuf::from_padded_slice(value)?;
-        self.io.write_all_at(buf, offset).await?;
-        Ok(())
-    }
-
     /// Append a live entry to the WAL for a put operation.
     pub async fn append_put(&self, key: Vec<u8>, offset: u64, length: u64) -> Result<()> {
         let lsn = self.allocate_lsn()?;
@@ -321,16 +314,6 @@ impl Wal {
     pub async fn append_tombstone(&self, key: Vec<u8>) -> Result<()> {
         let lsn = self.allocate_lsn()?;
         self.append_entry(WalEntry::tombstone(key, lsn), lsn).await
-    }
-
-    /// Read value bytes from the data region.
-    pub async fn read_exact(&self, buf: AlignedBuf, offset: u64) -> Result<AlignedBuf> {
-        self.io.read_exact_at(buf, offset).await
-    }
-
-    /// fsync the underlying file.
-    pub async fn fsync(&self) -> Result<()> {
-        self.io.fsync().await
     }
 
     // -- private -------------------------------------------------------------
