@@ -31,7 +31,7 @@ trait IoBackend: Sized + Send + 'static {
 }
 
 mod linux_impl {
-    use std::collections::{BTreeMap, VecDeque};
+    use std::collections::VecDeque;
     use std::os::fd::AsRawFd;
     use std::sync::mpsc;
     use std::sync::mpsc::TryRecvError;
@@ -187,14 +187,12 @@ mod linux_impl {
     struct PendingWalAppend {
         writes: Vec<WalWriteOp>,
         completion: WalAppendCompletion,
-        lsn: u64,
     }
 
     struct ActiveWalAppend {
         remaining: usize,
         completion: WalAppendCompletion,
         error: Option<Error>,
-        lsn: u64,
     }
 
     fn complete_submitted_with_result(submitted: SubmittedOp, result: Result<usize>) {
@@ -219,9 +217,8 @@ mod linux_impl {
         tokens: VecDeque<usize>,
         submitted_tasks: Vec<Option<SubmittedOp>>,
         queued: VecDeque<WorkerRequest>,
-        pending_wal_appends: BTreeMap<u64, PendingWalAppend>,
+        pending_wal_appends: VecDeque<PendingWalAppend>,
         active_wal_append: Option<ActiveWalAppend>,
-        next_wal_lsn: Option<u64>,
         cqe_buf: Vec<CompletionEvent>,
         shutting_down: bool,
         inflight: usize,
@@ -243,9 +240,8 @@ mod linux_impl {
                 tokens,
                 submitted_tasks,
                 queued: VecDeque::new(),
-                pending_wal_appends: BTreeMap::new(),
+                pending_wal_appends: VecDeque::new(),
                 active_wal_append: None,
-                next_wal_lsn: None,
                 cqe_buf: Vec::with_capacity(queue_depth),
                 shutting_down: false,
                 inflight: 0,
@@ -340,25 +336,12 @@ mod linux_impl {
             while !self.queued.is_empty() {
                 let request = self.queued.pop_front().expect("queued request missing");
                 match request {
-                    WorkerRequest::WalAppend {
-                        lsn,
-                        writes,
-                        completion,
-                    } => {
+                    WorkerRequest::WalAppend { writes, completion } => {
                         if writes.is_empty() {
                             completion.complete(Ok(()));
                         } else {
-                            let replaced = self.pending_wal_appends.insert(
-                                lsn,
-                                PendingWalAppend {
-                                    writes,
-                                    completion,
-                                    lsn,
-                                },
-                            );
-                            if replaced.is_some() {
-                                return Err(Error::Format(format!("duplicate wal lsn {lsn}")));
-                            }
+                            self.pending_wal_appends
+                                .push_back(PendingWalAppend { writes, completion });
                         }
                     }
                     other => {
@@ -386,15 +369,9 @@ mod linux_impl {
 
         fn submit_next_wal_step(&mut self) -> Result<bool> {
             if self.active_wal_append.is_none() {
-                if self.next_wal_lsn.is_none() {
-                    self.next_wal_lsn = self.pending_wal_appends.first_key_value().map(|(k, _)| *k);
-                }
-                let Some(expected_lsn) = self.next_wal_lsn else {
-                    return Ok(false);
-                };
-                if let Some(pending) = self.pending_wal_appends.remove(&expected_lsn) {
+                if let Some(pending) = self.pending_wal_appends.pop_front() {
                     if self.tokens.len() < pending.writes.len() {
-                        self.pending_wal_appends.insert(pending.lsn, pending);
+                        self.pending_wal_appends.push_front(pending);
                         return Ok(false);
                     }
 
@@ -403,7 +380,6 @@ mod linux_impl {
                         remaining: step_count,
                         completion: pending.completion,
                         error: None,
-                        lsn: pending.lsn,
                     });
 
                     let mut submitted_steps = 0_usize;
@@ -485,10 +461,7 @@ mod linux_impl {
                     .expect("active wal append missing");
                 match active.error {
                     Some(err) => active.completion.complete(Err(err)),
-                    None => {
-                        active.completion.complete(Ok(()));
-                        self.next_wal_lsn = active.lsn.checked_add(1);
-                    }
+                    None => active.completion.complete(Ok(())),
                 }
             }
         }
@@ -608,7 +581,7 @@ mod linux_impl {
                 complete_request_with_error(request, worker_failed_error(msg.clone()));
             }
 
-            while let Some((_, wal)) = self.pending_wal_appends.pop_first() {
+            while let Some(wal) = self.pending_wal_appends.pop_front() {
                 wal.completion
                     .complete(Err(worker_failed_error(msg.clone())));
             }
@@ -641,7 +614,7 @@ mod linux_impl {
             while let Some(request) = self.queued.pop_front() {
                 complete_request_with_error(request, worker_disconnected_error());
             }
-            while let Some((_, wal)) = self.pending_wal_appends.pop_first() {
+            while let Some(wal) = self.pending_wal_appends.pop_front() {
                 wal.completion.complete(Err(worker_disconnected_error()));
             }
             if let Some(wal) = self.active_wal_append.take() {
@@ -718,8 +691,16 @@ impl IoWorker {
         FileFsyncTask::new((*self.tx).clone())
     }
 
-    pub fn wal_append(&self, lsn: u64, writes: Vec<WalWriteOp>) -> FileWalAppendTask {
-        FileWalAppendTask::new((*self.tx).clone(), lsn, writes)
+    pub fn wal_append(&self, writes: Vec<WalWriteOp>) -> Result<FileWalAppendTask> {
+        let completion = Arc::new(crate::io_task::TaskCompletion::new());
+        let request = WorkerRequest::WalAppend {
+            writes,
+            completion: Arc::clone(&completion),
+        };
+        if self.tx.send(request).is_err() {
+            return Err(worker_disconnected_error());
+        }
+        Ok(FileWalAppendTask::new(completion))
     }
 
     pub async fn read_exact_at(&self, buf: AlignedBuf, offset: u64) -> Result<AlignedBuf> {

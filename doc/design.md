@@ -20,11 +20,15 @@ offset 0
 +-------------------+
 | WAL page 0        |
 +-------------------+
+| data page(s)      |
++-------------------+
 | WAL page N        |  (linked by next_page offsets)
 +-------------------+
-| data region       |  (append-only values, 4 KB aligned)
+| data page(s)      |
 +-------------------+
 ```
+
+WAL is one logical linked space. WAL pages may be physically interleaved with data pages as the file grows.
 
 Important details:
 
@@ -32,6 +36,8 @@ Important details:
 - The first WAL page is always at offset `0`
 - New WAL pages are appended when the current page is full
 - Values are appended and padded to a 4 KB boundary for direct I/O alignment
+- WAL and value allocation both come from WAL manager-owned file tail state
+- WAL pages stay WAL-only (metadata never spills into value pages)
 
 ## WAL Page Format
 
@@ -49,7 +55,7 @@ Each entry stores:
 - `flags` (`live` or `tombstone`)
 - `offset`
 - `length`
-- `lsn` (global monotonic log sequence number)
+- `lsn` (monotonic log sequence number carried by each entry)
 - `key bytes`
 
 The WAL is a durable append log for metadata.
@@ -59,8 +65,7 @@ The WAL is a durable append log for metadata.
 On mount, `t4` replays all WAL pages and rebuilds:
 
 - `HashMap<Vec<u8>, ValueRef>` for point lookups
-- `bump pointer` (next append offset)
-- current/last WAL page state
+- WAL manager state: file tail (next free page-aligned offset), current WAL tail page, and latest seen LSN
 
 Tombstones remove keys from the in-memory map during replay.
 
@@ -85,13 +90,13 @@ Why this matters:
 
 ### `put(key, value)`
 
-1. Append value bytes to the data region (4 KB padded)
-2. Append a live WAL entry `(key, offset, length, lsn)`
+1. WAL manager allocates value space from file tail and appends value bytes (4 KB padded)
+2. WAL manager appends a live WAL entry `(key, offset, length, lsn)`
 3. Update in-memory `HashMap`
 
 If the current WAL page is full:
 
-- Allocate and write a new WAL page at end-of-file
+- Allocate and write a new WAL page from WAL manager file tail
 - Update previous page's `next_page`
 
 ### `get(key)`
@@ -107,7 +112,7 @@ If the current WAL page is full:
 
 ### `remove(key)`
 
-- Append a tombstone WAL entry for the key
+- WAL manager appends a tombstone WAL entry for the key
 - Remove key from in-memory `HashMap`
 - Old value bytes remain on disk (no reclaim in v1)
 

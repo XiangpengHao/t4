@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::error::{Error, Result};
@@ -199,24 +198,46 @@ impl WalPage {
 // Wal
 // ---------------------------------------------------------------------------
 
+enum AppendEntry {
+    Live {
+        key: Vec<u8>,
+        offset: u64,
+        length: u64,
+    },
+    Tombstone {
+        key: Vec<u8>,
+    },
+}
+
+impl AppendEntry {
+    fn into_wal_entry(self, lsn: u64) -> WalEntry {
+        match self {
+            Self::Live {
+                key,
+                offset,
+                length,
+            } => WalEntry::live(key, offset, length, lsn),
+            Self::Tombstone { key } => WalEntry::tombstone(key, lsn),
+        }
+    }
+}
+
 #[derive(Debug)]
-struct AppendState {
+struct WalState {
+    file_tail: u64,
     tail: WalPage,
     tail_offset: u64,
+    last_lsn: Option<u64>,
 }
 
 pub struct Wal {
     io: IoWorker,
-    bump_pointer: AtomicU64,
-    next_lsn: AtomicU64,
-    append_state: Mutex<AppendState>,
+    state: Mutex<WalState>,
 }
 
 impl std::fmt::Debug for Wal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Wal")
-            .field("bump_pointer", &self.bump_pointer())
-            .finish_non_exhaustive()
+        f.debug_struct("Wal").finish_non_exhaustive()
     }
 }
 
@@ -229,11 +250,11 @@ impl Wal {
         io.write_all_at(buf, 0).await?;
         Ok(Self {
             io,
-            bump_pointer: AtomicU64::new(PAGE_SIZE_U64),
-            next_lsn: AtomicU64::new(0),
-            append_state: Mutex::new(AppendState {
+            state: Mutex::new(WalState {
+                file_tail: PAGE_SIZE_U64,
                 tail: page,
                 tail_offset: 0,
+                last_lsn: None,
             }),
         })
     }
@@ -247,107 +268,152 @@ impl Wal {
         }
 
         let mut index = HashMap::new();
-        let mut expected_lsn = 0_u64;
+        let mut last_lsn = None;
+        let mut max_data_end = PAGE_SIZE_U64;
+        let mut max_wal_end = PAGE_SIZE_U64;
         let mut offset = 0_u64;
         let (last_offset, last_page) = loop {
             let page = Self::read_page(&io, offset).await?;
+            let wal_end = offset
+                .checked_add(PAGE_SIZE_U64)
+                .ok_or_else(|| Error::Format("wal page offset overflow".into()))?;
+            max_wal_end = max_wal_end.max(wal_end);
+
             for entry in &page.entries {
-                if entry.lsn != expected_lsn {
-                    return Err(Error::Format(format!(
-                        "non-monotonic wal lsn: expected {expected_lsn}, got {}",
-                        entry.lsn
-                    )));
+                if let Some(prev_lsn) = last_lsn {
+                    if entry.lsn <= prev_lsn {
+                        return Err(Error::Format(format!(
+                            "non-monotonic wal lsn: previous {prev_lsn}, got {}",
+                            entry.lsn
+                        )));
+                    }
                 }
-                expected_lsn = expected_lsn
-                    .checked_add(1)
-                    .ok_or_else(|| Error::Format("wal lsn overflow".into()))?;
-                if entry.flags == FLAG_TOMBSTONE {
-                    index.remove(entry.key.as_slice());
-                } else {
-                    index.insert(
-                        entry.key.clone(),
-                        ValueRef {
-                            offset: entry.offset,
-                            length: entry.length,
-                        },
-                    );
+
+                match entry.flags {
+                    FLAG_TOMBSTONE => {
+                        index.remove(entry.key.as_slice());
+                    }
+                    FLAG_LIVE => {
+                        index.insert(
+                            entry.key.clone(),
+                            ValueRef {
+                                offset: entry.offset,
+                                length: entry.length,
+                            },
+                        );
+                        let padded_len = align_up(entry.length, PAGE_SIZE_U64)?;
+                        let data_end = entry
+                            .offset
+                            .checked_add(padded_len)
+                            .ok_or_else(|| Error::Format("value offset overflow".into()))?;
+                        max_data_end = max_data_end.max(data_end);
+                    }
+                    other => {
+                        return Err(Error::Format(format!("unknown wal entry flag: {other}")));
+                    }
                 }
+
+                last_lsn = Some(entry.lsn);
             }
+
             if page.next_page == 0 {
                 break (offset, page);
             }
             offset = page.next_page;
         };
 
-        let bump_pointer = align_up(file_len, PAGE_SIZE_U64)?;
+        let highest_used = file_len.max(max_data_end).max(max_wal_end);
+        let file_tail = align_up(highest_used, PAGE_SIZE_U64)?;
         let wal = Self {
             io,
-            bump_pointer: AtomicU64::new(bump_pointer),
-            next_lsn: AtomicU64::new(expected_lsn),
-            append_state: Mutex::new(AppendState {
+            state: Mutex::new(WalState {
+                file_tail,
                 tail: last_page,
                 tail_offset: last_offset,
+                last_lsn,
             }),
         };
         Ok((wal, index))
     }
 
-    /// Current bump pointer (next free offset in the file).
-    pub fn bump_pointer(&self) -> u64 {
-        self.bump_pointer.load(Ordering::Acquire)
+    /// Write value bytes into data space and append a live WAL entry.
+    pub async fn put(&self, key: Vec<u8>, value: &[u8]) -> Result<ValueRef> {
+        Self::validate_key(&key)?;
+
+        let value_len = value.len() as u64;
+        let value_offset = self.reserve_value_space(value_len)?;
+        let buf = AlignedBuf::from_padded_slice(value)?;
+        self.io.write_all_at(buf, value_offset).await?;
+
+        self.append_entry(AppendEntry::Live {
+            key,
+            offset: value_offset,
+            length: value_len,
+        })
+        .await?;
+
+        Ok(ValueRef {
+            offset: value_offset,
+            length: value_len,
+        })
     }
 
-    /// Reserve aligned value space in the data region.
-    pub fn reserve_value_space(&self, value_len: u64) -> Result<u64> {
-        let padded_len = align_up(value_len, PAGE_SIZE_U64)?;
-        self.reserve_space(padded_len)
-    }
-
-    /// Append a live entry to the WAL for a put operation.
-    pub async fn append_put(&self, key: Vec<u8>, offset: u64, length: u64) -> Result<()> {
-        let lsn = self.allocate_lsn()?;
-        self.append_entry(WalEntry::live(key, offset, length, lsn), lsn)
-            .await
-    }
-
-    /// Append a tombstone entry to the WAL for a remove operation.
-    pub async fn append_tombstone(&self, key: Vec<u8>) -> Result<()> {
-        let lsn = self.allocate_lsn()?;
-        self.append_entry(WalEntry::tombstone(key, lsn), lsn).await
+    /// Append a tombstone entry to the WAL.
+    pub async fn tombstone(&self, key: Vec<u8>) -> Result<()> {
+        Self::validate_key(&key)?;
+        self.append_entry(AppendEntry::Tombstone { key }).await
     }
 
     // -- private -------------------------------------------------------------
 
-    fn reserve_space(&self, len: u64) -> Result<u64> {
-        self.bump_pointer
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current.checked_add(len)
-            })
-            .map_err(|_| Error::Format("bump pointer overflow".into()))
+    fn validate_key(key: &[u8]) -> Result<()> {
+        let _: u16 = key
+            .len()
+            .try_into()
+            .map_err(|_| Error::KeyTooLarge(key.len()))?;
+        Ok(())
     }
 
-    fn allocate_lsn(&self) -> Result<u64> {
-        self.next_lsn
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current.checked_add(1)
-            })
-            .map_err(|_| Error::Format("wal lsn overflow".into()))
+    fn lock_state(&self) -> Result<MutexGuard<'_, WalState>> {
+        self.state.lock().map_err(|_| Error::LockPoisoned)
     }
 
-    fn lock_append_state(&self) -> Result<MutexGuard<'_, AppendState>> {
-        self.append_state.lock().map_err(|_| Error::LockPoisoned)
+    fn reserve_value_space(&self, value_len: u64) -> Result<u64> {
+        let padded_len = align_up(value_len, PAGE_SIZE_U64)?;
+        let mut state = self.lock_state()?;
+        Self::reserve_space_locked(&mut state, padded_len)
     }
 
-    async fn append_entry(&self, entry: WalEntry, lsn: u64) -> Result<()> {
-        let writes = {
-            let mut state = self.lock_append_state()?;
+    fn reserve_space_locked(state: &mut WalState, len: u64) -> Result<u64> {
+        let offset = state.file_tail;
+        state.file_tail = state
+            .file_tail
+            .checked_add(len)
+            .ok_or_else(|| Error::Format("file tail overflow".into()))?;
+        Ok(offset)
+    }
 
-            if state.tail.can_fit(&entry) {
+    fn allocate_next_lsn(last_lsn: Option<u64>) -> Result<u64> {
+        match last_lsn {
+            Some(prev) => prev
+                .checked_add(1)
+                .ok_or_else(|| Error::Format("wal lsn overflow".into())),
+            None => Ok(0),
+        }
+    }
+
+    async fn append_entry(&self, pending: AppendEntry) -> Result<()> {
+        let wal_append = {
+            let mut state = self.lock_state()?;
+            let lsn = Self::allocate_next_lsn(state.last_lsn)?;
+            let entry = pending.into_wal_entry(lsn);
+
+            let writes = if state.tail.can_fit(&entry) {
                 state.tail.push(entry);
                 vec![self.encode_page_write(state.tail_offset, &state.tail)?]
             } else {
-                // Current page is full — allocate a new one.
-                let new_page_offset = self.reserve_space(PAGE_SIZE_U64)?;
+                // Current page is full — allocate a new WAL page.
+                let new_page_offset = Self::reserve_space_locked(&mut state, PAGE_SIZE_U64)?;
 
                 // Link the old tail to the new page and rewrite it.
                 let old_tail_offset = state.tail_offset;
@@ -367,10 +433,13 @@ impl Wal {
                     self.encode_page_write(old_tail_offset, &linked_tail)?,
                     self.encode_page_write(new_page_offset, &new_page)?,
                 ]
-            }
+            };
+
+            state.last_lsn = Some(lsn);
+            self.io.wal_append(writes)?
         };
 
-        self.io.wal_append(lsn, writes).await?;
+        wal_append.await?;
         Ok(())
     }
 

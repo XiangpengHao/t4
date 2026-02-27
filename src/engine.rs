@@ -75,25 +75,8 @@ impl Engine {
     }
 
     pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        if key.len() > u16::MAX as usize {
-            return Err(Error::KeyTooLarge(key.len()));
-        }
-
-        let value_len = value.len() as u64;
-        let value_offset = self.wal.reserve_value_space(value_len)?;
-        let buf = AlignedBuf::from_padded_slice(value)?;
-        self.io.write_all_at(buf, value_offset).await?;
-
-        self.wal
-            .append_put(key.to_vec(), value_offset, value_len)
-            .await?;
-        self.write_index()?.insert(
-            key.to_vec(),
-            ValueRef {
-                offset: value_offset,
-                length: value_len,
-            },
-        );
+        let value_ref = self.wal.put(key.to_vec(), value).await?;
+        self.write_index()?.insert(key.to_vec(), value_ref);
         Ok(())
     }
 
@@ -146,10 +129,7 @@ impl Engine {
     }
 
     pub async fn remove(&self, key: &[u8]) -> Result<bool> {
-        if key.len() > u16::MAX as usize {
-            return Err(Error::KeyTooLarge(key.len()));
-        }
-        self.wal.append_tombstone(key.to_vec()).await?;
+        self.wal.tombstone(key.to_vec()).await?;
         let existed = self.write_index()?.remove(key).is_some();
         Ok(existed)
     }

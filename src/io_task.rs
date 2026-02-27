@@ -23,15 +23,16 @@ pub(crate) struct TaskCompletion<T> {
 }
 
 enum TaskCompletionState<T> {
+    PendingUnpolled,
     Pending { waker: Waker },
     Ready(Result<T>),
     Consumed,
 }
 
 impl<T> TaskCompletion<T> {
-    pub(crate) fn new(waker: Waker) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            inner: Mutex::new(TaskCompletionState::Pending { waker }),
+            inner: Mutex::new(TaskCompletionState::PendingUnpolled),
         }
     }
 
@@ -43,6 +44,7 @@ impl<T> TaskCompletion<T> {
                 .expect("task completion mutex poisoned while completing"),
             TaskCompletionState::Ready(result),
         ) {
+            TaskCompletionState::PendingUnpolled => None,
             TaskCompletionState::Pending { waker } => Some(waker),
             TaskCompletionState::Ready(_) => panic!("task completion completed twice"),
             TaskCompletionState::Consumed => {
@@ -60,6 +62,12 @@ impl<T> TaskCompletion<T> {
             .lock()
             .expect("task completion mutex poisoned while polling");
         match &mut *inner {
+            TaskCompletionState::PendingUnpolled => {
+                *inner = TaskCompletionState::Pending {
+                    waker: cx.waker().clone(),
+                };
+                Poll::Pending
+            }
             TaskCompletionState::Pending { waker } => {
                 if !waker.will_wake(cx.waker()) {
                     *waker = cx.waker().clone();
@@ -101,7 +109,6 @@ pub(crate) enum WorkerRequest {
         completion: FsyncCompletion,
     },
     WalAppend {
-        lsn: u64,
         writes: Vec<WalWriteOp>,
         completion: WalAppendCompletion,
     },
@@ -145,7 +152,7 @@ impl Future for FileReadTask {
         loop {
             match &mut this.state {
                 FileReadTaskState::Init(pending) => {
-                    let completion = Arc::new(TaskCompletion::new(cx.waker().clone()));
+                    let completion = Arc::new(TaskCompletion::new());
                     let request = WorkerRequest::Read {
                         buf: pending.buf.take().expect("read task buffer missing"),
                         offset: pending.offset,
@@ -209,7 +216,7 @@ impl Future for FileWriteTask {
         loop {
             match &mut this.state {
                 FileWriteTaskState::Init(pending) => {
-                    let completion = Arc::new(TaskCompletion::new(cx.waker().clone()));
+                    let completion = Arc::new(TaskCompletion::new());
                     let request = WorkerRequest::Write {
                         buf: pending.buf.take().expect("write task buffer missing"),
                         offset: pending.offset,
@@ -267,7 +274,7 @@ impl Future for FileFsyncTask {
         loop {
             match &mut this.state {
                 FileFsyncTaskState::Init(pending) => {
-                    let completion = Arc::new(TaskCompletion::new(cx.waker().clone()));
+                    let completion = Arc::new(TaskCompletion::new());
                     let request = WorkerRequest::Fsync {
                         completion: Arc::clone(&completion),
                     };
@@ -291,31 +298,19 @@ impl Future for FileFsyncTask {
     }
 }
 
-#[derive(Debug)]
-struct PendingWalAppend {
-    tx: mpsc::Sender<WorkerRequest>,
-    lsn: u64,
-    writes: Option<Vec<WalWriteOp>>,
-}
-
 pub(crate) struct FileWalAppendTask {
     state: FileWalAppendTaskState,
 }
 
 enum FileWalAppendTaskState {
-    Init(PendingWalAppend),
     Waiting(WalAppendCompletion),
     Done,
 }
 
 impl FileWalAppendTask {
-    pub(crate) fn new(tx: mpsc::Sender<WorkerRequest>, lsn: u64, writes: Vec<WalWriteOp>) -> Self {
+    pub(crate) fn new(completion: WalAppendCompletion) -> Self {
         Self {
-            state: FileWalAppendTaskState::Init(PendingWalAppend {
-                tx,
-                lsn,
-                writes: Some(writes),
-            }),
+            state: FileWalAppendTaskState::Waiting(completion),
         }
     }
 }
@@ -328,22 +323,6 @@ impl Future for FileWalAppendTask {
 
         loop {
             match &mut this.state {
-                FileWalAppendTaskState::Init(pending) => {
-                    let completion = Arc::new(TaskCompletion::new(cx.waker().clone()));
-                    let request = WorkerRequest::WalAppend {
-                        lsn: pending.lsn,
-                        writes: pending
-                            .writes
-                            .take()
-                            .expect("wal append task writes missing"),
-                        completion: Arc::clone(&completion),
-                    };
-                    if pending.tx.send(request).is_err() {
-                        this.state = FileWalAppendTaskState::Done;
-                        return Poll::Ready(Err(worker_disconnected_error()));
-                    }
-                    this.state = FileWalAppendTaskState::Waiting(completion);
-                }
                 FileWalAppendTaskState::Waiting(completion) => {
                     let completion = Arc::clone(completion);
                     let poll = completion.poll_result(cx);
