@@ -28,6 +28,7 @@ let removed = store.remove(b"a.txt").await?;
 assert!(removed);
 ```
 
+
 ## Limitations
 
 Currently it only supports files up to 4 GB.

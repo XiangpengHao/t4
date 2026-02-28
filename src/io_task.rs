@@ -1,11 +1,11 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use crate::error::{Error, Result};
 use crate::io::AlignedBuf;
+use crate::sync::mpsc;
+use crate::sync::{Arc, Mutex};
 
 pub(crate) type ReadCompletion = Arc<TaskCompletion<(AlignedBuf, usize)>>;
 pub(crate) type WriteCompletion = Arc<TaskCompletion<usize>>;
@@ -114,7 +114,6 @@ pub(crate) enum WorkerRequest {
     },
 }
 
-#[derive(Debug)]
 struct PendingRead {
     tx: mpsc::Sender<WorkerRequest>,
     buf: Option<AlignedBuf>,
@@ -178,7 +177,6 @@ impl Future for FileReadTask {
     }
 }
 
-#[derive(Debug)]
 struct PendingWrite {
     tx: mpsc::Sender<WorkerRequest>,
     buf: Option<AlignedBuf>,
@@ -242,7 +240,6 @@ impl Future for FileWriteTask {
     }
 }
 
-#[derive(Debug)]
 struct PendingFsync {
     tx: mpsc::Sender<WorkerRequest>,
 }

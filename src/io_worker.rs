@@ -3,10 +3,6 @@ use std::fmt;
 use std::fs::File;
 use std::num::NonZeroU32;
 use std::os::fd::AsRawFd;
-use std::sync::Arc;
-use std::sync::mpsc;
-use std::sync::mpsc::TryRecvError;
-use std::thread;
 
 use io_uring::{IoUring, opcode, types};
 
@@ -16,6 +12,13 @@ use crate::io_task::{
     FileFsyncTask, FileReadTask, FileWalAppendTask, FileWriteTask, WalWriteOp, WorkerRequest,
     worker_disconnected_error,
 };
+use crate::sync::mpsc;
+use crate::sync::Arc;
+#[cfg(test)]
+use crate::sync::Mutex;
+use crate::thread;
+#[cfg(test)]
+use crate::thread::JoinHandle;
 
 fn worker_failed_error(message: impl Into<String>) -> Error {
     Error::Io(std::io::Error::other(message.into()))
@@ -327,8 +330,8 @@ impl<D: IoDriver> UringBackend<D> {
                     complete_request_with_error(request, worker_disconnected_error());
                 }
                 Ok(request) => self.queued.push_back(request),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
                     self.shutting_down = true;
                     break;
                 }
@@ -704,7 +707,6 @@ mod invariant_harness_tests {
     use super::*;
     use std::collections::VecDeque;
     use std::num::NonZeroU32;
-    use std::sync::{Arc, Mutex};
 
     use pollster::block_on;
 
@@ -895,7 +897,7 @@ mod invariant_harness_tests {
     struct RunningBackend {
         worker: IoWorker,
         state: Arc<Mutex<MockState>>,
-        join: Option<std::thread::JoinHandle<()>>,
+        join: Option<JoinHandle<()>>,
     }
 
     impl RunningBackend {
@@ -906,7 +908,7 @@ mod invariant_harness_tests {
 
             let file = tempfile::tempfile().expect("failed to create tempfile for io worker tests");
             let backend = UringBackend::with_driver(file, queue_depth as usize, rx, driver);
-            let join = std::thread::spawn(move || {
+            let join = thread::spawn(move || {
                 backend.run();
             });
 

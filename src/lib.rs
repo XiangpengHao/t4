@@ -4,13 +4,15 @@ mod format;
 mod io;
 mod io_task;
 mod io_worker;
+mod sync;
+mod thread;
 mod types;
 mod wal;
 
 use std::path::Path;
-use std::sync::Arc;
 
 use crate::engine::Engine;
+use crate::sync::Arc;
 
 pub use engine::MountOptions;
 pub use error::{Error, Result};

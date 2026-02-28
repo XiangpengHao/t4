@@ -1,11 +1,11 @@
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
 
 use crate::error::{Error, Result};
 use crate::format::{MAGIC, PAGE_SIZE, PAGE_SIZE_NZ_U32, PAGE_SIZE_U32, PAGE_SIZE_U64, VERSION};
 use crate::io::AlignedBuf;
 use crate::io_task::WalWriteOp;
 use crate::io_worker::IoWorker;
+use crate::sync::{Mutex, MutexGuard};
 use crate::types::{T4Key, T4Value};
 
 const WAL_PAGE_HEADER_SIZE: usize = 32;
