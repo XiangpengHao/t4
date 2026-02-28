@@ -26,45 +26,15 @@ cargo install cargo-fuzz
 From repository root:
 
 ```bash
-cargo fuzz run model_equivalence
+RUSTFLAGS="-C force-frame-pointers=yes" cargo fuzz run model_equivalence
 ```
 
 Useful options:
 
 ```bash
 # run longer
-cargo fuzz run model_equivalence --release -- -max_total_time=600
+RUSTFLAGS="-C force-frame-pointers=yes" cargo fuzz run model_equivalence --release -- -max_total_time=600
 
 # run with multiple jobs
-cargo fuzz run model_equivalence --release -- -jobs=4 -workers=4
+RUSTFLAGS="-C force-frame-pointers=yes" cargo fuzz run model_equivalence --release -- -jobs=4 -workers=4
 ```
-
-## Corpus and artifacts
-
-- Seed corpus lives in `fuzz/corpus/model_equivalence/`
-- Crashes and reproducers go to `fuzz/artifacts/model_equivalence/`
-
-To run a saved crashing input:
-
-```bash
-cargo fuzz run model_equivalence fuzz/artifacts/model_equivalence/<crash-file>
-```
-
-## What is being checked
-
-Random sequences include:
-
-- `put(key, value)`
-- `get(key)`
-- `get_range(key, start, len)`
-- `remove(key)`
-- `sync()`
-- remounting the same backing file
-
-The target checks:
-
-- operation results match the `HashMap` model
-- `len()` and `is_empty()` match the model
-- all model values remain readable after remount
-
-This gives strong coverage for logical correctness and persistence-related regressions.
