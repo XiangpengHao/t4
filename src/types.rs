@@ -21,10 +21,6 @@ impl T4Key {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
-
-    pub(crate) fn from_wal_bytes(bytes: Vec<u8>) -> Result<Self> {
-        Self::try_from(bytes)
-    }
 }
 
 impl AsRef<[u8]> for T4Key {

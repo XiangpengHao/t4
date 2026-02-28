@@ -8,4 +8,4 @@ pub const PAGE_SIZE_NZ_U32: NonZeroU32 = match NonZeroU32::new(PAGE_SIZE_U32) {
 };
 pub const PAGE_SIZE_U64: u64 = PAGE_SIZE as u64;
 pub const MAGIC: [u8; 4] = *b"BTF4";
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
