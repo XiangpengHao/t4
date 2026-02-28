@@ -9,7 +9,7 @@ use crate::io_worker::IoWorker;
 use crate::types::{T4Key, T4Value};
 
 const WAL_PAGE_HEADER_SIZE: usize = 32;
-const ENTRY_HEADER_SIZE: usize = 28;
+const ENTRY_HEADER_SIZE: usize = 24;
 
 const FLAG_LIVE: u8 = 0;
 const FLAG_TOMBSTONE: u8 = 1;
@@ -21,86 +21,64 @@ pub struct ValueRef {
 }
 
 // ---------------------------------------------------------------------------
-// WalEntry
+// WalEntryRef
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct WalEntry {
-    key: T4Key,
-    offset: u64,
-    length: u32,
-    lsn: u64,
-    flags: u8,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WalEntryRef<'a> {
+    bytes: &'a [u8],
 }
 
-impl WalEntry {
-    fn live(key: T4Key, offset: u64, length: u32, lsn: u64) -> Self {
-        Self {
-            key,
-            offset,
-            length,
-            lsn,
-            flags: FLAG_LIVE,
-        }
-    }
-
-    fn tombstone(key: T4Key, lsn: u64) -> Self {
-        Self {
-            key,
-            offset: 0,
-            length: 0,
-            lsn,
-            flags: FLAG_TOMBSTONE,
-        }
-    }
-
-    fn serialized_len(&self) -> usize {
-        ENTRY_HEADER_SIZE + self.key.len()
-    }
-
-    fn encode_into(&self, dst: &mut [u8]) -> Result<usize> {
-        let key_len = self.key.len() as u16;
-        let total = self.serialized_len();
-        if dst.len() < total {
-            return Err(Error::Format("entry buffer too small".into()));
-        }
-        dst[0..2].copy_from_slice(&key_len.to_le_bytes());
-        dst[2] = self.flags;
-        dst[3] = 0;
-        dst[4..12].copy_from_slice(&self.offset.to_le_bytes());
-        dst[12..20].copy_from_slice(&u64::from(self.length).to_le_bytes());
-        dst[20..28].copy_from_slice(&self.lsn.to_le_bytes());
-        dst[28..28 + self.key.len()].copy_from_slice(self.key.as_bytes());
-        Ok(total)
-    }
-
-    fn decode_from(src: &[u8]) -> Result<(Self, usize)> {
+impl<'a> WalEntryRef<'a> {
+    fn decode_from(src: &'a [u8]) -> Result<(Self, usize)> {
         if src.len() < ENTRY_HEADER_SIZE {
             return Err(Error::Format("entry truncated".into()));
         }
+
         let key_len = u16::from_le_bytes([src[0], src[1]]) as usize;
         let total = ENTRY_HEADER_SIZE + key_len;
         if src.len() < total {
             return Err(Error::Format("entry key truncated".into()));
         }
-        let flags = src[2];
-        let offset = u64::from_le_bytes(src[4..12].try_into().unwrap());
-        let length_u64 = u64::from_le_bytes(src[12..20].try_into().unwrap());
-        let length: u32 = length_u64
-            .try_into()
-            .map_err(|_| Error::Format("value length exceeds u32".into()))?;
-        let lsn = u64::from_le_bytes(src[20..28].try_into().unwrap());
-        let key = T4Key::from_wal_bytes(src[28..28 + key_len].to_vec())?;
+
         Ok((
             Self {
-                key,
-                offset,
-                length,
-                lsn,
-                flags,
+                bytes: &src[..total],
             },
             total,
         ))
+    }
+
+    fn flags(self) -> u8 {
+        self.bytes[2]
+    }
+
+    fn offset(self) -> u64 {
+        u64::from_le_bytes(
+            self.bytes[4..12]
+                .try_into()
+                .expect("entry offset bytes must be present"),
+        )
+    }
+
+    fn length(self) -> u32 {
+        u32::from_le_bytes(
+            self.bytes[12..16]
+                .try_into()
+                .expect("entry length bytes must be present"),
+        )
+    }
+
+    fn lsn(self) -> u64 {
+        u64::from_le_bytes(
+            self.bytes[16..24]
+                .try_into()
+                .expect("entry lsn bytes must be present"),
+        )
+    }
+
+    fn key_bytes(self) -> &'a [u8] {
+        &self.bytes[ENTRY_HEADER_SIZE..]
     }
 }
 
@@ -110,87 +88,160 @@ impl WalEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WalPage {
-    next_page: u64,
-    entries: Vec<WalEntry>,
+    bytes: Box<[u8; PAGE_SIZE]>,
 }
 
 impl WalPage {
     fn empty() -> Self {
-        Self {
-            next_page: 0,
-            entries: Vec::new(),
-        }
-    }
-
-    fn used_bytes(&self) -> usize {
-        WAL_PAGE_HEADER_SIZE
-            + self
-                .entries
-                .iter()
-                .map(WalEntry::serialized_len)
-                .sum::<usize>()
-    }
-
-    fn can_fit(&self, entry: &WalEntry) -> bool {
-        self.used_bytes() + entry.serialized_len() <= PAGE_SIZE
-    }
-
-    fn push(&mut self, entry: WalEntry) -> bool {
-        if !self.can_fit(&entry) {
-            return false;
-        }
-        self.entries.push(entry);
-        true
-    }
-
-    fn to_bytes(&self) -> Result<[u8; PAGE_SIZE]> {
-        let mut out = [0_u8; PAGE_SIZE];
-        if self.used_bytes() > PAGE_SIZE {
-            return Err(Error::Format("WAL page overflow".into()));
-        }
-
-        out[0..4].copy_from_slice(&MAGIC);
-        out[4..6].copy_from_slice(&VERSION.to_le_bytes());
-        out[6..8].copy_from_slice(&0_u16.to_le_bytes());
-        out[8..16].copy_from_slice(&self.next_page.to_le_bytes());
-        out[16..20].copy_from_slice(&(self.entries.len() as u32).to_le_bytes());
-        out[20..24].copy_from_slice(&0_u32.to_le_bytes());
-        out[24..32].copy_from_slice(&0_u64.to_le_bytes());
-
-        let mut cursor = WAL_PAGE_HEADER_SIZE;
-        for entry in &self.entries {
-            let written = entry.encode_into(&mut out[cursor..])?;
-            cursor += written;
-        }
-        Ok(out)
+        let mut page = Self {
+            bytes: Box::new([0_u8; PAGE_SIZE]),
+        };
+        page.bytes[0..4].copy_from_slice(&MAGIC);
+        page.bytes[4..6].copy_from_slice(&VERSION.to_le_bytes());
+        page.bytes[6..8].copy_from_slice(&0_u16.to_le_bytes());
+        page.set_next_page(0);
+        page.set_entry_count(0)
+            .expect("initial WAL entry count must fit u32");
+        page.set_used_bytes(WAL_PAGE_HEADER_SIZE)
+            .expect("initial WAL used bytes must fit u32");
+        page.bytes[24..32].copy_from_slice(&0_u64.to_le_bytes());
+        page
     }
 
     fn from_bytes(src: &[u8]) -> Result<Self> {
         if src.len() != PAGE_SIZE {
             return Err(Error::Format("WAL page must be 4096 bytes".into()));
         }
-        if src[0..4] != MAGIC {
+
+        let mut bytes = [0_u8; PAGE_SIZE];
+        bytes.copy_from_slice(src);
+        let page = Self {
+            bytes: Box::new(bytes),
+        };
+        page.validate_layout()?;
+        Ok(page)
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[..]
+    }
+
+    fn next_page(&self) -> u64 {
+        u64::from_le_bytes(
+            self.bytes[8..16]
+                .try_into()
+                .expect("next_page bytes must be present"),
+        )
+    }
+
+    fn set_next_page(&mut self, next_page: u64) {
+        self.bytes[8..16].copy_from_slice(&next_page.to_le_bytes());
+    }
+
+    fn entry_count(&self) -> usize {
+        u32::from_le_bytes(
+            self.bytes[16..20]
+                .try_into()
+                .expect("entry_count bytes must be present"),
+        ) as usize
+    }
+
+    fn set_entry_count(&mut self, count: usize) -> Result<()> {
+        let count_u32: u32 = count
+            .try_into()
+            .map_err(|_| Error::Format("wal entry count overflow".into()))?;
+        self.bytes[16..20].copy_from_slice(&count_u32.to_le_bytes());
+        Ok(())
+    }
+
+    fn used_bytes(&self) -> usize {
+        u32::from_le_bytes(
+            self.bytes[20..24]
+                .try_into()
+                .expect("used_bytes bytes must be present"),
+        ) as usize
+    }
+
+    fn set_used_bytes(&mut self, used: usize) -> Result<()> {
+        let used_u32: u32 = used
+            .try_into()
+            .map_err(|_| Error::Format("wal used bytes overflow".into()))?;
+        self.bytes[20..24].copy_from_slice(&used_u32.to_le_bytes());
+        Ok(())
+    }
+
+    fn can_fit(&self, entry: &AppendEntry) -> bool {
+        self.used_bytes()
+            .checked_add(entry.encoded_len())
+            .is_some_and(|size| size <= PAGE_SIZE)
+    }
+
+    fn append(&mut self, entry: &AppendEntry, lsn: u64) -> Result<bool> {
+        let start = self.used_bytes();
+        let end = match start.checked_add(entry.encoded_len()) {
+            Some(end) => end,
+            None => return Err(Error::Format("WAL page offset overflow".into())),
+        };
+        if end > PAGE_SIZE {
+            return Ok(false);
+        }
+
+        let key = entry.key_bytes();
+        let key_len: u16 = key
+            .len()
+            .try_into()
+            .map_err(|_| Error::Format("key length exceeds u16".into()))?;
+
+        let dst = &mut self.bytes[start..end];
+        dst[0..2].copy_from_slice(&key_len.to_le_bytes());
+        dst[2] = entry.flags();
+        dst[3] = 0;
+        dst[4..12].copy_from_slice(&entry.offset().to_le_bytes());
+        dst[12..16].copy_from_slice(&entry.length().to_le_bytes());
+        dst[16..24].copy_from_slice(&lsn.to_le_bytes());
+        dst[24..].copy_from_slice(key);
+
+        let next_entry_count = self
+            .entry_count()
+            .checked_add(1)
+            .ok_or_else(|| Error::Format("wal entry count overflow".into()))?;
+        self.set_entry_count(next_entry_count)?;
+        self.set_used_bytes(end)?;
+        Ok(true)
+    }
+
+    fn validate_layout(&self) -> Result<()> {
+        if self.bytes[0..4] != MAGIC {
             return Err(Error::Format("bad magic".into()));
         }
-        let version = u16::from_le_bytes([src[4], src[5]]);
+
+        let version = u16::from_le_bytes([self.bytes[4], self.bytes[5]]);
         if version != VERSION {
             return Err(Error::Format(format!("unsupported version {version}")));
         }
-        let next_page = u64::from_le_bytes(src[8..16].try_into().unwrap());
-        let entry_count = u32::from_le_bytes(src[16..20].try_into().unwrap()) as usize;
 
-        let mut entries = Vec::with_capacity(entry_count);
-        let mut cursor = WAL_PAGE_HEADER_SIZE;
-        for _ in 0..entry_count {
-            let (entry, consumed) = WalEntry::decode_from(&src[cursor..])?;
-            cursor += consumed;
-            if cursor > PAGE_SIZE {
-                return Err(Error::Format("entry overran WAL page".into()));
-            }
-            entries.push(entry);
+        let used_bytes = self.used_bytes();
+        if !(WAL_PAGE_HEADER_SIZE..=PAGE_SIZE).contains(&used_bytes) {
+            return Err(Error::Format("invalid WAL used-bytes field".into()));
         }
 
-        Ok(Self { next_page, entries })
+        let mut cursor = WAL_PAGE_HEADER_SIZE;
+        for _ in 0..self.entry_count() {
+            let (entry, consumed) = WalEntryRef::decode_from(&self.bytes[cursor..used_bytes])?;
+            cursor = cursor
+                .checked_add(consumed)
+                .ok_or_else(|| Error::Format("entry cursor overflow".into()))?;
+            if cursor > used_bytes {
+                return Err(Error::Format("entry overran WAL used bytes".into()));
+            }
+            let _ = entry;
+        }
+
+        if cursor != used_bytes {
+            return Err(Error::Format("WAL page has trailing garbage bytes".into()));
+        }
+
+        Ok(())
     }
 }
 
@@ -210,14 +261,34 @@ enum AppendEntry {
 }
 
 impl AppendEntry {
-    fn into_wal_entry(self, lsn: u64) -> WalEntry {
+    fn encoded_len(&self) -> usize {
+        ENTRY_HEADER_SIZE + self.key_bytes().len()
+    }
+
+    fn key_bytes(&self) -> &[u8] {
         match self {
-            Self::Live {
-                key,
-                offset,
-                length,
-            } => WalEntry::live(key, offset, length, lsn),
-            Self::Tombstone { key } => WalEntry::tombstone(key, lsn),
+            Self::Live { key, .. } | Self::Tombstone { key } => key.as_bytes(),
+        }
+    }
+
+    fn flags(&self) -> u8 {
+        match self {
+            Self::Live { .. } => FLAG_LIVE,
+            Self::Tombstone { .. } => FLAG_TOMBSTONE,
+        }
+    }
+
+    fn offset(&self) -> u64 {
+        match self {
+            Self::Live { offset, .. } => *offset,
+            Self::Tombstone { .. } => 0,
+        }
+    }
+
+    fn length(&self) -> u32 {
+        match self {
+            Self::Live { length, .. } => *length,
+            Self::Tombstone { .. } => 0,
         }
     }
 }
@@ -246,7 +317,7 @@ impl Wal {
     pub async fn create(io: IoWorker) -> Result<Self> {
         let page = WalPage::empty();
         let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32)?;
-        buf.as_mut_slice().copy_from_slice(&page.to_bytes()?);
+        buf.as_mut_slice().copy_from_slice(page.as_slice());
         io.write_all_at(buf, 0).await?;
         Ok(Self {
             io,
@@ -279,31 +350,38 @@ impl Wal {
                 .ok_or_else(|| Error::Format("wal page offset overflow".into()))?;
             max_wal_end = max_wal_end.max(wal_end);
 
-            for entry in &page.entries {
+            let used = page.used_bytes();
+            let mut cursor = WAL_PAGE_HEADER_SIZE;
+            for _ in 0..page.entry_count() {
+                let (entry, consumed) = WalEntryRef::decode_from(&page.as_slice()[cursor..used])?;
+                cursor = cursor
+                    .checked_add(consumed)
+                    .ok_or_else(|| Error::Format("entry cursor overflow".into()))?;
+
                 if let Some(prev_lsn) = last_lsn
-                    && entry.lsn <= prev_lsn
+                    && entry.lsn() <= prev_lsn
                 {
                     return Err(Error::Format(format!(
                         "non-monotonic wal lsn: previous {prev_lsn}, got {}",
-                        entry.lsn
+                        entry.lsn()
                     )));
                 }
 
-                match entry.flags {
+                match entry.flags() {
                     FLAG_TOMBSTONE => {
-                        index.remove(&entry.key);
+                        index.remove(entry.key_bytes());
                     }
                     FLAG_LIVE => {
                         index.insert(
-                            entry.key.clone(),
+                            T4Key::try_from(entry.key_bytes().to_vec())?,
                             ValueRef {
-                                offset: entry.offset,
-                                length: entry.length,
+                                offset: entry.offset(),
+                                length: entry.length(),
                             },
                         );
-                        let padded_len = align_up(u64::from(entry.length), PAGE_SIZE_U64)?;
+                        let padded_len = align_up(u64::from(entry.length()), PAGE_SIZE_U64)?;
                         let data_end = entry
-                            .offset
+                            .offset()
                             .checked_add(padded_len)
                             .ok_or_else(|| Error::Format("value offset overflow".into()))?;
                         max_data_end = max_data_end.max(data_end);
@@ -313,13 +391,17 @@ impl Wal {
                     }
                 }
 
-                last_lsn = Some(entry.lsn);
+                last_lsn = Some(entry.lsn());
             }
 
-            if page.next_page == 0 {
+            if cursor != used {
+                return Err(Error::Format("WAL page has trailing garbage bytes".into()));
+            }
+
+            if page.next_page() == 0 {
                 break (offset, page);
             }
-            offset = page.next_page;
+            offset = page.next_page();
         };
 
         let highest_used = file_len.max(max_data_end).max(max_wal_end);
@@ -399,33 +481,28 @@ impl Wal {
         let wal_append = {
             let mut state = self.lock_state()?;
             let lsn = Self::allocate_next_lsn(state.last_lsn)?;
-            let entry = pending.into_wal_entry(lsn);
 
-            let writes = if state.tail.can_fit(&entry) {
-                state.tail.push(entry);
+            let writes = if state.tail.can_fit(&pending) {
+                let appended = state.tail.append(&pending, lsn)?;
+                debug_assert!(appended, "tail fit check and append diverged");
                 vec![self.encode_page_write(state.tail_offset, &state.tail)?]
             } else {
-                // Current page is full — allocate a new WAL page.
                 let new_page_offset = Self::reserve_space_locked(&mut state, PAGE_SIZE_U32)?;
 
-                // Link the old tail to the new page and rewrite it.
                 let old_tail_offset = state.tail_offset;
-                state.tail.next_page = new_page_offset;
-                let linked_tail = state.tail.clone();
+                state.tail.set_next_page(new_page_offset);
+                let old_tail_write = self.encode_page_write(old_tail_offset, &state.tail)?;
 
-                // Write the new page with the entry.
                 let mut new_page = WalPage::empty();
-                if !new_page.push(entry) {
+                if !new_page.append(&pending, lsn)? {
                     return Err(Error::Format("entry does not fit in empty WAL page".into()));
                 }
+                let new_page_write = self.encode_page_write(new_page_offset, &new_page)?;
 
                 state.tail_offset = new_page_offset;
-                state.tail = new_page.clone();
+                state.tail = new_page;
 
-                vec![
-                    self.encode_page_write(old_tail_offset, &linked_tail)?,
-                    self.encode_page_write(new_page_offset, &new_page)?,
-                ]
+                vec![old_tail_write, new_page_write]
             };
 
             state.last_lsn = Some(lsn);
@@ -438,7 +515,7 @@ impl Wal {
 
     fn encode_page_write(&self, offset: u64, page: &WalPage) -> Result<WalWriteOp> {
         let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32)?;
-        buf.as_mut_slice().copy_from_slice(&page.to_bytes()?);
+        buf.as_mut_slice().copy_from_slice(page.as_slice());
         Ok(WalWriteOp { buf, offset })
     }
 
@@ -468,20 +545,29 @@ mod tests {
     #[test]
     fn page_round_trip() {
         let mut page = WalPage::empty();
-        page.next_page = 8192;
-        assert!(page.push(WalEntry::live(
-            T4Key::try_from(b"alpha".to_vec()).unwrap(),
-            4096,
-            123,
-            0,
-        )));
-        assert!(page.push(WalEntry::tombstone(
-            T4Key::try_from(b"beta".to_vec()).unwrap(),
-            1,
-        )));
+        page.set_next_page(8192);
+        assert!(
+            page.append(
+                &AppendEntry::Live {
+                    key: T4Key::try_from(b"alpha".to_vec()).unwrap(),
+                    offset: 4096,
+                    length: 123,
+                },
+                0,
+            )
+            .unwrap()
+        );
+        assert!(
+            page.append(
+                &AppendEntry::Tombstone {
+                    key: T4Key::try_from(b"beta".to_vec()).unwrap(),
+                },
+                1,
+            )
+            .unwrap()
+        );
 
-        let bytes = page.to_bytes().unwrap();
-        let decoded = WalPage::from_bytes(&bytes).unwrap();
+        let decoded = WalPage::from_bytes(page.as_slice()).unwrap();
         assert_eq!(decoded, page);
     }
 
@@ -489,20 +575,48 @@ mod tests {
     fn page_overflow_detection() {
         let mut page = WalPage::empty();
         let mut i = 0_u64;
-        while page.push(WalEntry::live(
-            T4Key::try_from(vec![b'k'; 64]).unwrap(),
-            i * 4096,
-            64,
-            i,
-        )) {
+        while page
+            .append(
+                &AppendEntry::Live {
+                    key: T4Key::try_from(vec![b'k'; 64]).unwrap(),
+                    offset: i * 4096,
+                    length: 64,
+                },
+                i,
+            )
+            .unwrap()
+        {
             i += 1;
         }
         assert!(i > 0);
-        assert!(!page.can_fit(&WalEntry::live(
-            T4Key::try_from(vec![1; 128]).unwrap(),
-            0,
-            1,
-            i + 1,
-        )));
+        assert!(!page.can_fit(&AppendEntry::Live {
+            key: T4Key::try_from(vec![1; 128]).unwrap(),
+            offset: 0,
+            length: 1,
+        }));
+    }
+
+    #[test]
+    fn entry_ref_is_zero_copy_view() {
+        let mut page = WalPage::empty();
+        page.append(
+            &AppendEntry::Live {
+                key: T4Key::try_from(b"k".to_vec()).unwrap(),
+                offset: 128,
+                length: 7,
+            },
+            42,
+        )
+        .unwrap();
+
+        let used = page.used_bytes();
+        let (entry, _) =
+            WalEntryRef::decode_from(&page.as_slice()[WAL_PAGE_HEADER_SIZE..used]).unwrap();
+
+        assert_eq!(entry.flags(), FLAG_LIVE);
+        assert_eq!(entry.offset(), 128);
+        assert_eq!(entry.length(), 7);
+        assert_eq!(entry.lsn(), 42);
+        assert_eq!(entry.key_bytes(), b"k");
     }
 }
