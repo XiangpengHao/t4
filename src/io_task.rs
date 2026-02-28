@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use crate::io::AlignedBuf;
 use crate::sync::mpsc;
 use crate::sync::{Arc, Mutex};
+use crate::thread::cooperative_yield;
 
 pub(crate) type ReadCompletion = Arc<TaskCompletion<(AlignedBuf, usize)>>;
 pub(crate) type WriteCompletion = Arc<TaskCompletion<usize>>;
@@ -66,12 +67,16 @@ impl<T> TaskCompletion<T> {
                 *inner = TaskCompletionState::Pending {
                     waker: cx.waker().clone(),
                 };
+                drop(inner);
+                cooperative_yield();
                 Poll::Pending
             }
             TaskCompletionState::Pending { waker } => {
                 if !waker.will_wake(cx.waker()) {
                     *waker = cx.waker().clone();
                 }
+                drop(inner);
+                cooperative_yield();
                 Poll::Pending
             }
             TaskCompletionState::Ready(_) => {
@@ -161,6 +166,7 @@ impl Future for FileReadTask {
                         this.state = FileReadTaskState::Done;
                         return Poll::Ready(Err(worker_disconnected_error()));
                     }
+                    cooperative_yield();
                     this.state = FileReadTaskState::Waiting(completion);
                 }
                 FileReadTaskState::Waiting(completion) => {
@@ -224,6 +230,7 @@ impl Future for FileWriteTask {
                         this.state = FileWriteTaskState::Done;
                         return Poll::Ready(Err(worker_disconnected_error()));
                     }
+                    cooperative_yield();
                     this.state = FileWriteTaskState::Waiting(completion);
                 }
                 FileWriteTaskState::Waiting(completion) => {
@@ -279,6 +286,7 @@ impl Future for FileFsyncTask {
                         this.state = FileFsyncTaskState::Done;
                         return Poll::Ready(Err(worker_disconnected_error()));
                     }
+                    cooperative_yield();
                     this.state = FileFsyncTaskState::Waiting(completion);
                 }
                 FileFsyncTaskState::Waiting(completion) => {
@@ -324,8 +332,11 @@ impl Future for FileWalAppendTask {
                 let poll = completion.poll_result(cx);
                 if poll.is_ready() {
                     this.state = FileWalAppendTaskState::Done;
+                    poll
+                } else {
+                    cooperative_yield();
+                    Poll::Pending
                 }
-                poll
             }
             FileWalAppendTaskState::Done => panic!("FileWalAppendTask polled after completion"),
         }

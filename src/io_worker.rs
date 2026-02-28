@@ -14,10 +14,10 @@ use crate::io_task::{
 };
 use crate::sync::mpsc;
 use crate::sync::Arc;
-#[cfg(test)]
+#[cfg(all(test, not(feature = "shuttle")))]
 use crate::sync::Mutex;
 use crate::thread;
-#[cfg(test)]
+#[cfg(all(test, not(feature = "shuttle")))]
 use crate::thread::JoinHandle;
 
 fn worker_failed_error(message: impl Into<String>) -> Error {
@@ -274,6 +274,7 @@ impl<D: IoDriver> UringBackend<D> {
             }
 
             self.poll_completions();
+            thread::cooperative_yield();
 
             if self.shutting_down
                 && self.queued.is_empty()
@@ -285,11 +286,13 @@ impl<D: IoDriver> UringBackend<D> {
             }
 
             if self.inflight > 0 && (self.queued.is_empty() || self.tokens.is_empty()) {
+                thread::cooperative_yield();
                 if let Err(err) = self.ring.submit_and_wait(1) {
                     self.fail_all(err);
                     return;
                 }
                 self.poll_completions();
+                thread::cooperative_yield();
             }
 
             if self.shutting_down
@@ -702,7 +705,7 @@ impl IoWorker {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "shuttle")))]
 mod invariant_harness_tests {
     use super::*;
     use std::collections::VecDeque;

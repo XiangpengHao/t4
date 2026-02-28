@@ -1,3 +1,5 @@
+#![cfg(not(feature = "shuttle"))]
+
 use pollster::block_on;
 use t4::{MountOptions, Store};
 
