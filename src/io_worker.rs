@@ -48,6 +48,28 @@ struct UringDriver {
     ring: IoUring,
 }
 
+trait IoDriver {
+    fn push_read(
+        &mut self,
+        fd: i32,
+        buf: &mut AlignedBuf,
+        offset: u64,
+        user_data: u64,
+    ) -> Result<()>;
+    fn push_write(&mut self, fd: i32, buf: &AlignedBuf, offset: u64, user_data: u64) -> Result<()>;
+    fn push_write_link(
+        &mut self,
+        fd: i32,
+        buf: &AlignedBuf,
+        offset: u64,
+        user_data: u64,
+    ) -> Result<()>;
+    fn push_fsync(&mut self, fd: i32, user_data: u64) -> Result<()>;
+    fn submit(&mut self) -> Result<usize>;
+    fn submit_and_wait(&mut self, min_complete: usize) -> Result<usize>;
+    fn drain_completions(&mut self, out: &mut Vec<CompletionEvent>);
+}
+
 impl UringDriver {
     fn new(queue_depth: u32) -> Result<Self> {
         Ok(Self {
@@ -55,6 +77,21 @@ impl UringDriver {
         })
     }
 
+    fn push_entry(&mut self, entry: io_uring::squeue::Entry) -> Result<()> {
+        let mut sq = self.ring.submission();
+        unsafe {
+            sq.push(&entry).map_err(|_| {
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "submission queue is full",
+                ))
+            })?;
+        }
+        Ok(())
+    }
+}
+
+impl IoDriver for UringDriver {
     fn push_read(
         &mut self,
         fd: i32,
@@ -119,19 +156,6 @@ impl UringDriver {
             });
         }
     }
-
-    fn push_entry(&mut self, entry: io_uring::squeue::Entry) -> Result<()> {
-        let mut sq = self.ring.submission();
-        unsafe {
-            sq.push(&entry).map_err(|_| {
-                Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "submission queue is full",
-                ))
-            })?;
-        }
-        Ok(())
-    }
 }
 
 enum SubmittedOp {
@@ -177,10 +201,10 @@ fn complete_submitted_from_cqe(submitted: SubmittedOp, cqe_result: i32) {
     complete_submitted_with_result(submitted, decode_cqe_result(cqe_result));
 }
 
-struct UringBackend {
+struct UringBackend<D: IoDriver> {
     receiver: mpsc::Receiver<WorkerRequest>,
     file: File,
-    ring: UringDriver,
+    ring: D,
     tokens: VecDeque<usize>,
     submitted_tasks: Vec<Option<SubmittedOp>>,
     queued: VecDeque<WorkerRequest>,
@@ -191,16 +215,30 @@ struct UringBackend {
     inflight: usize,
 }
 
-impl UringBackend {
+impl UringBackend<UringDriver> {
     fn new(file: File, queue_depth: u32, rx: mpsc::Receiver<WorkerRequest>) -> Result<Self> {
         let ring = UringDriver::new(queue_depth)?;
-        let queue_depth = queue_depth as usize;
+        Ok(UringBackend::with_driver(
+            file,
+            queue_depth as usize,
+            rx,
+            ring,
+        ))
+    }
+}
 
+impl<D: IoDriver> UringBackend<D> {
+    fn with_driver(
+        file: File,
+        queue_depth: usize,
+        rx: mpsc::Receiver<WorkerRequest>,
+        ring: D,
+    ) -> Self {
         let tokens = (0..queue_depth).collect();
         let mut submitted_tasks = Vec::with_capacity(queue_depth);
         submitted_tasks.resize_with(queue_depth, || None);
 
-        Ok(Self {
+        Self {
             receiver: rx,
             file,
             ring,
@@ -212,7 +250,7 @@ impl UringBackend {
             cqe_buf: Vec::with_capacity(queue_depth),
             shutting_down: false,
             inflight: 0,
-        })
+        }
     }
 
     fn run(mut self) {
@@ -220,7 +258,7 @@ impl UringBackend {
     }
 }
 
-impl UringBackend {
+impl<D: IoDriver> UringBackend<D> {
     fn thread_loop(&mut self) {
         loop {
             self.block_for_one_request_if_idle();
@@ -659,5 +697,363 @@ impl IoWorker {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod invariant_harness_tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::num::NonZeroU32;
+    use std::sync::{Arc, Mutex};
+
+    use pollster::block_on;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum LoggedOpKind {
+        Read,
+        Write,
+        WriteLink,
+        Fsync,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum CompletionOrder {
+        Fifo,
+        Lifo,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct PushScript {
+        cqe_result: Option<i32>,
+    }
+
+    impl PushScript {
+        fn ok() -> Self {
+            Self { cqe_result: None }
+        }
+
+        fn ok_with_result(cqe_result: i32) -> Self {
+            Self {
+                cqe_result: Some(cqe_result),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct MockConfig {
+        completion_order: CompletionOrder,
+        release_on_submit: bool,
+        fail_submit_and_wait_once: bool,
+        scripts: VecDeque<PushScript>,
+    }
+
+    impl Default for MockConfig {
+        fn default() -> Self {
+            Self {
+                completion_order: CompletionOrder::Fifo,
+                release_on_submit: true,
+                fail_submit_and_wait_once: false,
+                scripts: VecDeque::new(),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct MockState {
+        completion_order: CompletionOrder,
+        release_on_submit: bool,
+        fail_submit_and_wait_once: bool,
+        scripts: VecDeque<PushScript>,
+        pending: VecDeque<CompletionEvent>,
+        ready: VecDeque<CompletionEvent>,
+        submissions: Vec<LoggedOpKind>,
+    }
+
+    impl MockState {
+        fn new(config: MockConfig) -> Self {
+            Self {
+                completion_order: config.completion_order,
+                release_on_submit: config.release_on_submit,
+                fail_submit_and_wait_once: config.fail_submit_and_wait_once,
+                scripts: config.scripts,
+                pending: VecDeque::new(),
+                ready: VecDeque::new(),
+                submissions: Vec::new(),
+            }
+        }
+
+        fn flush_pending_to_ready(&mut self) {
+            match self.completion_order {
+                CompletionOrder::Fifo => {
+                    while let Some(cqe) = self.pending.pop_front() {
+                        self.ready.push_back(cqe);
+                    }
+                }
+                CompletionOrder::Lifo => {
+                    while let Some(cqe) = self.pending.pop_back() {
+                        self.ready.push_back(cqe);
+                    }
+                }
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockDriver {
+        state: Arc<Mutex<MockState>>,
+    }
+
+    impl MockDriver {
+        fn new(state: Arc<Mutex<MockState>>) -> Self {
+            Self { state }
+        }
+
+        fn push_common(
+            &mut self,
+            kind: LoggedOpKind,
+            expected_len: usize,
+            user_data: u64,
+        ) -> Result<()> {
+            let mut state = self.state.lock().expect("mock state mutex poisoned");
+            state.submissions.push(kind);
+
+            let script = state.scripts.pop_front().unwrap_or(PushScript::ok());
+            let result = match script.cqe_result {
+                Some(result) => result,
+                None => i32::try_from(expected_len).expect("expected_len exceeds i32 for test"),
+            };
+            state
+                .pending
+                .push_back(CompletionEvent { user_data, result });
+            Ok(())
+        }
+    }
+
+    impl IoDriver for MockDriver {
+        fn push_read(
+            &mut self,
+            _fd: i32,
+            buf: &mut AlignedBuf,
+            _offset: u64,
+            user_data: u64,
+        ) -> Result<()> {
+            self.push_common(LoggedOpKind::Read, buf.len(), user_data)
+        }
+
+        fn push_write(
+            &mut self,
+            _fd: i32,
+            buf: &AlignedBuf,
+            _offset: u64,
+            user_data: u64,
+        ) -> Result<()> {
+            self.push_common(LoggedOpKind::Write, buf.len(), user_data)
+        }
+
+        fn push_write_link(
+            &mut self,
+            _fd: i32,
+            buf: &AlignedBuf,
+            _offset: u64,
+            user_data: u64,
+        ) -> Result<()> {
+            self.push_common(LoggedOpKind::WriteLink, buf.len(), user_data)
+        }
+
+        fn push_fsync(&mut self, _fd: i32, user_data: u64) -> Result<()> {
+            self.push_common(LoggedOpKind::Fsync, 0, user_data)
+        }
+
+        fn submit(&mut self) -> Result<usize> {
+            let mut state = self.state.lock().expect("mock state mutex poisoned");
+            if state.release_on_submit {
+                state.flush_pending_to_ready();
+            }
+            Ok(state.ready.len())
+        }
+
+        fn submit_and_wait(&mut self, _min_complete: usize) -> Result<usize> {
+            let mut state = self.state.lock().expect("mock state mutex poisoned");
+            if state.fail_submit_and_wait_once {
+                state.fail_submit_and_wait_once = false;
+                return Err(Error::Io(std::io::Error::other(
+                    "mock submit_and_wait failure",
+                )));
+            }
+            state.flush_pending_to_ready();
+            Ok(state.ready.len())
+        }
+
+        fn drain_completions(&mut self, out: &mut Vec<CompletionEvent>) {
+            let mut state = self.state.lock().expect("mock state mutex poisoned");
+            while let Some(cqe) = state.ready.pop_front() {
+                out.push(cqe);
+            }
+        }
+    }
+
+    struct RunningBackend {
+        worker: IoWorker,
+        state: Arc<Mutex<MockState>>,
+        join: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl RunningBackend {
+        fn start(queue_depth: u32, config: MockConfig) -> Self {
+            let (tx, rx) = mpsc::channel::<WorkerRequest>();
+            let state = Arc::new(Mutex::new(MockState::new(config)));
+            let driver = MockDriver::new(Arc::clone(&state));
+
+            let file = tempfile::tempfile().expect("failed to create tempfile for io worker tests");
+            let backend = UringBackend::with_driver(file, queue_depth as usize, rx, driver);
+            let join = std::thread::spawn(move || {
+                backend.run();
+            });
+
+            Self {
+                worker: IoWorker { tx: Arc::new(tx) },
+                state,
+                join: Some(join),
+            }
+        }
+
+        fn finish(mut self) -> Vec<LoggedOpKind> {
+            drop(self.worker);
+            self.join
+                .take()
+                .expect("missing backend join handle")
+                .join()
+                .expect("backend thread panicked");
+            self.state
+                .lock()
+                .expect("mock state mutex poisoned")
+                .submissions
+                .clone()
+        }
+    }
+
+    fn aligned_buf(len_u32: u32) -> AlignedBuf {
+        let len_u32 = NonZeroU32::new(len_u32).expect("aligned buffer length must be non-zero");
+        AlignedBuf::new_zeroed(len_u32).expect("failed to allocate aligned buffer")
+    }
+
+    fn wal_write(offset: u64) -> WalWriteOp {
+        WalWriteOp {
+            buf: aligned_buf(4096),
+            offset,
+        }
+    }
+
+    #[test]
+    fn core_invariant_harness_small_case_set() {
+        {
+            let harness = RunningBackend::start(
+                4,
+                MockConfig {
+                    completion_order: CompletionOrder::Lifo,
+                    ..Default::default()
+                },
+            );
+
+            let read_small = harness.worker.read_at(aligned_buf(4096), 0);
+            let read_large = harness.worker.read_at(aligned_buf(8192), 8192);
+            let fsync = harness.worker.fsync();
+            let wal_one = harness
+                .worker
+                .wal_append(vec![wal_write(0), wal_write(4096)])
+                .expect("failed to enqueue first wal append");
+            let wal_two = harness
+                .worker
+                .wal_append(vec![wal_write(8192)])
+                .expect("failed to enqueue second wal append");
+
+            let (_, n_small) = block_on(read_small).expect("small read should succeed");
+            let (_, n_large) = block_on(read_large).expect("large read should succeed");
+            assert_eq!(n_small, 4096, "small read completion routed incorrectly");
+            assert_eq!(n_large, 8192, "large read completion routed incorrectly");
+            block_on(fsync).expect("fsync should succeed");
+            block_on(wal_one).expect("first wal append should succeed");
+            block_on(wal_two).expect("second wal append should succeed");
+
+            let submissions = harness.finish();
+            let wal_write_kinds = submissions
+                .iter()
+                .filter_map(|kind| match kind {
+                    LoggedOpKind::WriteLink | LoggedOpKind::Write => Some(*kind),
+                    LoggedOpKind::Read | LoggedOpKind::Fsync => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                wal_write_kinds,
+                vec![
+                    LoggedOpKind::WriteLink,
+                    LoggedOpKind::Write,
+                    LoggedOpKind::Write
+                ],
+                "wal writes from different batches should not interleave"
+            );
+        }
+
+        {
+            let scripts = VecDeque::from([
+                PushScript::ok(),
+                PushScript::ok_with_result(2048),
+                PushScript::ok(),
+            ]);
+            let harness = RunningBackend::start(
+                4,
+                MockConfig {
+                    scripts,
+                    ..Default::default()
+                },
+            );
+
+            let wal_fails = harness
+                .worker
+                .wal_append(vec![wal_write(0), wal_write(4096)])
+                .expect("failed to enqueue failing wal append");
+            let wal_succeeds = harness
+                .worker
+                .wal_append(vec![wal_write(8192)])
+                .expect("failed to enqueue succeeding wal append");
+
+            assert!(
+                block_on(wal_fails).is_err(),
+                "wal append should fail when a step is short"
+            );
+            block_on(wal_succeeds).expect("next wal append should still succeed");
+            let _ = harness.finish();
+        }
+
+        {
+            let harness = RunningBackend::start(
+                1,
+                MockConfig {
+                    release_on_submit: false,
+                    fail_submit_and_wait_once: true,
+                    ..Default::default()
+                },
+            );
+
+            let wal_one = harness
+                .worker
+                .wal_append(vec![wal_write(0)])
+                .expect("failed to enqueue first wal append");
+            let wal_two = harness
+                .worker
+                .wal_append(vec![wal_write(4096)])
+                .expect("failed to enqueue second wal append");
+
+            assert!(
+                block_on(wal_one).is_err(),
+                "inflight wal append should resolve with error on worker failure"
+            );
+            assert!(
+                block_on(wal_two).is_err(),
+                "queued wal append should resolve with error on worker failure"
+            );
+            let _ = harness.finish();
+        }
     }
 }
