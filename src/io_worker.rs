@@ -171,6 +171,7 @@ enum SubmittedOp {
         completion: FsyncCompletion,
     },
     WalStep {
+        _buf: AlignedBuf,
         expected: usize,
     },
 }
@@ -389,6 +390,7 @@ impl<D: IoDriver> UringBackend<D> {
             });
 
             for (index, step) in pending.writes.into_iter().enumerate() {
+                let WalWriteOp { buf, offset } = step;
                 let token = self
                     .tokens
                     .pop_front()
@@ -397,14 +399,10 @@ impl<D: IoDriver> UringBackend<D> {
                 let is_last = index + 1 == step_count;
                 let push_result = if is_last {
                     self.ring
-                        .push_write(self.file.as_raw_fd(), &step.buf, step.offset, user_data)
+                        .push_write(self.file.as_raw_fd(), &buf, offset, user_data)
                 } else {
-                    self.ring.push_write_link(
-                        self.file.as_raw_fd(),
-                        &step.buf,
-                        step.offset,
-                        user_data,
-                    )
+                    self.ring
+                        .push_write_link(self.file.as_raw_fd(), &buf, offset, user_data)
                 };
 
                 if let Err(err) = push_result {
@@ -428,7 +426,8 @@ impl<D: IoDriver> UringBackend<D> {
                     .expect("token out of range for submitted_tasks");
                 debug_assert!(slot.is_none(), "token reused before completion");
                 *slot = Some(SubmittedOp::WalStep {
-                    expected: step.buf.len(),
+                    expected: buf.len(),
+                    _buf: buf,
                 });
                 self.inflight += 1;
             }
@@ -540,7 +539,7 @@ impl<D: IoDriver> UringBackend<D> {
 
             self.inflight = self.inflight.saturating_sub(1);
             self.tokens.push_back(token);
-            if let SubmittedOp::WalStep { expected } = submitted {
+            if let SubmittedOp::WalStep { expected, .. } = submitted {
                 let result = decode_cqe_result(cqe.result).and_then(|n| {
                     if n == expected {
                         Ok(n)

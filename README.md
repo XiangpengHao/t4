@@ -39,3 +39,7 @@ assert!(removed);
 ## Limitations
 
 Currently it only supports files up to 4 GB.
+
+## Vision
+
+`t4` will be the ultimate and only file system you need.

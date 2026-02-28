@@ -7,32 +7,22 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs =
-    {
-      nixpkgs,
-      rust-overlay,
-      flake-utils,
-      ...
-    }:
-    flake-utils.lib.eachDefaultSystem (
-      system:
+  outputs = { nixpkgs, rust-overlay, flake-utils, ... }:
+    flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
           inherit system;
           overlays = [ (import rust-overlay) ];
         };
-        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+        llvmPackages = pkgs.llvmPackages_latest;
+        rustToolchain = pkgs.rust-bin.nightly.latest.default.override {
           extensions = [ "rust-src" "rust-analyzer" "clippy" ];
         };
-      in
-      {
+      in {
         devShells.default = pkgs.mkShell {
-          packages = [
-            rustToolchain
-            pkgs.pkg-config
-            pkgs.cargo-fuzz
-          ];
+          packages =
+            [ rustToolchain pkgs.pkg-config pkgs.cargo-fuzz llvmPackages.llvm ];
+          ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
         };
-      }
-    );
+      });
 }

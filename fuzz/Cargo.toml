@@ -1,0 +1,23 @@
+[package]
+name = "t4-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+libc = "0.2"
+libfuzzer-sys = "0.4"
+pollster = "0.4"
+tempfile = "3"
+t4 = { path = ".." }
+
+[[bin]]
+name = "model_equivalence"
+path = "fuzz_targets/model_equivalence.rs"
+test = false
+doc = false
+bench = false
