@@ -16,7 +16,7 @@ use crate::sync::Arc;
 
 pub use engine::MountOptions;
 pub use error::{Error, Result};
-pub use types::{T4Key, T4KeyRef, T4Value};
+use proof_core::input_kv::{T4Key, T4KeyRef, T4Value};
 
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -60,8 +60,8 @@ impl Store {
         let key = key.into();
         let value = value.into();
         async move {
-            let key = crate::types::T4Key::try_from(key)?;
-            let value = crate::types::T4Value::try_from(value)?;
+            let key = T4Key::try_from_vec(key)?;
+            let value = T4Value::try_from_vec(value)?;
             this.inner.put(key, value).await
         }
     }
@@ -72,7 +72,7 @@ impl Store {
     ) -> impl std::future::Future<Output = Result<Vec<u8>>> + 'a {
         let this = self.clone();
         async move {
-            let key = crate::types::T4KeyRef::try_from(key)?;
+            let key = T4KeyRef::try_from_slice(key)?;
             this.inner.get(key).await
         }
     }
@@ -85,7 +85,7 @@ impl Store {
     ) -> impl std::future::Future<Output = Result<Vec<u8>>> + 'a {
         let this = self.clone();
         async move {
-            let key = crate::types::T4KeyRef::try_from(key)?;
+            let key = T4KeyRef::try_from_slice(key)?;
             let range = crate::types::RangeRequest::from_u64(range_start, range_len)
                 .ok_or(Error::RangeOutOfBounds)?;
             this.inner.get_range(key, range).await
@@ -98,7 +98,7 @@ impl Store {
     ) -> impl std::future::Future<Output = Result<bool>> + 'a {
         let this = self.clone();
         async move {
-            let key = crate::types::T4Key::try_from(key)?;
+            let key = T4Key::try_from_slice(key)?;
             this.inner.remove(key).await
         }
     }

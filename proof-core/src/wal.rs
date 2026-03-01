@@ -11,8 +11,6 @@ pub enum WalEntryDecodeError {
     KeyTruncated,
 }
 
-
-
 fn u16_from_le_bytes(bytes: &[u8]) -> (result: u16)
     requires
         bytes.len() == 2,

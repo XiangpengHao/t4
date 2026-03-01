@@ -4,12 +4,14 @@ use std::num::NonZeroU32;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
+use proof_core::input_kv::{T4Key, T4KeyRef, T4Value};
+
 use crate::error::{Error, Result};
 use crate::format::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U64};
 use crate::io::{AlignedBuf, align_down_u64, align_up_u32, align_up_u64};
 use crate::io_worker::IoWorker;
 use crate::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use crate::types::{RangeRequest, T4Key, T4KeyRef, T4Value};
+use crate::types::RangeRequest;
 use crate::wal::{ValueRef, Wal};
 
 #[derive(Debug, Clone, Copy)]

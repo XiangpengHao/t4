@@ -6,8 +6,8 @@ use crate::io::AlignedBuf;
 use crate::io_task::WalWriteOp;
 use crate::io_worker::IoWorker;
 use crate::sync::{Mutex, MutexGuard};
-use crate::types::{T4Key, T4Value};
 
+use proof_core::input_kv::{T4Key, T4Value};
 use proof_core::wal::WalEntryRef;
 use proof_core::{align_up_u64, allocate_next_lsn, reserve_space};
 
@@ -314,7 +314,7 @@ impl Wal {
                     }
                     FLAG_LIVE => {
                         index.insert(
-                            T4Key::try_from(entry.key_bytes().to_vec())?,
+                            T4Key::try_from_vec(entry.key_bytes().to_vec())?,
                             ValueRef {
                                 offset: entry.offset(),
                                 length: entry.length(),
@@ -480,7 +480,7 @@ mod tests {
         assert!(
             page.append(
                 &AppendEntry::Live {
-                    key: T4Key::try_from(b"alpha".to_vec()).unwrap(),
+                    key: T4Key::try_from_vec(b"alpha".to_vec()).unwrap(),
                     offset: 4096,
                     length: 123,
                 },
@@ -491,7 +491,7 @@ mod tests {
         assert!(
             page.append(
                 &AppendEntry::Tombstone {
-                    key: T4Key::try_from(b"beta".to_vec()).unwrap(),
+                    key: T4Key::try_from_vec(b"beta".to_vec()).unwrap(),
                 },
                 1,
             )
@@ -509,7 +509,7 @@ mod tests {
         while page
             .append(
                 &AppendEntry::Live {
-                    key: T4Key::try_from(vec![b'k'; 64]).unwrap(),
+                    key: T4Key::try_from_vec(vec![b'k'; 64]).unwrap(),
                     offset: i * 4096,
                     length: 64,
                 },
@@ -521,7 +521,7 @@ mod tests {
         }
         assert!(i > 0);
         assert!(!page.can_fit(&AppendEntry::Live {
-            key: T4Key::try_from(vec![1; 128]).unwrap(),
+            key: T4Key::try_from_vec(vec![1; 128]).unwrap(),
             offset: 0,
             length: 1,
         }));
@@ -532,7 +532,7 @@ mod tests {
         let mut page = WalPage::empty();
         page.append(
             &AppendEntry::Live {
-                key: T4Key::try_from(b"k".to_vec()).unwrap(),
+                key: T4Key::try_from_vec(b"k".to_vec()).unwrap(),
                 offset: 128,
                 length: 7,
             },

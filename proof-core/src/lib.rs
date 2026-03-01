@@ -1,3 +1,4 @@
+pub mod input_kv;
 pub mod wal;
 
 use vstd::prelude::*;
@@ -9,7 +10,8 @@ verus! {
 pub fn align_down_u64(value: u64, alignment: u64) -> (result: u64)
     requires
         alignment > 0,
-        alignment & sub(alignment, 1) == 0, // power of two
+        alignment & sub(alignment, 1) == 0,  // power of two
+
     ensures
         result <= value,
         result & sub(alignment, 1) == 0,
@@ -25,23 +27,27 @@ pub fn align_down_u64(value: u64, alignment: u64) -> (result: u64)
             requires
                 alignment > 0,
                 alignment & sub(alignment, 1) == 0,
-                result == value & !sub(alignment, 1);
+                result == value & !sub(alignment, 1),
+        ;
         assert(result & sub(alignment, 1) == 0u64) by (bit_vector)
             requires
                 alignment > 0,
                 alignment & sub(alignment, 1) == 0,
-                result == value & !sub(alignment, 1);
+                result == value & !sub(alignment, 1),
+        ;
         assert(value - result < alignment) by (bit_vector)
             requires
                 alignment > 0,
                 alignment & sub(alignment, 1) == 0,
                 result == value & !sub(alignment, 1),
-                result <= value;
+                result <= value,
+        ;
         assert(value & sub(alignment, 1) == 0 ==> result == value) by (bit_vector)
             requires
                 alignment > 0,
                 alignment & sub(alignment, 1) == 0,
-                result == value & !sub(alignment, 1);
+                result == value & !sub(alignment, 1),
+        ;
     }
 
     result
@@ -71,12 +77,14 @@ pub fn align_up_u64(value: u64, alignment: u64) -> (result: Option<u64>)
                 alignment & sub(alignment, 1) == 0,
                 sum == add(value, sub(alignment, 1)),
                 sum >= value,
-                result == sum & !sub(alignment, 1);
+                result == sum & !sub(alignment, 1),
+        ;
         assert(result & sub(alignment, 1) == 0u64) by (bit_vector)
             requires
                 alignment > 0,
                 alignment & sub(alignment, 1) == 0,
-                result == sum & !sub(alignment, 1);
+                result == sum & !sub(alignment, 1),
+        ;
         assert(result - value < alignment) by (bit_vector)
             requires
                 alignment > 0,
@@ -84,14 +92,16 @@ pub fn align_up_u64(value: u64, alignment: u64) -> (result: Option<u64>)
                 sum == add(value, sub(alignment, 1)),
                 sum >= value,
                 result == sum & !sub(alignment, 1),
-                result >= value;
+                result >= value,
+        ;
         assert(value & sub(alignment, 1) == 0 ==> result == value) by (bit_vector)
             requires
                 alignment > 0,
                 alignment & sub(alignment, 1) == 0,
                 sum == add(value, sub(alignment, 1)),
                 sum >= value,
-                result == sum & !sub(alignment, 1);
+                result == sum & !sub(alignment, 1),
+        ;
     }
 
     Some(result)
@@ -121,12 +131,14 @@ pub fn align_up_u32(value: u32, alignment: u32) -> (result: Option<u32>)
                 alignment & sub(alignment, 1) == 0,
                 sum == add(value, sub(alignment, 1)),
                 sum >= value,
-                result == sum & !sub(alignment, 1);
+                result == sum & !sub(alignment, 1),
+        ;
         assert(result & sub(alignment, 1) == 0u32) by (bit_vector)
             requires
                 alignment > 0,
                 alignment & sub(alignment, 1) == 0,
-                result == sum & !sub(alignment, 1);
+                result == sum & !sub(alignment, 1),
+        ;
         assert(result - value < alignment) by (bit_vector)
             requires
                 alignment > 0,
@@ -134,14 +146,16 @@ pub fn align_up_u32(value: u32, alignment: u32) -> (result: Option<u32>)
                 sum == add(value, sub(alignment, 1)),
                 sum >= value,
                 result == sum & !sub(alignment, 1),
-                result >= value;
+                result >= value,
+        ;
         assert(value & sub(alignment, 1) == 0 ==> result == value) by (bit_vector)
             requires
                 alignment > 0,
                 alignment & sub(alignment, 1) == 0,
                 sum == add(value, sub(alignment, 1)),
                 sum >= value,
-                result == sum & !sub(alignment, 1);
+                result == sum & !sub(alignment, 1),
+        ;
     }
 
     Some(result)
@@ -198,11 +212,13 @@ impl RangeRequestU32 {
             assert(end >= start) by (bit_vector)
                 requires
                     end == add(start, len),
-                    end >= start;
+                    end >= start,
+            ;
             assert(end - start == len) by (bit_vector)
                 requires
                     end == add(start, len),
-                    end >= start;
+                    end >= start,
+            ;
         }
 
         Some(Self { start, len, end })
@@ -229,12 +245,7 @@ impl RangeRequestU32 {
         if self.end > upper_bound {
             return None;
         }
-
-        Some(CheckedRangeU32 {
-            start: self.start,
-            len: self.len,
-            end: self.end,
-        })
+        Some(CheckedRangeU32 { start: self.start, len: self.len, end: self.end })
     }
 
     pub fn start(self) -> (result: u32)
@@ -324,18 +335,16 @@ pub fn reserve_space(file_tail: u64, len: u32) -> (result: Option<SpaceReservati
         assert(next_tail >= file_tail) by (bit_vector)
             requires
                 next_tail == add(file_tail, len as u64),
-                next_tail >= file_tail;
+                next_tail >= file_tail,
+        ;
         assert(next_tail - file_tail == len as u64) by (bit_vector)
             requires
                 next_tail == add(file_tail, len as u64),
-                next_tail >= file_tail;
+                next_tail >= file_tail,
+        ;
     }
 
-    Some(SpaceReservation {
-        offset: file_tail,
-        next_tail,
-        len,
-    })
+    Some(SpaceReservation { offset: file_tail, next_tail, len })
 }
 
 /// Arithmetic model for advancing `next_lsn`.
@@ -351,11 +360,13 @@ pub fn allocate_next_lsn(next_lsn: u64) -> (result: Option<u64>)
         assert(next > next_lsn) by (bit_vector)
             requires
                 next == add(next_lsn, 1),
-                next > next_lsn;
+                next > next_lsn,
+        ;
         assert(next - next_lsn == 1u64) by (bit_vector)
             requires
                 next == add(next_lsn, 1),
-                next > next_lsn;
+                next > next_lsn,
+        ;
     }
 
     Some(next)
