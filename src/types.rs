@@ -135,54 +135,5 @@ impl TryFrom<&[u8]> for T4Value {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RangeRequest {
-    start: u32,
-    len: u32,
-    end: u32,
-}
-
-impl RangeRequest {
-    pub fn new(start: u64, len: u64) -> Result<Self> {
-        let start: u32 = start.try_into().map_err(|_| Error::RangeOutOfBounds)?;
-        let len: u32 = len.try_into().map_err(|_| Error::RangeOutOfBounds)?;
-        let end = start.checked_add(len).ok_or(Error::RangeOutOfBounds)?;
-        Ok(Self { start, len, end })
-    }
-
-    pub fn checked_against(self, upper_bound: u32) -> Result<CheckedRange> {
-        if self.end > upper_bound {
-            return Err(Error::RangeOutOfBounds);
-        }
-        Ok(CheckedRange {
-            start: self.start,
-            len: self.len,
-            end: self.end,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CheckedRange {
-    start: u32,
-    len: u32,
-    end: u32,
-}
-
-impl CheckedRange {
-    pub fn start(self) -> u32 {
-        self.start
-    }
-
-    pub fn len(self) -> u32 {
-        self.len
-    }
-
-    pub fn end(self) -> u32 {
-        self.end
-    }
-
-    pub fn is_empty(self) -> bool {
-        self.len == 0
-    }
-}
+pub type RangeRequest = proof_core::RangeRequestU32;
+pub type CheckedRange = proof_core::CheckedRangeU32;

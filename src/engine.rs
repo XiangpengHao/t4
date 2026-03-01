@@ -106,7 +106,9 @@ impl Engine {
             *index.get(key.as_bytes()).ok_or(Error::NotFound)?
         };
 
-        let range = range.checked_against(value.length)?;
+        let range: crate::types::CheckedRange = range
+            .checked_against(value.length)
+            .ok_or(Error::RangeOutOfBounds)?;
         if range.is_empty() {
             return Ok(Vec::new());
         }

@@ -11,10 +11,8 @@ pub fn align_up_u32(value: NonZeroU32, alignment: NonZeroU32) -> Result<NonZeroU
     let value = value.get();
     let alignment = alignment.get();
     debug_assert!(alignment.is_power_of_two());
-    let sum = value
-        .checked_add(alignment - 1)
+    let aligned = proof_core::align_up_u32(value, alignment)
         .ok_or(Error::InvalidArgument("value overflow while aligning"))?;
-    let aligned = sum & !(alignment - 1);
     NonZeroU32::new(aligned).ok_or(Error::InvalidArgument("aligned value unexpectedly zero"))
 }
 

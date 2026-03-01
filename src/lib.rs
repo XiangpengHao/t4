@@ -86,7 +86,8 @@ impl Store {
         let this = self.clone();
         async move {
             let key = crate::types::T4KeyRef::try_from(key)?;
-            let range = crate::types::RangeRequest::new(range_start, range_len)?;
+            let range = crate::types::RangeRequest::from_u64(range_start, range_len)
+                .ok_or(Error::RangeOutOfBounds)?;
             this.inner.get_range(key, range).await
         }
     }
