@@ -1,7 +1,13 @@
 use vstd::prelude::*;
 use vstd::slice::slice_subrange;
 
+use crate::input_kv::T4Key;
+
 verus! {
+
+const FLAG_LIVE: u8 = 0;
+
+const FLAG_TOMBSTONE: u8 = 1;
 
 pub const ENTRY_HEADER_SIZE: usize = 24;
 
@@ -98,6 +104,58 @@ impl<'a> WalEntryRef<'a> {
             self.wf(),
     {
         slice_subrange(self.bytes, ENTRY_HEADER_SIZE, self.bytes.len())
+    }
+}
+
+pub enum AppendEntry {
+    Live { key: T4Key, offset: u64, length: u32 },
+    Tombstone { key: T4Key },
+}
+
+impl AppendEntry {
+    pub fn encoded_len(&self) -> usize
+        requires
+            match self {
+                Self::Live { key, .. } => key.wf(),
+                Self::Tombstone { key } => key.wf(),
+            },
+    {
+        ENTRY_HEADER_SIZE + self.key_bytes().len()
+    }
+
+    pub fn key_bytes(&self) -> (result: &[u8])
+        requires
+            match self {
+                Self::Live { key, .. } => key.wf(),
+                Self::Tombstone { key } => key.wf(),
+            },
+        ensures
+            result.len() <= u16::MAX as usize,
+    {
+        match self {
+            Self::Live { key, .. } | Self::Tombstone { key } => key.as_bytes(),
+        }
+    }
+
+    pub fn flags(&self) -> u8 {
+        match self {
+            Self::Live { .. } => FLAG_LIVE,
+            Self::Tombstone { .. } => FLAG_TOMBSTONE,
+        }
+    }
+
+    pub fn offset(&self) -> u64 {
+        match self {
+            Self::Live { offset, .. } => *offset,
+            Self::Tombstone { .. } => 0,
+        }
+    }
+
+    pub fn length(&self) -> u32 {
+        match self {
+            Self::Live { length, .. } => *length,
+            Self::Tombstone { .. } => 0,
+        }
     }
 }
 

@@ -8,11 +8,10 @@ use crate::io_worker::IoWorker;
 use crate::sync::{Mutex, MutexGuard};
 
 use verified::input_kv::{T4Key, T4Value};
-use verified::wal::WalEntryRef;
+use verified::wal::{AppendEntry, WalEntryRef};
 use verified::{align_up_u64, allocate_next_lsn, reserve_space};
 
 const WAL_PAGE_HEADER_SIZE: usize = 32;
-const ENTRY_HEADER_SIZE: usize = 24;
 
 const FLAG_LIVE: u8 = 0;
 const FLAG_TOMBSTONE: u8 = 1;
@@ -186,53 +185,6 @@ impl WalPage {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Wal
-// ---------------------------------------------------------------------------
-
-enum AppendEntry {
-    Live {
-        key: T4Key,
-        offset: u64,
-        length: u32,
-    },
-    Tombstone {
-        key: T4Key,
-    },
-}
-
-impl AppendEntry {
-    fn encoded_len(&self) -> usize {
-        ENTRY_HEADER_SIZE + self.key_bytes().len()
-    }
-
-    fn key_bytes(&self) -> &[u8] {
-        match self {
-            Self::Live { key, .. } | Self::Tombstone { key } => key.as_bytes(),
-        }
-    }
-
-    fn flags(&self) -> u8 {
-        match self {
-            Self::Live { .. } => FLAG_LIVE,
-            Self::Tombstone { .. } => FLAG_TOMBSTONE,
-        }
-    }
-
-    fn offset(&self) -> u64 {
-        match self {
-            Self::Live { offset, .. } => *offset,
-            Self::Tombstone { .. } => 0,
-        }
-    }
-
-    fn length(&self) -> u32 {
-        match self {
-            Self::Live { length, .. } => *length,
-            Self::Tombstone { .. } => 0,
-        }
-    }
-}
 
 #[derive(Debug)]
 struct WalState {
