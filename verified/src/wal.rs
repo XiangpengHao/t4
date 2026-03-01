@@ -1,7 +1,12 @@
+use std::ptr::slice_from_raw_parts;
+
 use vstd::prelude::*;
 use vstd::slice::slice_subrange;
 
 use crate::input_kv::T4Key;
+use crate::PAGE_SIZE;
+
+const _: [(); WAL_PAGE_HEADER_SIZE] = [(); std::mem::size_of::<WalPageHeader>()];
 
 verus! {
 
@@ -10,6 +15,12 @@ const FLAG_LIVE: u8 = 0;
 const FLAG_TOMBSTONE: u8 = 1;
 
 pub const ENTRY_HEADER_SIZE: usize = 24;
+
+const WAL_PAGE_HEADER_SIZE: usize = 32;
+
+pub const MAGIC: [u8; 4] = [0x42, 0x54, 0x46, 0x34];
+
+pub const VERSION: u16 = 3;
 
 #[derive(Debug)]
 pub enum WalEntryDecodeError {
@@ -155,6 +166,106 @@ impl AppendEntry {
         match self {
             Self::Live { length, .. } => *length,
             Self::Tombstone { .. } => 0,
+        }
+    }
+}
+
+#[repr(C)]
+struct WalPageHeader {
+    magic: [u8; 4],
+    version: u16,
+    next_page: u64,
+    entry_count: u32,
+    used_bytes: u32,
+    lsn: u64,
+}
+
+impl WalPageHeader {
+    pub fn new() -> Self {
+        Self {
+            magic: MAGIC,
+            version: VERSION,
+            next_page: 0,
+            entry_count: 0,
+            used_bytes: WAL_PAGE_HEADER_SIZE as u32,
+            lsn: 0,
+        }
+    }
+}
+
+const OFF_MAGIC: usize = 0;
+const OFF_VERSION: usize = 4;
+const OFF_NEXT_PAGE: usize = 8;
+const OFF_ENTRY_COUNT: usize = 16;
+const OFF_USED_BYTES: usize = 20;
+const OFF_LSN: usize = 24;
+
+
+
+fn write_u16_le(bytes: &mut [u8; PAGE_SIZE], off: usize, v: u16)
+    requires
+        off + 1 < PAGE_SIZE,
+{
+    bytes[off] = (v & 0x00ff) as u8;
+    bytes[off + 1] = ((v >> 8) & 0x00ff) as u8;
+}
+
+fn write_u32_le(bytes: &mut [u8; PAGE_SIZE], off: usize, v: u32)
+    requires
+        off + 3 < PAGE_SIZE,
+{
+    bytes[off] = (v & 0x000000ff) as u8;
+    bytes[off + 1] = ((v >> 8) & 0x000000ff) as u8;
+    bytes[off + 2] = ((v >> 16) & 0x000000ff) as u8;
+    bytes[off + 3] = ((v >> 24) & 0x000000ff) as u8;
+}
+
+fn write_u64_le(bytes: &mut [u8; PAGE_SIZE], off: usize, v: u64)
+    requires
+        off + 7 < PAGE_SIZE,
+{
+    bytes[off] = (v & 0x00000000000000ff) as u8;
+    bytes[off + 1] = ((v >> 8) & 0x00000000000000ff) as u8;
+    bytes[off + 2] = ((v >> 16) & 0x00000000000000ff) as u8;
+    bytes[off + 3] = ((v >> 24) & 0x00000000000000ff) as u8;
+    bytes[off + 4] = ((v >> 32) & 0x00000000000000ff) as u8;
+    bytes[off + 5] = ((v >> 40) & 0x00000000000000ff) as u8;
+    bytes[off + 6] = ((v >> 48) & 0x00000000000000ff) as u8;
+    bytes[off + 7] = ((v >> 56) & 0x00000000000000ff) as u8;
+}
+
+pub struct WalPage {
+    bytes: Box<[u8; PAGE_SIZE]>,
+}
+
+impl WalPage {
+    pub fn empty() -> Self {
+        let mut page = Self { bytes: Box::new([0_u8;PAGE_SIZE]) };
+        let header = WalPageHeader::new();
+        page.encode_header(&header);
+        page
+    }
+
+    fn encode_header(&mut self, h: &WalPageHeader) {
+        self.bytes[OFF_MAGIC + 0] = h.magic[0];
+        self.bytes[OFF_MAGIC + 1] = h.magic[1];
+        self.bytes[OFF_MAGIC + 2] = h.magic[2];
+        self.bytes[OFF_MAGIC + 3] = h.magic[3];
+        write_u16_le(&mut self.bytes, OFF_VERSION, h.version);
+        write_u64_le(&mut self.bytes, OFF_NEXT_PAGE, h.next_page);
+        write_u32_le(&mut self.bytes, OFF_ENTRY_COUNT, h.entry_count);
+        write_u32_le(&mut self.bytes, OFF_USED_BYTES, h.used_bytes);
+        write_u64_le(&mut self.bytes, OFF_LSN, h.lsn);
+    }
+
+    fn decode_header(&self) -> WalPageHeader {
+        WalPageHeader {
+            magic: [self.bytes[OFF_MAGIC + 0], self.bytes[OFF_MAGIC + 1], self.bytes[OFF_MAGIC + 2], self.bytes[OFF_MAGIC + 3]],
+            version: u16_from_le_bytes(slice_subrange(self.bytes.as_slice(), OFF_VERSION, OFF_VERSION + 2)),
+            next_page: u64_from_le_bytes(slice_subrange(self.bytes.as_slice(), OFF_NEXT_PAGE, OFF_NEXT_PAGE + 8)),
+            entry_count: u32_from_le_bytes(slice_subrange(self.bytes.as_slice(), OFF_ENTRY_COUNT, OFF_ENTRY_COUNT + 4)),
+            used_bytes: u32_from_le_bytes(slice_subrange(self.bytes.as_slice(), OFF_USED_BYTES, OFF_USED_BYTES + 4)),
+            lsn: u64_from_le_bytes(slice_subrange(self.bytes.as_slice(), OFF_LSN, OFF_LSN + 8)),
         }
     }
 }

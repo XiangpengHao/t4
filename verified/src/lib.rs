@@ -1,13 +1,14 @@
 pub mod input_kv;
 pub mod wal;
 
-pub const PAGE_SIZE: usize = 4096;
 pub const MAGIC: [u8; 4] = *b"BTF4";
 pub const VERSION: u16 = 3;
 
 use vstd::prelude::*;
 
 verus! {
+
+pub const PAGE_SIZE: usize = 4096;
 
 /// Rounds `value` down to the nearest multiple of `alignment`.
 /// `alignment` must be a power of two.
