@@ -26,6 +26,18 @@ pub struct ValueRef {
 // WalPage
 // ---------------------------------------------------------------------------
 
+#[repr(C)]
+struct WalPageHeader {
+    magic: [u8; 4],
+    version: u16,
+    next_page: u64,
+    entry_count: u32,
+    used_bytes: u32,
+    lsn: u64,
+}
+
+const _: () = assert!(std::mem::size_of::<WalPageHeader>() == WAL_PAGE_HEADER_SIZE);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WalPage {
     bytes: Box<[u8; PAGE_SIZE]>,
@@ -36,16 +48,21 @@ impl WalPage {
         let mut page = Self {
             bytes: Box::new([0_u8; PAGE_SIZE]),
         };
-        page.bytes[0..4].copy_from_slice(&MAGIC);
-        page.bytes[4..6].copy_from_slice(&VERSION.to_le_bytes());
-        page.bytes[6..8].copy_from_slice(&0_u16.to_le_bytes());
-        page.set_next_page(0);
-        page.set_entry_count(0)
-            .expect("initial WAL entry count must fit u32");
-        page.set_used_bytes(WAL_PAGE_HEADER_SIZE)
-            .expect("initial WAL used bytes must fit u32");
-        page.bytes[24..32].copy_from_slice(&0_u64.to_le_bytes());
+        page.header_mut().magic = MAGIC;
+        page.header_mut().version = VERSION;
+        page.header_mut().next_page = 0;
+        page.header_mut().entry_count = 0;
+        page.header_mut().used_bytes = WAL_PAGE_HEADER_SIZE as u32;
+        page.header_mut().lsn = 0;
         page
+    }
+
+    fn header_mut(&mut self) -> &mut WalPageHeader {
+        unsafe { &mut *(self.bytes.as_mut_ptr() as *mut WalPageHeader) }
+    }
+
+    fn header(&self) -> &WalPageHeader {
+        unsafe { &*(self.bytes.as_ptr() as *const WalPageHeader) }
     }
 
     fn from_bytes(src: &[u8]) -> Result<Self> {
@@ -67,47 +84,27 @@ impl WalPage {
     }
 
     fn next_page(&self) -> u64 {
-        u64::from_le_bytes(
-            self.bytes[8..16]
-                .try_into()
-                .expect("next_page bytes must be present"),
-        )
+        self.header().next_page
     }
 
     fn set_next_page(&mut self, next_page: u64) {
-        self.bytes[8..16].copy_from_slice(&next_page.to_le_bytes());
+        self.header_mut().next_page = next_page;
     }
 
     fn entry_count(&self) -> usize {
-        u32::from_le_bytes(
-            self.bytes[16..20]
-                .try_into()
-                .expect("entry_count bytes must be present"),
-        ) as usize
+        self.header().entry_count as usize
     }
 
-    fn set_entry_count(&mut self, count: usize) -> Result<()> {
-        let count_u32: u32 = count
-            .try_into()
-            .map_err(|_| Error::Format("wal entry count overflow".into()))?;
-        self.bytes[16..20].copy_from_slice(&count_u32.to_le_bytes());
-        Ok(())
+    fn set_entry_count(&mut self, count: usize) {
+        self.header_mut().entry_count = count as u32;
     }
 
     fn used_bytes(&self) -> usize {
-        u32::from_le_bytes(
-            self.bytes[20..24]
-                .try_into()
-                .expect("used_bytes bytes must be present"),
-        ) as usize
+        self.header().used_bytes as usize
     }
 
-    fn set_used_bytes(&mut self, used: usize) -> Result<()> {
-        let used_u32: u32 = used
-            .try_into()
-            .map_err(|_| Error::Format("wal used bytes overflow".into()))?;
-        self.bytes[20..24].copy_from_slice(&used_u32.to_le_bytes());
-        Ok(())
+    fn set_used_bytes(&mut self, used: usize) {
+        self.header_mut().used_bytes = used as u32;
     }
 
     fn can_fit(&self, entry: &AppendEntry) -> bool {
@@ -145,17 +142,17 @@ impl WalPage {
             .entry_count()
             .checked_add(1)
             .ok_or_else(|| Error::Format("wal entry count overflow".into()))?;
-        self.set_entry_count(next_entry_count)?;
-        self.set_used_bytes(end)?;
+        self.set_entry_count(next_entry_count);
+        self.set_used_bytes(end);
         Ok(true)
     }
 
     fn validate_layout(&self) -> Result<()> {
-        if self.bytes[0..4] != MAGIC {
+        if self.header().magic != MAGIC {
             return Err(Error::Format("bad magic".into()));
         }
 
-        let version = u16::from_le_bytes([self.bytes[4], self.bytes[5]]);
+        let version = self.header().version;
         if version != VERSION {
             return Err(Error::Format(format!("unsupported version {version}")));
         }
@@ -167,7 +164,7 @@ impl WalPage {
 
         let mut cursor = WAL_PAGE_HEADER_SIZE;
         for _ in 0..self.entry_count() {
-            let (entry, consumed) = WalEntryRef::decode_from(&self.bytes[cursor..used_bytes])?;
+            let (entry, consumed) = WalEntryRef::decode_from(&self.as_slice()[cursor..used_bytes])?;
             cursor = cursor
                 .checked_add(consumed)
                 .ok_or_else(|| Error::Format("entry cursor overflow".into()))?;
@@ -184,7 +181,6 @@ impl WalPage {
         Ok(())
     }
 }
-
 
 #[derive(Debug)]
 struct WalState {
