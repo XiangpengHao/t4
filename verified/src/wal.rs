@@ -137,12 +137,14 @@ pub enum AppendEntry {
 }
 
 impl AppendEntry {
-    pub fn encoded_len(&self) -> usize
+    pub fn encoded_len(&self) -> (result: usize)
         requires
             match self {
                 Self::Live { key, .. } => key.wf(),
                 Self::Tombstone { key } => key.wf(),
             },
+    ensures
+        ENTRY_HEADER_SIZE<= result && result <= PAGE_SIZE,
     {
         ENTRY_HEADER_SIZE + self.key_bytes().len()
     }
@@ -225,6 +227,7 @@ const OFF_LSN: usize = 24;
 fn write_u16_le(bytes: &mut [u8; PAGE_SIZE], off: usize, v: u16)
     requires
         off + 1 < PAGE_SIZE,
+    no_unwind
 {
     bytes[off] = (v & 0x00ff) as u8;
     bytes[off + 1] = ((v >> 8) & 0x00ff) as u8;
@@ -233,6 +236,7 @@ fn write_u16_le(bytes: &mut [u8; PAGE_SIZE], off: usize, v: u16)
 fn write_u32_le(bytes: &mut [u8; PAGE_SIZE], off: usize, v: u32)
     requires
         off + 3 < PAGE_SIZE,
+    no_unwind
 {
     bytes[off] = (v & 0x000000ff) as u8;
     bytes[off + 1] = ((v >> 8) & 0x000000ff) as u8;
@@ -243,6 +247,7 @@ fn write_u32_le(bytes: &mut [u8; PAGE_SIZE], off: usize, v: u32)
 fn write_u64_le(bytes: &mut [u8; PAGE_SIZE], off: usize, v: u64)
     requires
         off + 7 < PAGE_SIZE,
+    no_unwind
 {
     bytes[off] = (v & 0x00000000000000ff) as u8;
     bytes[off + 1] = ((v >> 8) & 0x00000000000000ff) as u8;
@@ -373,6 +378,17 @@ impl WalPage {
         )
     }
 
+    fn set_entry_count(&mut self, count: u32) {
+        write_u32_le(&mut self.bytes, OFF_ENTRY_COUNT, count);
+    }
+
+    fn set_used_bytes(&mut self, bytes: u32)
+        requires
+            bytes <= PAGE_SIZE as u32,
+    {
+        write_u32_le(&mut self.bytes, OFF_USED_BYTES, bytes);
+    }
+
     fn magic(&self) -> [u8; 4] {
         [
             self.bytes[OFF_MAGIC + 0],
@@ -395,52 +411,54 @@ impl WalPage {
         u16_from_le_bytes(slice_subrange(self.bytes.as_slice(), OFF_VERSION, OFF_VERSION + 2))
     }
 
-    // fn append(&mut self, entry: &AppendEntry, lsn: u64) -> Result<bool, WalEntryDecodeError>
-    //     requires
-    //         match entry {
-    //             AppendEntry::Live { key, .. } => key.wf(),
-    //             AppendEntry::Tombstone { key } => key.wf(),
-    //         },
-    // {
-    //     let start = self.used_bytes() as usize;
-    //     let end = start + entry.encoded_len();
-    //     if end > PAGE_SIZE {
-    //         return Ok(false);
-    //     }
-    //     let key = entry.key_bytes();
-    //     let key_len = key.len() as u16;
+    fn append(&mut self, entry: &AppendEntry, lsn: u64) -> Result<bool, WalEntryDecodeError>
+        requires
+            match entry {
+                AppendEntry::Live { key, .. } => key.wf(),
+                AppendEntry::Tombstone { key } => key.wf(),
+            },
+    {
+        let start = self.used_bytes() as usize;
+        let end = start + entry.encoded_len();
+      
+        if end > PAGE_SIZE {
+            return Ok(false);
+        }
+        let key = entry.key_bytes();
+        let key_len = key.len() as u16;
 
-    //     write_u16_le(&mut self.bytes, start, key_len);
-    //     self.bytes[start + 2] = entry.flags();
-    //     self.bytes[start + 3] = 0;
-    //     write_u64_le(&mut self.bytes, start + 4, entry.offset());
-    //     write_u32_le(&mut self.bytes, start + 12, entry.length());
-    //     write_u64_le(&mut self.bytes, start + 16, lsn);
-    //     copy_into_page(&mut self.bytes, start + 24, key);
+        write_u16_le(&mut self.bytes, start, key_len);
+        self.bytes[start + 2] = entry.flags();
+        self.bytes[start + 3] = 0;
+        write_u64_le(&mut self.bytes, start + 4, entry.offset());
+        write_u32_le(&mut self.bytes, start + 12, entry.length());
+        write_u64_le(&mut self.bytes, start + 16, lsn);
+        copy_into_page(&mut self.bytes, start + 24, key);
 
-    //     let next_entry_count = self.entry_count() + 1;
-    //     self.set_entry_count(next_entry_count);
-    //     self.set_used_bytes(end as u32);
+        let next_entry_count = self.entry_count() + 1;
+        self.set_entry_count(next_entry_count);
+        self.set_used_bytes(end as u32);
 
-    //     Ok(true)
-    // }
+        Ok(true)
+    }
 }
 
-// fn copy_into_page(bytes: &mut [u8; PAGE_SIZE], off: usize, src: &[u8])
-//     requires
-//         off + src.len() <= PAGE_SIZE,
-// {
-//     let mut i = 0;
+fn copy_into_page(bytes: &mut [u8; PAGE_SIZE], off: usize, src: &[u8])
+    requires
+        off + src.len() <= PAGE_SIZE,
+    no_unwind
+{
+    let mut i = 0;
 
-//     while i < src.len()
-//         invariant
-//             off + src.len() <= PAGE_SIZE,
-//             i <= src.len(),
-//         decreases src.len() - i,
-//     {
-//         bytes[off + i] = src[i];
-//         i = i + 1;
-//     }
-// }
+    while i < src.len()
+        invariant
+            off + src.len() <= PAGE_SIZE,
+            i <= src.len(),
+        decreases src.len() - i,
+    {
+        bytes[off + i] = src[i];
+        i = i + 1;
+    }
+}
 
 } // verus!
