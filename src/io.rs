@@ -1,4 +1,4 @@
-use std::alloc::{alloc_zeroed, dealloc, Layout};
+use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
 

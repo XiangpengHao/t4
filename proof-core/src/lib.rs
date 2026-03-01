@@ -59,10 +59,7 @@ pub fn align_up_u64(value: u64, alignment: u64) -> (result: Option<u64>)
         result.is_some() ==> (value & sub(alignment, 1) == 0 ==> result.unwrap() == value),
 {
     let mask = alignment - 1;
-    let sum = match value.checked_add(mask) {
-        Some(s) => s,
-        None => return None,
-    };
+    let sum = value.checked_add(mask)?;
     let result = sum & !mask;
 
     proof {

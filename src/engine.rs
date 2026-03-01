@@ -121,8 +121,7 @@ impl Engine {
             .ok_or(Error::RangeOutOfBounds)?;
 
         let aligned_start = align_down_u64(abs_start, PAGE_SIZE_U64);
-        let aligned_end = align_up_u64(abs_end, PAGE_SIZE_U64)
-            .ok_or(Error::RangeOutOfBounds)?;
+        let aligned_end = align_up_u64(abs_end, PAGE_SIZE_U64).ok_or(Error::RangeOutOfBounds)?;
         let read_len_u64 = aligned_end
             .checked_sub(aligned_start)
             .ok_or(Error::RangeOutOfBounds)?;

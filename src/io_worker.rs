@@ -12,10 +12,10 @@ use crate::io_task::{
     FileFsyncTask, FileReadTask, FileWalAppendTask, FileWriteTask, WalWriteOp, WorkerRequest,
     worker_disconnected_error,
 };
-use crate::sync::mpsc;
 use crate::sync::Arc;
 #[cfg(all(test, not(feature = "shuttle")))]
 use crate::sync::Mutex;
+use crate::sync::mpsc;
 use crate::thread;
 #[cfg(all(test, not(feature = "shuttle")))]
 use crate::thread::JoinHandle;
