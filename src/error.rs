@@ -34,3 +34,9 @@ impl From<std::io::Error> for Error {
         Self::Io(value)
     }
 }
+
+impl From<proof_core::wal::WalEntryDecodeError> for Error {
+    fn from(value: proof_core::wal::WalEntryDecodeError) -> Self {
+        Self::Format(format!("wal entry decode error: {:?}", value))
+    }
+}

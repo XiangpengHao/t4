@@ -93,9 +93,30 @@
             runHook postInstall
           '';
         };
+        verusfmt = pkgs.rustPlatform.buildRustPackage (finalAttrs: {
+          pname = "verusfmt";
+          version = "0.6.1";
+
+          src = pkgs.fetchFromGitHub {
+            owner = "verus-lang";
+            repo = "verusfmt";
+            tag = "v${finalAttrs.version}";
+            hash = "sha256-+NHI2dvCxEGVIUF9zO2aVvVbPSLRtsHFCIHU4cfRzUY=";
+          };
+
+          cargoHash = "sha256-8r8PzBrYZWibeFDh2nENctEEkigUzQeD9uD0Jl/Nv5U=";
+
+          nativeCheckInputs = [
+            pkgs.cargo
+            pkgs.rustfmt
+          ];
+
+          doCheck = true;
+        });
       in
       {
         packages.verus = verus;
+        packages.verusfmt = verusfmt;
 
         devShells.default = pkgs.mkShell {
           packages = [
@@ -105,6 +126,7 @@
             llvmPackages.llvm
             pkgs.cargo-binutils
             verus
+            verusfmt
           ];
           ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
         };

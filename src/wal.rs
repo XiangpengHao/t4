@@ -8,6 +8,7 @@ use crate::io_worker::IoWorker;
 use crate::sync::{Mutex, MutexGuard};
 use crate::types::{T4Key, T4Value};
 
+use proof_core::wal::WalEntryRef;
 use proof_core::{align_up_u64, allocate_next_lsn, reserve_space};
 
 const WAL_PAGE_HEADER_SIZE: usize = 32;
@@ -20,68 +21,6 @@ const FLAG_TOMBSTONE: u8 = 1;
 pub struct ValueRef {
     pub offset: u64,
     pub length: u32,
-}
-
-// ---------------------------------------------------------------------------
-// WalEntryRef
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WalEntryRef<'a> {
-    bytes: &'a [u8],
-}
-
-impl<'a> WalEntryRef<'a> {
-    fn decode_from(src: &'a [u8]) -> Result<(Self, usize)> {
-        if src.len() < ENTRY_HEADER_SIZE {
-            return Err(Error::Format("entry truncated".into()));
-        }
-
-        let key_len = u16::from_le_bytes([src[0], src[1]]) as usize;
-        let total = ENTRY_HEADER_SIZE + key_len;
-        if src.len() < total {
-            return Err(Error::Format("entry key truncated".into()));
-        }
-
-        Ok((
-            Self {
-                bytes: &src[..total],
-            },
-            total,
-        ))
-    }
-
-    fn flags(self) -> u8 {
-        self.bytes[2]
-    }
-
-    fn offset(self) -> u64 {
-        u64::from_le_bytes(
-            self.bytes[4..12]
-                .try_into()
-                .expect("entry offset bytes must be present"),
-        )
-    }
-
-    fn length(self) -> u32 {
-        u32::from_le_bytes(
-            self.bytes[12..16]
-                .try_into()
-                .expect("entry length bytes must be present"),
-        )
-    }
-
-    fn lsn(self) -> u64 {
-        u64::from_le_bytes(
-            self.bytes[16..24]
-                .try_into()
-                .expect("entry lsn bytes must be present"),
-        )
-    }
-
-    fn key_bytes(self) -> &'a [u8] {
-        &self.bytes[ENTRY_HEADER_SIZE..]
-    }
 }
 
 // ---------------------------------------------------------------------------

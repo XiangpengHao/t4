@@ -1,3 +1,5 @@
+pub mod wal;
+
 use vstd::prelude::*;
 
 verus! {
