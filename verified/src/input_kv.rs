@@ -14,11 +14,19 @@ pub enum InputError {
 pub struct T4Key(Vec<u8>);
 
 impl T4Key {
-    pub fn as_bytes<'a>(&'a self) -> (result: &'a [u8])
+    #[verifier::type_invariant]
+    spec fn type_inv(&self) -> bool {
+        self.0.len() <= u8::MAX as usize
+    }
+
+    pub fn as_bytes(&self) -> &[u8]
         ensures
-            self.wf() ==> result.len() <= u8::MAX as usize,
+            result.len() <= u8::MAX as usize,
     {
-        &self.0
+        proof {
+            use_type_invariant(&*self);
+        }
+        self.0.as_slice()
     }
 
     pub fn into_bytes(self) -> Vec<u8> {
@@ -33,18 +41,18 @@ impl T4Key {
         self.0.is_empty()
     }
 
+    #[allow(clippy::should_implement_trait)]
+    // verus doesn't allow inherit clone
     pub fn clone(&self) -> Self {
+        proof {
+            use_type_invariant(&*self);
+        }
         Self(self.0.clone())
-    }
-
-    pub closed spec fn wf(&self) -> bool {
-        self.0.len() <= u8::MAX as usize
     }
 
     pub fn try_from_vec(value: Vec<u8>) -> (result: Result<Self, InputError>)
         ensures
             result.is_ok() <==> value.len() <= u8::MAX as usize,
-            result.is_ok() ==> result.unwrap().wf(),
     {
         if value.len() > u8::MAX as usize {
             return Err(InputError::KeyTooLarge(value.len()));
@@ -136,6 +144,8 @@ impl T4Value {
         self.len_u32 == 0
     }
 
+    #[allow(clippy::should_implement_trait)]
+    // verus doesn't allow inherit clone
     pub fn clone(&self) -> Self {
         Self { bytes: self.bytes.clone(), len_u32: self.len_u32 }
     }
