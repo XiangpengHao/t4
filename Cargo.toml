@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = [".", "fuzz"]
+members = [".", "fuzz", "proof-core"]
 
 [features]
 default = []
@@ -14,6 +14,7 @@ shuttle = ["dep:shuttle"]
 libc = "0.2"
 io-uring = "0.7"
 shuttle = { version = "0.8", optional = true }
+proof-core = { path = "proof-core" }
 
 [dev-dependencies]
 pollster = "0.4"

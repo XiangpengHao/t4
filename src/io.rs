@@ -1,19 +1,11 @@
-use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
 
 use crate::error::{Error, Result};
 use crate::format::{PAGE_SIZE, PAGE_SIZE_NZ_U32};
 
-pub fn align_up_u64(value: u64, alignment: u64) -> u64 {
-    debug_assert!(alignment.is_power_of_two());
-    (value + (alignment - 1)) & !(alignment - 1)
-}
-
-pub fn align_down_u64(value: u64, alignment: u64) -> u64 {
-    debug_assert!(alignment.is_power_of_two());
-    value & !(alignment - 1)
-}
+pub use proof_core::{align_down_u64, align_up_u64};
 
 pub fn align_up_u32(value: NonZeroU32, alignment: NonZeroU32) -> Result<NonZeroU32> {
     let value = value.get();

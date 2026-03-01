@@ -8,6 +8,8 @@ use crate::io_worker::IoWorker;
 use crate::sync::{Mutex, MutexGuard};
 use crate::types::{T4Key, T4Value};
 
+use proof_core::align_up_u64;
+
 const WAL_PAGE_HEADER_SIZE: usize = 32;
 const ENTRY_HEADER_SIZE: usize = 24;
 
@@ -379,7 +381,8 @@ impl Wal {
                                 length: entry.length(),
                             },
                         );
-                        let padded_len = align_up(u64::from(entry.length()), PAGE_SIZE_U64)?;
+                        let padded_len = align_up_u64(u64::from(entry.length()), PAGE_SIZE_U64)
+                            .ok_or_else(|| Error::Format("value overflow while aligning".into()))?;
                         let data_end = entry
                             .offset()
                             .checked_add(padded_len)
@@ -405,7 +408,8 @@ impl Wal {
         };
 
         let highest_used = file_len.max(max_data_end).max(max_wal_end);
-        let file_tail = align_up(highest_used, PAGE_SIZE_U64)?;
+        let file_tail = align_up_u64(highest_used, PAGE_SIZE_U64)
+            .ok_or_else(|| Error::Format("value overflow while aligning".into()))?;
         let wal = Self {
             io,
             state: Mutex::new(WalState {
@@ -524,14 +528,6 @@ impl Wal {
         let buf = io.read_exact_at(buf, offset).await?;
         WalPage::from_bytes(buf.as_slice())
     }
-}
-
-fn align_up(value: u64, alignment: u64) -> Result<u64> {
-    debug_assert!(alignment.is_power_of_two());
-    let sum = value
-        .checked_add(alignment - 1)
-        .ok_or_else(|| Error::Format("value overflow while aligning".into()))?;
-    Ok(sum & !(alignment - 1))
 }
 
 // ---------------------------------------------------------------------------
