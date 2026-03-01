@@ -26,6 +26,7 @@ pub const VERSION: u16 = 3;
 pub enum WalEntryDecodeError {
     Truncated,
     KeyTruncated,
+    InvalidPageLayout,
 }
 
 fn u16_from_le_bytes(bytes: &[u8]) -> (result: u16)
@@ -194,13 +195,16 @@ impl WalPageHeader {
 }
 
 const OFF_MAGIC: usize = 0;
+
 const OFF_VERSION: usize = 4;
+
 const OFF_NEXT_PAGE: usize = 8;
+
 const OFF_ENTRY_COUNT: usize = 16;
+
 const OFF_USED_BYTES: usize = 20;
+
 const OFF_LSN: usize = 24;
-
-
 
 fn write_u16_le(bytes: &mut [u8; PAGE_SIZE], off: usize, v: u16)
     requires
@@ -234,6 +238,10 @@ fn write_u64_le(bytes: &mut [u8; PAGE_SIZE], off: usize, v: u64)
     bytes[off + 7] = ((v >> 56) & 0x00000000000000ff) as u8;
 }
 
+fn magic_matches(bytes: &[u8; 4]) -> bool {
+    bytes[0] == MAGIC[0] && bytes[1] == MAGIC[1] && bytes[2] == MAGIC[2] && bytes[3] == MAGIC[3]
+}
+
 pub struct WalPage {
     bytes: Box<[u8; PAGE_SIZE]>,
 }
@@ -259,14 +267,95 @@ impl WalPage {
     }
 
     fn decode_header(&self) -> WalPageHeader {
+        let used_bytes = self.used_bytes();
+        let version = self.version();
+        let magic = self.magic();
+        let entry_count = self.entry_count();
+        let lsn = self.lsn();
+        let next_page = self.next_page();
         WalPageHeader {
-            magic: [self.bytes[OFF_MAGIC + 0], self.bytes[OFF_MAGIC + 1], self.bytes[OFF_MAGIC + 2], self.bytes[OFF_MAGIC + 3]],
-            version: u16_from_le_bytes(slice_subrange(self.bytes.as_slice(), OFF_VERSION, OFF_VERSION + 2)),
-            next_page: u64_from_le_bytes(slice_subrange(self.bytes.as_slice(), OFF_NEXT_PAGE, OFF_NEXT_PAGE + 8)),
-            entry_count: u32_from_le_bytes(slice_subrange(self.bytes.as_slice(), OFF_ENTRY_COUNT, OFF_ENTRY_COUNT + 4)),
-            used_bytes: u32_from_le_bytes(slice_subrange(self.bytes.as_slice(), OFF_USED_BYTES, OFF_USED_BYTES + 4)),
-            lsn: u64_from_le_bytes(slice_subrange(self.bytes.as_slice(), OFF_LSN, OFF_LSN + 8)),
+            magic: magic,
+            version: version,
+            next_page: next_page,
+            entry_count: entry_count,
+            used_bytes: used_bytes,
+            lsn: lsn,
         }
+    }
+
+    fn next_page(&self) -> u64 {
+        u64_from_le_bytes(slice_subrange(self.bytes.as_slice(), OFF_NEXT_PAGE, OFF_NEXT_PAGE + 8))
+    }
+
+    fn lsn(&self) -> u64 {
+        u64_from_le_bytes(slice_subrange(self.bytes.as_slice(), OFF_LSN, OFF_LSN + 8))
+    }
+
+    fn entry_count(&self) -> u32 {
+        u32_from_le_bytes(
+            slice_subrange(self.bytes.as_slice(), OFF_ENTRY_COUNT, OFF_ENTRY_COUNT + 4),
+        )
+    }
+
+    fn magic(&self) -> [u8; 4] {
+        [
+            self.bytes[OFF_MAGIC + 0],
+            self.bytes[OFF_MAGIC + 1],
+            self.bytes[OFF_MAGIC + 2],
+            self.bytes[OFF_MAGIC + 3],
+        ]
+    }
+
+    fn used_bytes(&self) -> u32 {
+        let used_bytes = u32_from_le_bytes(
+            slice_subrange(self.bytes.as_slice(), OFF_USED_BYTES, OFF_USED_BYTES + 4),
+        );
+        used_bytes
+    }
+
+    fn version(&self) -> u16 {
+        u16_from_le_bytes(slice_subrange(self.bytes.as_slice(), OFF_VERSION, OFF_VERSION + 2))
+    }
+
+    fn validate_layout(&self) -> Result<(), WalEntryDecodeError> {
+        let magic = self.magic();
+        if !magic_matches(&magic) {
+            return Err(WalEntryDecodeError::InvalidPageLayout);
+        }
+        let version = self.version();
+        if version != VERSION {
+            return Err(WalEntryDecodeError::InvalidPageLayout);
+        }
+        let used_bytes = self.used_bytes() as usize;
+        if used_bytes < WAL_PAGE_HEADER_SIZE || used_bytes > PAGE_SIZE {
+            return Err(WalEntryDecodeError::InvalidPageLayout);
+        }
+        let entry_count = self.entry_count();
+        let mut cursor = WAL_PAGE_HEADER_SIZE;
+
+        let mut i = 0;
+        while i < entry_count
+            invariant
+                WAL_PAGE_HEADER_SIZE <= cursor <= used_bytes,
+                used_bytes <= self.bytes@.len()
+            decreases entry_count - i,
+        {
+            let tail = slice_subrange(self.bytes.as_slice(), cursor, used_bytes);
+            let (entry, consumed) = WalEntryRef::decode_from(
+                tail,
+            )?;
+
+            cursor = cursor + consumed;
+            if cursor > used_bytes {
+                return Err(WalEntryDecodeError::InvalidPageLayout);
+            }
+            let _ = entry;
+            i = i + 1;
+        }
+        if cursor != used_bytes {
+            return Err(WalEntryDecodeError::InvalidPageLayout);
+        }
+        Ok(())
     }
 }
 
