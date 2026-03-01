@@ -19,7 +19,7 @@ impl T4Key {
         self.0.len() <= u8::MAX as usize
     }
 
-    pub fn as_bytes(&self) -> &[u8]
+    pub fn as_bytes(&self) -> (result: &[u8])
         ensures
             result.len() <= u8::MAX as usize,
     {
