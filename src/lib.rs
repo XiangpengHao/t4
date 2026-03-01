@@ -16,7 +16,7 @@ use crate::sync::Arc;
 
 pub use engine::MountOptions;
 pub use error::{Error, Result};
-use proof_core::input_kv::{T4Key, T4KeyRef, T4Value};
+use verified::input_kv::{T4Key, T4KeyRef, T4Value};
 
 #[derive(Clone, Debug)]
 pub struct Store {

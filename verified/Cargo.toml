@@ -1,5 +1,5 @@
 [package]
-name = "proof-core"
+name = "verified"
 version = "0.1.0"
 edition = "2021"
 
@@ -21,6 +21,4 @@ verify = true
 #
 # This lint suppression prevents cargo from complaining about the
 # `verus_only` feature flag being undeclared.
-unexpected_cfgs = { level = "warn", check-cfg = [
-  'cfg(verus_only)',
-] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }

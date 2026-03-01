@@ -6,7 +6,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     Io(std::io::Error),
     Format(String),
-    InputError(proof_core::input_kv::InputError),
+    InputError(verified::input_kv::InputError),
     RangeOutOfBounds,
     NotFound,
     LockPoisoned,
@@ -35,14 +35,14 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl From<proof_core::wal::WalEntryDecodeError> for Error {
-    fn from(value: proof_core::wal::WalEntryDecodeError) -> Self {
+impl From<verified::wal::WalEntryDecodeError> for Error {
+    fn from(value: verified::wal::WalEntryDecodeError) -> Self {
         Self::Format(format!("wal entry decode error: {:?}", value))
     }
 }
 
-impl From<proof_core::input_kv::InputError> for Error {
-    fn from(value: proof_core::input_kv::InputError) -> Self {
+impl From<verified::input_kv::InputError> for Error {
+    fn from(value: verified::input_kv::InputError) -> Self {
         Self::InputError(value)
     }
 }

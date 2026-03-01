@@ -4,7 +4,7 @@ use vstd::{prelude::*, slice::slice_to_vec};
 
 verus! {
 
-    #[derive(Debug)]
+#[derive(Debug)]
 pub enum InputError {
     KeyTooLarge(usize),
     ValueTooLarge(usize),
@@ -36,7 +36,7 @@ impl T4Key {
 
     pub fn try_from_vec(value: Vec<u8>) -> (result: Result<Self, InputError>)
         ensures
-            result.is_ok() <==> value.len() <= u16::MAX as usize
+            result.is_ok() <==> value.len() <= u16::MAX as usize,
     {
         if value.len() > u16::MAX as usize {
             return Err(InputError::KeyTooLarge(value.len()));
@@ -46,7 +46,7 @@ impl T4Key {
 
     pub fn try_from_slice(value: &[u8]) -> (result: Result<Self, InputError>)
         ensures
-            result.is_ok() <==> value.len() <= u16::MAX as usize
+            result.is_ok() <==> value.len() <= u16::MAX as usize,
     {
         if value.len() > u16::MAX as usize {
             return Err(InputError::KeyTooLarge(value.len()));
@@ -67,7 +67,6 @@ impl Borrow<[u8]> for T4Key {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct T4KeyRef<'a>(&'a [u8]);
 
@@ -86,7 +85,7 @@ impl<'a> T4KeyRef<'a> {
 
     pub fn try_from_slice(value: &'a [u8]) -> (result: Result<Self, InputError>)
         ensures
-            result.is_ok() <==> value.len() <= u16::MAX as usize
+            result.is_ok() <==> value.len() <= u16::MAX as usize,
     {
         if value.len() > u16::MAX as usize {
             return Err(InputError::KeyTooLarge(value.len()));
@@ -130,7 +129,7 @@ impl T4Value {
 
     pub fn try_from_vec(value: Vec<u8>) -> (result: Result<Self, InputError>)
         ensures
-            result.is_ok() <==> value.len() <= u32::MAX as usize
+            result.is_ok() <==> value.len() <= u32::MAX as usize,
     {
         if value.len() > u32::MAX as usize {
             return Err(InputError::ValueTooLarge(value.len()));
@@ -141,7 +140,7 @@ impl T4Value {
 
     pub fn try_from_slice(value: &[u8]) -> (result: Result<Self, InputError>)
         ensures
-            result.is_ok() <==> value.len() <= u32::MAX as usize
+            result.is_ok() <==> value.len() <= u32::MAX as usize,
     {
         if value.len() > u32::MAX as usize {
             return Err(InputError::ValueTooLarge(value.len()));
@@ -149,6 +148,5 @@ impl T4Value {
         Ok(Self { bytes: slice_to_vec(value), len_u32: value.len() as u32 })
     }
 }
-
 
 } // verus!

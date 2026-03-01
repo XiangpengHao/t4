@@ -1,2 +1,2 @@
-pub type RangeRequest = proof_core::RangeRequestU32;
-pub type CheckedRange = proof_core::CheckedRangeU32;
+pub type RangeRequest = verified::RangeRequestU32;
+pub type CheckedRange = verified::CheckedRangeU32;

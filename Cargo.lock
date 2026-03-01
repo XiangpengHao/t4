@@ -348,13 +348,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "proof-core"
-version = "0.1.0"
-dependencies = [
- "vstd",
-]
-
-[[package]]
 name = "quote"
 version = "1.0.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -548,9 +541,9 @@ dependencies = [
  "io-uring",
  "libc",
  "pollster",
- "proof-core",
  "shuttle",
  "tempfile",
+ "verified",
 ]
 
 [[package]]
@@ -614,6 +607,13 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "verified"
+version = "0.1.0"
+dependencies = [
+ "vstd",
+]
 
 [[package]]
 name = "verus_builtin"

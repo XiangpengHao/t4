@@ -4,7 +4,7 @@ use std::num::NonZeroU32;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use proof_core::input_kv::{T4Key, T4KeyRef, T4Value};
+use verified::input_kv::{T4Key, T4KeyRef, T4Value};
 
 use crate::error::{Error, Result};
 use crate::format::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U64};

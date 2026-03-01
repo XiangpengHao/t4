@@ -5,13 +5,13 @@ use std::ptr::NonNull;
 use crate::error::{Error, Result};
 use crate::format::{PAGE_SIZE, PAGE_SIZE_NZ_U32};
 
-pub use proof_core::{align_down_u64, align_up_u64};
+pub use verified::{align_down_u64, align_up_u64};
 
 pub fn align_up_u32(value: NonZeroU32, alignment: NonZeroU32) -> Result<NonZeroU32> {
     let value = value.get();
     let alignment = alignment.get();
     debug_assert!(alignment.is_power_of_two());
-    let aligned = proof_core::align_up_u32(value, alignment)
+    let aligned = verified::align_up_u32(value, alignment)
         .ok_or(Error::InvalidArgument("value overflow while aligning"))?;
     NonZeroU32::new(aligned).ok_or(Error::InvalidArgument("aligned value unexpectedly zero"))
 }

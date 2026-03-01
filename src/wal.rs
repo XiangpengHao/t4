@@ -7,9 +7,9 @@ use crate::io_task::WalWriteOp;
 use crate::io_worker::IoWorker;
 use crate::sync::{Mutex, MutexGuard};
 
-use proof_core::input_kv::{T4Key, T4Value};
-use proof_core::wal::WalEntryRef;
-use proof_core::{align_up_u64, allocate_next_lsn, reserve_space};
+use verified::input_kv::{T4Key, T4Value};
+use verified::wal::WalEntryRef;
+use verified::{align_up_u64, allocate_next_lsn, reserve_space};
 
 const WAL_PAGE_HEADER_SIZE: usize = 32;
 const ENTRY_HEADER_SIZE: usize = 24;
