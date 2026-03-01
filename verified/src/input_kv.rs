@@ -16,7 +16,7 @@ pub struct T4Key(Vec<u8>);
 impl T4Key {
     pub fn as_bytes<'a>(&'a self) -> (result: &'a [u8])
         ensures
-            self.wf() ==> result.len() <= u16::MAX as usize,
+            self.wf() ==> result.len() <= u8::MAX as usize,
     {
         &self.0
     }
@@ -38,15 +38,15 @@ impl T4Key {
     }
 
     pub closed spec fn wf(&self) -> bool {
-        self.0.len() <= u16::MAX as usize
+        self.0.len() <= u8::MAX as usize
     }
 
     pub fn try_from_vec(value: Vec<u8>) -> (result: Result<Self, InputError>)
         ensures
-            result.is_ok() <==> value.len() <= u16::MAX as usize,
+            result.is_ok() <==> value.len() <= u8::MAX as usize,
             result.is_ok() ==> result.unwrap().wf(),
     {
-        if value.len() > u16::MAX as usize {
+        if value.len() > u8::MAX as usize {
             return Err(InputError::KeyTooLarge(value.len()));
         }
         Ok(Self(value))
@@ -54,9 +54,9 @@ impl T4Key {
 
     pub fn try_from_slice(value: &[u8]) -> (result: Result<Self, InputError>)
         ensures
-            result.is_ok() <==> value.len() <= u16::MAX as usize,
+            result.is_ok() <==> value.len() <= u8::MAX as usize,
     {
-        if value.len() > u16::MAX as usize {
+        if value.len() > u8::MAX as usize {
             return Err(InputError::KeyTooLarge(value.len()));
         }
         Ok(Self(slice_to_vec(value)))
@@ -92,15 +92,15 @@ impl<'a> T4KeyRef<'a> {
     }
 
     pub closed spec fn wf(self) -> bool {
-        self.0.len() <= u16::MAX as usize
+        self.0.len() <= u8::MAX as usize
     }
 
     pub fn try_from_slice(value: &'a [u8]) -> (result: Result<Self, InputError>)
         ensures
-            result.is_ok() <==> value.len() <= u16::MAX as usize,
+            result.is_ok() <==> value.len() <= u8::MAX as usize,
             result.is_ok() ==> result.unwrap().wf(),
     {
-        if value.len() > u16::MAX as usize {
+        if value.len() > u8::MAX as usize {
             return Err(InputError::KeyTooLarge(value.len()));
         }
         Ok(Self(value))

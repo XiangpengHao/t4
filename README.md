@@ -31,7 +31,7 @@ assert!(removed);
 
 ## Limitations
 
-Currently it only supports files up to 4 GB.
+File name is up to 256 bytes, file size is up to 4 GB.
 
 ## Vision
 

@@ -142,7 +142,7 @@ impl AppendEntry {
                 Self::Tombstone { key } => key.wf(),
             },
         ensures
-            result.len() <= u16::MAX as usize,
+            result.len() <= u8::MAX as usize,
     {
         match self {
             Self::Live { key, .. } | Self::Tombstone { key } => key.as_bytes(),
@@ -254,6 +254,15 @@ impl WalPage {
         page
     }
 
+    pub fn from_bytes(src: Box<[u8; PAGE_SIZE]>) -> (result: Result<Self, WalEntryDecodeError>)
+        requires
+            src.len() == PAGE_SIZE,
+    {
+        let page = Self { bytes: src };
+        page.validate_layout()?;
+        Ok(page)
+    }
+
     fn encode_header(&mut self, h: &WalPageHeader) {
         self.bytes[OFF_MAGIC + 0] = h.magic[0];
         self.bytes[OFF_MAGIC + 1] = h.magic[1];
@@ -297,6 +306,14 @@ impl WalPage {
         )
     }
 
+    fn set_entry_count(&mut self, count: u32) {
+        write_u32_le(&mut self.bytes, OFF_ENTRY_COUNT, count);
+    }
+
+    fn set_used_bytes(&mut self, used: u32) {
+        write_u32_le(&mut self.bytes, OFF_USED_BYTES, used);
+    }
+
     fn magic(&self) -> [u8; 4] {
         [
             self.bytes[OFF_MAGIC + 0],
@@ -306,7 +323,10 @@ impl WalPage {
         ]
     }
 
-    fn used_bytes(&self) -> u32 {
+    fn used_bytes(&self) -> (result: u32)
+    ensures
+        result <= PAGE_SIZE as u32,
+    {
         let used_bytes = u32_from_le_bytes(
             slice_subrange(self.bytes.as_slice(), OFF_USED_BYTES, OFF_USED_BYTES + 4),
         );
@@ -337,13 +357,11 @@ impl WalPage {
         while i < entry_count
             invariant
                 WAL_PAGE_HEADER_SIZE <= cursor <= used_bytes,
-                used_bytes <= self.bytes@.len()
+                used_bytes <= self.bytes@.len(),
             decreases entry_count - i,
         {
             let tail = slice_subrange(self.bytes.as_slice(), cursor, used_bytes);
-            let (entry, consumed) = WalEntryRef::decode_from(
-                tail,
-            )?;
+            let (entry, consumed) = WalEntryRef::decode_from(tail)?;
 
             cursor = cursor + consumed;
             if cursor > used_bytes {
@@ -357,6 +375,53 @@ impl WalPage {
         }
         Ok(())
     }
+
+    // fn append(&mut self, entry: &AppendEntry, lsn: u64) -> Result<bool, WalEntryDecodeError>
+    //     requires
+    //         match entry {
+    //             AppendEntry::Live { key, .. } => key.wf(),
+    //             AppendEntry::Tombstone { key } => key.wf(),
+    //         },
+    // {
+    //     let start = self.used_bytes() as usize;
+    //     let end = start + entry.encoded_len();
+    //     if end > PAGE_SIZE {
+    //         return Ok(false);
+    //     }
+    //     let key = entry.key_bytes();
+    //     let key_len = key.len() as u16;
+
+    //     write_u16_le(&mut self.bytes, start, key_len);
+    //     self.bytes[start + 2] = entry.flags();
+    //     self.bytes[start + 3] = 0;
+    //     write_u64_le(&mut self.bytes, start + 4, entry.offset());
+    //     write_u32_le(&mut self.bytes, start + 12, entry.length());
+    //     write_u64_le(&mut self.bytes, start + 16, lsn);
+    //     copy_into_page(&mut self.bytes, start + 24, key);
+
+    //     let next_entry_count = self.entry_count() + 1;
+    //     self.set_entry_count(next_entry_count);
+    //     self.set_used_bytes(end as u32);
+
+    //     Ok(true)
+    // }
 }
+
+// fn copy_into_page(bytes: &mut [u8; PAGE_SIZE], off: usize, src: &[u8])
+//     requires
+//         off + src.len() <= PAGE_SIZE,
+// {
+//     let mut i = 0;
+
+//     while i < src.len()
+//         invariant
+//             off + src.len() <= PAGE_SIZE,
+//             i <= src.len(),
+//         decreases src.len() - i,
+//     {
+//         bytes[off + i] = src[i];
+//         i = i + 1;
+//     }
+// }
 
 } // verus!
