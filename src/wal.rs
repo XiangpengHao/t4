@@ -8,7 +8,7 @@ use crate::io_worker::IoWorker;
 use crate::sync::{Mutex, MutexGuard};
 use crate::types::{T4Key, T4Value};
 
-use proof_core::align_up_u64;
+use proof_core::{align_up_u64, allocate_next_lsn, reserve_space};
 
 const WAL_PAGE_HEADER_SIZE: usize = 32;
 const ENTRY_HEADER_SIZE: usize = 24;
@@ -300,7 +300,7 @@ struct WalState {
     file_tail: u64,
     tail: WalPage,
     tail_offset: u64,
-    last_lsn: Option<u64>,
+    next_lsn: u64,
 }
 
 pub struct Wal {
@@ -327,7 +327,7 @@ impl Wal {
                 file_tail: PAGE_SIZE_U64,
                 tail: page,
                 tail_offset: 0,
-                last_lsn: None,
+                next_lsn: 0,
             }),
         })
     }
@@ -341,7 +341,7 @@ impl Wal {
         }
 
         let mut index = HashMap::new();
-        let mut last_lsn = None;
+        let mut previous_lsn = None;
         let mut max_data_end = PAGE_SIZE_U64;
         let mut max_wal_end = PAGE_SIZE_U64;
         let mut offset = 0_u64;
@@ -360,7 +360,7 @@ impl Wal {
                     .checked_add(consumed)
                     .ok_or_else(|| Error::Format("entry cursor overflow".into()))?;
 
-                if let Some(prev_lsn) = last_lsn
+                if let Some(prev_lsn) = previous_lsn
                     && entry.lsn() <= prev_lsn
                 {
                     return Err(Error::Format(format!(
@@ -394,7 +394,7 @@ impl Wal {
                     }
                 }
 
-                last_lsn = Some(entry.lsn());
+                previous_lsn = Some(entry.lsn());
             }
 
             if cursor != used {
@@ -410,13 +410,18 @@ impl Wal {
         let highest_used = file_len.max(max_data_end).max(max_wal_end);
         let file_tail = align_up_u64(highest_used, PAGE_SIZE_U64)
             .ok_or_else(|| Error::Format("value overflow while aligning".into()))?;
+        let next_lsn = if let Some(last_lsn) = previous_lsn {
+            allocate_next_lsn(last_lsn).ok_or_else(|| Error::Format("wal lsn overflow".into()))?
+        } else {
+            0
+        };
         let wal = Self {
             io,
             state: Mutex::new(WalState {
                 file_tail,
                 tail: last_page,
                 tail_offset: last_offset,
-                last_lsn,
+                next_lsn,
             }),
         };
         Ok((wal, index))
@@ -464,27 +469,18 @@ impl Wal {
     }
 
     fn reserve_space_locked(state: &mut WalState, len: u32) -> Result<u64> {
-        let offset = state.file_tail;
-        state.file_tail = state
-            .file_tail
-            .checked_add(u64::from(len))
+        let reservation = reserve_space(state.file_tail, len)
             .ok_or_else(|| Error::Format("file tail overflow".into()))?;
-        Ok(offset)
-    }
-
-    fn allocate_next_lsn(last_lsn: Option<u64>) -> Result<u64> {
-        match last_lsn {
-            Some(prev) => prev
-                .checked_add(1)
-                .ok_or_else(|| Error::Format("wal lsn overflow".into())),
-            None => Ok(0),
-        }
+        state.file_tail = reservation.next_tail;
+        Ok(reservation.offset)
     }
 
     async fn append_entry(&self, pending: AppendEntry) -> Result<()> {
         let wal_append = {
             let mut state = self.lock_state()?;
-            let lsn = Self::allocate_next_lsn(state.last_lsn)?;
+            let lsn = state.next_lsn;
+            let next_lsn =
+                allocate_next_lsn(lsn).ok_or_else(|| Error::Format("wal lsn overflow".into()))?;
 
             let writes = if state.tail.can_fit(&pending) {
                 let appended = state.tail.append(&pending, lsn)?;
@@ -509,7 +505,7 @@ impl Wal {
                 vec![old_tail_write, new_page_write]
             };
 
-            state.last_lsn = Some(lsn);
+            state.next_lsn = next_lsn;
             self.io.wal_append(writes)?
         };
 

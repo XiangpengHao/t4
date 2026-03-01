@@ -336,28 +336,27 @@ pub fn reserve_space(file_tail: u64, len: u32) -> (result: Option<SpaceReservati
     })
 }
 
-/// Arithmetic model of `Wal::allocate_next_lsn`.
-pub fn allocate_next_lsn(last_lsn: Option<u64>) -> (result: Option<u64>)
+/// Arithmetic model for advancing `next_lsn`.
+pub fn allocate_next_lsn(next_lsn: u64) -> (result: Option<u64>)
     ensures
-        last_lsn.is_none() ==> result == Some(0u64),
-        last_lsn.is_some() && result.is_some() ==> result.unwrap() > last_lsn.unwrap(),
-        last_lsn.is_some() && last_lsn.unwrap() == u64::MAX ==> result.is_none(),
+        result.is_some() ==> result.unwrap() > next_lsn,
+        result.is_some() ==> result.unwrap() - next_lsn == 1u64,
+        result.is_none() ==> next_lsn == u64::MAX,
 {
-    match last_lsn {
-        Some(prev) => {
-            let next = prev.checked_add(1)?;
+    let next = next_lsn.checked_add(1)?;
 
-            proof {
-                assert(next > prev) by (bit_vector)
-                    requires
-                        next == add(prev, 1),
-                        next > prev;
-            }
-
-            Some(next)
-        }
-        None => Some(0u64),
+    proof {
+        assert(next > next_lsn) by (bit_vector)
+            requires
+                next == add(next_lsn, 1),
+                next > next_lsn;
+        assert(next - next_lsn == 1u64) by (bit_vector)
+            requires
+                next == add(next_lsn, 1),
+                next > next_lsn;
     }
+
+    Some(next)
 }
 
 } // verus!
