@@ -263,6 +263,37 @@ impl Wal {
 mod tests {
     use super::*;
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct DecodedEntry {
+        flags: u8,
+        offset: u64,
+        length: u32,
+        lsn: u64,
+        key: Vec<u8>,
+    }
+
+    fn decode_page_entries(page: &WalPage) -> Vec<DecodedEntry> {
+        let used = page.used_bytes() as usize;
+        let mut cursor = WAL_PAGE_HEADER_SIZE;
+        let mut entries = Vec::with_capacity(page.entry_count() as usize);
+
+        for _ in 0..page.entry_count() {
+            let (entry, consumed) = WalEntryRef::decode_from(&page.as_slice()[cursor..used])
+                .expect("wal page entry should decode");
+            entries.push(DecodedEntry {
+                flags: entry.flags(),
+                offset: entry.offset(),
+                length: entry.length(),
+                lsn: entry.lsn(),
+                key: entry.key_bytes().to_vec(),
+            });
+            cursor += consumed;
+        }
+
+        assert_eq!(cursor, used, "wal page iterator must consume used_bytes");
+        entries
+    }
+
     #[test]
     fn page_round_trip() {
         let mut page = WalPage::empty();
@@ -341,5 +372,54 @@ mod tests {
         assert_eq!(entry.length(), 7);
         assert_eq!(entry.lsn(), 42);
         assert_eq!(entry.key_bytes(), b"k");
+    }
+
+    #[test]
+    fn append_success_makes_entry_observable_via_page_iterator() {
+        let mut page = WalPage::empty();
+        page.append(
+            &AppendEntry::Live {
+                key: T4Key::try_from_vec(b"alpha".to_vec()).unwrap(),
+                offset: 256,
+                length: 3,
+            },
+            1,
+        )
+        .unwrap();
+
+        let appended = AppendEntry::Tombstone {
+            key: T4Key::try_from_vec(b"beta".to_vec()).unwrap(),
+        };
+        let appended_lsn = 2_u64;
+        let before_count = page.entry_count();
+        let before_used = page.used_bytes();
+        let appended_len = appended.encoded_len() as u32;
+
+        assert!(page.append(&appended, appended_lsn).unwrap());
+        assert_eq!(
+            page.entry_count(),
+            before_count + 1,
+            "successful append must increase entry count"
+        );
+        assert_eq!(
+            page.used_bytes(),
+            before_used + appended_len,
+            "successful append must advance used bytes by encoded entry length"
+        );
+
+        let entries = decode_page_entries(&page);
+        assert_eq!(entries.len() as u32, page.entry_count());
+        let last = entries.last().expect("appended entry must be present");
+        assert_eq!(
+            last,
+            &DecodedEntry {
+                flags: FLAG_TOMBSTONE,
+                offset: 0,
+                length: 0,
+                lsn: appended_lsn,
+                key: b"beta".to_vec(),
+            },
+            "iterator view should expose the appended entry as the last record"
+        );
     }
 }
