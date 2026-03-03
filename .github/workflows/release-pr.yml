@@ -61,8 +61,8 @@ jobs:
         with:
           branch: release/v${{ steps.bump.outputs.new_version }}
           delete-branch: true
-          commit-message: release: v${{ steps.bump.outputs.new_version }}
-          title: release: v${{ steps.bump.outputs.new_version }}
+          commit-message: "release: v${{ steps.bump.outputs.new_version }}"
+          title: "release: v${{ steps.bump.outputs.new_version }}"
           labels: release
           body: |
             ## Release Automation
