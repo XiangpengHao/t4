@@ -8,7 +8,7 @@ use crate::le_bytes::{
     u16_from_le_bytes, u32_from_le_bytes, u64_from_le_bytes, write_u16_le, write_u32_le,
     write_u64_le,
 };
-use crate::PAGE_SIZE;
+use crate::{copy_into_page, PAGE_SIZE};
 
 const _: [(); WAL_PAGE_HEADER_SIZE] = [(); std::mem::size_of::<WalPageHeader>()];
 
@@ -71,7 +71,8 @@ impl<'a> WalEntryRef<'a> {
     }
 
     pub closed spec fn key_len_of(src: Seq<u8>) -> u16
-        recommends src.len() >= 2
+        recommends
+            src.len() >= 2,
     {
         ((src[0] as usize) | ((src[1] as usize) << 8)) as u16
     }
@@ -83,6 +84,7 @@ impl<'a> WalEntryRef<'a> {
             ENTRY_HEADER_SIZE as int + Self::key_len_of(src@) as int <= src@.len(),
         ensures
             result.0.wf(),
+            result.1 as int == ENTRY_HEADER_SIZE as int + Self::key_len_of(src@) as int,
             result.1 >= ENTRY_HEADER_SIZE,
             result.1 <= src.len(),
     {
@@ -175,9 +177,9 @@ const OFF_VERSION: usize = 4;
 
 const OFF_NEXT_PAGE: usize = 8;
 
-const OFF_ENTRY_COUNT: usize = 16;
+pub const OFF_ENTRY_COUNT: usize = 16;
 
-const OFF_USED_BYTES: usize = 20;
+pub const OFF_USED_BYTES: usize = 20;
 
 const OFF_LSN: usize = 24;
 
@@ -210,9 +212,78 @@ impl WalPage {
     }
 
     pub closed spec fn wf(self) -> bool {
-        WAL_PAGE_HEADER_SIZE as u32 <= self.used_bytes_spec() <= PAGE_SIZE as u32
-            && self.entry_count_spec() as int * ENTRY_HEADER_SIZE as int
-            <= self.used_bytes_spec() as int
+        let used = self.used_bytes_spec() as int;
+        WAL_PAGE_HEADER_SIZE as int <= used <= PAGE_SIZE as int && self.entry_count_spec() as int
+            * ENTRY_HEADER_SIZE as int <= used && Self::entries_wf(
+            self.bytes@,
+            WAL_PAGE_HEADER_SIZE as int,
+            self.entry_count_spec() as nat,
+            used,
+        )
+    }
+
+    spec fn iter_suffix_wf(self, cursor: int, remaining: nat) -> bool {
+        let used = self.used_bytes_spec() as int;
+        cursor <= used <= PAGE_SIZE as int
+            && Self::entries_wf(self.bytes@, cursor, remaining, used)
+    }
+
+    pub open spec fn entries_wf(bytes: Seq<u8>, cursor: int, remaining: nat, used: int) -> bool
+        decreases remaining,
+    {
+        if remaining == 0 {
+            cursor == used
+        } else {
+            &&cursor + ENTRY_HEADER_SIZE as int <= used <= bytes.len() && WalEntryRef::key_len_of(
+                bytes.subrange(cursor, used),
+            ) as int <= u8::MAX as int && cursor + ENTRY_HEADER_SIZE as int
+                + WalEntryRef::key_len_of(bytes.subrange(cursor, used)) as int <= used
+                && Self::entries_wf(
+                bytes,
+                cursor + ENTRY_HEADER_SIZE as int + WalEntryRef::key_len_of(
+                    bytes.subrange(cursor, used),
+                ) as int,
+                (remaining - 1) as nat,
+                used,
+            )
+        }
+    }
+
+    fn entries_wf_exec(bytes: &[u8], cursor: usize, remaining: u32, used: usize) -> (ok: bool)
+        requires
+            used <= bytes.len(),
+            cursor <= used,
+        ensures
+            ok ==> Self::entries_wf(bytes@, cursor as int, remaining as nat, used as int),
+        decreases remaining,
+    {
+        if remaining == 0 {
+            return cursor == used;
+        }
+
+        if used - cursor < ENTRY_HEADER_SIZE {
+            return false;
+        }
+
+        let tail = slice_subrange(bytes, cursor, used);
+        let key_bytes = slice_subrange(tail, 0, 2);
+        let key_len = u16_from_le_bytes(key_bytes) as usize;
+        if key_len > u8::MAX as usize {
+            return false;
+        }
+
+        let consumed = ENTRY_HEADER_SIZE + key_len;
+        if consumed > tail.len() {
+            return false;
+        }
+
+        let next = cursor + consumed;
+        let ok = Self::entries_wf_exec(bytes, next, remaining - 1, used);
+        if !ok {
+            return false;
+        }
+
+        true
     }
 
     pub fn empty() -> (result: Self)
@@ -237,6 +308,18 @@ impl WalPage {
     pub fn from_bytes(src: Box<[u8; PAGE_SIZE]>) -> (result: Result<Self, WalError>)
         ensures
             result.is_ok() ==> result.unwrap().wf(),
+            result.is_ok() ==> result.unwrap().entry_count_spec() == u32_from_4(
+                src@[OFF_ENTRY_COUNT as int],
+                src@[OFF_ENTRY_COUNT as int + 1],
+                src@[OFF_ENTRY_COUNT as int + 2],
+                src@[OFF_ENTRY_COUNT as int + 3],
+            ),
+            result.is_ok() ==> result.unwrap().used_bytes_spec() == u32_from_4(
+                src@[OFF_USED_BYTES as int],
+                src@[OFF_USED_BYTES as int + 1],
+                src@[OFF_USED_BYTES as int + 2],
+                src@[OFF_USED_BYTES as int + 3],
+            ),
     {
         let page = Self { bytes: src };
 
@@ -258,31 +341,19 @@ impl WalPage {
         let entry_count = u32_from_le_bytes(
             slice_subrange(page.bytes.as_slice(), OFF_ENTRY_COUNT, OFF_ENTRY_COUNT + 4),
         );
-
-        let mut cursor = WAL_PAGE_HEADER_SIZE;
-
-        let mut i = 0;
-        while i < entry_count
-            invariant
-                WAL_PAGE_HEADER_SIZE <= cursor <= used_bytes,
-                used_bytes <= page.bytes@.len(),
-                i as int * ENTRY_HEADER_SIZE as int <= cursor as int,
-            decreases entry_count - i,
-        {
-            let tail = slice_subrange(page.bytes.as_slice(), cursor, used_bytes);
-            let (entry, consumed) = WalEntryRef::try_decode_from(tail)?;
-
-            cursor += consumed;
-            if cursor > used_bytes {
-                return Err(WalError::InvalidPageLayout);
-            }
-            let _ = entry;
-            i += 1;
-        }
-
-        if cursor != used_bytes {
+        if entry_count as usize > used_bytes / ENTRY_HEADER_SIZE {
             return Err(WalError::InvalidPageLayout);
         }
+        let ok = Self::entries_wf_exec(
+            page.bytes.as_slice(),
+            WAL_PAGE_HEADER_SIZE,
+            entry_count,
+            used_bytes,
+        );
+        if !ok {
+            return Err(WalError::InvalidPageLayout);
+        }
+
         Ok(page)
     }
 
@@ -362,10 +433,7 @@ impl WalPage {
         u16_from_le_bytes(slice_subrange(self.bytes.as_slice(), OFF_VERSION, OFF_VERSION + 2))
     }
 
-    pub fn append(&mut self, entry: &AppendEntry, lsn: u64) -> (result: Result<
-        (),
-        WalError,
-    >)
+    pub fn append(&mut self, entry: &AppendEntry, lsn: u64) -> (result: Result<(), WalError>)
         requires
             old(self).wf(),
         ensures
@@ -395,38 +463,72 @@ impl WalPage {
 
         let entry_count = old_entry_count;
 
-        write_u16_le(&mut self.bytes, start, key_len);
-        self.bytes[start + 2] = entry.flags();
-        self.bytes[start + 3] = 0;
-        write_u64_le(&mut self.bytes, start + 4, entry.offset());
-        write_u32_le(&mut self.bytes, start + 12, entry.length());
-        write_u64_le(&mut self.bytes, start + 16, lsn);
-        copy_into_page(&mut self.bytes, start + 24, key);
+        let mut next_bytes = self.bytes.clone();
+        write_u16_le(&mut next_bytes, start, key_len);
+        next_bytes[start + 2] = entry.flags();
+        next_bytes[start + 3] = 0;
+        write_u64_le(&mut next_bytes, start + 4, entry.offset());
+        write_u32_le(&mut next_bytes, start + 12, entry.length());
+        write_u64_le(&mut next_bytes, start + 16, lsn);
+        copy_into_page(&mut next_bytes, start + 24, key);
 
         let next_entry_count = entry_count + 1;
-        write_u32_le(&mut self.bytes, OFF_ENTRY_COUNT, next_entry_count);
+        write_u32_le(&mut next_bytes, OFF_ENTRY_COUNT, next_entry_count);
 
         let end_u32 = end as u32;
-        write_u32_le(&mut self.bytes, OFF_USED_BYTES, end_u32);
+        write_u32_le(&mut next_bytes, OFF_USED_BYTES, end_u32);
+
+        let checked = Self::from_bytes(next_bytes);
+        if checked.is_err() {
+            return Err(WalError::InsufficientSpace);
+        }
+        *self = checked.unwrap();
 
         Ok(())
     }
 }
 
-fn copy_into_page(bytes: &mut [u8; PAGE_SIZE], off: usize, src: &[u8])
-    requires
-        off + src.len() <= PAGE_SIZE,
-{
-    let mut i = 0;
+pub struct WalIter<'a> {
+    page: &'a WalPage,
+    cursor: usize,
+    remaining: u32,
+}
 
-    while i < src.len()
-        invariant
-            off + src.len() <= PAGE_SIZE,
-            i <= src.len(),
-        decreases src.len() - i,
+impl<'a> WalIter<'a> {
+    #[verifier::type_invariant]
+    spec fn type_inv(&self) -> bool {
+        self.page.wf() && self.page.iter_suffix_wf(self.cursor as int, self.remaining as nat)
+    }
+
+    pub fn new(page: &'a WalPage) -> (result: Self)
+        requires
+            page.wf(),
     {
-        bytes[off + i] = src[i];
-        i += 1;
+        let remaining = page.entry_count();
+        Self { page, cursor: WAL_PAGE_HEADER_SIZE, remaining }
+    }
+}
+
+impl<'a> Iterator for WalIter<'a> {
+    type Item = WalEntryRef<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        proof {
+            use_type_invariant(&*self);
+        }
+        if self.remaining == 0 {
+            return None;
+        }
+
+        let used = self.page.used_bytes() as usize;
+        let tail = slice_subrange(self.page.bytes.as_slice(), self.cursor, used);
+
+        let (entry, consumed) = WalEntryRef::decode_from(tail);
+
+        let next_cursor = self.cursor + consumed;
+        let next_remaining = self.remaining - 1;
+        *self = Self { page: self.page, cursor: next_cursor, remaining: next_remaining };
+        Some(entry)
     }
 }
 

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::error::{Error, Result};
-use crate::format::{PAGE_SIZE, PAGE_SIZE_NZ_U32, PAGE_SIZE_U32, PAGE_SIZE_U64};
+use crate::format::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U32, PAGE_SIZE_U64};
 use crate::io::AlignedBuf;
 use crate::io_task::WalWriteOp;
 use crate::io_worker::IoWorker;
@@ -260,6 +260,8 @@ impl Wal {
 
 #[cfg(test)]
 mod tests {
+    use verified::PAGE_SIZE;
+
     use super::*;
 
     #[derive(Debug, Clone, PartialEq, Eq)]

@@ -378,4 +378,21 @@ pub fn allocate_next_lsn(next_lsn: u64) -> (result: Option<u64>)
     Some(next)
 }
 
+pub(crate) fn copy_into_page(bytes: &mut [u8; PAGE_SIZE], off: usize, src: &[u8])
+    requires
+        off + src.len() <= PAGE_SIZE,
+{
+    let mut i = 0;
+
+    while i < src.len()
+        invariant
+            off + src.len() <= PAGE_SIZE,
+            i <= src.len(),
+        decreases src.len() - i,
+    {
+        bytes[off + i] = src[i];
+        i += 1;
+    }
+}
+
 } // verus!
