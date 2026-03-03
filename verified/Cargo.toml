@@ -1,6 +1,6 @@
 [package]
 name = "t4-verified"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Verus specifications and proofs for the t4 storage model."
 repository = "https://github.com/XiangpengHao/btfile"
