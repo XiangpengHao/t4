@@ -2,6 +2,8 @@
 name = "t4"
 version = "0.1.1"
 edition = "2024"
+description = "Local embedded high-performance object store."
+repository = "https://github.com/XiangpengHao/t4"
 
 [workspace]
 members = [".", "fuzz", "verified"]
