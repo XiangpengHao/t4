@@ -82,7 +82,8 @@ impl Wal {
             let used = page.used_bytes() as usize;
             let mut cursor = WAL_PAGE_HEADER_SIZE;
             for _ in 0..page.entry_count() {
-                let (entry, consumed) = WalEntryRef::decode_from(&page.as_slice()[cursor..used])?;
+                let (entry, consumed) =
+                    WalEntryRef::try_decode_from(&page.as_slice()[cursor..used])?;
                 cursor = cursor
                     .checked_add(consumed)
                     .ok_or_else(|| Error::Format("entry cursor overflow".into()))?;
@@ -210,8 +211,7 @@ impl Wal {
                 allocate_next_lsn(lsn).ok_or_else(|| Error::Format("wal lsn overflow".into()))?;
 
             let writes = if state.tail.can_fit(&pending) {
-                let appended = state.tail.append(&pending, lsn)?;
-                debug_assert!(appended, "tail fit check and append diverged");
+                state.tail.append(&pending, lsn)?;
                 vec![self.encode_page_write(state.tail_offset, &state.tail)?]
             } else {
                 let new_page_offset = Self::reserve_space_locked(&mut state, PAGE_SIZE_U32)?;
@@ -221,9 +221,7 @@ impl Wal {
                 let old_tail_write = self.encode_page_write(old_tail_offset, &state.tail)?;
 
                 let mut new_page = WalPage::empty();
-                if !new_page.append(&pending, lsn)? {
-                    return Err(Error::Format("entry does not fit in empty WAL page".into()));
-                }
+                new_page.append(&pending, lsn)?;
                 let new_page_write = self.encode_page_write(new_page_offset, &new_page)?;
 
                 state.tail_offset = new_page_offset;
@@ -278,7 +276,7 @@ mod tests {
         let mut entries = Vec::with_capacity(page.entry_count() as usize);
 
         for _ in 0..page.entry_count() {
-            let (entry, consumed) = WalEntryRef::decode_from(&page.as_slice()[cursor..used])
+            let (entry, consumed) = WalEntryRef::try_decode_from(&page.as_slice()[cursor..used])
                 .expect("wal page entry should decode");
             entries.push(DecodedEntry {
                 flags: entry.flags(),
@@ -298,26 +296,22 @@ mod tests {
     fn page_round_trip() {
         let mut page = WalPage::empty();
         page.set_next_page(8192);
-        assert!(
-            page.append(
-                &AppendEntry::Live {
-                    key: T4Key::try_from_vec(b"alpha".to_vec()).unwrap(),
-                    offset: 4096,
-                    length: 123,
-                },
-                0,
-            )
-            .unwrap()
-        );
-        assert!(
-            page.append(
-                &AppendEntry::Tombstone {
-                    key: T4Key::try_from_vec(b"beta".to_vec()).unwrap(),
-                },
-                1,
-            )
-            .unwrap()
-        );
+        page.append(
+            &AppendEntry::Live {
+                key: T4Key::try_from_vec(b"alpha".to_vec()).unwrap(),
+                offset: 4096,
+                length: 123,
+            },
+            0,
+        )
+        .unwrap();
+        page.append(
+            &AppendEntry::Tombstone {
+                key: T4Key::try_from_vec(b"beta".to_vec()).unwrap(),
+            },
+            1,
+        )
+        .unwrap();
 
         let boxed: Box<[u8; PAGE_SIZE]> = Box::new(page.as_slice().try_into().unwrap());
         // TODO: this is expensive
@@ -338,7 +332,7 @@ mod tests {
                 },
                 i,
             )
-            .unwrap()
+            .is_ok()
         {
             i += 1;
         }
@@ -365,7 +359,7 @@ mod tests {
 
         let used = page.used_bytes() as usize;
         let (entry, _) =
-            WalEntryRef::decode_from(&page.as_slice()[WAL_PAGE_HEADER_SIZE..used]).unwrap();
+            WalEntryRef::try_decode_from(&page.as_slice()[WAL_PAGE_HEADER_SIZE..used]).unwrap();
 
         assert_eq!(entry.flags(), FLAG_LIVE);
         assert_eq!(entry.offset(), 128);
@@ -395,7 +389,7 @@ mod tests {
         let before_used = page.used_bytes();
         let appended_len = appended.encoded_len() as u32;
 
-        assert!(page.append(&appended, appended_lsn).unwrap());
+        page.append(&appended, appended_lsn).unwrap();
         assert_eq!(
             page.entry_count(),
             before_count + 1,
