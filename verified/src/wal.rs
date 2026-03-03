@@ -1,11 +1,13 @@
 use vstd::prelude::*;
 use vstd::slice::slice_subrange;
 
-use crate::input_kv::T4Key;
-use crate::le_bytes::{u16_from_le_bytes, u32_from_le_bytes, u64_from_le_bytes, write_u16_le,
-    write_u32_le, write_u64_le};
+use crate::input_kv::{T4Key, T4KeyRef};
 #[cfg(verus_only)]
 use crate::le_bytes::u32_from_4;
+use crate::le_bytes::{
+    u16_from_le_bytes, u32_from_le_bytes, u64_from_le_bytes, write_u16_le, write_u32_le,
+    write_u64_le,
+};
 use crate::PAGE_SIZE;
 
 const _: [(); WAL_PAGE_HEADER_SIZE] = [(); std::mem::size_of::<WalPageHeader>()];
@@ -25,75 +27,73 @@ pub const MAGIC: [u8; 4] = [0x42, 0x54, 0x46, 0x34];
 pub const VERSION: u16 = 3;
 
 #[derive(Debug)]
-pub enum WalEntryDecodeError {
+pub enum WalError {
     Truncated,
     KeyTruncated,
+    KeyTooLarge,
     InvalidPageLayout,
     InsufficientSpace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalEntryRef<'a> {
-    bytes: &'a [u8],
+    pub flags: u8,
+    pub offset: u64,
+    pub value_length: u32,
+    pub lsn: u64,
+    pub key: T4KeyRef<'a>,
 }
 
 impl<'a> WalEntryRef<'a> {
-    pub fn try_decode_from(src: &'a [u8]) -> (result: Result<(Self, usize), WalEntryDecodeError>)
+    pub fn try_decode_from(src: &'a [u8]) -> (result: Result<(Self, usize), WalError>)
         ensures
             result.is_ok() ==> {
                 let consumed = result.unwrap().1;
                 consumed >= ENTRY_HEADER_SIZE && consumed <= src.len() && result.unwrap().0.wf()
             },
-            result.is_err() ==> true,
     {
         if src.len() < ENTRY_HEADER_SIZE {
-            return Err(WalEntryDecodeError::Truncated);
+            return Err(WalError::Truncated);
         }
         let key_len = u16_from_le_bytes(slice_subrange(src, 0, 2)) as usize;
         let total = ENTRY_HEADER_SIZE + key_len;
         if src.len() < total {
-            return Err(WalEntryDecodeError::KeyTruncated);
+            return Err(WalError::KeyTruncated);
         }
-        Ok((Self { bytes: slice_subrange(src, 0, total) }, total))
+        if key_len > u8::MAX as usize {
+            return Err(WalError::KeyTooLarge);
+        }
+        Ok(Self::decode_from(src))
     }
 
     pub closed spec fn wf(self) -> bool {
-        self.bytes@.len() >= ENTRY_HEADER_SIZE as int
+        self.key.wf()
     }
 
-    pub fn flags(self) -> u8
-        requires
-            self.wf(),
+    pub closed spec fn key_len_of(src: Seq<u8>) -> u16
+        recommends src.len() >= 2
     {
-        self.bytes[2]
+        ((src[0] as usize) | ((src[1] as usize) << 8)) as u16
     }
 
-    pub fn offset(self) -> u64
+    pub fn decode_from(src: &'a [u8]) -> (result: (Self, usize))
         requires
-            self.wf(),
+            src@.len() >= ENTRY_HEADER_SIZE as int,
+            Self::key_len_of(src@) as int <= u8::MAX as int,
+            ENTRY_HEADER_SIZE as int + Self::key_len_of(src@) as int <= src@.len(),
+        ensures
+            result.0.wf(),
+            result.1 >= ENTRY_HEADER_SIZE,
+            result.1 <= src.len(),
     {
-        u64_from_le_bytes(slice_subrange(self.bytes, 4, 12))
-    }
-
-    pub fn length(self) -> u32
-        requires
-            self.wf(),
-    {
-        u32_from_le_bytes(slice_subrange(self.bytes, 12, 16))
-    }
-
-    pub fn lsn(self) -> u64
-        requires
-            self.wf(),
-    {
-        u64_from_le_bytes(slice_subrange(self.bytes, 16, 24))
-    }
-
-    pub fn key_bytes(self) -> &'a [u8]
-        requires
-            self.wf(),
-    {
-        slice_subrange(self.bytes, ENTRY_HEADER_SIZE, self.bytes.len())
+        let key_len = u16_from_le_bytes(slice_subrange(src, 0, 2)) as usize;
+        let total = ENTRY_HEADER_SIZE + key_len;
+        let flags = src[2];
+        let offset = u64_from_le_bytes(slice_subrange(src, 4, 12));
+        let value_length = u32_from_le_bytes(slice_subrange(src, 12, 16));
+        let lsn = u64_from_le_bytes(slice_subrange(src, 16, 24));
+        let key = T4KeyRef::from_slice(slice_subrange(src, ENTRY_HEADER_SIZE, total));
+        (Self { flags, offset, value_length, lsn, key }, total)
     }
 }
 
@@ -234,7 +234,7 @@ impl WalPage {
         Self { bytes }
     }
 
-    pub fn from_bytes(src: Box<[u8; PAGE_SIZE]>) -> (result: Result<Self, WalEntryDecodeError>)
+    pub fn from_bytes(src: Box<[u8; PAGE_SIZE]>) -> (result: Result<Self, WalError>)
         ensures
             result.is_ok() ==> result.unwrap().wf(),
     {
@@ -244,15 +244,15 @@ impl WalPage {
             slice_subrange(page.bytes.as_slice(), OFF_USED_BYTES, OFF_USED_BYTES + 4),
         );
         if used_bytes_u32 < WAL_PAGE_HEADER_SIZE as u32 || used_bytes_u32 > PAGE_SIZE as u32 {
-            return Err(WalEntryDecodeError::InvalidPageLayout);
+            return Err(WalError::InvalidPageLayout);
         }
         let magic = page.magic();
         if !magic_matches(&magic) {
-            return Err(WalEntryDecodeError::InvalidPageLayout);
+            return Err(WalError::InvalidPageLayout);
         }
         let version = page.version();
         if version != VERSION {
-            return Err(WalEntryDecodeError::InvalidPageLayout);
+            return Err(WalError::InvalidPageLayout);
         }
         let used_bytes = used_bytes_u32 as usize;
         let entry_count = u32_from_le_bytes(
@@ -274,14 +274,14 @@ impl WalPage {
 
             cursor += consumed;
             if cursor > used_bytes {
-                return Err(WalEntryDecodeError::InvalidPageLayout);
+                return Err(WalError::InvalidPageLayout);
             }
             let _ = entry;
             i += 1;
         }
 
         if cursor != used_bytes {
-            return Err(WalEntryDecodeError::InvalidPageLayout);
+            return Err(WalError::InvalidPageLayout);
         }
         Ok(page)
     }
@@ -364,7 +364,7 @@ impl WalPage {
 
     pub fn append(&mut self, entry: &AppendEntry, lsn: u64) -> (result: Result<
         (),
-        WalEntryDecodeError,
+        WalError,
     >)
         requires
             old(self).wf(),
@@ -376,7 +376,7 @@ impl WalPage {
             result.is_err() ==> self.used_bytes_spec() == old(self).used_bytes_spec(),
             result.is_err() ==> self.entry_count_spec() == old(self).entry_count_spec(),
             result.is_err() ==> self.used_bytes_spec() == old(self).used_bytes_spec(),
-            result.is_err() ==> result.unwrap_err() == WalEntryDecodeError::InsufficientSpace,
+            result.is_err() ==> result.unwrap_err() == WalError::InsufficientSpace,
     {
         let old_used = self.used_bytes();
         let old_entry_count = self.entry_count();
@@ -385,11 +385,11 @@ impl WalPage {
         let key_len = key.len() as u16;
 
         if start > PAGE_SIZE - ENTRY_HEADER_SIZE {
-            return Err(WalEntryDecodeError::InsufficientSpace);
+            return Err(WalError::InsufficientSpace);
         }
         let header_end = start + ENTRY_HEADER_SIZE;
         if key.len() > PAGE_SIZE - header_end {
-            return Err(WalEntryDecodeError::InsufficientSpace);
+            return Err(WalError::InsufficientSpace);
         }
         let end = header_end + key.len();
 

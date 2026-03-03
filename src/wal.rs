@@ -89,30 +89,30 @@ impl Wal {
                     .ok_or_else(|| Error::Format("entry cursor overflow".into()))?;
 
                 if let Some(prev_lsn) = previous_lsn
-                    && entry.lsn() <= prev_lsn
+                    && entry.lsn <= prev_lsn
                 {
                     return Err(Error::Format(format!(
                         "non-monotonic wal lsn: previous {prev_lsn}, got {}",
-                        entry.lsn()
+                        entry.lsn
                     )));
                 }
 
-                match entry.flags() {
+                match entry.flags {
                     FLAG_TOMBSTONE => {
-                        index.remove(entry.key_bytes());
+                        index.remove(entry.key.as_bytes());
                     }
                     FLAG_LIVE => {
                         index.insert(
-                            T4Key::try_from_vec(entry.key_bytes().to_vec())?,
+                            T4Key::try_from_vec(entry.key.as_bytes().to_vec())?,
                             ValueRef {
-                                offset: entry.offset(),
-                                length: entry.length(),
+                                offset: entry.offset,
+                                length: entry.value_length,
                             },
                         );
-                        let padded_len = align_up_u64(u64::from(entry.length()), PAGE_SIZE_U64)
+                        let padded_len = align_up_u64(u64::from(entry.value_length), PAGE_SIZE_U64)
                             .ok_or_else(|| Error::Format("value overflow while aligning".into()))?;
                         let data_end = entry
-                            .offset()
+                            .offset
                             .checked_add(padded_len)
                             .ok_or_else(|| Error::Format("value offset overflow".into()))?;
                         max_data_end = max_data_end.max(data_end);
@@ -122,7 +122,7 @@ impl Wal {
                     }
                 }
 
-                previous_lsn = Some(entry.lsn());
+                previous_lsn = Some(entry.lsn);
             }
 
             if cursor != used {
@@ -247,8 +247,9 @@ impl Wal {
     async fn read_page(io: &IoWorker, offset: u64) -> Result<WalPage> {
         let buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32)?;
         let buf = io.read_exact_at(buf, offset).await?;
-        let boxed: Box<[u8; PAGE_SIZE]> = Box::new(buf.as_slice().try_into().unwrap());
-        // TODO: this is expensive
+        let boxed = buf
+            .try_into_boxed_array()
+            .expect("invalid aligned buffer layout");
         Ok(WalPage::from_bytes(boxed)?)
     }
 }
@@ -279,11 +280,11 @@ mod tests {
             let (entry, consumed) = WalEntryRef::try_decode_from(&page.as_slice()[cursor..used])
                 .expect("wal page entry should decode");
             entries.push(DecodedEntry {
-                flags: entry.flags(),
-                offset: entry.offset(),
-                length: entry.length(),
-                lsn: entry.lsn(),
-                key: entry.key_bytes().to_vec(),
+                flags: entry.flags,
+                offset: entry.offset,
+                length: entry.value_length,
+                lsn: entry.lsn,
+                key: entry.key.as_bytes().to_vec(),
             });
             cursor += consumed;
         }
@@ -314,7 +315,6 @@ mod tests {
         .unwrap();
 
         let boxed: Box<[u8; PAGE_SIZE]> = Box::new(page.as_slice().try_into().unwrap());
-        // TODO: this is expensive
         let decoded = WalPage::from_bytes(boxed).unwrap();
         assert_eq!(decoded.as_slice(), page.as_slice());
     }
@@ -361,11 +361,11 @@ mod tests {
         let (entry, _) =
             WalEntryRef::try_decode_from(&page.as_slice()[WAL_PAGE_HEADER_SIZE..used]).unwrap();
 
-        assert_eq!(entry.flags(), FLAG_LIVE);
-        assert_eq!(entry.offset(), 128);
-        assert_eq!(entry.length(), 7);
-        assert_eq!(entry.lsn(), 42);
-        assert_eq!(entry.key_bytes(), b"k");
+        assert_eq!(entry.flags, FLAG_LIVE);
+        assert_eq!(entry.offset, 128);
+        assert_eq!(entry.value_length, 7);
+        assert_eq!(entry.lsn, 42);
+        assert_eq!(entry.key.as_bytes(), b"k");
     }
 
     #[test]

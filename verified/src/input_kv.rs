@@ -103,6 +103,15 @@ impl<'a> T4KeyRef<'a> {
         self.0.len() <= u8::MAX as usize
     }
 
+    pub fn from_slice(value: &'a [u8]) -> (result: Self)
+        requires
+            value.len() <= u8::MAX as usize,
+        ensures
+            result.wf(),
+    {
+        Self(value)
+    }
+
     pub fn try_from_slice(value: &'a [u8]) -> (result: Result<Self, InputError>)
         ensures
             result.is_ok() <==> value.len() <= u8::MAX as usize,

@@ -88,6 +88,19 @@ impl AlignedBuf {
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), self.len()) }
     }
+
+    pub fn try_into_boxed_array(self) -> Result<Box<[u8; PAGE_SIZE]>> {
+        if self.len() != PAGE_SIZE {
+            return Err(Error::InvalidArgument("invalid aligned buffer layout"));
+        }
+        if self.layout.align() != PAGE_SIZE {
+            return Err(Error::InvalidArgument("invalid aligned buffer layout"));
+        }
+        let ptr = self.ptr.as_ptr();
+        let boxed = unsafe { Box::from_raw(ptr as *mut [u8; PAGE_SIZE]) };
+        std::mem::forget(self);
+        Ok(boxed)
+    }
 }
 
 impl Drop for AlignedBuf {

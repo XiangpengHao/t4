@@ -35,9 +35,9 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl From<verified::wal::WalEntryDecodeError> for Error {
-    fn from(value: verified::wal::WalEntryDecodeError) -> Self {
-        Self::Format(format!("wal entry decode error: {:?}", value))
+impl From<verified::wal::WalError> for Error {
+    fn from(value: verified::wal::WalError) -> Self {
+        Self::Format(format!("wal entry error: {:?}", value))
     }
 }
 
