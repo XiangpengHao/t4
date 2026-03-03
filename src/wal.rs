@@ -8,10 +8,8 @@ use crate::io_worker::IoWorker;
 use crate::sync::{Mutex, MutexGuard};
 
 use verified::input_kv::{T4Key, T4Value};
-use verified::wal::{AppendEntry, WalEntryRef, WalPage};
+use verified::wal::{AppendEntry, WalPage};
 use verified::{align_up_u64, allocate_next_lsn, reserve_space};
-
-const WAL_PAGE_HEADER_SIZE: usize = 32;
 
 const FLAG_LIVE: u8 = 0;
 const FLAG_TOMBSTONE: u8 = 1;
@@ -79,15 +77,7 @@ impl Wal {
                 .ok_or_else(|| Error::Format("wal page offset overflow".into()))?;
             max_wal_end = max_wal_end.max(wal_end);
 
-            let used = page.used_bytes() as usize;
-            let mut cursor = WAL_PAGE_HEADER_SIZE;
-            for _ in 0..page.entry_count() {
-                let (entry, consumed) =
-                    WalEntryRef::try_decode_from(&page.as_slice()[cursor..used])?;
-                cursor = cursor
-                    .checked_add(consumed)
-                    .ok_or_else(|| Error::Format("entry cursor overflow".into()))?;
-
+            for entry in page.iter() {
                 if let Some(prev_lsn) = previous_lsn
                     && entry.lsn <= prev_lsn
                 {
@@ -123,10 +113,6 @@ impl Wal {
                 }
 
                 previous_lsn = Some(entry.lsn);
-            }
-
-            if cursor != used {
-                return Err(Error::Format("WAL page has trailing garbage bytes".into()));
             }
 
             if page.next_page() == 0 {
@@ -274,25 +260,15 @@ mod tests {
     }
 
     fn decode_page_entries(page: &WalPage) -> Vec<DecodedEntry> {
-        let used = page.used_bytes() as usize;
-        let mut cursor = WAL_PAGE_HEADER_SIZE;
-        let mut entries = Vec::with_capacity(page.entry_count() as usize);
-
-        for _ in 0..page.entry_count() {
-            let (entry, consumed) = WalEntryRef::try_decode_from(&page.as_slice()[cursor..used])
-                .expect("wal page entry should decode");
-            entries.push(DecodedEntry {
+        page.iter()
+            .map(|entry| DecodedEntry {
                 flags: entry.flags,
                 offset: entry.offset,
                 length: entry.value_length,
                 lsn: entry.lsn,
                 key: entry.key.as_bytes().to_vec(),
-            });
-            cursor += consumed;
-        }
-
-        assert_eq!(cursor, used, "wal page iterator must consume used_bytes");
-        entries
+            })
+            .collect()
     }
 
     #[test]
@@ -359,9 +335,7 @@ mod tests {
         )
         .unwrap();
 
-        let used = page.used_bytes() as usize;
-        let (entry, _) =
-            WalEntryRef::try_decode_from(&page.as_slice()[WAL_PAGE_HEADER_SIZE..used]).unwrap();
+        let entry = page.iter().next().expect("page should have one entry");
 
         assert_eq!(entry.flags, FLAG_LIVE);
         assert_eq!(entry.offset, 128);

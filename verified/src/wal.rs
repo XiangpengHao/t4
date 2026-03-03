@@ -77,7 +77,7 @@ impl<'a> WalEntryRef<'a> {
         ((src[0] as usize) | ((src[1] as usize) << 8)) as u16
     }
 
-    pub fn decode_from(src: &'a [u8]) -> (result: (Self, usize))
+    pub(crate) fn decode_from(src: &'a [u8]) -> (result: (Self, usize))
         requires
             src@.len() >= ENTRY_HEADER_SIZE as int,
             Self::key_len_of(src@) as int <= u8::MAX as int,
@@ -224,8 +224,7 @@ impl WalPage {
 
     spec fn iter_suffix_wf(self, cursor: int, remaining: nat) -> bool {
         let used = self.used_bytes_spec() as int;
-        cursor <= used <= PAGE_SIZE as int
-            && Self::entries_wf(self.bytes@, cursor, remaining, used)
+        cursor <= used <= PAGE_SIZE as int && Self::entries_wf(self.bytes@, cursor, remaining, used)
     }
 
     pub open spec fn entries_wf(bytes: Seq<u8>, cursor: int, remaining: nat, used: int) -> bool
@@ -260,29 +259,24 @@ impl WalPage {
         if remaining == 0 {
             return cursor == used;
         }
-
         if used - cursor < ENTRY_HEADER_SIZE {
             return false;
         }
-
         let tail = slice_subrange(bytes, cursor, used);
         let key_bytes = slice_subrange(tail, 0, 2);
         let key_len = u16_from_le_bytes(key_bytes) as usize;
         if key_len > u8::MAX as usize {
             return false;
         }
-
         let consumed = ENTRY_HEADER_SIZE + key_len;
         if consumed > tail.len() {
             return false;
         }
-
         let next = cursor + consumed;
         let ok = Self::entries_wf_exec(bytes, next, remaining - 1, used);
         if !ok {
             return false;
         }
-
         true
     }
 
@@ -353,7 +347,6 @@ impl WalPage {
         if !ok {
             return Err(WalError::InvalidPageLayout);
         }
-
         Ok(page)
     }
 
@@ -486,6 +479,13 @@ impl WalPage {
 
         Ok(())
     }
+
+    pub fn iter<'a>(&'a self) -> WalIter<'a>
+        requires
+            self.wf(),
+    {
+        WalIter::new(self)
+    }
 }
 
 pub struct WalIter<'a> {
@@ -500,7 +500,7 @@ impl<'a> WalIter<'a> {
         self.page.wf() && self.page.iter_suffix_wf(self.cursor as int, self.remaining as nat)
     }
 
-    pub fn new(page: &'a WalPage) -> (result: Self)
+    pub(crate) fn new(page: &'a WalPage) -> (result: Self)
         requires
             page.wf(),
     {
@@ -519,7 +519,6 @@ impl<'a> Iterator for WalIter<'a> {
         if self.remaining == 0 {
             return None;
         }
-
         let used = self.page.used_bytes() as usize;
         let tail = slice_subrange(self.page.bytes.as_slice(), self.cursor, used);
 
