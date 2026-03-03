@@ -536,7 +536,7 @@ dependencies = [
 
 [[package]]
 name = "t4"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "io-uring",
  "libc",
@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "t4-verified"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "vstd",
 ]
