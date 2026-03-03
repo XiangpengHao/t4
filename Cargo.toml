@@ -3,6 +3,7 @@ name = "t4"
 version = "0.1.2"
 edition = "2024"
 description = "Local embedded high-performance object store."
+license = "Apache-2.0"
 repository = "https://github.com/XiangpengHao/t4"
 
 [workspace]

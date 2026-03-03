@@ -3,6 +3,7 @@ name = "t4-verified"
 version = "0.1.2"
 edition = "2021"
 description = "Verus specifications and proofs for the t4 storage model."
+license = "Apache-2.0"
 repository = "https://github.com/XiangpengHao/btfile"
 
 [dependencies]
