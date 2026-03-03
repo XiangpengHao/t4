@@ -33,4 +33,4 @@ jobs:
         run: nix develop -c cargo test --all-features
 
       - name: Run proof check
-        run: nix develop -c cargo verus verify -p verified
+        run: nix develop -c cargo verus verify -p t4-verified

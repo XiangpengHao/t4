@@ -1,0 +1,75 @@
+name: Release PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: SemVer increment to apply
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  open-release-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Bump crate versions
+        id: bump
+        run: |
+          current_version="$(sed -nE 's/^version = "([0-9]+\.[0-9]+\.[0-9]+)"/\1/p' Cargo.toml | head -n1)"
+          IFS='.' read -r major minor patch <<< "$current_version"
+
+          case "${{ inputs.release_type }}" in
+            patch)
+              patch=$((patch + 1))
+              ;;
+            minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+          esac
+
+          new_version="${major}.${minor}.${patch}"
+
+          sed -i -E 's/^version = "[0-9]+\.[0-9]+\.[0-9]+"$/version = "'"${new_version}"'"/' Cargo.toml
+          sed -i -E 's/^version = "[0-9]+\.[0-9]+\.[0-9]+"$/version = "'"${new_version}"'"/' verified/Cargo.toml
+          sed -i -E 's#^verified = \{ package = "t4-verified", version = "[0-9]+\.[0-9]+\.[0-9]+", path = "verified" \}$#verified = { package = "t4-verified", version = "'"${new_version}"'", path = "verified" }#' Cargo.toml
+
+          echo "new_version=${new_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Refresh lockfile
+        run: cargo check --workspace --all-targets
+
+      - name: Open release pull request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: release/v${{ steps.bump.outputs.new_version }}
+          delete-branch: true
+          commit-message: release: v${{ steps.bump.outputs.new_version }}
+          title: release: v${{ steps.bump.outputs.new_version }}
+          labels: release
+          body: |
+            ## Release Automation
+
+            - Bumps `t4` and `t4-verified` to `${{ steps.bump.outputs.new_version }}`.
+            - Updates `t4` dependency pin for `t4-verified`.
+            - Refreshes `Cargo.lock`.
+            - After this PR merges into `main`, `.github/workflows/publish-crates.yml` publishes to crates.io.
+
+            Trigger: `${{ github.workflow }}` with `release_type=${{ inputs.release_type }}`.

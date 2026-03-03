@@ -14,7 +14,7 @@ shuttle = ["dep:shuttle"]
 libc = "0.2"
 io-uring = "0.7"
 shuttle = { version = "0.8", optional = true }
-verified = { path = "verified" }
+verified = { package = "t4-verified", version = "0.1.0", path = "verified" }
 
 [dev-dependencies]
 pollster = "0.4"

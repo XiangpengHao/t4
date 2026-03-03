@@ -213,20 +213,6 @@ impl RangeRequestU32 {
             result.is_some() ==> result.unwrap().end - start == len,
     {
         let end = start.checked_add(len)?;
-
-        proof {
-            assert(end >= start) by (bit_vector)
-                requires
-                    end == add(start, len),
-                    end >= start,
-            ;
-            assert(end - start == len) by (bit_vector)
-                requires
-                    end == add(start, len),
-                    end >= start,
-            ;
-        }
-
         Some(Self { start, len, end })
     }
 
@@ -336,20 +322,6 @@ pub fn reserve_space(file_tail: u64, len: u32) -> (result: Option<SpaceReservati
         result.is_some() ==> result.unwrap().next_tail - file_tail == len as u64,
 {
     let next_tail = file_tail.checked_add(len as u64)?;
-
-    proof {
-        assert(next_tail >= file_tail) by (bit_vector)
-            requires
-                next_tail == add(file_tail, len as u64),
-                next_tail >= file_tail,
-        ;
-        assert(next_tail - file_tail == len as u64) by (bit_vector)
-            requires
-                next_tail == add(file_tail, len as u64),
-                next_tail >= file_tail,
-        ;
-    }
-
     Some(SpaceReservation { offset: file_tail, next_tail, len })
 }
 
@@ -361,20 +333,6 @@ pub fn allocate_next_lsn(next_lsn: u64) -> (result: Option<u64>)
         result.is_none() ==> next_lsn == u64::MAX,
 {
     let next = next_lsn.checked_add(1)?;
-
-    proof {
-        assert(next > next_lsn) by (bit_vector)
-            requires
-                next == add(next_lsn, 1),
-                next > next_lsn,
-        ;
-        assert(next - next_lsn == 1u64) by (bit_vector)
-            requires
-                next == add(next_lsn, 1),
-                next > next_lsn,
-        ;
-    }
-
     Some(next)
 }
 
