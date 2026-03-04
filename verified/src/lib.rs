@@ -1,5 +1,6 @@
 pub mod input_kv;
 pub mod le_bytes;
+pub mod wal_replay;
 pub mod wal;
 
 pub const MAGIC: [u8; 4] = *b"BTF4";
@@ -71,6 +72,7 @@ pub fn align_up_u64(value: u64, alignment: u64) -> (result: Option<u64>)
         result.is_some() ==> result.unwrap() & sub(alignment, 1) == 0,
         result.is_some() ==> result.unwrap() - value < alignment,
         result.is_some() ==> (value & sub(alignment, 1) == 0 ==> result.unwrap() == value),
+        result.is_none() ==> value + alignment > u64::MAX,
 {
     let mask = alignment - 1;
     let sum = value.checked_add(mask)?;

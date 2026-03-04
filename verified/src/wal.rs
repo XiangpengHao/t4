@@ -37,11 +37,11 @@ pub enum WalError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalEntryRef<'a> {
-    pub flags: u8,
-    pub offset: u64,
-    pub value_length: u32,
-    pub lsn: u64,
-    pub key: T4KeyRef<'a>,
+    pub(crate) flags: u8,
+    pub(crate) offset: u64,
+    pub(crate) value_length: u32,
+    pub(crate) lsn: u64,
+    pub(crate) key: T4KeyRef<'a>,
 }
 
 impl<'a> WalEntryRef<'a> {
@@ -66,6 +66,7 @@ impl<'a> WalEntryRef<'a> {
         Ok(Self::decode_from(src))
     }
 
+    #[verifier::type_invariant]
     pub closed spec fn wf(self) -> bool {
         self.key.wf()
     }
@@ -368,7 +369,7 @@ impl WalPage {
         WalPageHeader { magic, version, next_page, entry_count, used_bytes, lsn }
     }
 
-    pub fn next_page(&self) -> u64 {
+    pub(crate) fn next_page(&self) -> u64 {
         u64_from_le_bytes(slice_subrange(self.bytes.as_slice(), OFF_NEXT_PAGE, OFF_NEXT_PAGE + 8))
     }
 
@@ -507,12 +508,21 @@ impl<'a> WalIter<'a> {
         let remaining = page.entry_count();
         Self { page, cursor: WAL_PAGE_HEADER_SIZE, remaining }
     }
+
+    pub closed spec fn remaining(&self) -> u32 {
+        self.remaining
+    }
 }
 
 impl<'a> Iterator for WalIter<'a> {
     type Item = WalEntryRef<'a>;
 
-    fn next(&mut self) -> Option<Self::Item> {
+    fn next(&mut self) -> (result: Option<Self::Item>)
+        ensures
+            result.is_some() ==> self.remaining() < old(self).remaining(),
+            result.is_some() ==> result.unwrap().wf(),
+            result.is_none() ==> self.remaining() == 0,
+    {
         proof {
             use_type_invariant(&*self);
         }

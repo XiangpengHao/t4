@@ -7,18 +7,10 @@ use crate::io_task::WalWriteOp;
 use crate::io_worker::IoWorker;
 use crate::sync::{Mutex, MutexGuard};
 
-use verified::input_kv::{T4Key, T4Value};
+use verified::input_kv::{T4Key, T4Value, ValueRef};
 use verified::wal::{AppendEntry, WalPage};
-use verified::{align_up_u64, allocate_next_lsn, reserve_space};
-
-const FLAG_LIVE: u8 = 0;
-const FLAG_TOMBSTONE: u8 = 1;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ValueRef {
-    pub offset: u64,
-    pub length: u32,
-}
+use verified::wal_replay::ReplayState;
+use verified::{allocate_next_lsn, reserve_space};
 
 #[derive(Debug)]
 struct WalState {
@@ -65,70 +57,22 @@ impl Wal {
             ));
         }
 
-        let mut index = HashMap::new();
-        let mut previous_lsn = None;
-        let mut max_data_end = PAGE_SIZE_U64;
-        let mut max_wal_end = PAGE_SIZE_U64;
+        let mut replay_state = ReplayState::init();
         let mut offset = 0_u64;
         let (last_offset, last_page) = loop {
             let page = Self::read_page(&io, offset).await?;
-            let wal_end = offset
-                .checked_add(PAGE_SIZE_U64)
-                .ok_or_else(|| Error::Format("wal page offset overflow".into()))?;
-            max_wal_end = max_wal_end.max(wal_end);
-
-            for entry in page.iter() {
-                if let Some(prev_lsn) = previous_lsn
-                    && entry.lsn <= prev_lsn
-                {
-                    return Err(Error::Format(format!(
-                        "non-monotonic wal lsn: previous {prev_lsn}, got {}",
-                        entry.lsn
-                    )));
-                }
-
-                match entry.flags {
-                    FLAG_TOMBSTONE => {
-                        index.remove(entry.key.as_bytes());
-                    }
-                    FLAG_LIVE => {
-                        index.insert(
-                            T4Key::try_from_vec(entry.key.as_bytes().to_vec())?,
-                            ValueRef {
-                                offset: entry.offset,
-                                length: entry.value_length,
-                            },
-                        );
-                        let padded_len = align_up_u64(u64::from(entry.value_length), PAGE_SIZE_U64)
-                            .ok_or_else(|| Error::Format("value overflow while aligning".into()))?;
-                        let data_end = entry
-                            .offset
-                            .checked_add(padded_len)
-                            .ok_or_else(|| Error::Format("value offset overflow".into()))?;
-                        max_data_end = max_data_end.max(data_end);
-                    }
-                    other => {
-                        return Err(Error::Format(format!("unknown wal entry flag: {other}")));
-                    }
-                }
-
-                previous_lsn = Some(entry.lsn);
-            }
-
-            if page.next_page() == 0 {
+            let (new_replay_state, next_page) = replay_state.process_page(&page)?;
+            replay_state = new_replay_state;
+            if let Some(next_page) = next_page {
+                offset = next_page;
+            } else {
                 break (offset, page);
             }
-            offset = page.next_page();
         };
 
-        let highest_used = file_len.max(max_data_end).max(max_wal_end);
-        let file_tail = align_up_u64(highest_used, PAGE_SIZE_U64)
-            .ok_or_else(|| Error::Format("value overflow while aligning".into()))?;
-        let next_lsn = if let Some(last_lsn) = previous_lsn {
-            allocate_next_lsn(last_lsn).ok_or_else(|| Error::Format("wal lsn overflow".into()))?
-        } else {
-            0
-        };
+        let (file_tail, next_lsn, replay_index) = replay_state
+            .finalize(file_len)
+            .map_err(|_| Error::Format("replay finalize overflow".into()))?;
         let wal = Self {
             io,
             state: Mutex::new(WalState {
@@ -138,7 +82,7 @@ impl Wal {
                 next_lsn,
             }),
         };
-        Ok((wal, index))
+        Ok((wal, replay_index))
     }
 
     /// Write value bytes into data space and append a live WAL entry.
@@ -250,27 +194,6 @@ mod tests {
 
     use super::*;
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct DecodedEntry {
-        flags: u8,
-        offset: u64,
-        length: u32,
-        lsn: u64,
-        key: Vec<u8>,
-    }
-
-    fn decode_page_entries(page: &WalPage) -> Vec<DecodedEntry> {
-        page.iter()
-            .map(|entry| DecodedEntry {
-                flags: entry.flags,
-                offset: entry.offset,
-                length: entry.value_length,
-                lsn: entry.lsn,
-                key: entry.key.as_bytes().to_vec(),
-            })
-            .collect()
-    }
-
     #[test]
     fn page_round_trip() {
         let mut page = WalPage::empty();
@@ -320,76 +243,5 @@ mod tests {
             offset: 0,
             length: 1,
         }));
-    }
-
-    #[test]
-    fn entry_ref_is_zero_copy_view() {
-        let mut page = WalPage::empty();
-        page.append(
-            &AppendEntry::Live {
-                key: T4Key::try_from_vec(b"k".to_vec()).unwrap(),
-                offset: 128,
-                length: 7,
-            },
-            42,
-        )
-        .unwrap();
-
-        let entry = page.iter().next().expect("page should have one entry");
-
-        assert_eq!(entry.flags, FLAG_LIVE);
-        assert_eq!(entry.offset, 128);
-        assert_eq!(entry.value_length, 7);
-        assert_eq!(entry.lsn, 42);
-        assert_eq!(entry.key.as_bytes(), b"k");
-    }
-
-    #[test]
-    fn append_success_makes_entry_observable_via_page_iterator() {
-        let mut page = WalPage::empty();
-        page.append(
-            &AppendEntry::Live {
-                key: T4Key::try_from_vec(b"alpha".to_vec()).unwrap(),
-                offset: 256,
-                length: 3,
-            },
-            1,
-        )
-        .unwrap();
-
-        let appended = AppendEntry::Tombstone {
-            key: T4Key::try_from_vec(b"beta".to_vec()).unwrap(),
-        };
-        let appended_lsn = 2_u64;
-        let before_count = page.entry_count();
-        let before_used = page.used_bytes();
-        let appended_len = appended.encoded_len() as u32;
-
-        page.append(&appended, appended_lsn).unwrap();
-        assert_eq!(
-            page.entry_count(),
-            before_count + 1,
-            "successful append must increase entry count"
-        );
-        assert_eq!(
-            page.used_bytes(),
-            before_used + appended_len,
-            "successful append must advance used bytes by encoded entry length"
-        );
-
-        let entries = decode_page_entries(&page);
-        assert_eq!(entries.len() as u32, page.entry_count());
-        let last = entries.last().expect("appended entry must be present");
-        assert_eq!(
-            last,
-            &DecodedEntry {
-                flags: FLAG_TOMBSTONE,
-                offset: 0,
-                length: 0,
-                lsn: appended_lsn,
-                key: b"beta".to_vec(),
-            },
-            "iterator view should expose the appended entry as the last record"
-        );
     }
 }

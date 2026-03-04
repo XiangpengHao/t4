@@ -46,3 +46,9 @@ impl From<verified::input_kv::InputError> for Error {
         Self::InputError(value)
     }
 }
+
+impl From<verified::wal_replay::ReplayError> for Error {
+    fn from(value: verified::wal_replay::ReplayError) -> Self {
+        Self::Format(format!("replay error: {:?}", value))
+    }
+}

@@ -4,7 +4,7 @@ use std::num::NonZeroU32;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use verified::input_kv::{T4Key, T4KeyRef, T4Value};
+use verified::input_kv::{T4Key, T4KeyRef, T4Value, ValueRef};
 
 use crate::error::{Error, Result};
 use crate::format::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U64};
@@ -12,7 +12,7 @@ use crate::io::{AlignedBuf, align_down_u64, align_up_u32, align_up_u64};
 use crate::io_worker::IoWorker;
 use crate::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::types::RangeRequest;
-use crate::wal::{ValueRef, Wal};
+use crate::wal::Wal;
 
 #[derive(Debug, Clone, Copy)]
 pub struct MountOptions {

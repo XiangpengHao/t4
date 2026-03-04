@@ -63,6 +63,7 @@ impl T4Key {
     pub fn try_from_slice(value: &[u8]) -> (result: Result<Self, InputError>)
         ensures
             result.is_ok() <==> value.len() <= u8::MAX as usize,
+            result.is_err() ==> value.len() > u8::MAX as usize,
     {
         if value.len() > u8::MAX as usize {
             return Err(InputError::KeyTooLarge(value.len()));
@@ -87,7 +88,13 @@ impl Borrow<[u8]> for T4Key {
 pub struct T4KeyRef<'a>(&'a [u8]);
 
 impl<'a> T4KeyRef<'a> {
-    pub fn as_bytes(self) -> &'a [u8] {
+    pub fn as_bytes(self) -> (result: &'a [u8])
+        ensures
+            result.len() <= u8::MAX as usize,
+    {
+        proof {
+            use_type_invariant(&self);
+        }
         self.0
     }
 
@@ -99,6 +106,7 @@ impl<'a> T4KeyRef<'a> {
         self.0.is_empty()
     }
 
+    #[verifier::type_invariant]
     pub closed spec fn wf(self) -> bool {
         self.0.len() <= u8::MAX as usize
     }
@@ -179,6 +187,12 @@ impl T4Value {
         }
         Ok(Self { bytes: slice_to_vec(value), len_u32: value.len() as u32 })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValueRef {
+    pub offset: u64,
+    pub length: u32,
 }
 
 } // verus!
