@@ -1,7 +1,7 @@
 pub mod input_kv;
 pub mod le_bytes;
-pub mod wal_replay;
 pub mod wal;
+pub mod wal_replay;
 
 pub const MAGIC: [u8; 4] = *b"BTF4";
 pub const VERSION: u16 = 3;
