@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use vstd::prelude::*;
 
 use crate::input_kv::{T4Key, ValueRef};
-use crate::wal::{WalEntryRef, WalPage};
+use crate::wal::{WalEntryRef, WalEntryState, WalPage};
 use crate::{align_up_u64, allocate_next_lsn, PAGE_SIZE};
 
 verus! {
@@ -53,6 +53,12 @@ impl ReplayState {
             result.is_ok() ==> result.unwrap().max_data_end >= self.max_data_end,
             result.is_ok() ==> result.unwrap().max_wal_end == self.max_wal_end,
             result.is_ok() ==> result.unwrap().previous_lsn == Some(entry.lsn),
+            result.is_ok() ==> self.previous_lsn.is_some() ==> self.previous_lsn.unwrap() < result.unwrap().previous_lsn.unwrap(),
+            // result.is_ok() && entry.flags == FLAG_LIVE ==> {
+            //     let k = T4Key::try_from_slice(entry.key.as_bytes()).unwrap();
+            //     let v = ValueRef { offset: entry.offset, length: entry.value_length };
+            //     result.unwrap().index@[k] == v
+            // }
     {
         let prev_max_data_end = self.max_data_end;
         let max_wal_end = self.max_wal_end;
@@ -64,8 +70,8 @@ impl ReplayState {
                 return Err(ReplayError::NonMonotonicLsn);
             }
         }
-        let max_data_end = match entry.flags {
-            FLAG_LIVE => {
+        let max_data_end = match entry.state() {
+            WalEntryState::Live => {
                 proof {
                     assert(PAGE_SIZE as u64 & sub(PAGE_SIZE as u64, 1) == 0u64) by (bit_vector);
                 }
@@ -84,12 +90,9 @@ impl ReplayState {
                     prev_max_data_end
                 }
             },
-            FLAG_TOMBSTONE => {
+            WalEntryState::Tombstone => {
                 index.remove(entry.key.as_bytes());
                 prev_max_data_end
-            },
-            _ => {
-                return Err(ReplayError::UnknownFlag);
             },
         };
 

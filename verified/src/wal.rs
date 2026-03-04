@@ -14,9 +14,9 @@ const _: [(); WAL_PAGE_HEADER_SIZE] = [(); std::mem::size_of::<WalPageHeader>()]
 
 verus! {
 
-const FLAG_LIVE: u8 = 0;
+pub const FLAG_LIVE: u8 = 0;
 
-const FLAG_TOMBSTONE: u8 = 1;
+pub const FLAG_TOMBSTONE: u8 = 1;
 
 pub const ENTRY_HEADER_SIZE: usize = 24;
 
@@ -33,6 +33,12 @@ pub enum WalError {
     KeyTooLarge,
     InvalidPageLayout,
     InsufficientSpace,
+    InvalidFlags,
+}
+
+pub(crate) enum WalEntryState{
+    Live,
+    Tombstone,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +51,26 @@ pub struct WalEntryRef<'a> {
 }
 
 impl<'a> WalEntryRef<'a> {
+    pub open spec fn flags_wf(flags: u8) -> bool {
+        flags == FLAG_LIVE || flags == FLAG_TOMBSTONE
+    }
+
+    pub open spec fn encoded_entry_wf(bytes: Seq<u8>, cursor: int, used: int) -> bool {
+        &&cursor + ENTRY_HEADER_SIZE as int <= used <= bytes.len()
+            && Self::key_len_of(bytes.subrange(cursor, used)) as int <= u8::MAX as int
+            && cursor + ENTRY_HEADER_SIZE as int + Self::key_len_of(
+                bytes.subrange(cursor, used),
+            ) as int <= used
+            && Self::flags_wf(bytes[cursor + 2])
+    }
+
+    pub open spec fn encoded_entry_len(bytes: Seq<u8>, cursor: int, used: int) -> int
+        recommends
+            Self::encoded_entry_wf(bytes, cursor, used),
+    {
+        ENTRY_HEADER_SIZE as int + Self::key_len_of(bytes.subrange(cursor, used)) as int
+    }
+
     pub fn try_decode_from(src: &'a [u8]) -> (result: Result<(Self, usize), WalError>)
         ensures
             result.is_ok() ==> {
@@ -63,12 +89,16 @@ impl<'a> WalEntryRef<'a> {
         if key_len > u8::MAX as usize {
             return Err(WalError::KeyTooLarge);
         }
+        let flags = src[2];
+        if flags != FLAG_LIVE && flags != FLAG_TOMBSTONE {
+            return Err(WalError::InvalidFlags);
+        }
         Ok(Self::decode_from(src))
     }
 
     #[verifier::type_invariant]
     pub closed spec fn wf(self) -> bool {
-        self.key.wf()
+        self.key.wf() && Self::flags_wf(self.flags)
     }
 
     pub closed spec fn key_len_of(src: Seq<u8>) -> u16
@@ -83,6 +113,7 @@ impl<'a> WalEntryRef<'a> {
             src@.len() >= ENTRY_HEADER_SIZE as int,
             Self::key_len_of(src@) as int <= u8::MAX as int,
             ENTRY_HEADER_SIZE as int + Self::key_len_of(src@) as int <= src@.len(),
+            Self::flags_wf(src@[2]),
         ensures
             result.0.wf(),
             result.1 as int == ENTRY_HEADER_SIZE as int + Self::key_len_of(src@) as int,
@@ -97,6 +128,19 @@ impl<'a> WalEntryRef<'a> {
         let lsn = u64_from_le_bytes(slice_subrange(src, 16, 24));
         let key = T4KeyRef::from_slice(slice_subrange(src, ENTRY_HEADER_SIZE, total));
         (Self { flags, offset, value_length, lsn, key }, total)
+    }
+
+    pub(crate) fn state(&self) -> WalEntryState
+    {
+        proof {
+            use_type_invariant(&self);
+        }
+        if self.flags == FLAG_LIVE {
+            WalEntryState::Live
+        } else {
+            assert(self.flags == FLAG_TOMBSTONE);
+            WalEntryState::Tombstone
+        }
     }
 }
 
@@ -234,15 +278,9 @@ impl WalPage {
         if remaining == 0 {
             cursor == used
         } else {
-            &&cursor + ENTRY_HEADER_SIZE as int <= used <= bytes.len() && WalEntryRef::key_len_of(
-                bytes.subrange(cursor, used),
-            ) as int <= u8::MAX as int && cursor + ENTRY_HEADER_SIZE as int
-                + WalEntryRef::key_len_of(bytes.subrange(cursor, used)) as int <= used
-                && Self::entries_wf(
+            WalEntryRef::encoded_entry_wf(bytes, cursor, used) && Self::entries_wf(
                 bytes,
-                cursor + ENTRY_HEADER_SIZE as int + WalEntryRef::key_len_of(
-                    bytes.subrange(cursor, used),
-                ) as int,
+                cursor + WalEntryRef::encoded_entry_len(bytes, cursor, used),
                 (remaining - 1) as nat,
                 used,
             )
@@ -267,6 +305,9 @@ impl WalPage {
         let key_bytes = slice_subrange(tail, 0, 2);
         let key_len = u16_from_le_bytes(key_bytes) as usize;
         if key_len > u8::MAX as usize {
+            return false;
+        }
+        if tail[2] != FLAG_LIVE && tail[2] != FLAG_TOMBSTONE {
             return false;
         }
         let consumed = ENTRY_HEADER_SIZE + key_len;
