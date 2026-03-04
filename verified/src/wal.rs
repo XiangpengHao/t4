@@ -36,7 +36,7 @@ pub enum WalError {
     InvalidFlags,
 }
 
-pub(crate) enum WalEntryState{
+pub(crate) enum WalEntryState {
     Live,
     Tombstone,
 }
@@ -56,12 +56,11 @@ impl<'a> WalEntryRef<'a> {
     }
 
     pub open spec fn encoded_entry_wf(bytes: Seq<u8>, cursor: int, used: int) -> bool {
-        &&cursor + ENTRY_HEADER_SIZE as int <= used <= bytes.len()
-            && Self::key_len_of(bytes.subrange(cursor, used)) as int <= u8::MAX as int
-            && cursor + ENTRY_HEADER_SIZE as int + Self::key_len_of(
-                bytes.subrange(cursor, used),
-            ) as int <= used
-            && Self::flags_wf(bytes[cursor + 2])
+        &&cursor + ENTRY_HEADER_SIZE as int <= used <= bytes.len() && Self::key_len_of(
+            bytes.subrange(cursor, used),
+        ) as int <= u8::MAX as int && cursor + ENTRY_HEADER_SIZE as int + Self::key_len_of(
+            bytes.subrange(cursor, used),
+        ) as int <= used && Self::flags_wf(bytes[cursor + 2])
     }
 
     pub open spec fn encoded_entry_len(bytes: Seq<u8>, cursor: int, used: int) -> int
@@ -130,8 +129,7 @@ impl<'a> WalEntryRef<'a> {
         (Self { flags, offset, value_length, lsn, key }, total)
     }
 
-    pub(crate) fn state(&self) -> WalEntryState
-    {
+    pub(crate) fn state(&self) -> WalEntryState {
         proof {
             use_type_invariant(&self);
         }

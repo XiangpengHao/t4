@@ -53,12 +53,8 @@ impl ReplayState {
             result.is_ok() ==> result.unwrap().max_data_end >= self.max_data_end,
             result.is_ok() ==> result.unwrap().max_wal_end == self.max_wal_end,
             result.is_ok() ==> result.unwrap().previous_lsn == Some(entry.lsn),
-            result.is_ok() ==> self.previous_lsn.is_some() ==> self.previous_lsn.unwrap() < result.unwrap().previous_lsn.unwrap(),
-            // result.is_ok() && entry.flags == FLAG_LIVE ==> {
-            //     let k = T4Key::try_from_slice(entry.key.as_bytes()).unwrap();
-            //     let v = ValueRef { offset: entry.offset, length: entry.value_length };
-            //     result.unwrap().index@[k] == v
-            // }
+            result.is_ok() ==> self.previous_lsn.is_some() ==> self.previous_lsn.unwrap()
+                < result.unwrap().previous_lsn.unwrap(),
     {
         let prev_max_data_end = self.max_data_end;
         let max_wal_end = self.max_wal_end;
