@@ -6,14 +6,13 @@ use std::os::fd::AsRawFd;
 
 use io_uring::{IoUring, opcode, types};
 
+use crate::buffer::AlignedBuf;
 use crate::error::{Error, Result};
-use crate::io::AlignedBuf;
 use crate::io_task::{
     FileFsyncTask, FileReadTask, FileWriteTask, PageWrite, WorkerRequest, worker_disconnected_error,
 };
 use crate::sync::Arc;
 use crate::sync::mpsc;
-use crate::thread;
 
 fn worker_failed_error(message: impl Into<String>) -> Error {
     Error::Io(std::io::Error::other(message.into()))
@@ -272,7 +271,7 @@ impl<D: IoDriver> UringBackend<D> {
 
             self.poll_completions();
 
-            thread::cooperative_yield();
+            crate::sync::cooperative_yield();
         }
     }
 
@@ -605,7 +604,7 @@ impl IoWorker {
         let (tx, rx) = mpsc::channel::<WorkerRequest>();
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<()>>(1);
 
-        thread::spawn(move || {
+        crate::sync::spawn(move || {
             let backend = match UringBackend::new(file, queue_depth, rx) {
                 Ok(backend) => {
                     let _ = init_tx.send(Ok(()));

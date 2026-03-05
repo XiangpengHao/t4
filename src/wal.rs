@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
+use crate::buffer::AlignedBuf;
 use crate::error::{Error, Result};
-use crate::format::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U32, PAGE_SIZE_U64};
-use crate::io::AlignedBuf;
 use crate::io_task::PageWrite;
 use crate::io_worker::IoWorker;
 use crate::sync::{Mutex, MutexGuard};
+use crate::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U32, PAGE_SIZE_U64};
 
 use verified::input_kv::{T4Key, T4Value, ValueRef};
 use verified::wal::{AppendEntry, WalPage};

@@ -5,14 +5,14 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use verified::input_kv::{T4Key, T4KeyRef, T4Value, ValueRef};
+use verified::{CheckedRangeU32, RangeRequestU32};
 
+use crate::buffer::{AlignedBuf, align_down_u64, align_up_u32, align_up_u64};
 use crate::error::{Error, Result};
-use crate::format::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U64};
-use crate::io::{AlignedBuf, align_down_u64, align_up_u32, align_up_u64};
 use crate::io_worker::IoWorker;
 use crate::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use crate::types::RangeRequest;
 use crate::wal::Wal;
+use crate::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U64};
 
 #[derive(Debug, Clone, Copy)]
 pub struct MountOptions {
@@ -32,13 +32,13 @@ impl Default for MountOptions {
 }
 
 #[derive(Debug)]
-pub struct Engine {
+pub struct T4Store {
     io: IoWorker,
     wal: Wal,
     index: RwLock<HashMap<T4Key, ValueRef>>,
 }
 
-impl Engine {
+impl T4Store {
     pub async fn mount_with_options(path: impl AsRef<Path>, options: MountOptions) -> Result<Self> {
         let mut open = OpenOptions::new();
         open.read(true).write(true).create(true);
@@ -102,13 +102,13 @@ impl Engine {
         Ok(buf.as_slice()[..value_len].to_vec())
     }
 
-    pub async fn get_range(&self, key: T4KeyRef<'_>, range: RangeRequest) -> Result<Vec<u8>> {
+    pub async fn get_range(&self, key: T4KeyRef<'_>, range: RangeRequestU32) -> Result<Vec<u8>> {
         let value = {
             let index = self.read_index()?;
             *index.get(key.as_bytes()).ok_or(Error::NotFound)?
         };
 
-        let range: crate::types::CheckedRange = range
+        let range: CheckedRangeU32 = range
             .checked_against(value.length)
             .ok_or(Error::RangeOutOfBounds)?;
         if range.is_empty() {

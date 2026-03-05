@@ -3,7 +3,7 @@ use std::num::NonZeroU32;
 use std::ptr::NonNull;
 
 use crate::error::{Error, Result};
-use crate::format::{PAGE_SIZE, PAGE_SIZE_NZ_U32};
+use crate::{PAGE_SIZE, PAGE_SIZE_NZ_U32};
 
 pub use verified::{align_down_u64, align_up_u64};
 

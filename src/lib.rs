@@ -1,26 +1,31 @@
-mod engine;
+mod buffer;
 mod error;
-mod format;
-mod io;
 mod io_task;
 mod io_worker;
+mod store;
 mod sync;
-mod thread;
-mod types;
 mod wal;
 
-use std::path::Path;
+use std::{num::NonZeroU32, path::Path};
 
-use crate::engine::Engine;
+use crate::store::T4Store;
 use crate::sync::Arc;
 
-pub use engine::MountOptions;
 pub use error::{Error, Result};
+pub use store::MountOptions;
 use verified::input_kv::{T4Key, T4KeyRef, T4Value};
+
+pub const PAGE_SIZE: usize = 4096;
+pub const PAGE_SIZE_U32: u32 = PAGE_SIZE as u32;
+pub const PAGE_SIZE_NZ_U32: NonZeroU32 = match NonZeroU32::new(PAGE_SIZE_U32) {
+    Some(value) => value,
+    None => panic!("PAGE_SIZE must be non-zero"),
+};
+pub const PAGE_SIZE_U64: u64 = PAGE_SIZE as u64;
 
 #[derive(Clone, Debug)]
 pub struct Store {
-    inner: Arc<Engine>,
+    inner: Arc<T4Store>,
 }
 
 pub fn mount(path: impl AsRef<Path>) -> impl std::future::Future<Output = Result<Store>> {
@@ -46,7 +51,7 @@ impl Store {
         let path = path.as_ref().to_path_buf();
         async move {
             Ok(Self {
-                inner: Arc::new(Engine::mount_with_options(path, options).await?),
+                inner: Arc::new(T4Store::mount_with_options(path, options).await?),
             })
         }
     }
@@ -86,7 +91,7 @@ impl Store {
         let this = self.clone();
         async move {
             let key = T4KeyRef::try_from_slice(key)?;
-            let range = crate::types::RangeRequest::from_u64(range_start, range_len)
+            let range = verified::RangeRequestU32::from_u64(range_start, range_len)
                 .ok_or(Error::RangeOutOfBounds)?;
             this.inner.get_range(key, range).await
         }

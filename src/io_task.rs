@@ -2,11 +2,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
+use crate::buffer::AlignedBuf;
 use crate::error::{Error, Result};
-use crate::io::AlignedBuf;
+use crate::sync::cooperative_yield;
 use crate::sync::mpsc;
 use crate::sync::{Arc, Mutex};
-use crate::thread::cooperative_yield;
 
 pub(crate) type ReadCompletion = Arc<TaskCompletion<(AlignedBuf, usize)>>;
 pub(crate) type WriteCompletion = Arc<TaskCompletion<()>>;
