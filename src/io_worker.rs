@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs::File;
 use std::num::NonZeroU32;
@@ -50,6 +50,7 @@ struct UringDriver {
 }
 
 trait IoDriver {
+    fn available_submission_slots(&mut self) -> usize;
     fn push_read(
         &mut self,
         fd: i32,
@@ -93,6 +94,11 @@ impl UringDriver {
 }
 
 impl IoDriver for UringDriver {
+    fn available_submission_slots(&mut self) -> usize {
+        let sq = self.ring.submission();
+        sq.capacity() - sq.len()
+    }
+
     fn push_read(
         &mut self,
         fd: i32,
@@ -159,57 +165,81 @@ impl IoDriver for UringDriver {
     }
 }
 
-enum SubmittedOp {
+type RequestId = u32;
+
+struct InflightRequest {
+    remaining: usize,
+    error: Option<Error>,
+    kind: InflightRequestKind,
+}
+
+enum InflightRequestKind {
     Read {
-        buf: AlignedBuf,
+        buf: Option<AlignedBuf>,
         completion: ReadCompletion,
+        result: Option<usize>,
+    },
+    Write {
+        pages: Vec<PageWrite>,
+        completion: WriteCompletion,
     },
     Fsync {
         completion: FsyncCompletion,
     },
-    WriteStep {
-        _buf: AlignedBuf,
-        expected: usize,
-    },
 }
 
-struct PendingWriteChain {
-    writes: Vec<PageWrite>,
-    completion: WriteCompletion,
-}
+impl InflightRequest {
+    fn complete(self) {
+        match self.kind {
+            InflightRequestKind::Read {
+                buf,
+                completion,
+                result,
+            } => match self.error {
+                Some(err) => completion.complete(Err(err)),
+                None => completion.complete(Ok((
+                    buf.expect("read buffer missing at completion"),
+                    result.expect("read result missing at completion"),
+                ))),
+            },
+            InflightRequestKind::Write { completion, .. } => match self.error {
+                Some(err) => completion.complete(Err(err)),
+                None => completion.complete(Ok(())),
+            },
+            InflightRequestKind::Fsync { completion } => match self.error {
+                Some(err) => completion.complete(Err(err)),
+                None => completion.complete(Ok(())),
+            },
+        }
+    }
 
-struct ActiveWriteChain {
-    remaining: usize,
-    completion: WriteCompletion,
-    error: Option<Error>,
-}
-
-fn complete_submitted_with_result(submitted: SubmittedOp, result: Result<usize>) {
-    match submitted {
-        SubmittedOp::Read {
-            buf, completion, ..
-        } => completion.complete(result.map(|n| (buf, n))),
-        SubmittedOp::Fsync { completion, .. } => completion.complete(result.map(|_| ())),
-        SubmittedOp::WriteStep { .. } => {}
+    fn complete_with_error(self, err: Error) {
+        match self.kind {
+            InflightRequestKind::Read { completion, .. } => completion.complete(Err(err)),
+            InflightRequestKind::Write { completion, .. } => completion.complete(Err(err)),
+            InflightRequestKind::Fsync { completion } => completion.complete(Err(err)),
+        }
     }
 }
 
-fn complete_submitted_from_cqe(submitted: SubmittedOp, cqe_result: i32) {
-    complete_submitted_with_result(submitted, decode_cqe_result(cqe_result));
+fn encode_user_data(request_id: RequestId, op_index: usize) -> u64 {
+    ((request_id as u64) << 32) | (op_index as u32 as u64)
+}
+
+fn decode_user_data(user_data: u64) -> (RequestId, usize) {
+    ((user_data >> 32) as RequestId, user_data as u32 as usize)
 }
 
 struct UringBackend<D: IoDriver> {
     receiver: mpsc::Receiver<WorkerRequest>,
     file: File,
     ring: D,
-    tokens: VecDeque<usize>,
-    submitted_tasks: Vec<Option<SubmittedOp>>,
+    queue_depth: usize,
     queued: VecDeque<WorkerRequest>,
-    pending_write_chains: VecDeque<PendingWriteChain>,
-    active_write_chain: Option<ActiveWriteChain>,
+    inflight_requests: HashMap<RequestId, InflightRequest>,
+    next_request_id: RequestId,
     cqe_buf: Vec<CompletionEvent>,
     shutting_down: bool,
-    inflight: usize,
 }
 
 impl UringBackend<UringDriver> {
@@ -231,22 +261,16 @@ impl<D: IoDriver> UringBackend<D> {
         rx: mpsc::Receiver<WorkerRequest>,
         ring: D,
     ) -> Self {
-        let tokens = (0..queue_depth).collect();
-        let mut submitted_tasks = Vec::with_capacity(queue_depth);
-        submitted_tasks.resize_with(queue_depth, || None);
-
         Self {
             receiver: rx,
             file,
             ring,
-            tokens,
-            submitted_tasks,
+            queue_depth,
             queued: VecDeque::new(),
-            pending_write_chains: VecDeque::new(),
-            active_write_chain: None,
+            inflight_requests: HashMap::new(),
+            next_request_id: 0,
             cqe_buf: Vec::with_capacity(queue_depth),
             shutting_down: false,
-            inflight: 0,
         }
     }
 
@@ -256,29 +280,30 @@ impl<D: IoDriver> UringBackend<D> {
 }
 
 impl<D: IoDriver> UringBackend<D> {
+    fn should_exit(&self) -> bool {
+        self.shutting_down && self.queued.is_empty() && self.inflight_requests.is_empty()
+    }
+
     fn thread_loop(&mut self) {
         loop {
-            self.block_for_one_request_if_idle();
             self.drain_requests();
 
-            if let Err(err) = self.drain_submissions() {
-                self.fail_all(err);
-                return;
-            }
+            let submitted_any = match self.drain_submissions() {
+                Ok(submitted_any) => submitted_any,
+                Err(err) => {
+                    self.fail_all(err);
+                    return;
+                }
+            };
 
             self.poll_completions();
             thread::cooperative_yield();
 
-            if self.shutting_down
-                && self.queued.is_empty()
-                && self.pending_write_chains.is_empty()
-                && self.active_write_chain.is_none()
-                && self.inflight == 0
-            {
+            if self.should_exit() {
                 break;
             }
 
-            if self.inflight > 0 && (self.queued.is_empty() || self.tokens.is_empty()) {
+            if !self.inflight_requests.is_empty() && !submitted_any {
                 thread::cooperative_yield();
                 if let Err(err) = self.ring.submit_and_wait(1) {
                     self.fail_all(err);
@@ -288,35 +313,14 @@ impl<D: IoDriver> UringBackend<D> {
                 thread::cooperative_yield();
             }
 
-            if self.shutting_down
-                && self.queued.is_empty()
-                && self.pending_write_chains.is_empty()
-                && self.active_write_chain.is_none()
-                && self.inflight == 0
-            {
+            if self.should_exit() {
                 break;
             }
         }
 
         self.drain_requests();
         self.reject_queued_disconnected();
-        self.reject_submitted_disconnected();
-    }
-
-    fn block_for_one_request_if_idle(&mut self) {
-        if self.shutting_down
-            || !self.queued.is_empty()
-            || !self.pending_write_chains.is_empty()
-            || self.active_write_chain.is_some()
-            || self.inflight != 0
-        {
-            return;
-        }
-
-        match self.receiver.recv() {
-            Ok(request) => self.queued.push_back(request),
-            Err(_) => self.shutting_down = true,
-        }
+        self.reject_inflight_disconnected();
     }
 
     fn drain_requests(&mut self) {
@@ -335,195 +339,156 @@ impl<D: IoDriver> UringBackend<D> {
         }
     }
 
-    fn drain_submissions(&mut self) -> Result<()> {
+    fn drain_submissions(&mut self) -> Result<bool> {
         let mut submitted_any = false;
 
-        while !self.queued.is_empty() {
-            let request = self.queued.pop_front().expect("queued request missing");
-            match request {
-                WorkerRequest::Write { writes, completion } => {
-                    self.pending_write_chains
-                        .push_back(PendingWriteChain { writes, completion });
-                }
-                other => {
-                    if self.tokens.is_empty() {
-                        self.queued.push_front(other);
-                        break;
-                    }
-                    if self.submit_non_write(other)? {
-                        submitted_any = true;
-                    }
-                }
+        while let Some(request) = self.queued.pop_front() {
+            let op_count = request_op_count(&request);
+            if op_count == 0 {
+                complete_empty_request(request);
+                continue;
             }
-        }
-
-        if self.submit_next_write_chain()? {
-            submitted_any = true;
+            if op_count > self.queue_depth {
+                complete_request_with_error(
+                    request,
+                    Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "request needs {op_count} SQEs, queue depth is {}",
+                            self.queue_depth
+                        ),
+                    )),
+                );
+                continue;
+            }
+            if self.ring.available_submission_slots() < op_count {
+                self.queued.push_front(request);
+                break;
+            }
+            if self.submit_request(request)? {
+                submitted_any = true;
+            }
         }
 
         if submitted_any {
             let _ = self.ring.submit()?;
         }
 
-        Ok(())
+        Ok(submitted_any)
     }
 
-    fn submit_next_write_chain(&mut self) -> Result<bool> {
-        if self.active_write_chain.is_none()
-            && let Some(pending) = self.pending_write_chains.pop_front()
-        {
-            let step_count = pending.writes.len();
-            debug_assert!(step_count > 0, "write chain must contain at least one step");
-            if step_count == 0 {
-                pending.completion.complete(Ok(()));
-                return Ok(false);
-            }
-
-            if self.tokens.len() < step_count {
-                self.pending_write_chains.push_front(pending);
-                return Ok(false);
-            }
-
-            self.active_write_chain = Some(ActiveWriteChain {
-                remaining: step_count,
-                completion: pending.completion,
-                error: None,
-            });
-
-            for (index, step) in pending.writes.into_iter().enumerate() {
-                let is_last = index + 1 == step_count;
-                if !self.submit_write_step(step, is_last, index)? {
-                    return Ok(index != 0);
-                }
-            }
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
-
-    fn complete_write_step(&mut self, result: Result<usize>) {
-        let Some(active) = self.active_write_chain.as_mut() else {
-            debug_assert!(false, "write step completion with no active write chain");
-            return;
-        };
-
-        if let Err(err) = result
-            && active.error.is_none()
-        {
-            active.error = Some(err);
-        }
-
-        if active.remaining > 0 {
-            active.remaining -= 1;
-        }
-        if active.remaining == 0 {
-            let active = self
-                .active_write_chain
-                .take()
-                .expect("active write chain missing");
-            match active.error {
-                Some(err) => active.completion.complete(Err(err)),
-                None => active.completion.complete(Ok(())),
-            }
-        }
-    }
-
-    fn submit_non_write(&mut self, mut request: WorkerRequest) -> Result<bool> {
-        debug_assert!(
-            !matches!(request, WorkerRequest::Write { .. }),
-            "write chains should be handled separately"
-        );
-
-        let token = self
-            .tokens
-            .pop_front()
-            .expect("token pool unexpectedly empty");
-        let user_data = token as u64;
-
-        let push_result = match &mut request {
-            WorkerRequest::Read { buf, offset, .. } => {
-                self.ring
-                    .push_read(self.file.as_raw_fd(), buf, *offset, user_data)
-            }
-            WorkerRequest::Fsync { .. } => self.ring.push_fsync(self.file.as_raw_fd(), user_data),
-            WorkerRequest::Write { .. } => unreachable!("handled above"),
-        };
-
-        if let Err(err) = push_result {
-            self.tokens.push_front(token);
-            complete_request_with_error(request, err);
-            return Ok(false);
-        }
-
-        let slot = self
-            .submitted_tasks
-            .get_mut(token)
-            .expect("token out of range for submitted_tasks");
-        debug_assert!(slot.is_none(), "token reused before completion");
-
-        *slot = Some(match request {
+    fn submit_request(&mut self, request: WorkerRequest) -> Result<bool> {
+        let request_id = self.allocate_request_id();
+        match request {
             WorkerRequest::Read {
-                buf, completion, ..
-            } => SubmittedOp::Read { buf, completion },
-            WorkerRequest::Fsync { completion, .. } => SubmittedOp::Fsync { completion },
-            WorkerRequest::Write { .. } => unreachable!("handled above"),
-        });
-        self.inflight += 1;
-        Ok(true)
-    }
+                buf,
+                offset,
+                completion,
+            } => {
+                self.inflight_requests.insert(
+                    request_id,
+                    InflightRequest {
+                        remaining: 1,
+                        error: None,
+                        kind: InflightRequestKind::Read {
+                            buf: Some(buf),
+                            completion,
+                            result: None,
+                        },
+                    },
+                );
 
-    fn submit_write_step(
-        &mut self,
-        step: PageWrite,
-        is_last: bool,
-        completed_before_error: usize,
-    ) -> Result<bool> {
-        let PageWrite { buf, offset } = step;
-        let token = self
-            .tokens
-            .pop_front()
-            .expect("token pool unexpectedly empty");
-        let user_data = token as u64;
-        let push_result = if is_last {
-            self.ring
-                .push_write(self.file.as_raw_fd(), &buf, offset, user_data)
-        } else {
-            self.ring
-                .push_write_link(self.file.as_raw_fd(), &buf, offset, user_data)
-        };
+                let push_result = {
+                    let request = self
+                        .inflight_requests
+                        .get_mut(&request_id)
+                        .expect("read request missing after insert");
+                    let InflightRequestKind::Read { buf, .. } = &mut request.kind else {
+                        unreachable!("request kind changed while submitting read");
+                    };
+                    self.ring.push_read(
+                        self.file.as_raw_fd(),
+                        buf.as_mut().expect("read buffer missing while submitting"),
+                        offset,
+                        encode_user_data(request_id, 0),
+                    )
+                };
+                self.finish_single_submit(request_id, push_result)
+            }
+            WorkerRequest::Fsync { completion } => {
+                self.inflight_requests.insert(
+                    request_id,
+                    InflightRequest {
+                        remaining: 1,
+                        error: None,
+                        kind: InflightRequestKind::Fsync { completion },
+                    },
+                );
 
-        if let Err(err) = push_result {
-            self.tokens.push_front(token);
-            match completed_before_error {
-                0 => {
-                    if let Some(active) = self.active_write_chain.take() {
-                        active.completion.complete(Err(err));
-                    }
-                }
-                count => {
-                    if let Some(active) = self.active_write_chain.as_mut() {
-                        active.remaining = count;
-                        if active.error.is_none() {
-                            active.error = Some(err);
+                let push_result = self
+                    .ring
+                    .push_fsync(self.file.as_raw_fd(), encode_user_data(request_id, 0));
+                self.finish_single_submit(request_id, push_result)
+            }
+            WorkerRequest::Write { writes, completion } => {
+                let page_count = writes.len();
+                self.inflight_requests.insert(
+                    request_id,
+                    InflightRequest {
+                        remaining: page_count,
+                        error: None,
+                        kind: InflightRequestKind::Write {
+                            pages: writes,
+                            completion,
+                        },
+                    },
+                );
+
+                let mut submitted_pages = 0;
+                for index in 0..page_count {
+                    let is_last = index + 1 == page_count;
+                    let push_result = {
+                        let request = self
+                            .inflight_requests
+                            .get(&request_id)
+                            .expect("write request missing after insert");
+                        let InflightRequestKind::Write { pages, .. } = &request.kind else {
+                            unreachable!("request kind changed while submitting write");
+                        };
+                        let page = pages
+                            .get(index)
+                            .expect("write page missing while submitting");
+                        if is_last {
+                            self.ring.push_write(
+                                self.file.as_raw_fd(),
+                                &page.buf,
+                                page.offset,
+                                encode_user_data(request_id, index),
+                            )
+                        } else {
+                            self.ring.push_write_link(
+                                self.file.as_raw_fd(),
+                                &page.buf,
+                                page.offset,
+                                encode_user_data(request_id, index),
+                            )
+                        }
+                    };
+
+                    match push_result {
+                        Ok(()) => {
+                            submitted_pages += 1;
+                        }
+                        Err(err) => {
+                            self.handle_write_submit_error(request_id, submitted_pages, err);
+                            return Ok(submitted_pages > 0);
                         }
                     }
                 }
-            }
-            return Ok(false);
-        }
 
-        let slot = self
-            .submitted_tasks
-            .get_mut(token)
-            .expect("token out of range for submitted_tasks");
-        debug_assert!(slot.is_none(), "token reused before completion");
-        *slot = Some(SubmittedOp::WriteStep {
-            expected: buf.len(),
-            _buf: buf,
-        });
-        self.inflight += 1;
-        Ok(true)
+                Ok(true)
+            }
+        }
     }
 
     fn poll_completions(&mut self) {
@@ -532,32 +497,68 @@ impl<D: IoDriver> UringBackend<D> {
         let completions: Vec<_> = self.cqe_buf.drain(..).collect();
 
         for cqe in completions {
-            let token = cqe.user_data as usize;
-            let Some(slot) = self.submitted_tasks.get_mut(token) else {
-                debug_assert!(false, "cqe token out of range: {}", cqe.user_data);
-                continue;
-            };
-            let Some(submitted) = slot.take() else {
-                debug_assert!(false, "missing submitted task for token {}", cqe.user_data);
+            let (request_id, op_index) = decode_user_data(cqe.user_data);
+            let mut should_complete = false;
+
+            let Some(request) = self.inflight_requests.get_mut(&request_id) else {
+                debug_assert!(false, "missing inflight request for cqe {}", cqe.user_data);
                 continue;
             };
 
-            self.inflight = self.inflight.saturating_sub(1);
-            self.tokens.push_back(token);
-            if let SubmittedOp::WriteStep { expected, .. } = submitted {
-                let result = decode_cqe_result(cqe.result).and_then(|n| {
-                    if n == expected {
-                        Ok(n)
-                    } else {
-                        Err(Error::Io(std::io::Error::new(
-                            std::io::ErrorKind::WriteZero,
-                            format!("short write: expected {expected}, got {n}"),
-                        )))
+            match &mut request.kind {
+                InflightRequestKind::Read { result, .. } => {
+                    debug_assert_eq!(op_index, 0, "read request should only have op 0");
+                    match decode_cqe_result(cqe.result) {
+                        Ok(n) => *result = Some(n),
+                        Err(err) if request.error.is_none() => request.error = Some(err),
+                        Err(_) => {}
                     }
-                });
-                self.complete_write_step(result);
-            } else {
-                complete_submitted_from_cqe(submitted, cqe.result);
+                }
+                InflightRequestKind::Write { pages, .. } => {
+                    let Some(page) = pages.get(op_index) else {
+                        debug_assert!(false, "write page index out of range: {}", op_index);
+                        continue;
+                    };
+                    let expected = page.buf.len();
+                    let result = decode_cqe_result(cqe.result).and_then(|n| {
+                        if n == expected {
+                            Ok(())
+                        } else {
+                            Err(Error::Io(std::io::Error::new(
+                                std::io::ErrorKind::WriteZero,
+                                format!("short write: expected {expected}, got {n}"),
+                            )))
+                        }
+                    });
+                    if let Err(err) = result
+                        && request.error.is_none()
+                    {
+                        request.error = Some(err);
+                    }
+                }
+                InflightRequestKind::Fsync { .. } => {
+                    debug_assert_eq!(op_index, 0, "fsync request should only have op 0");
+                    if let Err(err) = decode_cqe_result(cqe.result).map(|_| ())
+                        && request.error.is_none()
+                    {
+                        request.error = Some(err);
+                    }
+                }
+            }
+
+            if request.remaining > 0 {
+                request.remaining -= 1;
+            }
+            if request.remaining == 0 {
+                should_complete = true;
+            }
+
+            if should_complete {
+                let request = self
+                    .inflight_requests
+                    .remove(&request_id)
+                    .expect("inflight request missing at completion");
+                request.complete();
             }
         }
     }
@@ -569,23 +570,9 @@ impl<D: IoDriver> UringBackend<D> {
             complete_request_with_error(request, worker_failed_error(msg.clone()));
         }
 
-        while let Some(write) = self.pending_write_chains.pop_front() {
-            write
-                .completion
-                .complete(Err(worker_failed_error(msg.clone())));
+        for (_, request) in self.inflight_requests.drain() {
+            request.complete_with_error(worker_failed_error(msg.clone()));
         }
-        if let Some(write) = self.active_write_chain.take() {
-            write
-                .completion
-                .complete(Err(worker_failed_error(msg.clone())));
-        }
-
-        for slot in &mut self.submitted_tasks {
-            if let Some(submitted) = slot.take() {
-                complete_submitted_with_result(submitted, Err(worker_failed_error(msg.clone())));
-            }
-        }
-        self.inflight = 0;
 
         while let Ok(request) = self.receiver.try_recv() {
             complete_request_with_error(request, worker_failed_error(msg.clone()));
@@ -596,21 +583,81 @@ impl<D: IoDriver> UringBackend<D> {
         while let Some(request) = self.queued.pop_front() {
             complete_request_with_error(request, worker_disconnected_error());
         }
-        while let Some(write) = self.pending_write_chains.pop_front() {
-            write.completion.complete(Err(worker_disconnected_error()));
-        }
-        if let Some(write) = self.active_write_chain.take() {
-            write.completion.complete(Err(worker_disconnected_error()));
+        self.reject_inflight_disconnected();
+    }
+
+    fn reject_inflight_disconnected(&mut self) {
+        for (_, request) in self.inflight_requests.drain() {
+            request.complete_with_error(worker_disconnected_error());
         }
     }
 
-    fn reject_submitted_disconnected(&mut self) {
-        for slot in &mut self.submitted_tasks {
-            if let Some(submitted) = slot.take() {
-                complete_submitted_with_result(submitted, Err(worker_disconnected_error()));
+    fn finish_single_submit(
+        &mut self,
+        request_id: RequestId,
+        push_result: Result<()>,
+    ) -> Result<bool> {
+        match push_result {
+            Ok(()) => Ok(true),
+            Err(err) => {
+                let request = self
+                    .inflight_requests
+                    .remove(&request_id)
+                    .expect("request missing after failed submit");
+                request.complete_with_error(err);
+                Ok(false)
             }
         }
-        self.inflight = 0;
+    }
+
+    fn handle_write_submit_error(
+        &mut self,
+        request_id: RequestId,
+        submitted_pages: usize,
+        err: Error,
+    ) {
+        if submitted_pages == 0 {
+            let request = self
+                .inflight_requests
+                .remove(&request_id)
+                .expect("write request missing after failed first submit");
+            request.complete_with_error(err);
+            return;
+        }
+
+        let request = self
+            .inflight_requests
+            .get_mut(&request_id)
+            .expect("write request missing after partial submit");
+        request.remaining = submitted_pages;
+        if request.error.is_none() {
+            request.error = Some(err);
+        }
+    }
+
+    fn allocate_request_id(&mut self) -> RequestId {
+        loop {
+            self.next_request_id = self.next_request_id.wrapping_add(1);
+            if !self.inflight_requests.contains_key(&self.next_request_id) {
+                return self.next_request_id;
+            }
+        }
+    }
+}
+
+fn request_op_count(request: &WorkerRequest) -> usize {
+    match request {
+        WorkerRequest::Read { .. } | WorkerRequest::Fsync { .. } => 1,
+        WorkerRequest::Write { writes, .. } => writes.len(),
+    }
+}
+
+fn complete_empty_request(request: WorkerRequest) {
+    match request {
+        WorkerRequest::Write { completion, .. } => completion.complete(Ok(())),
+        WorkerRequest::Read { .. } | WorkerRequest::Fsync { .. } => {
+            debug_assert!(false, "only writes should be empty")
+        }
     }
 }
 
@@ -742,6 +789,8 @@ mod invariant_harness_tests {
 
     #[derive(Debug)]
     struct MockState {
+        queue_depth: usize,
+        sq_occupancy: usize,
         completion_order: CompletionOrder,
         release_on_submit: bool,
         fail_submit_and_wait_once: bool,
@@ -752,8 +801,10 @@ mod invariant_harness_tests {
     }
 
     impl MockState {
-        fn new(config: MockConfig) -> Self {
+        fn new(config: MockConfig, queue_depth: usize) -> Self {
             Self {
+                queue_depth,
+                sq_occupancy: 0,
                 completion_order: config.completion_order,
                 release_on_submit: config.release_on_submit,
                 fail_submit_and_wait_once: config.fail_submit_and_wait_once,
@@ -804,6 +855,7 @@ mod invariant_harness_tests {
                 Some(result) => result,
                 None => i32::try_from(expected_len).expect("expected_len exceeds i32 for test"),
             };
+            state.sq_occupancy += 1;
             state
                 .pending
                 .push_back(CompletionEvent { user_data, result });
@@ -812,6 +864,11 @@ mod invariant_harness_tests {
     }
 
     impl IoDriver for MockDriver {
+        fn available_submission_slots(&mut self) -> usize {
+            let state = self.state.lock().expect("mock state mutex poisoned");
+            state.queue_depth.saturating_sub(state.sq_occupancy)
+        }
+
         fn push_read(
             &mut self,
             _fd: i32,
@@ -848,6 +905,7 @@ mod invariant_harness_tests {
 
         fn submit(&mut self) -> Result<usize> {
             let mut state = self.state.lock().expect("mock state mutex poisoned");
+            state.sq_occupancy = 0;
             if state.release_on_submit {
                 state.flush_pending_to_ready();
             }
@@ -862,6 +920,7 @@ mod invariant_harness_tests {
                     "mock submit_and_wait failure",
                 )));
             }
+            state.sq_occupancy = 0;
             state.flush_pending_to_ready();
             Ok(state.ready.len())
         }
@@ -883,7 +942,7 @@ mod invariant_harness_tests {
     impl RunningBackend {
         fn start(queue_depth: u32, config: MockConfig) -> Self {
             let (tx, rx) = mpsc::channel::<WorkerRequest>();
-            let state = Arc::new(Mutex::new(MockState::new(config)));
+            let state = Arc::new(Mutex::new(MockState::new(config, queue_depth as usize)));
             let driver = MockDriver::new(Arc::clone(&state));
 
             let file = tempfile::tempfile().expect("failed to create tempfile for io worker tests");
