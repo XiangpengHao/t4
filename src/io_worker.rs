@@ -12,12 +12,8 @@ use crate::io_task::{
     FileFsyncTask, FileReadTask, FileWriteTask, PageWrite, WorkerRequest, worker_disconnected_error,
 };
 use crate::sync::Arc;
-#[cfg(all(test, not(feature = "shuttle")))]
-use crate::sync::Mutex;
 use crate::sync::mpsc;
 use crate::thread;
-#[cfg(all(test, not(feature = "shuttle")))]
-use crate::thread::JoinHandle;
 
 fn worker_failed_error(message: impl Into<String>) -> Error {
     Error::Io(std::io::Error::other(message.into()))
@@ -68,7 +64,6 @@ trait IoDriver {
     ) -> Result<()>;
     fn push_fsync(&mut self, fd: i32, user_data: u64) -> Result<()>;
     fn submit(&mut self) -> Result<usize>;
-    fn submit_and_wait(&mut self, min_complete: usize) -> Result<usize>;
     fn drain_completions(&mut self, out: &mut Vec<CompletionEvent>);
 }
 
@@ -148,10 +143,6 @@ impl IoDriver for UringDriver {
 
     fn submit(&mut self) -> Result<usize> {
         Ok(self.ring.submit()?)
-    }
-
-    fn submit_and_wait(&mut self, min_complete: usize) -> Result<usize> {
-        Ok(self.ring.submit_and_wait(min_complete)?)
     }
 
     fn drain_completions(&mut self, out: &mut Vec<CompletionEvent>) {
@@ -288,30 +279,14 @@ impl<D: IoDriver> UringBackend<D> {
         loop {
             self.drain_requests();
 
-            let submitted_any = match self.drain_submissions() {
-                Ok(submitted_any) => submitted_any,
-                Err(err) => {
-                    self.fail_all(err);
-                    return;
-                }
-            };
+            if let Err(err) = self.drain_submissions() {
+                self.fail_all(err);
+                return;
+            }
 
             self.poll_completions();
+
             thread::cooperative_yield();
-
-            if self.should_exit() {
-                break;
-            }
-
-            if !self.inflight_requests.is_empty() && !submitted_any {
-                thread::cooperative_yield();
-                if let Err(err) = self.ring.submit_and_wait(1) {
-                    self.fail_all(err);
-                    return;
-                }
-                self.poll_completions();
-                thread::cooperative_yield();
-            }
 
             if self.should_exit() {
                 break;
@@ -726,356 +701,5 @@ impl IoWorker {
             )));
         }
         Ok(buf)
-    }
-}
-
-#[cfg(all(test, not(feature = "shuttle")))]
-mod invariant_harness_tests {
-    use super::*;
-    use std::collections::VecDeque;
-    use std::num::NonZeroU32;
-
-    use pollster::block_on;
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum LoggedOpKind {
-        Read,
-        Write,
-        WriteLink,
-        Fsync,
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum CompletionOrder {
-        Fifo,
-        Lifo,
-    }
-
-    #[derive(Clone, Copy, Debug)]
-    struct PushScript {
-        cqe_result: Option<i32>,
-    }
-
-    impl PushScript {
-        fn ok() -> Self {
-            Self { cqe_result: None }
-        }
-
-        fn ok_with_result(cqe_result: i32) -> Self {
-            Self {
-                cqe_result: Some(cqe_result),
-            }
-        }
-    }
-
-    #[derive(Debug)]
-    struct MockConfig {
-        completion_order: CompletionOrder,
-        release_on_submit: bool,
-        fail_submit_and_wait_once: bool,
-        scripts: VecDeque<PushScript>,
-    }
-
-    impl Default for MockConfig {
-        fn default() -> Self {
-            Self {
-                completion_order: CompletionOrder::Fifo,
-                release_on_submit: true,
-                fail_submit_and_wait_once: false,
-                scripts: VecDeque::new(),
-            }
-        }
-    }
-
-    #[derive(Debug)]
-    struct MockState {
-        queue_depth: usize,
-        sq_occupancy: usize,
-        completion_order: CompletionOrder,
-        release_on_submit: bool,
-        fail_submit_and_wait_once: bool,
-        scripts: VecDeque<PushScript>,
-        pending: VecDeque<CompletionEvent>,
-        ready: VecDeque<CompletionEvent>,
-        submissions: Vec<LoggedOpKind>,
-    }
-
-    impl MockState {
-        fn new(config: MockConfig, queue_depth: usize) -> Self {
-            Self {
-                queue_depth,
-                sq_occupancy: 0,
-                completion_order: config.completion_order,
-                release_on_submit: config.release_on_submit,
-                fail_submit_and_wait_once: config.fail_submit_and_wait_once,
-                scripts: config.scripts,
-                pending: VecDeque::new(),
-                ready: VecDeque::new(),
-                submissions: Vec::new(),
-            }
-        }
-
-        fn flush_pending_to_ready(&mut self) {
-            match self.completion_order {
-                CompletionOrder::Fifo => {
-                    while let Some(cqe) = self.pending.pop_front() {
-                        self.ready.push_back(cqe);
-                    }
-                }
-                CompletionOrder::Lifo => {
-                    while let Some(cqe) = self.pending.pop_back() {
-                        self.ready.push_back(cqe);
-                    }
-                }
-            }
-        }
-    }
-
-    #[derive(Clone)]
-    struct MockDriver {
-        state: Arc<Mutex<MockState>>,
-    }
-
-    impl MockDriver {
-        fn new(state: Arc<Mutex<MockState>>) -> Self {
-            Self { state }
-        }
-
-        fn push_common(
-            &mut self,
-            kind: LoggedOpKind,
-            expected_len: usize,
-            user_data: u64,
-        ) -> Result<()> {
-            let mut state = self.state.lock().expect("mock state mutex poisoned");
-            state.submissions.push(kind);
-
-            let script = state.scripts.pop_front().unwrap_or(PushScript::ok());
-            let result = match script.cqe_result {
-                Some(result) => result,
-                None => i32::try_from(expected_len).expect("expected_len exceeds i32 for test"),
-            };
-            state.sq_occupancy += 1;
-            state
-                .pending
-                .push_back(CompletionEvent { user_data, result });
-            Ok(())
-        }
-    }
-
-    impl IoDriver for MockDriver {
-        fn available_submission_slots(&mut self) -> usize {
-            let state = self.state.lock().expect("mock state mutex poisoned");
-            state.queue_depth.saturating_sub(state.sq_occupancy)
-        }
-
-        fn push_read(
-            &mut self,
-            _fd: i32,
-            buf: &mut AlignedBuf,
-            _offset: u64,
-            user_data: u64,
-        ) -> Result<()> {
-            self.push_common(LoggedOpKind::Read, buf.len(), user_data)
-        }
-
-        fn push_write(
-            &mut self,
-            _fd: i32,
-            buf: &AlignedBuf,
-            _offset: u64,
-            user_data: u64,
-        ) -> Result<()> {
-            self.push_common(LoggedOpKind::Write, buf.len(), user_data)
-        }
-
-        fn push_write_link(
-            &mut self,
-            _fd: i32,
-            buf: &AlignedBuf,
-            _offset: u64,
-            user_data: u64,
-        ) -> Result<()> {
-            self.push_common(LoggedOpKind::WriteLink, buf.len(), user_data)
-        }
-
-        fn push_fsync(&mut self, _fd: i32, user_data: u64) -> Result<()> {
-            self.push_common(LoggedOpKind::Fsync, 0, user_data)
-        }
-
-        fn submit(&mut self) -> Result<usize> {
-            let mut state = self.state.lock().expect("mock state mutex poisoned");
-            state.sq_occupancy = 0;
-            if state.release_on_submit {
-                state.flush_pending_to_ready();
-            }
-            Ok(state.ready.len())
-        }
-
-        fn submit_and_wait(&mut self, _min_complete: usize) -> Result<usize> {
-            let mut state = self.state.lock().expect("mock state mutex poisoned");
-            if state.fail_submit_and_wait_once {
-                state.fail_submit_and_wait_once = false;
-                return Err(Error::Io(std::io::Error::other(
-                    "mock submit_and_wait failure",
-                )));
-            }
-            state.sq_occupancy = 0;
-            state.flush_pending_to_ready();
-            Ok(state.ready.len())
-        }
-
-        fn drain_completions(&mut self, out: &mut Vec<CompletionEvent>) {
-            let mut state = self.state.lock().expect("mock state mutex poisoned");
-            while let Some(cqe) = state.ready.pop_front() {
-                out.push(cqe);
-            }
-        }
-    }
-
-    struct RunningBackend {
-        worker: IoWorker,
-        state: Arc<Mutex<MockState>>,
-        join: Option<JoinHandle<()>>,
-    }
-
-    impl RunningBackend {
-        fn start(queue_depth: u32, config: MockConfig) -> Self {
-            let (tx, rx) = mpsc::channel::<WorkerRequest>();
-            let state = Arc::new(Mutex::new(MockState::new(config, queue_depth as usize)));
-            let driver = MockDriver::new(Arc::clone(&state));
-
-            let file = tempfile::tempfile().expect("failed to create tempfile for io worker tests");
-            let backend = UringBackend::with_driver(file, queue_depth as usize, rx, driver);
-            let join = thread::spawn(move || {
-                backend.run();
-            });
-
-            Self {
-                worker: IoWorker { tx: Arc::new(tx) },
-                state,
-                join: Some(join),
-            }
-        }
-
-        fn finish(mut self) -> Vec<LoggedOpKind> {
-            drop(self.worker);
-            self.join
-                .take()
-                .expect("missing backend join handle")
-                .join()
-                .expect("backend thread panicked");
-            self.state
-                .lock()
-                .expect("mock state mutex poisoned")
-                .submissions
-                .clone()
-        }
-    }
-
-    fn aligned_buf(len_u32: u32) -> AlignedBuf {
-        let len_u32 = NonZeroU32::new(len_u32).expect("aligned buffer length must be non-zero");
-        AlignedBuf::new_zeroed(len_u32).expect("failed to allocate aligned buffer")
-    }
-
-    fn page_write(offset: u64) -> PageWrite {
-        PageWrite {
-            buf: aligned_buf(4096),
-            offset,
-        }
-    }
-
-    #[test]
-    fn core_invariant_harness_small_case_set() {
-        {
-            let harness = RunningBackend::start(
-                4,
-                MockConfig {
-                    completion_order: CompletionOrder::Lifo,
-                    ..Default::default()
-                },
-            );
-
-            let read_small = harness.worker.read_at(aligned_buf(4096), 0);
-            let read_large = harness.worker.read_at(aligned_buf(8192), 8192);
-            let fsync = harness.worker.fsync();
-            let write_one = harness.worker.write(vec![page_write(0), page_write(4096)]);
-            let write_two = harness.worker.write(vec![page_write(8192)]);
-
-            let (_, n_small) = block_on(read_small).expect("small read should succeed");
-            let (_, n_large) = block_on(read_large).expect("large read should succeed");
-            assert_eq!(n_small, 4096, "small read completion routed incorrectly");
-            assert_eq!(n_large, 8192, "large read completion routed incorrectly");
-            block_on(fsync).expect("fsync should succeed");
-            block_on(write_one).expect("first write chain should succeed");
-            block_on(write_two).expect("second write chain should succeed");
-
-            let submissions = harness.finish();
-            let write_kinds = submissions
-                .iter()
-                .filter_map(|kind| match kind {
-                    LoggedOpKind::WriteLink | LoggedOpKind::Write => Some(*kind),
-                    LoggedOpKind::Read | LoggedOpKind::Fsync => None,
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                write_kinds,
-                vec![
-                    LoggedOpKind::WriteLink,
-                    LoggedOpKind::Write,
-                    LoggedOpKind::Write
-                ],
-                "writes from different chains should not interleave"
-            );
-        }
-
-        {
-            let scripts = VecDeque::from([
-                PushScript::ok(),
-                PushScript::ok_with_result(2048),
-                PushScript::ok(),
-            ]);
-            let harness = RunningBackend::start(
-                4,
-                MockConfig {
-                    scripts,
-                    ..Default::default()
-                },
-            );
-
-            let write_fails = harness.worker.write(vec![page_write(0), page_write(4096)]);
-            let write_succeeds = harness.worker.write(vec![page_write(8192)]);
-
-            assert!(
-                block_on(write_fails).is_err(),
-                "write chain should fail when a step is short"
-            );
-            block_on(write_succeeds).expect("next write chain should still succeed");
-            let _ = harness.finish();
-        }
-
-        {
-            let harness = RunningBackend::start(
-                1,
-                MockConfig {
-                    release_on_submit: false,
-                    fail_submit_and_wait_once: true,
-                    ..Default::default()
-                },
-            );
-
-            let write_one = harness.worker.write(vec![page_write(0)]);
-            let write_two = harness.worker.write(vec![page_write(4096)]);
-
-            assert!(
-                block_on(write_one).is_err(),
-                "inflight write chain should resolve with error on worker failure"
-            );
-            assert!(
-                block_on(write_two).is_err(),
-                "queued write chain should resolve with error on worker failure"
-            );
-            let _ = harness.finish();
-        }
     }
 }

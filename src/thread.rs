@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 #[cfg(feature = "shuttle")]
 pub(crate) use shuttle::thread::spawn;
 
