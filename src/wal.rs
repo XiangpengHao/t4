@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::error::{Error, Result};
 use crate::format::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U32, PAGE_SIZE_U64};
 use crate::io::AlignedBuf;
-use crate::io_task::WalWriteOp;
+use crate::io_task::{WalCommitPlan, WalPageWrite};
 use crate::io_worker::IoWorker;
 use crate::sync::{Mutex, MutexGuard};
 
@@ -142,7 +142,9 @@ impl Wal {
 
             let writes = if state.tail.can_fit(&pending) {
                 state.tail.append(&pending, lsn)?;
-                vec![self.encode_page_write(state.tail_offset, &state.tail)?]
+                WalCommitPlan::RewriteTail {
+                    tail: self.encode_page_write(state.tail_offset, &state.tail)?,
+                }
             } else {
                 let new_page_offset = Self::reserve_space_locked(&mut state, PAGE_SIZE_U32)?;
 
@@ -157,21 +159,24 @@ impl Wal {
                 state.tail_offset = new_page_offset;
                 state.tail = new_page;
 
-                vec![old_tail_write, new_page_write]
+                WalCommitPlan::RotateTail {
+                    old_tail: old_tail_write,
+                    new_tail: new_page_write,
+                }
             };
 
             state.next_lsn = next_lsn;
-            self.io.wal_append(writes)?
+            self.io.wal_commit(writes)?
         };
 
         wal_append.await?;
         Ok(())
     }
 
-    fn encode_page_write(&self, offset: u64, page: &WalPage) -> Result<WalWriteOp> {
+    fn encode_page_write(&self, offset: u64, page: &WalPage) -> Result<WalPageWrite> {
         let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32)?;
         buf.as_mut_slice().copy_from_slice(page.as_slice());
-        Ok(WalWriteOp { buf, offset })
+        Ok(WalPageWrite { buf, offset })
     }
 
     async fn read_page(io: &IoWorker, offset: u64) -> Result<WalPage> {

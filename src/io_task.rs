@@ -14,9 +14,20 @@ pub(crate) type FsyncCompletion = Arc<TaskCompletion<()>>;
 pub(crate) type WalAppendCompletion = Arc<TaskCompletion<()>>;
 
 #[derive(Debug)]
-pub(crate) struct WalWriteOp {
+pub(crate) struct WalPageWrite {
     pub(crate) buf: AlignedBuf,
     pub(crate) offset: u64,
+}
+
+#[derive(Debug)]
+pub(crate) enum WalCommitPlan {
+    RewriteTail {
+        tail: WalPageWrite,
+    },
+    RotateTail {
+        old_tail: WalPageWrite,
+        new_tail: WalPageWrite,
+    },
 }
 
 pub(crate) struct TaskCompletion<T> {
@@ -113,8 +124,8 @@ pub(crate) enum WorkerRequest {
     Fsync {
         completion: FsyncCompletion,
     },
-    WalAppend {
-        writes: Vec<WalWriteOp>,
+    WalCommit {
+        plan: WalCommitPlan,
         completion: WalAppendCompletion,
     },
 }

@@ -9,7 +9,8 @@ use io_uring::{IoUring, opcode, types};
 use crate::error::{Error, Result};
 use crate::io::AlignedBuf;
 use crate::io_task::{
-    FileFsyncTask, FileReadTask, FileWalAppendTask, FileWriteTask, WalWriteOp, WorkerRequest,
+    FileFsyncTask, FileReadTask, FileWalAppendTask, FileWriteTask, WalCommitPlan, WalPageWrite,
+    WorkerRequest,
     worker_disconnected_error,
 };
 use crate::sync::Arc;
@@ -29,7 +30,7 @@ fn complete_request_with_error(request: WorkerRequest, err: Error) {
         WorkerRequest::Read { completion, .. } => completion.complete(Err(err)),
         WorkerRequest::Write { completion, .. } => completion.complete(Err(err)),
         WorkerRequest::Fsync { completion, .. } => completion.complete(Err(err)),
-        WorkerRequest::WalAppend { completion, .. } => completion.complete(Err(err)),
+        WorkerRequest::WalCommit { completion, .. } => completion.complete(Err(err)),
     }
 }
 use crate::io_task::{FsyncCompletion, ReadCompletion, WalAppendCompletion, WriteCompletion};
@@ -180,7 +181,7 @@ enum SubmittedOp {
 }
 
 struct PendingWalAppend {
-    writes: Vec<WalWriteOp>,
+    plan: WalCommitPlan,
     completion: WalAppendCompletion,
 }
 
@@ -348,13 +349,9 @@ impl<D: IoDriver> UringBackend<D> {
         while !self.queued.is_empty() {
             let request = self.queued.pop_front().expect("queued request missing");
             match request {
-                WorkerRequest::WalAppend { writes, completion } => {
-                    if writes.is_empty() {
-                        completion.complete(Ok(()));
-                    } else {
-                        self.pending_wal_appends
-                            .push_back(PendingWalAppend { writes, completion });
-                    }
+                WorkerRequest::WalCommit { plan, completion } => {
+                    self.pending_wal_appends
+                        .push_back(PendingWalAppend { plan, completion });
                 }
                 other => {
                     if self.tokens.is_empty() {
@@ -383,59 +380,36 @@ impl<D: IoDriver> UringBackend<D> {
         if self.active_wal_append.is_none()
             && let Some(pending) = self.pending_wal_appends.pop_front()
         {
-            if self.tokens.len() < pending.writes.len() {
+            let step_count = match &pending.plan {
+                WalCommitPlan::RewriteTail { .. } => 1,
+                WalCommitPlan::RotateTail { .. } => 2,
+            };
+
+            if self.tokens.len() < step_count {
                 self.pending_wal_appends.push_front(pending);
                 return Ok(false);
             }
 
-            let step_count = pending.writes.len();
             self.active_wal_append = Some(ActiveWalAppend {
                 remaining: step_count,
                 completion: pending.completion,
                 error: None,
             });
 
-            for (index, step) in pending.writes.into_iter().enumerate() {
-                let WalWriteOp { buf, offset } = step;
-                let token = self
-                    .tokens
-                    .pop_front()
-                    .expect("token pool unexpectedly empty");
-                let user_data = token as u64;
-                let is_last = index + 1 == step_count;
-                let push_result = if is_last {
-                    self.ring
-                        .push_write(self.file.as_raw_fd(), &buf, offset, user_data)
-                } else {
-                    self.ring
-                        .push_write_link(self.file.as_raw_fd(), &buf, offset, user_data)
-                };
-
-                if let Err(err) = push_result {
-                    self.tokens.push_front(token);
-                    if index == 0 {
-                        if let Some(active) = self.active_wal_append.take() {
-                            active.completion.complete(Err(err));
-                        }
-                    } else if let Some(active) = self.active_wal_append.as_mut() {
-                        active.remaining = index;
-                        if active.error.is_none() {
-                            active.error = Some(err);
-                        }
+            match pending.plan {
+                WalCommitPlan::RewriteTail { tail } => {
+                    if !self.submit_wal_step(tail, true, 0)? {
+                        return Ok(false);
                     }
-                    return Ok(index > 0);
                 }
-
-                let slot = self
-                    .submitted_tasks
-                    .get_mut(token)
-                    .expect("token out of range for submitted_tasks");
-                debug_assert!(slot.is_none(), "token reused before completion");
-                *slot = Some(SubmittedOp::WalStep {
-                    expected: buf.len(),
-                    _buf: buf,
-                });
-                self.inflight += 1;
+                WalCommitPlan::RotateTail { old_tail, new_tail } => {
+                    if !self.submit_wal_step(old_tail, false, 0)? {
+                        return Ok(false);
+                    }
+                    if !self.submit_wal_step(new_tail, true, 1)? {
+                        return Ok(true);
+                    }
+                }
             }
             return Ok(true);
         }
@@ -472,8 +446,8 @@ impl<D: IoDriver> UringBackend<D> {
 
     fn submit_one(&mut self, request: WorkerRequest) -> Result<bool> {
         let mut request = match request {
-            WorkerRequest::WalAppend { .. } => {
-                debug_assert!(false, "wal append should not be submitted directly");
+            WorkerRequest::WalCommit { .. } => {
+                debug_assert!(false, "wal commit should not be submitted directly");
                 return Ok(false);
             }
             other => other,
@@ -495,7 +469,7 @@ impl<D: IoDriver> UringBackend<D> {
                     .push_write(self.file.as_raw_fd(), buf, *offset, user_data)
             }
             WorkerRequest::Fsync { .. } => self.ring.push_fsync(self.file.as_raw_fd(), user_data),
-            WorkerRequest::WalAppend { .. } => unreachable!("handled above"),
+            WorkerRequest::WalCommit { .. } => unreachable!("handled above"),
         };
 
         if let Err(err) = push_result {
@@ -521,7 +495,60 @@ impl<D: IoDriver> UringBackend<D> {
                 completion,
             },
             WorkerRequest::Fsync { completion, .. } => SubmittedOp::Fsync { completion },
-            WorkerRequest::WalAppend { .. } => unreachable!("handled above"),
+            WorkerRequest::WalCommit { .. } => unreachable!("handled above"),
+        });
+        self.inflight += 1;
+        Ok(true)
+    }
+
+    fn submit_wal_step(
+        &mut self,
+        step: WalPageWrite,
+        is_last: bool,
+        completed_before_error: usize,
+    ) -> Result<bool> {
+        let WalPageWrite { buf, offset } = step;
+        let token = self
+            .tokens
+            .pop_front()
+            .expect("token pool unexpectedly empty");
+        let user_data = token as u64;
+        let push_result = if is_last {
+            self.ring
+                .push_write(self.file.as_raw_fd(), &buf, offset, user_data)
+        } else {
+            self.ring
+                .push_write_link(self.file.as_raw_fd(), &buf, offset, user_data)
+        };
+
+        if let Err(err) = push_result {
+            self.tokens.push_front(token);
+            match completed_before_error {
+                0 => {
+                    if let Some(active) = self.active_wal_append.take() {
+                        active.completion.complete(Err(err));
+                    }
+                }
+                count => {
+                    if let Some(active) = self.active_wal_append.as_mut() {
+                        active.remaining = count;
+                        if active.error.is_none() {
+                            active.error = Some(err);
+                        }
+                    }
+                }
+            }
+            return Ok(false);
+        }
+
+        let slot = self
+            .submitted_tasks
+            .get_mut(token)
+            .expect("token out of range for submitted_tasks");
+        debug_assert!(slot.is_none(), "token reused before completion");
+        *slot = Some(SubmittedOp::WalStep {
+            expected: buf.len(),
+            _buf: buf,
         });
         self.inflight += 1;
         Ok(true)
@@ -668,10 +695,10 @@ impl IoWorker {
         FileFsyncTask::new((*self.tx).clone())
     }
 
-    pub fn wal_append(&self, writes: Vec<WalWriteOp>) -> Result<FileWalAppendTask> {
+    pub fn wal_commit(&self, plan: WalCommitPlan) -> Result<FileWalAppendTask> {
         let completion = Arc::new(crate::io_task::TaskCompletion::new());
-        let request = WorkerRequest::WalAppend {
-            writes,
+        let request = WorkerRequest::WalCommit {
+            plan,
             completion: Arc::clone(&completion),
         };
         if self.tx.send(request).is_err() {
@@ -942,8 +969,8 @@ mod invariant_harness_tests {
         AlignedBuf::new_zeroed(len_u32).expect("failed to allocate aligned buffer")
     }
 
-    fn wal_write(offset: u64) -> WalWriteOp {
-        WalWriteOp {
+    fn wal_write(offset: u64) -> WalPageWrite {
+        WalPageWrite {
             buf: aligned_buf(4096),
             offset,
         }
@@ -965,11 +992,16 @@ mod invariant_harness_tests {
             let fsync = harness.worker.fsync();
             let wal_one = harness
                 .worker
-                .wal_append(vec![wal_write(0), wal_write(4096)])
+                .wal_commit(WalCommitPlan::RotateTail {
+                    old_tail: wal_write(0),
+                    new_tail: wal_write(4096),
+                })
                 .expect("failed to enqueue first wal append");
             let wal_two = harness
                 .worker
-                .wal_append(vec![wal_write(8192)])
+                .wal_commit(WalCommitPlan::RewriteTail {
+                    tail: wal_write(8192),
+                })
                 .expect("failed to enqueue second wal append");
 
             let (_, n_small) = block_on(read_small).expect("small read should succeed");
@@ -1015,11 +1047,16 @@ mod invariant_harness_tests {
 
             let wal_fails = harness
                 .worker
-                .wal_append(vec![wal_write(0), wal_write(4096)])
+                .wal_commit(WalCommitPlan::RotateTail {
+                    old_tail: wal_write(0),
+                    new_tail: wal_write(4096),
+                })
                 .expect("failed to enqueue failing wal append");
             let wal_succeeds = harness
                 .worker
-                .wal_append(vec![wal_write(8192)])
+                .wal_commit(WalCommitPlan::RewriteTail {
+                    tail: wal_write(8192),
+                })
                 .expect("failed to enqueue succeeding wal append");
 
             assert!(
@@ -1042,11 +1079,13 @@ mod invariant_harness_tests {
 
             let wal_one = harness
                 .worker
-                .wal_append(vec![wal_write(0)])
+                .wal_commit(WalCommitPlan::RewriteTail { tail: wal_write(0) })
                 .expect("failed to enqueue first wal append");
             let wal_two = harness
                 .worker
-                .wal_append(vec![wal_write(4096)])
+                .wal_commit(WalCommitPlan::RewriteTail {
+                    tail: wal_write(4096),
+                })
                 .expect("failed to enqueue second wal append");
 
             assert!(
