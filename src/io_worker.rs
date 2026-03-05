@@ -47,24 +47,60 @@ struct UringDriver {
 
 trait IoDriver {
     fn available_submission_slots(&mut self) -> usize;
-    fn push_read(
-        &mut self,
-        fd: i32,
-        buf: &mut AlignedBuf,
-        offset: u64,
-        user_data: u64,
-    ) -> Result<()>;
-    fn push_write(&mut self, fd: i32, buf: &AlignedBuf, offset: u64, user_data: u64) -> Result<()>;
-    fn push_write_link(
-        &mut self,
-        fd: i32,
-        buf: &AlignedBuf,
-        offset: u64,
-        user_data: u64,
-    ) -> Result<()>;
-    fn push_fsync(&mut self, fd: i32, user_data: u64) -> Result<()>;
+    fn push(&mut self, entry: io_uring::squeue::Entry) -> Result<()>;
     fn submit(&mut self) -> Result<usize>;
     fn drain_completions(&mut self, out: &mut Vec<CompletionEvent>);
+}
+
+struct ReadEntry<'a> {
+    fd: i32,
+    buf: &'a mut AlignedBuf,
+    offset: u64,
+    user_data: u64,
+}
+
+impl From<ReadEntry<'_>> for io_uring::squeue::Entry {
+    fn from(value: ReadEntry<'_>) -> Self {
+        opcode::Read::new(
+            types::Fd(value.fd),
+            value.buf.as_mut_ptr(),
+            value.buf.len_u32(),
+        )
+        .offset(value.offset)
+        .build()
+        .user_data(value.user_data)
+    }
+}
+
+struct WriteEntry<'a> {
+    fd: i32,
+    buf: &'a AlignedBuf,
+    offset: u64,
+    user_data: u64,
+    flags: io_uring::squeue::Flags,
+}
+
+impl From<WriteEntry<'_>> for io_uring::squeue::Entry {
+    fn from(value: WriteEntry<'_>) -> Self {
+        opcode::Write::new(types::Fd(value.fd), value.buf.as_ptr(), value.buf.len_u32())
+            .offset(value.offset)
+            .build()
+            .flags(value.flags)
+            .user_data(value.user_data)
+    }
+}
+
+struct FsyncEntry {
+    fd: i32,
+    user_data: u64,
+}
+
+impl From<FsyncEntry> for io_uring::squeue::Entry {
+    fn from(value: FsyncEntry) -> Self {
+        opcode::Fsync::new(types::Fd(value.fd))
+            .build()
+            .user_data(value.user_data)
+    }
 }
 
 impl UringDriver {
@@ -94,50 +130,7 @@ impl IoDriver for UringDriver {
         sq.capacity() - sq.len()
     }
 
-    fn push_read(
-        &mut self,
-        fd: i32,
-        buf: &mut AlignedBuf,
-        offset: u64,
-        user_data: u64,
-    ) -> Result<()> {
-        let len_u32 = buf.len_u32();
-        let entry = opcode::Read::new(types::Fd(fd), buf.as_mut_ptr(), len_u32)
-            .offset(offset)
-            .build()
-            .user_data(user_data);
-        self.push_entry(entry)
-    }
-
-    fn push_write(&mut self, fd: i32, buf: &AlignedBuf, offset: u64, user_data: u64) -> Result<()> {
-        let len_u32 = buf.len_u32();
-        let entry = opcode::Write::new(types::Fd(fd), buf.as_ptr(), len_u32)
-            .offset(offset)
-            .build()
-            .user_data(user_data);
-        self.push_entry(entry)
-    }
-
-    fn push_write_link(
-        &mut self,
-        fd: i32,
-        buf: &AlignedBuf,
-        offset: u64,
-        user_data: u64,
-    ) -> Result<()> {
-        let len_u32 = buf.len_u32();
-        let entry = opcode::Write::new(types::Fd(fd), buf.as_ptr(), len_u32)
-            .offset(offset)
-            .build()
-            .flags(io_uring::squeue::Flags::IO_LINK)
-            .user_data(user_data);
-        self.push_entry(entry)
-    }
-
-    fn push_fsync(&mut self, fd: i32, user_data: u64) -> Result<()> {
-        let entry = opcode::Fsync::new(types::Fd(fd))
-            .build()
-            .user_data(user_data);
+    fn push(&mut self, entry: io_uring::squeue::Entry) -> Result<()> {
         self.push_entry(entry)
     }
 
@@ -381,11 +374,14 @@ impl<D: IoDriver> UringBackend<D> {
                     let InflightRequestKind::Read { buf, .. } = &mut request.kind else {
                         unreachable!("request kind changed while submitting read");
                     };
-                    self.ring.push_read(
-                        self.file.as_raw_fd(),
-                        buf.as_mut().expect("read buffer missing while submitting"),
-                        offset,
-                        encode_user_data(request_id, 0),
+                    self.ring.push(
+                        ReadEntry {
+                            fd: self.file.as_raw_fd(),
+                            buf: buf.as_mut().expect("read buffer missing while submitting"),
+                            offset,
+                            user_data: encode_user_data(request_id, 0),
+                        }
+                        .into(),
                     )
                 };
                 self.finish_single_submit(request_id, push_result)
@@ -400,9 +396,13 @@ impl<D: IoDriver> UringBackend<D> {
                     },
                 );
 
-                let push_result = self
-                    .ring
-                    .push_fsync(self.file.as_raw_fd(), encode_user_data(request_id, 0));
+                let push_result = self.ring.push(
+                    FsyncEntry {
+                        fd: self.file.as_raw_fd(),
+                        user_data: encode_user_data(request_id, 0),
+                    }
+                    .into(),
+                );
                 self.finish_single_submit(request_id, push_result)
             }
             WorkerRequest::Write { writes, completion } => {
@@ -433,21 +433,20 @@ impl<D: IoDriver> UringBackend<D> {
                         let page = pages
                             .get(index)
                             .expect("write page missing while submitting");
-                        if is_last {
-                            self.ring.push_write(
-                                self.file.as_raw_fd(),
-                                &page.buf,
-                                page.offset,
-                                encode_user_data(request_id, index),
-                            )
-                        } else {
-                            self.ring.push_write_link(
-                                self.file.as_raw_fd(),
-                                &page.buf,
-                                page.offset,
-                                encode_user_data(request_id, index),
-                            )
-                        }
+                        self.ring.push(
+                            WriteEntry {
+                                fd: self.file.as_raw_fd(),
+                                buf: &page.buf,
+                                offset: page.offset,
+                                user_data: encode_user_data(request_id, index),
+                                flags: if is_last {
+                                    io_uring::squeue::Flags::empty()
+                                } else {
+                                    io_uring::squeue::Flags::IO_LINK
+                                },
+                            }
+                            .into(),
+                        )
                     };
 
                     match push_result {
