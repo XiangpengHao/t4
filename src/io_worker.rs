@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
 use std::num::NonZeroU32;
@@ -49,7 +49,7 @@ trait IoDriver {
     fn available_submission_slots(&mut self) -> usize;
     fn push(&mut self, entry: io_uring::squeue::Entry) -> Result<()>;
     fn submit(&mut self) -> Result<usize>;
-    fn drain_completions(&mut self, out: &mut Vec<CompletionEvent>);
+    fn pop_completion(&mut self) -> Option<CompletionEvent>;
 }
 
 struct ReadEntry<'a> {
@@ -138,14 +138,12 @@ impl IoDriver for UringDriver {
         Ok(self.ring.submit()?)
     }
 
-    fn drain_completions(&mut self, out: &mut Vec<CompletionEvent>) {
-        let cq = self.ring.completion();
-        for cqe in cq {
-            out.push(CompletionEvent {
-                user_data: cqe.user_data(),
-                result: cqe.result(),
-            });
-        }
+    fn pop_completion(&mut self) -> Option<CompletionEvent> {
+        let mut cq = self.ring.completion();
+        cq.next().map(|cqe| CompletionEvent {
+            user_data: cqe.user_data(),
+            result: cqe.result(),
+        })
     }
 }
 
@@ -219,11 +217,8 @@ struct UringBackend<D: IoDriver> {
     file: File,
     ring: D,
     queue_depth: usize,
-    queued: VecDeque<WorkerRequest>,
     inflight_requests: HashMap<RequestId, InflightRequest>,
     next_request_id: RequestId,
-    cqe_buf: Vec<CompletionEvent>,
-    shutting_down: bool,
 }
 
 impl UringBackend<UringDriver> {
@@ -250,11 +245,8 @@ impl<D: IoDriver> UringBackend<D> {
             file,
             ring,
             queue_depth,
-            queued: VecDeque::new(),
             inflight_requests: HashMap::new(),
             next_request_id: 0,
-            cqe_buf: Vec::with_capacity(queue_depth),
-            shutting_down: false,
         }
     }
 
@@ -264,58 +256,40 @@ impl<D: IoDriver> UringBackend<D> {
 }
 
 impl<D: IoDriver> UringBackend<D> {
-    fn should_exit(&self) -> bool {
-        self.shutting_down && self.queued.is_empty() && self.inflight_requests.is_empty()
-    }
-
     fn thread_loop(&mut self) {
+        let mut pending_request = None;
         loop {
-            self.drain_requests();
-
-            if let Err(err) = self.drain_submissions() {
-                self.fail_all(err);
+            let disconnected = match self.submit_requests(&mut pending_request) {
+                Ok(disconnected) => disconnected,
+                Err(err) => {
+                    self.fail_all(err, pending_request.take());
+                    return;
+                }
+            };
+            if disconnected {
                 return;
             }
 
             self.poll_completions();
 
             thread::cooperative_yield();
-
-            if self.should_exit() {
-                break;
-            }
-        }
-
-        self.drain_requests();
-        self.reject_queued_disconnected();
-        self.reject_inflight_disconnected();
-    }
-
-    fn drain_requests(&mut self) {
-        loop {
-            match self.receiver.try_recv() {
-                Ok(request) if self.shutting_down => {
-                    complete_request_with_error(request, worker_disconnected_error());
-                }
-                Ok(request) => self.queued.push_back(request),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.shutting_down = true;
-                    break;
-                }
-            }
         }
     }
 
-    fn drain_submissions(&mut self) -> Result<bool> {
+    fn submit_requests(&mut self, pending_request: &mut Option<WorkerRequest>) -> Result<bool> {
         let mut submitted_any = false;
 
-        while let Some(request) = self.queued.pop_front() {
+        loop {
+            let request = match pending_request.take() {
+                Some(request) => request,
+                None => match self.receiver.try_recv() {
+                    Ok(request) => request,
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => return Ok(true),
+                },
+            };
             let op_count = request_op_count(&request);
-            if op_count == 0 {
-                complete_empty_request(request);
-                continue;
-            }
+            assert!(op_count > 0, "request has no operations");
             if op_count > self.queue_depth {
                 complete_request_with_error(
                     request,
@@ -330,7 +304,7 @@ impl<D: IoDriver> UringBackend<D> {
                 continue;
             }
             if self.ring.available_submission_slots() < op_count {
-                self.queued.push_front(request);
+                *pending_request = Some(request);
                 break;
             }
             if self.submit_request(request)? {
@@ -342,7 +316,7 @@ impl<D: IoDriver> UringBackend<D> {
             let _ = self.ring.submit()?;
         }
 
-        Ok(submitted_any)
+        Ok(false)
     }
 
     fn submit_request(&mut self, request: WorkerRequest) -> Result<bool> {
@@ -466,11 +440,7 @@ impl<D: IoDriver> UringBackend<D> {
     }
 
     fn poll_completions(&mut self) {
-        self.cqe_buf.clear();
-        self.ring.drain_completions(&mut self.cqe_buf);
-        let completions: Vec<_> = self.cqe_buf.drain(..).collect();
-
-        for cqe in completions {
+        while let Some(cqe) = self.ring.pop_completion() {
             let (request_id, op_index) = decode_user_data(cqe.user_data);
             let mut should_complete = false;
 
@@ -537,10 +507,10 @@ impl<D: IoDriver> UringBackend<D> {
         }
     }
 
-    fn fail_all(&mut self, err: Error) {
+    fn fail_all(&mut self, err: Error, pending_request: Option<WorkerRequest>) {
         let msg = format!("io worker failed: {err}");
 
-        while let Some(request) = self.queued.pop_front() {
+        if let Some(request) = pending_request {
             complete_request_with_error(request, worker_failed_error(msg.clone()));
         }
 
@@ -550,19 +520,6 @@ impl<D: IoDriver> UringBackend<D> {
 
         while let Ok(request) = self.receiver.try_recv() {
             complete_request_with_error(request, worker_failed_error(msg.clone()));
-        }
-    }
-
-    fn reject_queued_disconnected(&mut self) {
-        while let Some(request) = self.queued.pop_front() {
-            complete_request_with_error(request, worker_disconnected_error());
-        }
-        self.reject_inflight_disconnected();
-    }
-
-    fn reject_inflight_disconnected(&mut self) {
-        for (_, request) in self.inflight_requests.drain() {
-            request.complete_with_error(worker_disconnected_error());
         }
     }
 
@@ -623,15 +580,6 @@ fn request_op_count(request: &WorkerRequest) -> usize {
     match request {
         WorkerRequest::Read { .. } | WorkerRequest::Fsync { .. } => 1,
         WorkerRequest::Write { writes, .. } => writes.len(),
-    }
-}
-
-fn complete_empty_request(request: WorkerRequest) {
-    match request {
-        WorkerRequest::Write { completion, .. } => completion.complete(Ok(())),
-        WorkerRequest::Read { .. } | WorkerRequest::Fsync { .. } => {
-            debug_assert!(false, "only writes should be empty")
-        }
     }
 }
 
