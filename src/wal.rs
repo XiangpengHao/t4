@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::error::{Error, Result};
 use crate::format::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U32, PAGE_SIZE_U64};
 use crate::io::AlignedBuf;
-use crate::io_task::{WalCommitPlan, WalPageWrite};
+use crate::io_task::PageWrite;
 use crate::io_worker::IoWorker;
 use crate::sync::{Mutex, MutexGuard};
 
@@ -37,7 +37,7 @@ impl Wal {
         let page = WalPage::empty();
         let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32)?;
         buf.as_mut_slice().copy_from_slice(page.as_slice());
-        io.write_all_at(buf, 0).await?;
+        io.write(vec![PageWrite { buf, offset: 0 }]).await?;
         Ok(Self {
             io,
             state: Mutex::new(WalState {
@@ -93,7 +93,12 @@ impl Wal {
         } else {
             let buf = AlignedBuf::from_padded_slice(value.as_bytes())?;
             let value_offset = self.reserve_value_space(buf.len_u32())?;
-            self.io.write_all_at(buf, value_offset).await?;
+            self.io
+                .write(vec![PageWrite {
+                    buf,
+                    offset: value_offset,
+                }])
+                .await?;
             value_offset
         };
 
@@ -134,7 +139,7 @@ impl Wal {
     }
 
     async fn append_entry(&self, pending: AppendEntry) -> Result<()> {
-        let wal_append = {
+        let write = {
             let mut state = self.lock_state()?;
             let lsn = state.next_lsn;
             let next_lsn =
@@ -142,9 +147,7 @@ impl Wal {
 
             let writes = if state.tail.can_fit(&pending) {
                 state.tail.append(&pending, lsn)?;
-                WalCommitPlan::RewriteTail {
-                    tail: self.encode_page_write(state.tail_offset, &state.tail)?,
-                }
+                vec![self.encode_page_write(state.tail_offset, &state.tail)?]
             } else {
                 let new_page_offset = Self::reserve_space_locked(&mut state, PAGE_SIZE_U32)?;
 
@@ -159,24 +162,21 @@ impl Wal {
                 state.tail_offset = new_page_offset;
                 state.tail = new_page;
 
-                WalCommitPlan::RotateTail {
-                    old_tail: old_tail_write,
-                    new_tail: new_page_write,
-                }
+                vec![old_tail_write, new_page_write]
             };
 
             state.next_lsn = next_lsn;
-            self.io.wal_commit(writes)?
+            self.io.write(writes)
         };
 
-        wal_append.await?;
+        write.await?;
         Ok(())
     }
 
-    fn encode_page_write(&self, offset: u64, page: &WalPage) -> Result<WalPageWrite> {
+    fn encode_page_write(&self, offset: u64, page: &WalPage) -> Result<PageWrite> {
         let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32)?;
         buf.as_mut_slice().copy_from_slice(page.as_slice());
-        Ok(WalPageWrite { buf, offset })
+        Ok(PageWrite { buf, offset })
     }
 
     async fn read_page(io: &IoWorker, offset: u64) -> Result<WalPage> {

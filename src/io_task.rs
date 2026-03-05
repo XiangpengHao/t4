@@ -9,25 +9,13 @@ use crate::sync::{Arc, Mutex};
 use crate::thread::cooperative_yield;
 
 pub(crate) type ReadCompletion = Arc<TaskCompletion<(AlignedBuf, usize)>>;
-pub(crate) type WriteCompletion = Arc<TaskCompletion<usize>>;
+pub(crate) type WriteCompletion = Arc<TaskCompletion<()>>;
 pub(crate) type FsyncCompletion = Arc<TaskCompletion<()>>;
-pub(crate) type WalAppendCompletion = Arc<TaskCompletion<()>>;
 
 #[derive(Debug)]
-pub(crate) struct WalPageWrite {
+pub(crate) struct PageWrite {
     pub(crate) buf: AlignedBuf,
     pub(crate) offset: u64,
-}
-
-#[derive(Debug)]
-pub(crate) enum WalCommitPlan {
-    RewriteTail {
-        tail: WalPageWrite,
-    },
-    RotateTail {
-        old_tail: WalPageWrite,
-        new_tail: WalPageWrite,
-    },
 }
 
 pub(crate) struct TaskCompletion<T> {
@@ -117,16 +105,11 @@ pub(crate) enum WorkerRequest {
         completion: ReadCompletion,
     },
     Write {
-        buf: AlignedBuf,
-        offset: u64,
+        writes: Vec<PageWrite>,
         completion: WriteCompletion,
     },
     Fsync {
         completion: FsyncCompletion,
-    },
-    WalCommit {
-        plan: WalCommitPlan,
-        completion: WalAppendCompletion,
     },
 }
 
@@ -196,8 +179,7 @@ impl Future for FileReadTask {
 
 struct PendingWrite {
     tx: mpsc::Sender<WorkerRequest>,
-    buf: Option<AlignedBuf>,
-    offset: u64,
+    writes: Option<Vec<PageWrite>>,
 }
 
 pub(crate) struct FileWriteTask {
@@ -211,19 +193,18 @@ enum FileWriteTaskState {
 }
 
 impl FileWriteTask {
-    pub(crate) fn new(tx: mpsc::Sender<WorkerRequest>, buf: AlignedBuf, offset: u64) -> Self {
+    pub(crate) fn new(tx: mpsc::Sender<WorkerRequest>, writes: Vec<PageWrite>) -> Self {
         Self {
             state: FileWriteTaskState::Init(PendingWrite {
                 tx,
-                buf: Some(buf),
-                offset,
+                writes: Some(writes),
             }),
         }
     }
 }
 
 impl Future for FileWriteTask {
-    type Output = Result<usize>;
+    type Output = Result<()>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
@@ -233,8 +214,7 @@ impl Future for FileWriteTask {
                 FileWriteTaskState::Init(pending) => {
                     let completion = Arc::new(TaskCompletion::new());
                     let request = WorkerRequest::Write {
-                        buf: pending.buf.take().expect("write task buffer missing"),
-                        offset: pending.offset,
+                        writes: pending.writes.take().expect("write task payload missing"),
                         completion: Arc::clone(&completion),
                     };
                     if pending.tx.send(request).is_err() {
@@ -310,46 +290,6 @@ impl Future for FileFsyncTask {
                 }
                 FileFsyncTaskState::Done => panic!("FileFsyncTask polled after completion"),
             }
-        }
-    }
-}
-
-pub(crate) struct FileWalAppendTask {
-    state: FileWalAppendTaskState,
-}
-
-enum FileWalAppendTaskState {
-    Waiting(WalAppendCompletion),
-    Done,
-}
-
-impl FileWalAppendTask {
-    pub(crate) fn new(completion: WalAppendCompletion) -> Self {
-        Self {
-            state: FileWalAppendTaskState::Waiting(completion),
-        }
-    }
-}
-
-impl Future for FileWalAppendTask {
-    type Output = Result<()>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-
-        match &mut this.state {
-            FileWalAppendTaskState::Waiting(completion) => {
-                let completion = Arc::clone(completion);
-                let poll = completion.poll_result(cx);
-                if poll.is_ready() {
-                    this.state = FileWalAppendTaskState::Done;
-                    poll
-                } else {
-                    cooperative_yield();
-                    Poll::Pending
-                }
-            }
-            FileWalAppendTaskState::Done => panic!("FileWalAppendTask polled after completion"),
         }
     }
 }
