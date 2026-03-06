@@ -1,8 +1,9 @@
 use crate::art::{meta::{NodeMeta, NodeType}, ptr::TaggedPointer};
 
-#[repr(C)]
+#[repr(C, align(16))]
 pub(crate) struct Node256 {
     meta: NodeMeta,
+    terminal: TaggedPointer,
     key_mask: [u8; 32],
     children: [TaggedPointer; 256],
 }
@@ -12,6 +13,7 @@ impl Node256 {
         let meta = NodeMeta::new(NodeType::Node256);
         Self {
             meta,
+            terminal: TaggedPointer::default(),
             key_mask: [0; 32],
             children: [TaggedPointer::default(); 256],
         }
@@ -45,12 +47,54 @@ impl Node256 {
 
         Some(self.children[key_idx])
     }
+
+    pub(crate) fn meta(&self) -> &NodeMeta {
+        &self.meta
+    }
+
+    pub(crate) fn meta_mut(&mut self) -> &mut NodeMeta {
+        &mut self.meta
+    }
+
+    pub(crate) fn terminal(&self) -> TaggedPointer {
+        self.terminal
+    }
+
+    pub(crate) fn set_terminal(&mut self, value: TaggedPointer) {
+        self.terminal = value;
+    }
+
+    pub(crate) fn is_full(&self) -> bool {
+        self.meta.len() == self.children.len()
+    }
+
+    pub(crate) fn first_child(&self) -> Option<TaggedPointer> {
+        if !self.terminal.is_null() {
+            return Some(self.terminal);
+        }
+
+        for key in 0..=u8::MAX {
+            if let Some(child) = self.get(key) {
+                return Some(child);
+            }
+        }
+
+        None
+    }
+
+    pub(crate) fn for_each_child(&self, mut f: impl FnMut(u8, TaggedPointer)) {
+        for key in 0..=u8::MAX {
+            if let Some(child) = self.get(key) {
+                f(key, child);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Node256;
-    use crate::art::{meta::NodeMeta, ptr::TaggedPointer};
+    use crate::art::ptr::TaggedPointer;
 
     #[test]
     fn insert_and_get_direct_slots() {

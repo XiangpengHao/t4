@@ -1,10 +1,9 @@
-use crate::art::{
-    meta::{NodeMeta, NodeType}, n256::Node256, ptr::TaggedPointer
-};
+use crate::art::{meta::{NodeMeta, NodeType}, ptr::TaggedPointer};
 
-#[repr(C)]
+#[repr(C, align(16))]
 pub(crate) struct Node48 {
     meta: NodeMeta,
+    terminal: TaggedPointer,
     child_idx: [u8; 256],
     children: [TaggedPointer; 48],
 }
@@ -14,6 +13,7 @@ impl Node48 {
         let meta = NodeMeta::new(NodeType::Node48);
         Self {
             meta,
+            terminal: TaggedPointer::default(),
             child_idx: [0; 256],
             children: [TaggedPointer::default(); 48],
         }
@@ -49,12 +49,54 @@ impl Node48 {
 
         Some(self.children[(child_idx - 1) as usize])
     }
+
+    pub(crate) fn meta(&self) -> &NodeMeta {
+        &self.meta
+    }
+
+    pub(crate) fn meta_mut(&mut self) -> &mut NodeMeta {
+        &mut self.meta
+    }
+
+    pub(crate) fn terminal(&self) -> TaggedPointer {
+        self.terminal
+    }
+
+    pub(crate) fn set_terminal(&mut self, value: TaggedPointer) {
+        self.terminal = value;
+    }
+
+    pub(crate) fn is_full(&self) -> bool {
+        self.meta.len() == self.children.len()
+    }
+
+    pub(crate) fn first_child(&self) -> Option<TaggedPointer> {
+        if !self.terminal.is_null() {
+            return Some(self.terminal);
+        }
+
+        for key in 0..=u8::MAX {
+            if let Some(child) = self.get(key) {
+                return Some(child);
+            }
+        }
+
+        None
+    }
+
+    pub(crate) fn for_each_child(&self, mut f: impl FnMut(u8, TaggedPointer)) {
+        for key in 0..=u8::MAX {
+            if let Some(child) = self.get(key) {
+                f(key, child);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Node48;
-    use crate::art::{meta::NodeMeta, ptr::TaggedPointer};
+    use crate::art::ptr::TaggedPointer;
 
     #[test]
     fn insert_and_get_sparse_keys() {
