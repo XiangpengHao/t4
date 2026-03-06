@@ -32,7 +32,7 @@ impl Default for MountOptions {
 }
 
 #[derive(Debug)]
-pub struct T4Store {
+pub(crate) struct T4Store {
     io: IoWorker,
     wal: Wal,
     index: RwLock<HashMap<T4Key, ValueRef>>,

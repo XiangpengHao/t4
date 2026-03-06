@@ -1,8 +1,8 @@
-mod buffer;
+mod store;
 mod error;
+mod buffer;
 mod io_task;
 mod io_worker;
-mod store;
 mod sync;
 mod wal;
 
@@ -11,8 +11,8 @@ use std::{num::NonZeroU32, path::Path};
 use crate::store::T4Store;
 use crate::sync::Arc;
 
-pub use error::{Error, Result};
 pub use store::MountOptions;
+pub use error::{Error, Result};
 use verified::input_kv::{T4Key, T4KeyRef, T4Value};
 
 pub const PAGE_SIZE: usize = 4096;
