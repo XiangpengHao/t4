@@ -1,3 +1,60 @@
+use crate::art::ptr::TaggedPointer;
+
+pub(crate) enum InsertStep {
+    Split { matched: usize },
+    Descend {
+        edge: u8,
+        child: TaggedPointer,
+        next_depth: usize,
+    },
+    Grow {
+        prefix_depth: usize,
+        prefix_len: usize,
+    },
+    Done,
+}
+
+pub(crate) trait ArtNode {
+    fn insert_step(
+        &mut self,
+        terminated_key: &[u8],
+        value_ptr: TaggedPointer,
+        depth: usize,
+    ) -> InsertStep;
+
+    fn replace_child(&mut self, edge: u8, child: TaggedPointer);
+
+    fn can_grow(&self) -> bool {
+        true
+    }
+
+    fn prefix(&self) -> [u8; 8];
+
+    fn prefix_len(&self) -> usize;
+
+    fn first_child(&self) -> Option<TaggedPointer>;
+
+    fn get_child(&self, edge: u8) -> Option<TaggedPointer>;
+
+    fn get_from_node(&self, terminated_key: &[u8], depth: usize) -> Option<(TaggedPointer, usize)> {
+        let prefix_len = self.prefix_len();
+        let matched = crate::art::art::match_prefix(
+            prefix_len,
+            self.prefix(),
+            self.first_child(),
+            terminated_key,
+            depth,
+        );
+        if matched != prefix_len {
+            return None;
+        }
+
+        let depth = depth + prefix_len;
+        let child = self.get_child(terminated_key[depth])?;
+        Some((child, depth + 1))
+    }
+}
+
 mod meta;
 mod n16;
 mod n256;

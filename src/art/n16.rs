@@ -1,9 +1,13 @@
-use crate::art::{meta::{NodeMeta, NodeType}, ptr::TaggedPointer};
+use crate::art::{
+    art::match_prefix,
+    meta::{NodeMeta, NodeType},
+    ptr::TaggedPointer,
+    ArtNode, InsertStep,
+};
 
 #[repr(C, align(16))]
 pub(crate) struct Node16 {
     meta: NodeMeta,
-    terminal: TaggedPointer,
     keys: [u8; 16],
     children: [TaggedPointer; 16],
 }
@@ -13,7 +17,6 @@ impl Node16 {
         let meta = NodeMeta::new(NodeType::Node16);
         Self {
             meta,
-            terminal: TaggedPointer::default(),
             keys: [0; 16],
             children: [TaggedPointer::default(); 16],
         }
@@ -62,23 +65,11 @@ impl Node16 {
         &mut self.meta
     }
 
-    pub(crate) fn terminal(&self) -> TaggedPointer {
-        self.terminal
-    }
-
-    pub(crate) fn set_terminal(&mut self, value: TaggedPointer) {
-        self.terminal = value;
-    }
-
     pub(crate) fn is_full(&self) -> bool {
         self.meta.len() == self.children.len()
     }
 
     pub(crate) fn first_child(&self) -> Option<TaggedPointer> {
-        if !self.terminal.is_null() {
-            return Some(self.terminal);
-        }
-
         if self.meta.len() == 0 {
             return None;
         }
@@ -91,6 +82,68 @@ impl Node16 {
         for idx in 0..len {
             f(self.keys[idx], self.children[idx]);
         }
+    }
+}
+
+impl ArtNode for Node16 {
+    fn insert_step(
+        &mut self,
+        terminated_key: &[u8],
+        value_ptr: TaggedPointer,
+        depth: usize,
+    ) -> InsertStep {
+        let prefix_depth = depth;
+        let prefix_len = self.meta.prefix_len();
+        let matched = match_prefix(
+            prefix_len,
+            self.meta.prefix(),
+            self.first_child(),
+            terminated_key,
+            depth,
+        );
+        if matched != prefix_len {
+            return InsertStep::Split { matched };
+        }
+
+        let depth = depth + prefix_len;
+        let edge = terminated_key[depth];
+        if let Some(child) = self.get(edge) {
+            return InsertStep::Descend {
+                edge,
+                child,
+                next_depth: depth + 1,
+            };
+        }
+
+        if self.is_full() {
+            return InsertStep::Grow {
+                prefix_depth,
+                prefix_len,
+            };
+        }
+
+        let _ = self.insert(edge, value_ptr);
+        InsertStep::Done
+    }
+
+    fn replace_child(&mut self, edge: u8, child: TaggedPointer) {
+        let _ = self.insert(edge, child);
+    }
+
+    fn prefix_len(&self) -> usize {
+        self.meta.prefix_len()
+    }
+
+    fn prefix(&self) -> [u8; 8] {
+        self.meta.prefix()
+    }
+
+    fn first_child(&self) -> Option<TaggedPointer> {
+        self.first_child()
+    }
+
+    fn get_child(&self, edge: u8) -> Option<TaggedPointer> {
+        self.get(edge)
     }
 }
 
