@@ -1,6 +1,7 @@
 use crate::art::{
     art::match_prefix,
     meta::{NodeMeta, NodeType},
+    n256::Node256,
     ptr::TaggedPointer,
     ArtNode, InsertStep,
 };
@@ -13,8 +14,8 @@ pub(crate) struct Node48 {
 }
 
 impl Node48 {
-    pub(crate) fn new() -> Self {
-        let meta = NodeMeta::new(NodeType::Node48);
+    pub(crate) fn new(prefix: &[u8]) -> Self {
+        let meta = NodeMeta::new(NodeType::Node48, prefix);
         Self {
             meta,
             child_idx: [0; 256],
@@ -81,6 +82,14 @@ impl Node48 {
                 f(key, child);
             }
         }
+    }
+
+    pub(crate) fn grow(&self, prefix: &[u8]) -> TaggedPointer {
+        let mut grown = Node256::new(prefix);
+        self.for_each_child(|key, child| {
+            let _ = grown.insert(key, child);
+        });
+        TaggedPointer::from_node256(Box::new(grown))
     }
 }
 
@@ -153,7 +162,7 @@ mod tests {
 
     #[test]
     fn insert_and_get_sparse_keys() {
-        let mut node = Node48::new();
+        let mut node = Node48::new(b"");
 
         node.insert(200, TaggedPointer::from_raw(200));
         node.insert(3, TaggedPointer::from_raw(3));
@@ -168,7 +177,7 @@ mod tests {
 
     #[test]
     fn insert_replaces_existing_child() {
-        let mut node = Node48::new();
+        let mut node = Node48::new(b"");
 
         assert_eq!(node.insert(7, TaggedPointer::from_raw(1)), None);
         assert_eq!(

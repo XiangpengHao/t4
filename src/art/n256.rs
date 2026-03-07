@@ -13,8 +13,8 @@ pub(crate) struct Node256 {
 }
 
 impl Node256 {
-    pub(crate) fn new() -> Self {
-        let meta = NodeMeta::new(NodeType::Node256);
+    pub(crate) fn new(prefix: &[u8]) -> Self {
+        let meta = NodeMeta::new(NodeType::Node256, prefix);
         Self {
             meta,
             key_mask: [0; 32],
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn insert_and_get_direct_slots() {
-        let mut node = Node256::new();
+        let mut node = Node256::new(b"");
 
         node.insert(0, TaggedPointer::from_raw(10));
         node.insert(127, TaggedPointer::from_raw(20));
@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn insert_replaces_existing_child() {
-        let mut node = Node256::new();
+        let mut node = Node256::new(b"");
 
         assert_eq!(node.insert(7, TaggedPointer::from_raw(1)), None);
         assert_eq!(

@@ -1,8 +1,9 @@
 use crate::art::{
+    ArtNode, InsertStep,
     art::match_prefix,
     meta::{NodeMeta, NodeType},
+    n16::Node16,
     ptr::TaggedPointer,
-    ArtNode, InsertStep,
 };
 
 #[repr(C, align(16))]
@@ -13,8 +14,8 @@ pub(crate) struct Node4 {
 }
 
 impl Node4 {
-    pub(crate) fn new() -> Self {
-        let meta = NodeMeta::new(NodeType::Node4);
+    pub(crate) fn new(prefix: &[u8]) -> Self {
+        let meta = NodeMeta::new(NodeType::Node4, prefix);
         Self {
             meta,
             keys: [0; 4],
@@ -46,8 +47,6 @@ impl Node4 {
         self.meta.increment_len();
         None
     }
-
-
 
     pub(crate) fn get(&self, key: u8) -> Option<TaggedPointer> {
         let len = self.meta.len();
@@ -82,6 +81,14 @@ impl Node4 {
         for idx in 0..len {
             f(self.keys[idx], self.children[idx]);
         }
+    }
+
+    pub(crate) fn grow(&self, prefix: &[u8]) -> TaggedPointer {
+        let mut grown = Node16::new(prefix);
+        self.for_each_child(|key, child| {
+            let _ = grown.insert(key, child);
+        });
+        TaggedPointer::from_node16(Box::new(grown))
     }
 }
 
@@ -154,7 +161,7 @@ mod tests {
 
     #[test]
     fn insert_keeps_keys_sorted() {
-        let mut node = Node4::new();
+        let mut node = Node4::new(b"");
 
         node.insert(20, TaggedPointer::from_raw(20));
         node.insert(10, TaggedPointer::from_raw(10));
@@ -168,7 +175,7 @@ mod tests {
 
     #[test]
     fn insert_replaces_existing_child() {
-        let mut node = Node4::new();
+        let mut node = Node4::new(b"");
 
         assert_eq!(node.insert(7, TaggedPointer::from_raw(1)), None);
         assert_eq!(

@@ -17,13 +17,15 @@ pub(crate) struct NodeMeta {
 }
 
 impl NodeMeta {
-    pub(crate) const fn new(node_type: NodeType) -> Self {
-        Self {
+    pub(crate) fn new(node_type: NodeType, prefix: &[u8]) -> Self {
+        let mut meta = Self {
             len: 0,
             prefix_len: 0,
             node_type,
             prefix: [0; 8],
-        }
+        };
+        meta.set_prefix(prefix);
+        meta
     }
 
     pub(crate) const fn len(self) -> usize {
@@ -60,7 +62,7 @@ mod tests {
 
     #[test]
     fn new_meta_starts_with_empty_prefix() {
-        let meta = NodeMeta::new(NodeType::Node4);
+        let meta = NodeMeta::new(NodeType::Node4, b"");
 
         assert_eq!(meta.prefix_len(), 0);
         assert_eq!(meta.prefix(), [0; 8]);
@@ -68,9 +70,7 @@ mod tests {
 
     #[test]
     fn set_prefix_tracks_logical_and_inline_lengths() {
-        let mut meta = NodeMeta::new(NodeType::Node16);
-
-        meta.set_prefix(b"prefix-path");
+        let meta = NodeMeta::new(NodeType::Node16, b"prefix-path");
 
         assert_eq!(meta.prefix_len(), 11);
         assert_eq!(meta.prefix(), *b"prefix-p");
