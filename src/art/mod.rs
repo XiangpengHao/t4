@@ -1,24 +1,19 @@
 use crate::art::art::{DeleteResult, common_prefix_len, delete_at};
 use crate::art::ptr::TaggedPointer;
+use vstd::prelude::*;
 
 pub use art::ArtIndex;
 
+verus! {
+
 pub(crate) enum InsertStep {
-    Split {
-        matched: usize,
-    },
-    Descend {
-        edge: u8,
-        child: TaggedPointer,
-        next_depth: usize,
-    },
-    Grow {
-        prefix_depth: usize,
-        prefix_len: usize,
-    },
+    Split { matched: usize },
+    Descend { edge: u8, child: TaggedPointer, next_depth: usize },
+    Grow { prefix_depth: usize, prefix_len: usize },
     Done,
 }
 
+} // verus!
 pub(crate) trait ArtNode {
     fn insert_step(
         &mut self,

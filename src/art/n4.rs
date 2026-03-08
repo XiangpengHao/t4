@@ -1,4 +1,4 @@
-use vstd::prelude::*;
+use vstd::{prelude::*, slice::slice_subrange};
 
 use crate::art::{
     ArtNode, InsertStep,
@@ -37,8 +37,7 @@ impl Node4 {
 
     pub closed spec fn wf(&self) -> bool {
         &&& self.live_len() <= 4
-        &&& forall|i: int, j: int|
-            0 <= i < j < self.live_len() ==> self.keys[i] < self.keys[j]
+        &&& forall|i: int, j: int| 0 <= i < j < self.live_len() ==> self.keys[i] < self.keys[j]
         &&& forall|i: int|
             0 <= i < self.live_len() ==> #[trigger] TaggedPointer::wf_raw(self.children[i])
     }
@@ -51,11 +50,7 @@ impl Node4 {
             result.live_len() == 0,
     {
         let meta = NodeMeta::new(NodeType::Node4, prefix);
-        Self {
-            meta,
-            keys: [0; 4],
-            children: [0; 4],
-        }
+        Self { meta, keys: [0;4], children: [0;4] }
     }
 
     fn search(&self, key: u8) -> (result: SearchResult)
@@ -66,13 +61,13 @@ impl Node4 {
                 SearchResult::Found(idx) => {
                     &&& idx < self.live_len()
                     &&& self.keys[idx as int] == key
-                }
+                },
                 SearchResult::Vacant(idx) => {
                     &&& idx <= self.live_len()
                     &&& !self.has_key(key)
                     &&& forall|i: int| 0 <= i < idx ==> self.keys[i] < key
                     &&& forall|i: int| idx <= i < self.live_len() ==> key < self.keys[i]
-                }
+                },
             },
     {
         let len = self.meta.len();
@@ -165,7 +160,8 @@ impl Node4 {
                 forall|i: int| idx <= i < shift ==> self.keys[i] == #[trigger] old_keys[i],
                 forall|i: int| idx <= i < shift ==> self.children[i] == #[trigger] old_children[i],
                 forall|i: int| shift <= i < len ==> self.keys[i + 1] == #[trigger] old_keys[i],
-                forall|i: int| shift <= i < len ==> self.children[i + 1] == #[trigger] old_children[i],
+                forall|i: int|
+                    shift <= i < len ==> self.children[i + 1] == #[trigger] old_children[i],
             decreases shift - idx,
         {
             self.keys[shift] = self.keys[shift - 1];
@@ -178,7 +174,8 @@ impl Node4 {
         self.meta.increment_len();
         proof {
             assert(self.wf()) by {
-                assert forall|i: int, j: int| 0 <= i < j < self.live_len() implies self.keys[i] < self.keys[j] by {
+                assert forall|i: int, j: int| 0 <= i < j < self.live_len() implies self.keys[i]
+                    < self.keys[j] by {
                     if j < idx as int {
                         assert(self.keys[i] == old_keys[i]);
                         assert(self.keys[j] == old_keys[j]);
@@ -202,7 +199,10 @@ impl Node4 {
                         assert(self.keys[j] == old_keys[j - 1]);
                     }
                 }
-                assert forall|i: int| 0 <= i < self.live_len() implies #[trigger] TaggedPointer::wf_raw(self.children[i]) by {
+                assert forall|i: int|
+                    0 <= i < self.live_len() implies #[trigger] TaggedPointer::wf_raw(
+                    self.children[i],
+                ) by {
                     if i == idx as int {
                         assert(self.children[i] == value_raw);
                     } else if i < idx as int {
@@ -215,7 +215,9 @@ impl Node4 {
         }
     }
 
-    pub(crate) fn insert(&mut self, key: u8, value: TaggedPointer) -> (result: Option<TaggedPointer>)
+    pub(crate) fn insert(&mut self, key: u8, value: TaggedPointer) -> (result: Option<
+        TaggedPointer,
+    >)
         requires
             old(self).wf(),
             old(self).has_key(key) || old(self).live_len() < 4,
@@ -234,7 +236,7 @@ impl Node4 {
             SearchResult::Vacant(idx) => {
                 self.insert_at(idx, key, value);
                 None
-            }
+            },
         }
     }
 
@@ -249,7 +251,8 @@ impl Node4 {
             forall|i: int| 0 <= i < idx ==> self.keys[i] == old(self).keys[i],
             forall|i: int| idx <= i < self.live_len() ==> self.keys[i] == old(self).keys[i + 1],
             forall|i: int| 0 <= i < idx ==> self.children[i] == old(self).children[i],
-            forall|i: int| idx <= i < self.live_len() ==> self.children[i] == old(self).children[i + 1],
+            forall|i: int|
+                idx <= i < self.live_len() ==> self.children[i] == old(self).children[i + 1],
     {
         let ghost old_len = self.live_len();
         let ghost old_keys = self.keys@;
@@ -266,7 +269,8 @@ impl Node4 {
                 forall|i: int| 0 <= i < idx ==> self.keys[i] == #[trigger] old_keys[i],
                 forall|i: int| 0 <= i < idx ==> self.children[i] == #[trigger] old_children[i],
                 forall|i: int| idx <= i < shift - 1 ==> self.keys[i] == #[trigger] old_keys[i + 1],
-                forall|i: int| idx <= i < shift - 1 ==> self.children[i] == #[trigger] old_children[i + 1],
+                forall|i: int|
+                    idx <= i < shift - 1 ==> self.children[i] == #[trigger] old_children[i + 1],
                 forall|i: int| shift <= i < len ==> self.keys[i] == #[trigger] old_keys[i],
                 forall|i: int| shift <= i < len ==> self.children[i] == #[trigger] old_children[i],
             decreases len - shift,
@@ -280,7 +284,8 @@ impl Node4 {
 
         proof {
             assert(self.wf()) by {
-                assert forall|i: int, j: int| 0 <= i < j < self.live_len() implies self.keys[i] < self.keys[j] by {
+                assert forall|i: int, j: int| 0 <= i < j < self.live_len() implies self.keys[i]
+                    < self.keys[j] by {
                     if j < idx as int {
                         assert(self.keys[i] == old_keys[i]);
                         assert(self.keys[j] == old_keys[j]);
@@ -292,7 +297,10 @@ impl Node4 {
                         assert(self.keys[j] == old_keys[j + 1]);
                     }
                 }
-                assert forall|i: int| 0 <= i < self.live_len() implies #[trigger] TaggedPointer::wf_raw(self.children[i]) by {
+                assert forall|i: int|
+                    0 <= i < self.live_len() implies #[trigger] TaggedPointer::wf_raw(
+                    self.children[i],
+                ) by {
                     if i < idx as int {
                         assert(self.children[i] == old_children[i]);
                     } else {
@@ -316,17 +324,27 @@ impl Node4 {
             result.is_some() ==> self.live_len() + 1 == old(self).live_len(),
             result.is_none() ==> self.live_len() == old(self).live_len(),
             forall|other_key: u8, raw: usize|
-                self.maps_to(other_key, raw) ==> old(self).maps_to(other_key, raw) && other_key != key,
+                self.maps_to(other_key, raw) ==> old(self).maps_to(other_key, raw) && other_key
+                    != key,
             forall|other_key: u8, raw: usize|
-                other_key != key && old(self).maps_to(other_key, raw) ==> self.maps_to(other_key, raw),
+                other_key != key && old(self).maps_to(other_key, raw) ==> self.maps_to(
+                    other_key,
+                    raw,
+                ),
     {
         match self.search(key) {
             SearchResult::Found(idx) => {
                 let removed = self.remove_at(idx);
                 proof {
                     assert forall|other_key: u8, raw: usize|
-                        other_key != key && old(self).maps_to(other_key, raw) implies self.maps_to(other_key, raw) by {
-                        let i = choose|i: int| 0 <= i < old(self).live_len() && old(self).keys[i] == other_key && old(self).children[i] == raw;
+                        other_key != key && old(self).maps_to(other_key, raw) implies self.maps_to(
+                        other_key,
+                        raw,
+                    ) by {
+                        let i = choose|i: int|
+                            0 <= i < old(self).live_len() && old(self).keys[i] == other_key && old(
+                                self,
+                            ).children[i] == raw;
                         if i < idx as int {
                             assert(self.keys[i] == old(self).keys[i]);
                             assert(self.children[i] == old(self).children[i]);
@@ -339,15 +357,82 @@ impl Node4 {
                     }
                 }
                 Some(removed)
-            }
+            },
             SearchResult::Vacant(_) => None,
         }
     }
 
+    fn insert_step_impl(
+        &mut self,
+        terminated_key: &[u8],
+        value_ptr: TaggedPointer,
+        depth: usize,
+    ) -> (result: InsertStep)
+        requires
+            old(self).wf(),
+            depth + (old(self).meta.raw_prefix_len() as usize) < terminated_key.len(),
+        ensures
+            self.wf(),
+            match result {
+                InsertStep::Split { .. } => self.live_len() == old(self).live_len(),
+                InsertStep::Descend { edge, child, next_depth } => {
+                    &&& self.live_len() == old(self).live_len()
+                    &&& edge == terminated_key[depth + old(self).meta.raw_prefix_len() as usize]
+                    &&& next_depth == depth + old(self).meta.raw_prefix_len() as usize + 1
+                    &&& old(self).maps_to(edge, child.raw())
+                },
+                InsertStep::Grow { prefix_depth, prefix_len } => {
+                    &&& self.live_len() == old(self).live_len()
+                    &&& prefix_depth == depth
+                    &&& prefix_len == old(self).meta.raw_prefix_len() as usize
+                },
+                InsertStep::Done => {
+                    &&& self.live_len() == old(self).live_len() + 1
+                    &&& self.maps_to(
+                        terminated_key[depth + old(self).meta.raw_prefix_len() as usize],
+                        value_ptr.raw(),
+                    )
+                },
+            },
+    {
+        let prefix_depth = depth;
+        let prefix_len = self.meta.prefix_len();
+        let prefix = self.meta.prefix_slice();
+        let matched = common_prefix_len(
+            slice_subrange(prefix, 0, prefix_len),
+            slice_subrange(terminated_key, depth, terminated_key.len()),
+        );
+        if matched != prefix_len {
+            return InsertStep::Split { matched };
+        }
+
+        let depth = depth + prefix_len;
+        let edge = terminated_key[depth];
+        match self.search(edge) {
+            SearchResult::Found(idx) => {
+                let child = TaggedPointer::from_raw(self.children[idx]);
+                InsertStep::Descend {
+                    edge,
+                    child,
+                    next_depth: depth + 1,
+                }
+            },
+            SearchResult::Vacant(_) => {
+                if self.is_full() {
+                    InsertStep::Grow {
+                        prefix_depth,
+                        prefix_len,
+                    }
+                } else {
+                    let _ = self.insert(edge, value_ptr);
+                    InsertStep::Done
+                }
+            },
+        }
+    }
 }
 
 } // verus!
-
 impl Node4 {
     pub(crate) fn for_each_child(&self, mut f: impl FnMut(u8, TaggedPointer)) {
         let len = self.meta.len();
@@ -372,33 +457,7 @@ impl ArtNode for Node4 {
         value_ptr: TaggedPointer,
         depth: usize,
     ) -> InsertStep {
-        let prefix_depth = depth;
-        let prefix_len = self.meta.prefix_len();
-        let matched =
-            common_prefix_len(&self.meta.prefix()[..prefix_len], &terminated_key[depth..]);
-        if matched != prefix_len {
-            return InsertStep::Split { matched };
-        }
-
-        let depth = depth + prefix_len;
-        let edge = terminated_key[depth];
-        if let Some(child) = self.get(edge) {
-            return InsertStep::Descend {
-                edge,
-                child,
-                next_depth: depth + 1,
-            };
-        }
-
-        if self.is_full() {
-            return InsertStep::Grow {
-                prefix_depth,
-                prefix_len,
-            };
-        }
-
-        let _ = self.insert(edge, value_ptr);
-        InsertStep::Done
+        self.insert_step_impl(terminated_key, value_ptr, depth)
     }
 
     fn replace_child(&mut self, edge: u8, child: TaggedPointer) {

@@ -124,7 +124,6 @@ impl TaggedPointer {
 }
 
 } // verus!
-
 impl TaggedPointer {
     #[cfg(test)]
     pub(crate) const fn from_test_raw(raw: usize) -> Self {

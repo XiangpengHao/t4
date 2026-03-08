@@ -3,6 +3,8 @@ use std::{
     ptr::{NonNull, copy_nonoverlapping},
 };
 
+use vstd::prelude::*;
+
 use crate::art::{
     ArtNode, InsertStep,
     n4::Node4,
@@ -348,12 +350,35 @@ pub(crate) fn split_node(
     TaggedPointer::from_node4(Box::new(parent))
 }
 
-pub(crate) fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
-    a.iter()
-        .zip(b.iter())
-        .take_while(|(lhs, rhs)| lhs == rhs)
-        .count()
+verus! {
+
+pub(crate) fn common_prefix_len(a: &[u8], b: &[u8]) -> (result: usize)
+    ensures
+        result <= a.len(),
+        result <= b.len(),
+        forall|i: int| 0 <= i < result ==> a[i] == b[i],
+{
+    let limit = if a.len() < b.len() { a.len() } else { b.len() };
+    let mut idx = 0usize;
+    while idx < limit
+        invariant
+            idx <= limit,
+            limit <= a.len(),
+            limit <= b.len(),
+            forall|i: int| 0 <= i < idx ==> a[i] == b[i],
+        decreases limit - idx,
+    {
+        if a[idx] == b[idx] {
+            idx += 1;
+        } else {
+            return idx;
+        }
+    }
+
+    idx
 }
+
+} // verus!
 
 fn new_branching_path(
     prefix: &[u8],

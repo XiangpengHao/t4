@@ -45,12 +45,7 @@ impl NodeMeta {
             result.spec_len() == 0,
             result.raw_prefix_len() as usize == prefix.len(),
     {
-        let mut meta = Self {
-            len: 0,
-            prefix_len: 0,
-            node_type,
-            prefix: [0; 8],
-        };
+        let mut meta = Self { len: 0, prefix_len: 0, node_type, prefix: [0;8] };
         meta.set_prefix(prefix);
         meta
     }
@@ -103,6 +98,13 @@ impl NodeMeta {
         self.prefix
     }
 
+    pub(crate) fn prefix_slice(&self) -> (result: &[u8])
+        ensures
+            result@.len() == Self::prefix_capacity(),
+    {
+        &self.prefix
+    }
+
     pub(crate) fn set_prefix(&mut self, prefix: &[u8])
         requires
             prefix.len() <= Self::prefix_capacity(),
@@ -112,7 +114,7 @@ impl NodeMeta {
             self.wf(),
     {
         self.prefix_len = prefix.len() as u8;
-        self.prefix = [0; 8];
+        self.prefix = [0;8];
         let mut idx = 0usize;
         while idx < prefix.len()
             invariant
@@ -129,7 +131,6 @@ impl NodeMeta {
 }
 
 } // verus!
-
 #[cfg(test)]
 mod tests {
     use super::{NodeMeta, NodeType};
