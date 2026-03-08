@@ -49,10 +49,13 @@ impl NodeMeta {
     }
 
     pub(crate) fn set_prefix(&mut self, prefix: &[u8]) {
+        assert!(
+            prefix.len() <= self.prefix.len(),
+            "node prefixes longer than 8 bytes must be represented by subnodes"
+        );
         self.prefix_len = prefix.len() as u8;
         self.prefix = [0; 8];
-        let stored_len = prefix.len().min(self.prefix.len());
-        self.prefix[..stored_len].copy_from_slice(&prefix[..stored_len]);
+        self.prefix[..prefix.len()].copy_from_slice(prefix);
     }
 }
 
@@ -69,10 +72,16 @@ mod tests {
     }
 
     #[test]
-    fn set_prefix_tracks_logical_and_inline_lengths() {
-        let meta = NodeMeta::new(NodeType::Node16, b"prefix-path");
+    fn set_prefix_stores_full_prefix_when_it_fits() {
+        let meta = NodeMeta::new(NodeType::Node16, b"prefix-p");
 
-        assert_eq!(meta.prefix_len(), 11);
+        assert_eq!(meta.prefix_len(), 8);
         assert_eq!(meta.prefix(), *b"prefix-p");
+    }
+
+    #[test]
+    #[should_panic(expected = "node prefixes longer than 8 bytes must be represented by subnodes")]
+    fn set_prefix_rejects_prefixes_longer_than_eight_bytes() {
+        let _ = NodeMeta::new(NodeType::Node16, b"prefix-path");
     }
 }

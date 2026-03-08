@@ -47,19 +47,23 @@ impl ArtIndex {
 
                     let shared =
                         common_prefix_len(&terminated_existing[depth..], &terminated_key[depth..]);
-                    let mut split = Node4::new(&terminated_key[depth..depth + shared]);
-                    let _ = split.insert(terminated_existing[depth + shared], current);
-                    let _ = split.insert(terminated_key[depth + shared], value_ptr);
-                    update_parent(parent, TaggedPointer::from_node4(Box::new(split)));
+                    let split = new_branching_path(
+                        &terminated_key[depth..depth + shared],
+                        terminated_existing[depth + shared],
+                        current,
+                        terminated_key[depth + shared],
+                        value_ptr,
+                    );
+                    update_parent(parent, split);
                     return;
                 }
                 NextNode::Node4(node_ptr) => {
-                    let step =
-                        unsafe { (&mut *node_ptr).insert_step(&terminated_key, value_ptr, depth) };
+                    let node = unsafe { &mut *node_ptr };
+                    let step = node.insert_step(&terminated_key, value_ptr, depth);
                     match step {
                         InsertStep::Split { matched } => {
                             let replacement =
-                                split_node(current, &terminated_key, value_ptr, depth, matched);
+                                split_node(node, current, &terminated_key, value_ptr, depth, matched);
                             update_parent(parent, replacement);
                             return;
                         }
@@ -88,12 +92,12 @@ impl ArtIndex {
                     }
                 }
                 NextNode::Node16(node_ptr) => {
-                    let step =
-                        unsafe { (&mut *node_ptr).insert_step(&terminated_key, value_ptr, depth) };
+                    let node = unsafe { &mut *node_ptr };
+                    let step = node.insert_step(&terminated_key, value_ptr, depth);
                     match step {
                         InsertStep::Split { matched } => {
                             let replacement =
-                                split_node(current, &terminated_key, value_ptr, depth, matched);
+                                split_node(node, current, &terminated_key, value_ptr, depth, matched);
                             update_parent(parent, replacement);
                             return;
                         }
@@ -122,12 +126,12 @@ impl ArtIndex {
                     }
                 }
                 NextNode::Node48(node_ptr) => {
-                    let step =
-                        unsafe { (&mut *node_ptr).insert_step(&terminated_key, value_ptr, depth) };
+                    let node = unsafe { &mut *node_ptr };
+                    let step = node.insert_step(&terminated_key, value_ptr, depth);
                     match step {
                         InsertStep::Split { matched } => {
                             let replacement =
-                                split_node(current, &terminated_key, value_ptr, depth, matched);
+                                split_node(node, current, &terminated_key, value_ptr, depth, matched);
                             update_parent(parent, replacement);
                             return;
                         }
@@ -156,12 +160,12 @@ impl ArtIndex {
                     }
                 }
                 NextNode::Node256(node_ptr) => {
-                    let step =
-                        unsafe { (&mut *node_ptr).insert_step(&terminated_key, value_ptr, depth) };
+                    let node = unsafe { &mut *node_ptr };
+                    let step = node.insert_step(&terminated_key, value_ptr, depth);
                     match step {
                         InsertStep::Split { matched } => {
                             let replacement =
-                                split_node(current, &terminated_key, value_ptr, depth, matched);
+                                split_node(node, current, &terminated_key, value_ptr, depth, matched);
                             update_parent(parent, replacement);
                             return;
                         }
@@ -240,110 +244,50 @@ fn update_parent(parent: Parent, value: TaggedPointer) {
 }
 
 pub(crate) fn split_node(
+    node: &mut impl ArtNode,
     old_ptr: TaggedPointer,
     terminated_key: &[u8],
     value_ptr: TaggedPointer,
     depth: usize,
     matched: usize,
 ) -> TaggedPointer {
-    let reference_key = representative_terminated_key(old_ptr);
-    let old_prefix_len = node_prefix_len(old_ptr);
+    let old_prefix_len = node.prefix_len();
+    let old_prefix = node.prefix();
 
-    let mut parent = Node4::new(&reference_key[depth..depth + matched]);
+    let mut parent = Node4::new(&old_prefix[..matched]);
 
-    rewrite_node_prefix(
-        old_ptr,
-        &reference_key[depth + matched + 1..depth + old_prefix_len],
-    );
-    let _ = parent.insert(reference_key[depth + matched], old_ptr);
+    node.set_prefix(&old_prefix[matched + 1..old_prefix_len]);
+    let _ = parent.insert(old_prefix[matched], old_ptr);
     let _ = parent.insert(terminated_key[depth + matched], value_ptr);
 
     TaggedPointer::from_node4(Box::new(parent))
 }
 
-fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
+pub(crate) fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
     a.iter()
         .zip(b.iter())
         .take_while(|(lhs, rhs)| lhs == rhs)
         .count()
 }
 
-pub(crate) fn match_prefix(
-    prefix_len: usize,
-    inline_prefix: [u8; 8],
-    first_child: Option<TaggedPointer>,
-    terminated_key: &[u8],
-    depth: usize,
-) -> usize {
-    let available = terminated_key.len().saturating_sub(depth);
-    let compare_len = prefix_len.min(available);
-    let inline_len = compare_len.min(inline_prefix.len());
-
-    for idx in 0..inline_len {
-        if terminated_key[depth + idx] != inline_prefix[idx] {
-            return idx;
-        }
+fn new_branching_path(
+    prefix: &[u8],
+    left_edge: u8,
+    left_child: TaggedPointer,
+    right_edge: u8,
+    right_child: TaggedPointer,
+) -> TaggedPointer {
+    if prefix.len() <= 8 {
+        let mut node = Node4::new(prefix);
+        let _ = node.insert(left_edge, left_child);
+        let _ = node.insert(right_edge, right_child);
+        return TaggedPointer::from_node4(Box::new(node));
     }
 
-    if compare_len <= inline_prefix.len() {
-        return compare_len;
-    }
-
-    let reference = representative_terminated_key(
-        first_child.expect("node with long prefix must have a child"),
-    );
-    for idx in inline_prefix.len()..compare_len {
-        if terminated_key[depth + idx] != reference[depth + idx] {
-            return idx;
-        }
-    }
-
-    compare_len
-}
-
-fn representative_terminated_key(ptr: TaggedPointer) -> Vec<u8> {
-    match ptr.next_node() {
-        NextNode::Value(value_ptr) => {
-            let value = unsafe { &*value_ptr };
-            terminated_key_owned(value.key())
-        }
-        NextNode::Node4(node_ptr) => unsafe {
-            let node = &*node_ptr;
-            representative_terminated_key(node.first_child().expect("node has no children"))
-        },
-        NextNode::Node16(node_ptr) => unsafe {
-            let node = &*node_ptr;
-            representative_terminated_key(node.first_child().expect("node has no children"))
-        },
-        NextNode::Node48(node_ptr) => unsafe {
-            let node = &*node_ptr;
-            representative_terminated_key(node.first_child().expect("node has no children"))
-        },
-        NextNode::Node256(node_ptr) => unsafe {
-            let node = &*node_ptr;
-            representative_terminated_key(node.first_child().expect("node has no children"))
-        },
-    }
-}
-
-fn node_prefix_len(ptr: TaggedPointer) -> usize {
-    match ptr.next_node() {
-        NextNode::Node4(node_ptr) => unsafe { (*node_ptr).meta().prefix_len() },
-        NextNode::Node16(node_ptr) => unsafe { (*node_ptr).meta().prefix_len() },
-        NextNode::Node48(node_ptr) => unsafe { (*node_ptr).meta().prefix_len() },
-        NextNode::Node256(node_ptr) => unsafe { (*node_ptr).meta().prefix_len() },
-        NextNode::Value(_) => 0,
-    }
-}
-
-fn rewrite_node_prefix(ptr: TaggedPointer, prefix: &[u8]) {
-    match ptr.next_node() {
-        NextNode::Node4(node_ptr) => unsafe { (*node_ptr).meta_mut().set_prefix(prefix) },
-        NextNode::Node16(node_ptr) => unsafe { (*node_ptr).meta_mut().set_prefix(prefix) },
-        NextNode::Node48(node_ptr) => unsafe { (*node_ptr).meta_mut().set_prefix(prefix) },
-        NextNode::Node256(node_ptr) => unsafe { (*node_ptr).meta_mut().set_prefix(prefix) },
-        NextNode::Value(_) => panic!("value has no prefix"),
-    }
+    let mut node = Node4::new(&prefix[..8]);
+    let child = new_branching_path(&prefix[9..], left_edge, left_child, right_edge, right_child);
+    let _ = node.insert(prefix[8], child);
+    TaggedPointer::from_node4(Box::new(node))
 }
 
 fn terminated_key_owned(key: &[u8]) -> Vec<u8> {
@@ -486,5 +430,33 @@ mod tests {
 
         assert_eq!(index.get(b"name\0").expect("value").value(), b"value");
         assert_eq!(index.get(b"name").expect("value").value(), b"value");
+    }
+
+    #[test]
+    fn long_prefix_mismatch_returns_none() {
+        let mut index = ArtIndex::new();
+
+        index.insert(b"prefix-path-alpha", b"alpha");
+        index.insert(b"prefix-path-beta", b"beta");
+
+        assert!(index.get(b"prefix-path-gamma").is_none());
+    }
+
+    #[test]
+    fn insert_handles_shared_prefix_longer_than_eight_bytes() {
+        let mut index = ArtIndex::new();
+
+        index.insert(b"123456789abcdef-left", b"left");
+        index.insert(b"123456789abcdef-right", b"right");
+
+        assert_eq!(
+            index.get(b"123456789abcdef-left").expect("left").value(),
+            b"left"
+        );
+        assert_eq!(
+            index.get(b"123456789abcdef-right").expect("right").value(),
+            b"right"
+        );
+        assert!(index.get(b"123456789abcdef-middle").is_none());
     }
 }

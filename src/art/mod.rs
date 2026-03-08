@@ -1,4 +1,5 @@
 use crate::art::ptr::TaggedPointer;
+use crate::art::art::common_prefix_len;
 
 pub(crate) enum InsertStep {
     Split { matched: usize },
@@ -24,27 +25,18 @@ pub(crate) trait ArtNode {
 
     fn replace_child(&mut self, edge: u8, child: TaggedPointer);
 
-    fn can_grow(&self) -> bool {
-        true
-    }
-
     fn prefix(&self) -> [u8; 8];
 
     fn prefix_len(&self) -> usize;
 
-    fn first_child(&self) -> Option<TaggedPointer>;
+    fn set_prefix(&mut self, prefix: &[u8]);
 
     fn get_child(&self, edge: u8) -> Option<TaggedPointer>;
 
     fn get_from_node(&self, terminated_key: &[u8], depth: usize) -> Option<(TaggedPointer, usize)> {
         let prefix_len = self.prefix_len();
-        let matched = crate::art::art::match_prefix(
-            prefix_len,
-            self.prefix(),
-            self.first_child(),
-            terminated_key,
-            depth,
-        );
+        let inline_prefix = self.prefix();
+        let matched = common_prefix_len(&inline_prefix[..prefix_len], &terminated_key[depth..]);
         if matched != prefix_len {
             return None;
         }

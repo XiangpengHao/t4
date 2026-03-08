@@ -1,5 +1,5 @@
 use crate::art::{
-    art::match_prefix,
+    art::common_prefix_len,
     meta::{NodeMeta, NodeType},
     n48::Node48,
     ptr::TaggedPointer,
@@ -70,14 +70,6 @@ impl Node16 {
         self.meta.len() == self.children.len()
     }
 
-    pub(crate) fn first_child(&self) -> Option<TaggedPointer> {
-        if self.meta.len() == 0 {
-            return None;
-        }
-
-        Some(self.children[0])
-    }
-
     pub(crate) fn for_each_child(&self, mut f: impl FnMut(u8, TaggedPointer)) {
         let len = self.meta.len();
         for idx in 0..len {
@@ -103,13 +95,7 @@ impl ArtNode for Node16 {
     ) -> InsertStep {
         let prefix_depth = depth;
         let prefix_len = self.meta.prefix_len();
-        let matched = match_prefix(
-            prefix_len,
-            self.meta.prefix(),
-            self.first_child(),
-            terminated_key,
-            depth,
-        );
+        let matched = common_prefix_len(&self.meta.prefix()[..prefix_len], &terminated_key[depth..]);
         if matched != prefix_len {
             return InsertStep::Split { matched };
         }
@@ -147,8 +133,8 @@ impl ArtNode for Node16 {
         self.meta.prefix()
     }
 
-    fn first_child(&self) -> Option<TaggedPointer> {
-        self.first_child()
+    fn set_prefix(&mut self, prefix: &[u8]) {
+        self.meta_mut().set_prefix(prefix);
     }
 
     fn get_child(&self, edge: u8) -> Option<TaggedPointer> {

@@ -1,5 +1,5 @@
 use crate::art::{
-    art::match_prefix,
+    art::common_prefix_len,
     meta::{NodeMeta, NodeType},
     ptr::TaggedPointer,
     ArtNode, InsertStep,
@@ -63,16 +63,6 @@ impl Node256 {
         self.meta.len() == self.children.len()
     }
 
-    pub(crate) fn first_child(&self) -> Option<TaggedPointer> {
-        for key in 0..=u8::MAX {
-            if let Some(child) = self.get(key) {
-                return Some(child);
-            }
-        }
-
-        None
-    }
-
     pub(crate) fn for_each_child(&self, mut f: impl FnMut(u8, TaggedPointer)) {
         for key in 0..=u8::MAX {
             if let Some(child) = self.get(key) {
@@ -90,13 +80,7 @@ impl ArtNode for Node256 {
         depth: usize,
     ) -> InsertStep {
         let prefix_len = self.meta.prefix_len();
-        let matched = match_prefix(
-            prefix_len,
-            self.meta.prefix(),
-            self.first_child(),
-            terminated_key,
-            depth,
-        );
+        let matched = common_prefix_len(&self.meta.prefix()[..prefix_len], &terminated_key[depth..]);
         if matched != prefix_len {
             return InsertStep::Split { matched };
         }
@@ -118,10 +102,6 @@ impl ArtNode for Node256 {
     fn replace_child(&mut self, edge: u8, child: TaggedPointer) {
         let _ = self.insert(edge, child);
     }
-    fn can_grow(&self) -> bool {
-        false
-    }
-
     fn prefix_len(&self) -> usize {
         self.meta.prefix_len()
     }
@@ -130,8 +110,8 @@ impl ArtNode for Node256 {
         self.meta.prefix()
     }
 
-    fn first_child(&self) -> Option<TaggedPointer> {
-        self.first_child()
+    fn set_prefix(&mut self, prefix: &[u8]) {
+        self.meta_mut().set_prefix(prefix);
     }
 
     fn get_child(&self, edge: u8) -> Option<TaggedPointer> {
