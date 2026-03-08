@@ -1,3 +1,5 @@
+use vstd::prelude::*;
+
 use crate::art::{
     ArtNode, InsertStep,
     dense::DenseNode,
@@ -6,26 +8,140 @@ use crate::art::{
     ptr::TaggedPointer,
 };
 
+verus! {
+
 #[repr(transparent)]
 pub(crate) struct Node16(DenseNode<16>);
 
 impl Node16 {
-    pub(crate) fn new(prefix: &[u8]) -> Self {
+    pub closed spec fn live_len(self) -> usize {
+        self.0.live_len()
+    }
+
+    pub closed spec fn has_key(self, key: u8) -> bool {
+        self.0.has_key(key)
+    }
+
+    pub closed spec fn maps_to(self, key: u8, raw: usize) -> bool {
+        self.0.maps_to(key, raw)
+    }
+
+    pub closed spec fn wf(&self) -> bool {
+        self.0.wf()
+    }
+
+    pub closed spec fn raw_prefix_len(self) -> usize {
+        self.0.raw_prefix_len()
+    }
+
+    pub(crate) fn new(prefix: &[u8]) -> (result: Self)
+        requires
+            prefix.len() <= crate::art::meta::NodeMeta::prefix_capacity(),
+        ensures
+            result.wf(),
+            result.live_len() == 0,
+    {
         Self(DenseNode::new(NodeType::Node16, prefix))
     }
 
-    pub(crate) fn insert(&mut self, key: u8, value: TaggedPointer) -> Option<TaggedPointer> {
-        self.0.insert(key, value)
-    }
-
-    pub(crate) fn get(&self, key: u8) -> Option<TaggedPointer> {
+    pub(crate) fn get(&self, key: u8) -> (result: Option<TaggedPointer>)
+        requires
+            self.wf(),
+        ensures
+            result.is_some() <==> self.has_key(key),
+    {
         self.0.get(key)
     }
 
-    pub(crate) fn remove(&mut self, key: u8) -> Option<TaggedPointer> {
+    #[allow(dead_code)]
+    pub(crate) fn is_full(&self) -> (result: bool)
+        ensures
+            result <==> self.live_len() == 16,
+    {
+        self.0.is_full()
+    }
+
+    pub(crate) fn insert(&mut self, key: u8, value: TaggedPointer) -> (result: Option<
+        TaggedPointer,
+    >)
+        requires
+            old(self).wf(),
+            old(self).has_key(key) || old(self).live_len() < 16,
+        ensures
+            self.wf(),
+            self.has_key(key),
+            self.maps_to(key, value.raw()),
+            old(self).has_key(key) ==> result.is_some(),
+            !old(self).has_key(key) ==> result.is_none(),
+            result.is_some() ==> old(self).maps_to(key, result.unwrap().raw()),
+            old(self).has_key(key) ==> self.live_len() == old(self).live_len(),
+            !old(self).has_key(key) ==> self.live_len() == old(self).live_len() + 1,
+    {
+        self.0.insert(key, value)
+    }
+
+    pub(crate) fn remove(&mut self, key: u8) -> (result: Option<TaggedPointer>)
+        requires
+            old(self).wf(),
+        ensures
+            self.wf(),
+            !self.has_key(key),
+            old(self).has_key(key) <==> result.is_some(),
+            result.is_some() ==> old(self).maps_to(key, result.unwrap().raw()),
+            result.is_some() ==> self.live_len() + 1 == old(self).live_len(),
+            result.is_none() ==> self.live_len() == old(self).live_len(),
+            forall|other_key: u8, raw: usize|
+                self.maps_to(other_key, raw) ==> old(self).maps_to(other_key, raw) && other_key
+                    != key,
+            forall|other_key: u8, raw: usize|
+                other_key != key && old(self).maps_to(other_key, raw) ==> self.maps_to(
+                    other_key,
+                    raw,
+                ),
+    {
         self.0.remove(key)
     }
 
+    pub(crate) fn insert_step_impl(
+        &mut self,
+        terminated_key: &[u8],
+        value_ptr: TaggedPointer,
+        depth: usize,
+    ) -> (result: InsertStep)
+        requires
+            old(self).wf(),
+            depth + old(self).raw_prefix_len() < terminated_key.len(),
+        ensures
+            self.wf(),
+            match result {
+                InsertStep::Split { .. } => self.live_len() == old(self).live_len(),
+                InsertStep::Descend { edge, child, next_depth } => {
+                    &&& self.live_len() == old(self).live_len()
+                    &&& edge == terminated_key[depth + old(self).raw_prefix_len()]
+                    &&& next_depth == depth + old(self).raw_prefix_len() + 1
+                    &&& old(self).maps_to(edge, child.raw())
+                },
+                InsertStep::Grow { prefix_depth, prefix_len } => {
+                    &&& self.live_len() == old(self).live_len()
+                    &&& prefix_depth == depth
+                    &&& prefix_len == old(self).raw_prefix_len()
+                },
+                InsertStep::Done => {
+                    &&& self.live_len() == old(self).live_len() + 1
+                    &&& self.maps_to(
+                        terminated_key[depth + old(self).raw_prefix_len()],
+                        value_ptr.raw(),
+                    )
+                },
+            },
+    {
+        self.0.insert_step_impl(terminated_key, value_ptr, depth)
+    }
+}
+
+} // verus!
+
+impl Node16 {
     pub(crate) fn for_each_child(&self, f: impl FnMut(u8, TaggedPointer)) {
         self.0.for_each_child(f);
     }
@@ -46,7 +162,7 @@ impl ArtNode for Node16 {
         value_ptr: TaggedPointer,
         depth: usize,
     ) -> InsertStep {
-        self.0.insert_step_impl(terminated_key, value_ptr, depth)
+        self.insert_step_impl(terminated_key, value_ptr, depth)
     }
 
     fn replace_child(&mut self, edge: u8, child: TaggedPointer) {
