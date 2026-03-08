@@ -170,40 +170,40 @@ mod tests {
     fn insert_keeps_keys_sorted() {
         let mut node = Node16::new(b"");
 
-        node.insert(40, TaggedPointer::from_raw(40));
-        node.insert(10, TaggedPointer::from_raw(10));
-        node.insert(30, TaggedPointer::from_raw(30));
-        node.insert(20, TaggedPointer::from_raw(20));
+        node.insert(40, TaggedPointer::from_test_raw(40));
+        node.insert(10, TaggedPointer::from_test_raw(10));
+        node.insert(30, TaggedPointer::from_test_raw(30));
+        node.insert(20, TaggedPointer::from_test_raw(20));
 
         assert_eq!(node.keys[..node.meta.len()], [10, 20, 30, 40]);
-        assert_eq!(node.get(10), Some(TaggedPointer::from_raw(10)));
-        assert_eq!(node.get(20), Some(TaggedPointer::from_raw(20)));
-        assert_eq!(node.get(30), Some(TaggedPointer::from_raw(30)));
-        assert_eq!(node.get(40), Some(TaggedPointer::from_raw(40)));
+        assert_eq!(node.get(10), Some(TaggedPointer::from_test_raw(10)));
+        assert_eq!(node.get(20), Some(TaggedPointer::from_test_raw(20)));
+        assert_eq!(node.get(30), Some(TaggedPointer::from_test_raw(30)));
+        assert_eq!(node.get(40), Some(TaggedPointer::from_test_raw(40)));
     }
 
     #[test]
     fn insert_replaces_existing_child() {
         let mut node = Node16::new(b"");
 
-        assert_eq!(node.insert(7, TaggedPointer::from_raw(1)), None);
+        assert_eq!(node.insert(7, TaggedPointer::from_test_raw(1)), None);
         assert_eq!(
-            node.insert(7, TaggedPointer::from_raw(2)),
-            Some(TaggedPointer::from_raw(1))
+            node.insert(7, TaggedPointer::from_test_raw(2)),
+            Some(TaggedPointer::from_test_raw(1))
         );
         assert_eq!(node.meta.len(), 1);
-        assert_eq!(node.get(7), Some(TaggedPointer::from_raw(2)));
+        assert_eq!(node.get(7), Some(TaggedPointer::from_test_raw(2)));
     }
 
     #[test]
     fn remove_deletes_child_and_keeps_keys_sorted() {
         let mut node = Node16::new(b"");
 
-        node.insert(40, TaggedPointer::from_raw(40));
-        node.insert(10, TaggedPointer::from_raw(10));
-        node.insert(30, TaggedPointer::from_raw(30));
+        node.insert(40, TaggedPointer::from_test_raw(40));
+        node.insert(10, TaggedPointer::from_test_raw(10));
+        node.insert(30, TaggedPointer::from_test_raw(30));
 
-        assert_eq!(node.remove(30), Some(TaggedPointer::from_raw(30)));
+        assert_eq!(node.remove(30), Some(TaggedPointer::from_test_raw(30)));
         assert_eq!(node.keys[..node.meta.len()], [10, 40]);
         assert_eq!(node.get(30), None);
     }

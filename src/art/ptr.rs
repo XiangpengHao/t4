@@ -23,12 +23,24 @@ impl TaggedPointer {
         TAG_MASK
     }
 
+    pub closed spec fn wf_raw(raw: usize) -> bool {
+        &&& raw & !TAG_MASK != 0
+        &&& raw & TAG_MASK < 5
+    }
+
     pub closed spec fn raw(self) -> usize {
         self.ptr
     }
 
+    pub(crate) const fn to_raw(self) -> (result: usize)
+        ensures
+            result == self.raw(),
+    {
+        self.ptr
+    }
+
     #[verifier::type_invariant]
-    spec fn wf(&self) -> bool {
+    pub closed spec fn wf(&self) -> bool {
         &&& self.ptr & !TAG_MASK != 0
         &&& self.ptr & TAG_MASK < 5
     }
@@ -68,6 +80,16 @@ impl TaggedPointer {
         ptr
     }
 
+    pub(crate) fn from_raw(raw: usize) -> (result: Self)
+        requires
+            Self::wf_raw(raw),
+        ensures
+            result.wf(),
+            result.raw() == raw,
+    {
+        Self { ptr: raw }
+    }
+
     fn from_tagged_ptr(ptr: usize, tag: usize) -> (result: Self)
         requires
             ptr != 0,
@@ -77,28 +99,24 @@ impl TaggedPointer {
             result.wf(),
             result.raw() == ptr | tag,
     {
-        assert(ptr != 0);
-        assert(ptr & TAG_MASK == 0);
-        assert(tag < 5);
-
         let raw = ptr | tag;
-
         proof {
-            assert(raw & !TAG_MASK != 0usize) by (bit_vector)
-                requires
-                    raw == ptr | tag,
-                    ptr != 0,
-                    ptr & TAG_MASK == 0,
-            ;
-            assert(raw & TAG_MASK < 5usize) by (bit_vector)
-                requires
-                    raw == ptr | tag,
-                    ptr & TAG_MASK == 0,
-                    tag < 5,
-            ;
+            assert(Self::wf_raw(raw)) by {
+                assert(raw & !TAG_MASK != 0usize) by (bit_vector)
+                    requires
+                        raw == ptr | tag,
+                        ptr != 0,
+                        ptr & TAG_MASK == 0,
+                ;
+                assert(raw & TAG_MASK < 5usize) by (bit_vector)
+                    requires
+                        raw == ptr | tag,
+                        ptr & TAG_MASK == 0,
+                        tag < 5,
+                ;
+            }
         }
-
-        Self { ptr: raw }
+        Self::from_raw(raw)
     }
 }
 
@@ -106,7 +124,7 @@ impl TaggedPointer {
 
 impl TaggedPointer {
     #[cfg(test)]
-    pub(crate) const fn from_raw(raw: usize) -> Self {
+    pub(crate) const fn from_test_raw(raw: usize) -> Self {
         Self {
             ptr: raw.wrapping_add(1) << 4,
         }

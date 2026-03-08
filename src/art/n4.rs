@@ -1,3 +1,5 @@
+use vstd::prelude::*;
+
 use crate::art::{
     ArtNode, InsertStep,
     art::common_prefix_len,
@@ -5,33 +7,111 @@ use crate::art::{
     n16::Node16,
     ptr::TaggedPointer,
 };
-use std::mem::MaybeUninit;
+
+verus! {
 
 #[repr(C, align(16))]
 pub(crate) struct Node4 {
     meta: NodeMeta,
     keys: [u8; 4],
-    children: [MaybeUninit<TaggedPointer>; 4],
+    children: [usize; 4],
 }
 
 impl Node4 {
-    pub(crate) fn new(prefix: &[u8]) -> Self {
+    pub closed spec fn live_len(self) -> usize {
+        self.meta.raw_len() as usize
+    }
+
+    pub closed spec fn has_key(self, key: u8) -> bool {
+        exists|i: int| 0 <= i < self.live_len() && self.keys[i] == key
+    }
+
+    #[verifier::type_invariant]
+    pub closed spec fn wf(&self) -> bool {
+        &&& self.live_len() <= 4
+        &&& forall|i: int, j: int|
+            0 <= i < j < self.live_len() ==> self.keys[i] < self.keys[j]
+        &&& forall|i: int|
+            0 <= i < self.live_len() ==> #[trigger] TaggedPointer::wf_raw(self.children[i])
+    }
+
+    pub(crate) fn new(prefix: &[u8]) -> (result: Self)
+        requires
+            prefix.len() <= NodeMeta::prefix_capacity(),
+        ensures
+            result.wf(),
+            result.live_len() == 0,
+    {
         let meta = NodeMeta::new(NodeType::Node4, prefix);
         Self {
             meta,
             keys: [0; 4],
-            children: [const { MaybeUninit::uninit() }; 4],
+            children: [0; 4],
         }
     }
 
+    fn key_index(&self, key: u8) -> (result: Option<usize>)
+        ensures
+            result.is_some() ==> result.unwrap() < self.live_len(),
+            result.is_some() ==> self.keys[result.unwrap() as int] == key,
+            result.is_none() ==> !self.has_key(key),
+    {
+        proof {
+            use_type_invariant(self);
+        }
+
+        let len = self.meta.len();
+        let mut idx = 0usize;
+        while idx < len
+            invariant
+                self.wf(),
+                idx <= len,
+                len == self.live_len(),
+                forall|j: int| 0 <= j < idx ==> self.keys[j] != key,
+            decreases len - idx,
+        {
+            if self.keys[idx] == key {
+                return Some(idx);
+            }
+            idx += 1;
+        }
+        None
+    }
+
+    pub(crate) fn get(&self, key: u8) -> (result: Option<TaggedPointer>)
+        ensures
+            result.is_some() <==> self.has_key(key),
+    {
+        let Some(idx) = self.key_index(key) else {
+            return None;
+        };
+
+        proof {
+            use_type_invariant(self);
+        }
+
+        Some(TaggedPointer::from_raw(self.children[idx]))
+    }
+
+    pub(crate) fn is_full(&self) -> (result: bool)
+        ensures
+            result <==> self.live_len() == 4,
+    {
+        self.meta.len() == 4
+    }
+}
+
+} // verus!
+
+impl Node4 {
     pub(crate) fn insert(&mut self, key: u8, value: TaggedPointer) -> Option<TaggedPointer> {
         let len = self.meta.len();
 
         for idx in 0..len {
             if self.keys[idx] == key {
-                let old = self.children[idx];
-                self.children[idx] = MaybeUninit::new(value);
-                return Some(unsafe { old.assume_init() });
+                let old = TaggedPointer::from_raw(self.children[idx]);
+                self.children[idx] = value.to_raw();
+                return Some(old);
             }
         }
 
@@ -44,17 +124,9 @@ impl Node4 {
         }
 
         self.keys[insert_at] = key;
-        self.children[insert_at] = MaybeUninit::new(value);
+        self.children[insert_at] = value.to_raw();
         self.meta.increment_len();
         None
-    }
-
-    pub(crate) fn get(&self, key: u8) -> Option<TaggedPointer> {
-        let len = self.meta.len();
-        let idx = self.keys[..len]
-            .iter()
-            .position(|existing| *existing == key)?;
-        Some(unsafe { self.children[idx].assume_init() })
     }
 
     pub(crate) fn remove(&mut self, key: u8) -> Option<TaggedPointer> {
@@ -62,28 +134,25 @@ impl Node4 {
         let idx = self.keys[..len]
             .iter()
             .position(|existing| *existing == key)?;
-        let removed = self.children[idx];
+        let removed = TaggedPointer::from_raw(self.children[idx]);
         for shift in idx + 1..len {
             self.keys[shift - 1] = self.keys[shift];
             self.children[shift - 1] = self.children[shift];
         }
         self.keys[len - 1] = 0;
+        self.children[len - 1] = 0;
         self.meta.decrement_len();
-        Some(unsafe { removed.assume_init() })
+        Some(removed)
     }
 
     pub(crate) fn meta_mut(&mut self) -> &mut NodeMeta {
         &mut self.meta
     }
 
-    pub(crate) fn is_full(&self) -> bool {
-        self.meta.len() == self.children.len()
-    }
-
     pub(crate) fn for_each_child(&self, mut f: impl FnMut(u8, TaggedPointer)) {
         let len = self.meta.len();
         for idx in 0..len {
-            f(self.keys[idx], unsafe { self.children[idx].assume_init() });
+            f(self.keys[idx], TaggedPointer::from_raw(self.children[idx]));
         }
     }
 
@@ -170,38 +239,38 @@ mod tests {
     fn insert_keeps_keys_sorted() {
         let mut node = Node4::new(b"");
 
-        node.insert(20, TaggedPointer::from_raw(20));
-        node.insert(10, TaggedPointer::from_raw(10));
-        node.insert(30, TaggedPointer::from_raw(30));
+        node.insert(20, TaggedPointer::from_test_raw(20));
+        node.insert(10, TaggedPointer::from_test_raw(10));
+        node.insert(30, TaggedPointer::from_test_raw(30));
 
         assert_eq!(node.keys[..node.meta.len()], [10, 20, 30]);
-        assert_eq!(node.get(10), Some(TaggedPointer::from_raw(10)));
-        assert_eq!(node.get(20), Some(TaggedPointer::from_raw(20)));
-        assert_eq!(node.get(30), Some(TaggedPointer::from_raw(30)));
+        assert_eq!(node.get(10), Some(TaggedPointer::from_test_raw(10)));
+        assert_eq!(node.get(20), Some(TaggedPointer::from_test_raw(20)));
+        assert_eq!(node.get(30), Some(TaggedPointer::from_test_raw(30)));
     }
 
     #[test]
     fn insert_replaces_existing_child() {
         let mut node = Node4::new(b"");
 
-        assert_eq!(node.insert(7, TaggedPointer::from_raw(1)), None);
+        assert_eq!(node.insert(7, TaggedPointer::from_test_raw(1)), None);
         assert_eq!(
-            node.insert(7, TaggedPointer::from_raw(2)),
-            Some(TaggedPointer::from_raw(1))
+            node.insert(7, TaggedPointer::from_test_raw(2)),
+            Some(TaggedPointer::from_test_raw(1))
         );
         assert_eq!(node.meta.len(), 1);
-        assert_eq!(node.get(7), Some(TaggedPointer::from_raw(2)));
+        assert_eq!(node.get(7), Some(TaggedPointer::from_test_raw(2)));
     }
 
     #[test]
     fn remove_deletes_child_and_keeps_keys_sorted() {
         let mut node = Node4::new(b"");
 
-        node.insert(20, TaggedPointer::from_raw(20));
-        node.insert(10, TaggedPointer::from_raw(10));
-        node.insert(30, TaggedPointer::from_raw(30));
+        node.insert(20, TaggedPointer::from_test_raw(20));
+        node.insert(10, TaggedPointer::from_test_raw(10));
+        node.insert(30, TaggedPointer::from_test_raw(30));
 
-        assert_eq!(node.remove(20), Some(TaggedPointer::from_raw(20)));
+        assert_eq!(node.remove(20), Some(TaggedPointer::from_test_raw(20)));
         assert_eq!(node.keys[..node.meta.len()], [10, 30]);
         assert_eq!(node.get(20), None);
     }

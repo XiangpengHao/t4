@@ -137,14 +137,14 @@ mod tests {
     fn insert_and_get_direct_slots() {
         let mut node = Node256::new(b"");
 
-        node.insert(0, TaggedPointer::from_raw(10));
-        node.insert(127, TaggedPointer::from_raw(20));
-        node.insert(255, TaggedPointer::from_raw(30));
+        node.insert(0, TaggedPointer::from_test_raw(10));
+        node.insert(127, TaggedPointer::from_test_raw(20));
+        node.insert(255, TaggedPointer::from_test_raw(30));
 
         assert_eq!(node.meta.len(), 3);
-        assert_eq!(node.get(0), Some(TaggedPointer::from_raw(10)));
-        assert_eq!(node.get(127), Some(TaggedPointer::from_raw(20)));
-        assert_eq!(node.get(255), Some(TaggedPointer::from_raw(30)));
+        assert_eq!(node.get(0), Some(TaggedPointer::from_test_raw(10)));
+        assert_eq!(node.get(127), Some(TaggedPointer::from_test_raw(20)));
+        assert_eq!(node.get(255), Some(TaggedPointer::from_test_raw(30)));
         assert_eq!(node.get(42), None);
     }
 
@@ -152,24 +152,24 @@ mod tests {
     fn insert_replaces_existing_child() {
         let mut node = Node256::new(b"");
 
-        assert_eq!(node.insert(7, TaggedPointer::from_raw(1)), None);
+        assert_eq!(node.insert(7, TaggedPointer::from_test_raw(1)), None);
         assert_eq!(
-            node.insert(7, TaggedPointer::from_raw(2)),
-            Some(TaggedPointer::from_raw(1))
+            node.insert(7, TaggedPointer::from_test_raw(2)),
+            Some(TaggedPointer::from_test_raw(1))
         );
         assert_eq!(node.meta.len(), 1);
-        assert_eq!(node.get(7), Some(TaggedPointer::from_raw(2)));
+        assert_eq!(node.get(7), Some(TaggedPointer::from_test_raw(2)));
     }
 
     #[test]
     fn remove_deletes_direct_slot() {
         let mut node = Node256::new(b"");
 
-        node.insert(0, TaggedPointer::from_raw(10));
-        node.insert(127, TaggedPointer::from_raw(20));
+        node.insert(0, TaggedPointer::from_test_raw(10));
+        node.insert(127, TaggedPointer::from_test_raw(20));
 
-        assert_eq!(node.remove(127), Some(TaggedPointer::from_raw(20)));
+        assert_eq!(node.remove(127), Some(TaggedPointer::from_test_raw(20)));
         assert_eq!(node.get(127), None);
-        assert_eq!(node.get(0), Some(TaggedPointer::from_raw(10)));
+        assert_eq!(node.get(0), Some(TaggedPointer::from_test_raw(10)));
     }
 }
