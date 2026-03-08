@@ -35,14 +35,17 @@ impl TaggedPointer {
     pub(crate) const fn to_raw(self) -> (result: usize)
         ensures
             result == self.raw(),
+            Self::wf_raw(result),
     {
+        proof {
+            use_type_invariant(&self);
+        }
         self.ptr
     }
 
     #[verifier::type_invariant]
     pub closed spec fn wf(&self) -> bool {
-        &&& self.ptr & !TAG_MASK != 0
-        &&& self.ptr & TAG_MASK < 5
+        Self::wf_raw(self.ptr)
     }
 
     pub(crate) fn tag(&self) -> u8 {

@@ -25,7 +25,7 @@ impl NodeMeta {
         8
     }
 
-    pub closed spec fn raw_len(self) -> u8 {
+    pub closed spec fn spec_len(self) -> u8 {
         self.len
     }
 
@@ -42,7 +42,7 @@ impl NodeMeta {
         requires
             prefix.len() <= Self::prefix_capacity(),
         ensures
-            result.raw_len() == 0,
+            result.spec_len() == 0,
             result.raw_prefix_len() as usize == prefix.len(),
     {
         let mut meta = Self {
@@ -57,16 +57,16 @@ impl NodeMeta {
 
     pub(crate) const fn len(self) -> (result: usize)
         ensures
-            result == self.raw_len() as usize,
+            result == self.spec_len() as usize,
     {
         self.len as usize
     }
 
     pub(crate) fn increment_len(&mut self)
         requires
-            old(self).raw_len() < u8::MAX,
+            old(self).spec_len() < u8::MAX,
         ensures
-            self.raw_len() == old(self).raw_len() + 1,
+            self.spec_len() == old(self).spec_len() + 1,
             self.raw_prefix_len() == old(self).raw_prefix_len(),
     {
         proof {
@@ -77,9 +77,9 @@ impl NodeMeta {
 
     pub(crate) fn decrement_len(&mut self)
         requires
-            old(self).raw_len() > 0,
+            old(self).spec_len() > 0,
         ensures
-            self.raw_len() + 1 == old(self).raw_len(),
+            self.spec_len() + 1 == old(self).spec_len(),
             self.raw_prefix_len() == old(self).raw_prefix_len(),
     {
         proof {
@@ -107,7 +107,7 @@ impl NodeMeta {
         requires
             prefix.len() <= Self::prefix_capacity(),
         ensures
-            self.raw_len() == old(self).raw_len(),
+            self.spec_len() == old(self).spec_len(),
             self.raw_prefix_len() as usize == prefix.len(),
             self.wf(),
     {
@@ -117,7 +117,7 @@ impl NodeMeta {
         while idx < prefix.len()
             invariant
                 self.wf(),
-                self.raw_len() == old(self).raw_len(),
+                self.spec_len() == old(self).spec_len(),
                 self.raw_prefix_len() as usize == prefix.len(),
                 idx <= prefix.len(),
             decreases prefix.len() - idx,

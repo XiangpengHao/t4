@@ -17,16 +17,24 @@ pub(crate) struct Node4 {
     children: [usize; 4],
 }
 
+enum SearchResult {
+    Found(usize),
+    Vacant(usize),
+}
+
 impl Node4 {
     pub closed spec fn live_len(self) -> usize {
-        self.meta.raw_len() as usize
+        self.meta.spec_len() as usize
     }
 
     pub closed spec fn has_key(self, key: u8) -> bool {
         exists|i: int| 0 <= i < self.live_len() && self.keys[i] == key
     }
 
-    #[verifier::type_invariant]
+    pub closed spec fn maps_to(self, key: u8, raw: usize) -> bool {
+        exists|i: int| 0 <= i < self.live_len() && self.keys[i] == key && self.children[i] == raw
+    }
+
     pub closed spec fn wf(&self) -> bool {
         &&& self.live_len() <= 4
         &&& forall|i: int, j: int|
@@ -50,16 +58,23 @@ impl Node4 {
         }
     }
 
-    fn key_index(&self, key: u8) -> (result: Option<usize>)
+    fn search(&self, key: u8) -> (result: SearchResult)
+        requires
+            self.wf(),
         ensures
-            result.is_some() ==> result.unwrap() < self.live_len(),
-            result.is_some() ==> self.keys[result.unwrap() as int] == key,
-            result.is_none() ==> !self.has_key(key),
+            match result {
+                SearchResult::Found(idx) => {
+                    &&& idx < self.live_len()
+                    &&& self.keys[idx as int] == key
+                }
+                SearchResult::Vacant(idx) => {
+                    &&& idx <= self.live_len()
+                    &&& !self.has_key(key)
+                    &&& forall|i: int| 0 <= i < idx ==> self.keys[i] < key
+                    &&& forall|i: int| idx <= i < self.live_len() ==> key < self.keys[i]
+                }
+            },
     {
-        proof {
-            use_type_invariant(self);
-        }
-
         let len = self.meta.len();
         let mut idx = 0usize;
         while idx < len
@@ -67,30 +82,31 @@ impl Node4 {
                 self.wf(),
                 idx <= len,
                 len == self.live_len(),
-                forall|j: int| 0 <= j < idx ==> self.keys[j] != key,
+                forall|j: int| 0 <= j < idx ==> self.keys[j] < key,
             decreases len - idx,
         {
-            if self.keys[idx] == key {
-                return Some(idx);
+            if self.keys[idx] < key {
+                idx += 1;
+            } else if self.keys[idx] == key {
+                return SearchResult::Found(idx);
+            } else {
+                return SearchResult::Vacant(idx);
             }
-            idx += 1;
         }
-        None
+
+        SearchResult::Vacant(idx)
     }
 
     pub(crate) fn get(&self, key: u8) -> (result: Option<TaggedPointer>)
+        requires
+            self.wf(),
         ensures
             result.is_some() <==> self.has_key(key),
     {
-        let Some(idx) = self.key_index(key) else {
-            return None;
-        };
-
-        proof {
-            use_type_invariant(self);
+        match self.search(key) {
+            SearchResult::Found(idx) => Some(TaggedPointer::from_raw(self.children[idx])),
+            SearchResult::Vacant(_) => None,
         }
-
-        Some(TaggedPointer::from_raw(self.children[idx]))
     }
 
     pub(crate) fn is_full(&self) -> (result: bool)
@@ -99,36 +115,134 @@ impl Node4 {
     {
         self.meta.len() == 4
     }
+
+    fn replace_at(&mut self, idx: usize, value: TaggedPointer) -> (result: TaggedPointer)
+        requires
+            old(self).wf(),
+            idx < old(self).live_len(),
+        ensures
+            self.wf(),
+            self.live_len() == old(self).live_len(),
+            forall|i: int| 0 <= i < self.live_len() ==> self.keys[i] == old(self).keys[i],
+            self.keys[idx as int] == old(self).keys[idx as int],
+            self.children[idx as int] == value.raw(),
+            result.raw() == old(self).children[idx as int],
+    {
+        let prev = TaggedPointer::from_raw(self.children[idx]);
+        self.children[idx] = value.to_raw();
+
+        prev
+    }
+
+    fn insert_at(&mut self, idx: usize, key: u8, value: TaggedPointer)
+        requires
+            old(self).wf(),
+            old(self).live_len() < 4,
+            !old(self).has_key(key),
+            idx <= old(self).live_len(),
+            forall|i: int| 0 <= i < idx ==> old(self).keys[i] < key,
+            forall|i: int| idx <= i < old(self).live_len() ==> key < old(self).keys[i],
+        ensures
+            self.wf(),
+            self.live_len() == old(self).live_len() + 1,
+            self.keys[idx as int] == key,
+            self.children[idx as int] == value.raw(),
+            forall|i: int| 0 <= i < idx ==> self.keys[i] == old(self).keys[i],
+            forall|i: int| idx < i < self.live_len() ==> self.keys[i] == old(self).keys[i - 1],
+    {
+        let ghost old_len = self.live_len();
+        let ghost old_keys = self.keys@;
+        let ghost old_children = self.children@;
+        let value_raw = value.to_raw();
+        let len = self.meta.len();
+        let mut shift = len;
+        while shift > idx
+            invariant
+                idx <= shift <= len,
+                self.meta.spec_len() == len < 4,
+                forall|i: int| 0 <= i < idx ==> self.keys[i] == old_keys[i],
+                forall|i: int| 0 <= i < idx ==> self.children[i] == old_children[i],
+                forall|i: int| idx <= i < shift ==> self.keys[i] == old_keys[i],
+                forall|i: int| idx <= i < shift ==> self.children[i] == old_children[i],
+                forall|i: int| shift <= i < len ==> self.keys[i + 1] == old_keys[i],
+                forall|i: int| shift <= i < len ==> self.children[i + 1] == old_children[i],
+            decreases shift - idx,
+        {
+            self.keys[shift] = self.keys[shift - 1];
+            self.children[shift] = self.children[shift - 1];
+            shift -= 1;
+        }
+
+        self.keys[idx] = key;
+        self.children[idx] = value_raw;
+        self.meta.increment_len();
+        proof {
+            assert(self.wf()) by {
+                assert forall|i: int, j: int| 0 <= i < j < self.live_len() implies self.keys[i] < self.keys[j] by {
+                    if j < idx as int {
+                        assert(self.keys[i] == old_keys[i]);
+                        assert(self.keys[j] == old_keys[j]);
+                    } else if j == idx as int {
+                        assert(self.keys[j] == key);
+                        if i < idx as int {
+                            assert(self.keys[i] == old_keys[i]);
+                            assert(old_keys[i] < key);
+                        }
+                    } else if i < idx as int {
+                        assert(self.keys[i] == old_keys[i]);
+                        assert(self.keys[j] == old_keys[j - 1]);
+                        assert(old_keys[i] < key);
+                        assert(key < old_keys[j - 1]);
+                    } else if i == idx as int {
+                        assert(self.keys[i] == key);
+                        assert(self.keys[j] == old_keys[j - 1]);
+                        assert(key < old_keys[j - 1]);
+                    } else {
+                        assert(self.keys[i] == old_keys[i - 1]);
+                        assert(self.keys[j] == old_keys[j - 1]);
+                    }
+                }
+                assert forall|i: int| 0 <= i < self.live_len() implies #[trigger] TaggedPointer::wf_raw(self.children[i]) by {
+                    if i == idx as int {
+                        assert(self.children[i] == value_raw);
+                    } else if i < idx as int {
+                        assert(self.children[i] == old_children[i]);
+                    } else {
+                        assert(self.children[i] == old_children[i - 1]);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn insert(&mut self, key: u8, value: TaggedPointer) -> (result: Option<TaggedPointer>)
+        requires
+            old(self).wf(),
+            old(self).has_key(key) || old(self).live_len() < 4,
+        ensures
+            self.wf(),
+            self.has_key(key),
+            self.maps_to(key, value.raw()),
+            old(self).has_key(key) ==> result.is_some(),
+            !old(self).has_key(key) ==> result.is_none(),
+            result.is_some() ==> old(self).maps_to(key, result.unwrap().raw()),
+            old(self).has_key(key) ==> self.live_len() == old(self).live_len(),
+            !old(self).has_key(key) ==> self.live_len() == old(self).live_len() + 1,
+    {
+        match self.search(key) {
+            SearchResult::Found(idx) => Some(self.replace_at(idx, value)),
+            SearchResult::Vacant(idx) => {
+                self.insert_at(idx, key, value);
+                None
+            }
+        }
+    }
+
 }
 
 } // verus!
 
 impl Node4 {
-    pub(crate) fn insert(&mut self, key: u8, value: TaggedPointer) -> Option<TaggedPointer> {
-        let len = self.meta.len();
-
-        for idx in 0..len {
-            if self.keys[idx] == key {
-                let old = TaggedPointer::from_raw(self.children[idx]);
-                self.children[idx] = value.to_raw();
-                return Some(old);
-            }
-        }
-
-        assert!(len < self.keys.len(), "Node4 is full");
-
-        let insert_at = self.keys[..len].partition_point(|existing| *existing < key);
-        for idx in (insert_at..len).rev() {
-            self.keys[idx + 1] = self.keys[idx];
-            self.children[idx + 1] = self.children[idx];
-        }
-
-        self.keys[insert_at] = key;
-        self.children[insert_at] = value.to_raw();
-        self.meta.increment_len();
-        None
-    }
-
     pub(crate) fn remove(&mut self, key: u8) -> Option<TaggedPointer> {
         let len = self.meta.len();
         let idx = self.keys[..len]
@@ -143,10 +257,6 @@ impl Node4 {
         self.children[len - 1] = 0;
         self.meta.decrement_len();
         Some(removed)
-    }
-
-    pub(crate) fn meta_mut(&mut self) -> &mut NodeMeta {
-        &mut self.meta
     }
 
     pub(crate) fn for_each_child(&self, mut f: impl FnMut(u8, TaggedPointer)) {
@@ -222,7 +332,7 @@ impl ArtNode for Node4 {
     }
 
     fn set_prefix(&mut self, prefix: &[u8]) {
-        self.meta_mut().set_prefix(prefix);
+        self.meta.set_prefix(prefix);
     }
 
     fn get_child(&self, edge: u8) -> Option<TaggedPointer> {
