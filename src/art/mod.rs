@@ -102,6 +102,7 @@ pub(crate) trait ArtNode {
 }
 
 mod meta;
+mod dense;
 mod n16;
 mod n256;
 mod n4;

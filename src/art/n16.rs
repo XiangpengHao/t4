@@ -1,90 +1,33 @@
 use crate::art::{
     ArtNode, InsertStep,
-    art::common_prefix_len,
-    meta::{NodeMeta, NodeType},
+    dense::DenseNode,
+    meta::NodeType,
     n48::Node48,
     ptr::TaggedPointer,
 };
-use std::mem::MaybeUninit;
 
-#[repr(C, align(16))]
-pub(crate) struct Node16 {
-    meta: NodeMeta,
-    keys: [u8; 16],
-    children: [MaybeUninit<TaggedPointer>; 16],
-}
+#[repr(transparent)]
+pub(crate) struct Node16(DenseNode<16>);
 
 impl Node16 {
     pub(crate) fn new(prefix: &[u8]) -> Self {
-        let meta = NodeMeta::new(NodeType::Node16, prefix);
-        Self {
-            meta,
-            keys: [0; 16],
-            children: [const { MaybeUninit::uninit() }; 16],
-        }
+        Self(DenseNode::new(NodeType::Node16, prefix))
     }
 
     pub(crate) fn insert(&mut self, key: u8, value: TaggedPointer) -> Option<TaggedPointer> {
-        let len = self.meta.len();
-
-        for idx in 0..len {
-            if self.keys[idx] == key {
-                let old = self.children[idx];
-                self.children[idx] = MaybeUninit::new(value);
-                return Some(unsafe { old.assume_init() });
-            }
-        }
-
-        assert!(len < self.keys.len(), "Node16 is full");
-
-        let insert_at = self.keys[..len].partition_point(|existing| *existing < key);
-        for idx in (insert_at..len).rev() {
-            self.keys[idx + 1] = self.keys[idx];
-            self.children[idx + 1] = self.children[idx];
-        }
-
-        self.keys[insert_at] = key;
-        self.children[insert_at] = MaybeUninit::new(value);
-        self.meta.increment_len();
-        None
+        self.0.insert(key, value)
     }
 
     pub(crate) fn get(&self, key: u8) -> Option<TaggedPointer> {
-        let len = self.meta.len();
-        let idx = self.keys[..len]
-            .iter()
-            .position(|existing| *existing == key)?;
-        Some(unsafe { self.children[idx].assume_init() })
+        self.0.get(key)
     }
 
     pub(crate) fn remove(&mut self, key: u8) -> Option<TaggedPointer> {
-        let len = self.meta.len();
-        let idx = self.keys[..len]
-            .iter()
-            .position(|existing| *existing == key)?;
-        let removed = self.children[idx];
-        for shift in idx + 1..len {
-            self.keys[shift - 1] = self.keys[shift];
-            self.children[shift - 1] = self.children[shift];
-        }
-        self.keys[len - 1] = 0;
-        self.meta.decrement_len();
-        Some(unsafe { removed.assume_init() })
+        self.0.remove(key)
     }
 
-    pub(crate) fn meta_mut(&mut self) -> &mut NodeMeta {
-        &mut self.meta
-    }
-
-    pub(crate) fn is_full(&self) -> bool {
-        self.meta.len() == self.children.len()
-    }
-
-    pub(crate) fn for_each_child(&self, mut f: impl FnMut(u8, TaggedPointer)) {
-        let len = self.meta.len();
-        for idx in 0..len {
-            f(self.keys[idx], unsafe { self.children[idx].assume_init() });
-        }
+    pub(crate) fn for_each_child(&self, f: impl FnMut(u8, TaggedPointer)) {
+        self.0.for_each_child(f);
     }
 
     pub(crate) fn grow(&self, prefix: &[u8]) -> TaggedPointer {
@@ -103,33 +46,7 @@ impl ArtNode for Node16 {
         value_ptr: TaggedPointer,
         depth: usize,
     ) -> InsertStep {
-        let prefix_depth = depth;
-        let prefix_len = self.meta.prefix_len();
-        let matched =
-            common_prefix_len(&self.meta.prefix()[..prefix_len], &terminated_key[depth..]);
-        if matched != prefix_len {
-            return InsertStep::Split { matched };
-        }
-
-        let depth = depth + prefix_len;
-        let edge = terminated_key[depth];
-        if let Some(child) = self.get(edge) {
-            return InsertStep::Descend {
-                edge,
-                child,
-                next_depth: depth + 1,
-            };
-        }
-
-        if self.is_full() {
-            return InsertStep::Grow {
-                prefix_depth,
-                prefix_len,
-            };
-        }
-
-        let _ = self.insert(edge, value_ptr);
-        InsertStep::Done
+        self.0.insert_step_impl(terminated_key, value_ptr, depth)
     }
 
     fn replace_child(&mut self, edge: u8, child: TaggedPointer) {
@@ -141,19 +58,19 @@ impl ArtNode for Node16 {
     }
 
     fn child_count(&self) -> usize {
-        self.meta.len()
+        self.0.child_count()
     }
 
     fn prefix_len(&self) -> usize {
-        self.meta.prefix_len()
+        self.0.prefix_len()
     }
 
     fn prefix(&self) -> [u8; 8] {
-        self.meta.prefix()
+        self.0.prefix()
     }
 
     fn set_prefix(&mut self, prefix: &[u8]) {
-        self.meta_mut().set_prefix(prefix);
+        self.0.set_prefix(prefix);
     }
 
     fn get_child(&self, edge: u8) -> Option<TaggedPointer> {
@@ -175,7 +92,9 @@ mod tests {
         node.insert(30, TaggedPointer::from_test_raw(30));
         node.insert(20, TaggedPointer::from_test_raw(20));
 
-        assert_eq!(node.keys[..node.meta.len()], [10, 20, 30, 40]);
+        let mut keys = Vec::new();
+        node.for_each_child(|key, _| keys.push(key));
+        assert_eq!(keys, [10, 20, 30, 40]);
         assert_eq!(node.get(10), Some(TaggedPointer::from_test_raw(10)));
         assert_eq!(node.get(20), Some(TaggedPointer::from_test_raw(20)));
         assert_eq!(node.get(30), Some(TaggedPointer::from_test_raw(30)));
@@ -191,7 +110,9 @@ mod tests {
             node.insert(7, TaggedPointer::from_test_raw(2)),
             Some(TaggedPointer::from_test_raw(1))
         );
-        assert_eq!(node.meta.len(), 1);
+        let mut count = 0;
+        node.for_each_child(|_, _| count += 1);
+        assert_eq!(count, 1);
         assert_eq!(node.get(7), Some(TaggedPointer::from_test_raw(2)));
     }
 
@@ -204,7 +125,9 @@ mod tests {
         node.insert(30, TaggedPointer::from_test_raw(30));
 
         assert_eq!(node.remove(30), Some(TaggedPointer::from_test_raw(30)));
-        assert_eq!(node.keys[..node.meta.len()], [10, 40]);
+        let mut keys = Vec::new();
+        node.for_each_child(|key, _| keys.push(key));
+        assert_eq!(keys, [10, 40]);
         assert_eq!(node.get(30), None);
     }
 }
