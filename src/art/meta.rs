@@ -36,6 +36,10 @@ impl NodeMeta {
         self.len += 1;
     }
 
+    pub(crate) fn decrement_len(&mut self) {
+        self.len -= 1;
+    }
+
     pub(crate) const fn prefix_len(self) -> usize {
         self.prefix_len as usize
     }

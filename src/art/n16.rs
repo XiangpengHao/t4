@@ -56,6 +56,22 @@ impl Node16 {
         Some(self.children[idx])
     }
 
+    pub(crate) fn remove(&mut self, key: u8) -> Option<TaggedPointer> {
+        let len = self.meta.len();
+        let idx = self.keys[..len]
+            .iter()
+            .position(|existing| *existing == key)?;
+        let removed = self.children[idx];
+        for shift in idx + 1..len {
+            self.keys[shift - 1] = self.keys[shift];
+            self.children[shift - 1] = self.children[shift];
+        }
+        self.keys[len - 1] = 0;
+        self.children[len - 1] = TaggedPointer::default();
+        self.meta.decrement_len();
+        Some(removed)
+    }
+
     pub(crate) fn meta_mut(&mut self) -> &mut NodeMeta {
         &mut self.meta
     }
@@ -120,6 +136,14 @@ impl ArtNode for Node16 {
         let _ = self.insert(edge, child);
     }
 
+    fn remove_child(&mut self, edge: u8) -> Option<TaggedPointer> {
+        self.remove(edge)
+    }
+
+    fn child_count(&self) -> usize {
+        self.meta.len()
+    }
+
     fn prefix_len(&self) -> usize {
         self.meta.prefix_len()
     }
@@ -169,5 +193,18 @@ mod tests {
         );
         assert_eq!(node.meta.len(), 1);
         assert_eq!(node.get(7), Some(TaggedPointer::from_raw(2)));
+    }
+
+    #[test]
+    fn remove_deletes_child_and_keeps_keys_sorted() {
+        let mut node = Node16::new(b"");
+
+        node.insert(40, TaggedPointer::from_raw(40));
+        node.insert(10, TaggedPointer::from_raw(10));
+        node.insert(30, TaggedPointer::from_raw(30));
+
+        assert_eq!(node.remove(30), Some(TaggedPointer::from_raw(30)));
+        assert_eq!(node.keys[..node.meta.len()], [10, 40]);
+        assert_eq!(node.get(30), None);
     }
 }

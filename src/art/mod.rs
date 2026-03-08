@@ -1,4 +1,4 @@
-use crate::art::art::common_prefix_len;
+use crate::art::art::{DeleteResult, common_prefix_len, delete_at};
 use crate::art::ptr::TaggedPointer;
 
 pub use art::ArtIndex;
@@ -29,6 +29,10 @@ pub(crate) trait ArtNode {
 
     fn replace_child(&mut self, edge: u8, child: TaggedPointer);
 
+    fn remove_child(&mut self, edge: u8) -> Option<TaggedPointer>;
+
+    fn child_count(&self) -> usize;
+
     fn prefix(&self) -> [u8; 8];
 
     fn prefix_len(&self) -> usize;
@@ -48,6 +52,57 @@ pub(crate) trait ArtNode {
         let depth = depth + prefix_len;
         let child = self.get_child(terminated_key[depth])?;
         Some((child, depth + 1))
+    }
+
+    fn delete_from_node(
+        &mut self,
+        self_ptr: TaggedPointer,
+        terminated_key: &[u8],
+        depth: usize,
+    ) -> DeleteResult {
+        let prefix_len = self.prefix_len();
+        let prefix = self.prefix();
+        let matched = common_prefix_len(&prefix[..prefix_len], &terminated_key[depth..]);
+        if matched != prefix_len {
+            return DeleteResult {
+                removed: None,
+                replacement: self_ptr,
+            };
+        }
+
+        let depth = depth + prefix_len;
+        let edge = terminated_key[depth];
+        let Some(child) = self.get_child(edge) else {
+            return DeleteResult {
+                removed: None,
+                replacement: self_ptr,
+            };
+        };
+
+        let child_result = delete_at(child, terminated_key, depth + 1);
+        let Some(removed) = child_result.removed else {
+            return DeleteResult {
+                removed: None,
+                replacement: self_ptr,
+            };
+        };
+
+        if child_result.replacement.is_null() {
+            let _ = self.remove_child(edge);
+        } else {
+            self.replace_child(edge, child_result.replacement);
+        }
+
+        let replacement = if self.child_count() == 0 {
+            TaggedPointer::default()
+        } else {
+            self_ptr
+        };
+
+        DeleteResult {
+            removed: Some(removed),
+            replacement,
+        }
     }
 }
 

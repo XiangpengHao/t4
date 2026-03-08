@@ -52,6 +52,35 @@ impl Node48 {
         Some(self.children[(child_idx - 1) as usize])
     }
 
+    pub(crate) fn remove(&mut self, key: u8) -> Option<TaggedPointer> {
+        let key_idx = key as usize;
+        let child_idx = self.child_idx[key_idx];
+        if child_idx == 0 {
+            return None;
+        }
+
+        let slot = (child_idx - 1) as usize;
+        let len = self.meta.len();
+        let removed = self.children[slot];
+        let last_slot = len - 1;
+
+        self.child_idx[key_idx] = 0;
+        if slot != last_slot {
+            let moved = self.children[last_slot];
+            self.children[slot] = moved;
+            for idx in 0..=u8::MAX {
+                if self.child_idx[idx as usize] == len as u8 {
+                    self.child_idx[idx as usize] = child_idx;
+                    break;
+                }
+            }
+        }
+
+        self.children[last_slot] = TaggedPointer::default();
+        self.meta.decrement_len();
+        Some(removed)
+    }
+
     pub(crate) fn meta_mut(&mut self) -> &mut NodeMeta {
         &mut self.meta
     }
@@ -117,6 +146,14 @@ impl ArtNode for Node48 {
         let _ = self.insert(edge, child);
     }
 
+    fn remove_child(&mut self, edge: u8) -> Option<TaggedPointer> {
+        self.remove(edge)
+    }
+
+    fn child_count(&self) -> usize {
+        self.meta.len()
+    }
+
     fn prefix_len(&self) -> usize {
         self.meta.prefix_len()
     }
@@ -165,5 +202,19 @@ mod tests {
         );
         assert_eq!(node.meta.len(), 1);
         assert_eq!(node.get(7), Some(TaggedPointer::from_raw(2)));
+    }
+
+    #[test]
+    fn remove_deletes_sparse_child() {
+        let mut node = Node48::new(b"");
+
+        node.insert(200, TaggedPointer::from_raw(200));
+        node.insert(3, TaggedPointer::from_raw(3));
+        node.insert(128, TaggedPointer::from_raw(128));
+
+        assert_eq!(node.remove(3), Some(TaggedPointer::from_raw(3)));
+        assert_eq!(node.get(3), None);
+        assert_eq!(node.get(128), Some(TaggedPointer::from_raw(128)));
+        assert_eq!(node.get(200), Some(TaggedPointer::from_raw(200)));
     }
 }

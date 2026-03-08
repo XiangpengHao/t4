@@ -16,6 +16,11 @@ pub struct ArtIndex {
     root: TaggedPointer,
 }
 
+pub(crate) struct DeleteResult {
+    pub(crate) removed: Option<KVPair>,
+    pub(crate) replacement: TaggedPointer,
+}
+
 impl ArtIndex {
     pub fn new() -> Self {
         Self {
@@ -246,6 +251,13 @@ impl ArtIndex {
             }
         }
     }
+
+    pub fn delete(&mut self, key: &[u8]) -> Option<KVPair> {
+        let terminated_key = terminated_key_owned(key);
+        let result = delete_at(self.root, &terminated_key, 0);
+        self.root = result.replacement;
+        result.removed
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -264,6 +276,44 @@ fn update_parent(parent: Parent, value: TaggedPointer) {
         Parent::Node16(node_ptr, edge) => unsafe { (&mut *node_ptr).replace_child(edge, value) },
         Parent::Node48(node_ptr, edge) => unsafe { (&mut *node_ptr).replace_child(edge, value) },
         Parent::Node256(node_ptr, edge) => unsafe { (&mut *node_ptr).replace_child(edge, value) },
+    }
+}
+
+pub(crate) fn delete_at(current: TaggedPointer, terminated_key: &[u8], depth: usize) -> DeleteResult {
+    if current.is_null() {
+        return DeleteResult {
+            removed: None,
+            replacement: current,
+        };
+    }
+
+    match current.next_node() {
+        NextNode::Value(value_ptr) => {
+            let value = unsafe { &*value_ptr };
+            if terminated_key_owned(value.key()) != terminated_key {
+                return DeleteResult {
+                    removed: None,
+                    replacement: current,
+                };
+            }
+
+            DeleteResult {
+                removed: Some(*value),
+                replacement: TaggedPointer::default(),
+            }
+        }
+        NextNode::Node4(node_ptr) => unsafe {
+            (&mut *node_ptr).delete_from_node(current, terminated_key, depth)
+        },
+        NextNode::Node16(node_ptr) => unsafe {
+            (&mut *node_ptr).delete_from_node(current, terminated_key, depth)
+        },
+        NextNode::Node48(node_ptr) => unsafe {
+            (&mut *node_ptr).delete_from_node(current, terminated_key, depth)
+        },
+        NextNode::Node256(node_ptr) => unsafe {
+            (&mut *node_ptr).delete_from_node(current, terminated_key, depth)
+        },
     }
 }
 
@@ -482,5 +532,100 @@ mod tests {
             b"right"
         );
         assert!(index.get(b"123456789abcdef-middle").is_none());
+    }
+
+    #[test]
+    fn delete_removes_single_key() {
+        let mut index = ArtIndex::new();
+
+        index.insert(b"hello", b"world");
+
+        let deleted = index.delete(b"hello").expect("deleted");
+        assert_eq!(deleted.key(), b"hello");
+        assert_eq!(deleted.value(), b"world");
+        assert!(index.get(b"hello").is_none());
+    }
+
+    #[test]
+    fn delete_missing_key_keeps_existing_values() {
+        let mut index = ArtIndex::new();
+
+        index.insert(b"hello", b"world");
+
+        assert!(index.delete(b"missing").is_none());
+        assert_eq!(index.get(b"hello").expect("value").value(), b"world");
+    }
+
+    #[test]
+    fn delete_distinguishes_prefix_keys() {
+        let mut index = ArtIndex::new();
+
+        index.insert(b"a", b"1");
+        index.insert(b"ab", b"2");
+
+        assert_eq!(index.delete(b"a").expect("deleted").value(), b"1");
+        assert!(index.get(b"a").is_none());
+        assert_eq!(index.get(b"ab").expect("ab").value(), b"2");
+    }
+
+    #[test]
+    fn delete_handles_shared_long_prefix() {
+        let mut index = ArtIndex::new();
+
+        index.insert(b"prefix-path-alpha", b"alpha");
+        index.insert(b"prefix-path-beta", b"beta");
+
+        assert_eq!(index.delete(b"prefix-path-beta").expect("deleted").value(), b"beta");
+        assert!(index.get(b"prefix-path-beta").is_none());
+        assert_eq!(
+            index.get(b"prefix-path-alpha").expect("alpha").value(),
+            b"alpha"
+        );
+    }
+
+    #[test]
+    fn delete_allows_reinsert_after_pruning_empty_nodes() {
+        let mut index = ArtIndex::new();
+
+        index.insert(b"ab", b"old");
+        index.insert(b"ac", b"stay");
+
+        assert!(index.delete(b"ab").is_some());
+        assert!(index.delete(b"ac").is_some());
+        assert!(index.get(b"ab").is_none());
+        assert!(index.get(b"ac").is_none());
+
+        index.insert(b"xyz", b"new");
+        assert_eq!(index.get(b"xyz").expect("xyz").value(), b"new");
+    }
+
+    #[test]
+    fn delete_works_after_node_growth() {
+        let mut index = ArtIndex::new();
+
+        for byte in 0u8..60 {
+            let key = [b'y', byte];
+            let value = [byte];
+            index.insert(&key, &value);
+        }
+
+        for byte in 10u8..50 {
+            let key = [b'y', byte];
+            let deleted = index.delete(&key);
+            assert!(deleted.is_some(), "missing delete for {:?}", key);
+        }
+
+        for byte in 0u8..10 {
+            let key = [b'y', byte];
+            assert_eq!(index.get(&key).expect("present").value(), [byte]);
+        }
+        for byte in 10u8..50 {
+            let key = [b'y', byte];
+            assert!(index.get(&key).is_none(), "deleted key still present {:?}", key);
+        }
+        for byte in 50u8..60 {
+            let key = [b'y', byte];
+            assert_eq!(index.get(&key).expect("present").value(), [byte]);
+        }
     }
 }
