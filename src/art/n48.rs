@@ -1,9 +1,9 @@
 use crate::art::{
+    ArtNode, InsertStep,
     art::common_prefix_len,
     meta::{NodeMeta, NodeType},
     n256::Node256,
     ptr::TaggedPointer,
-    ArtNode, InsertStep,
 };
 
 #[repr(C, align(16))]
@@ -43,8 +43,6 @@ impl Node48 {
         None
     }
 
-  
-
     pub(crate) fn get(&self, key: u8) -> Option<TaggedPointer> {
         let child_idx = self.child_idx[key as usize];
         if child_idx == 0 {
@@ -52,10 +50,6 @@ impl Node48 {
         }
 
         Some(self.children[(child_idx - 1) as usize])
-    }
-
-    pub(crate) fn meta(&self) -> &NodeMeta {
-        &self.meta
     }
 
     pub(crate) fn meta_mut(&mut self) -> &mut NodeMeta {
@@ -92,7 +86,8 @@ impl ArtNode for Node48 {
     ) -> InsertStep {
         let prefix_depth = depth;
         let prefix_len = self.meta.prefix_len();
-        let matched = common_prefix_len(&self.meta.prefix()[..prefix_len], &terminated_key[depth..]);
+        let matched =
+            common_prefix_len(&self.meta.prefix()[..prefix_len], &terminated_key[depth..]);
         if matched != prefix_len {
             return InsertStep::Split { matched };
         }

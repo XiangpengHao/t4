@@ -11,6 +11,7 @@ pub(crate) struct TaggedPointer {
 impl TaggedPointer {
     const TAG_MASK: usize = 0x0000_0000_0000_000f;
 
+    #[cfg(test)]
     pub(crate) const fn from_raw(ptr: usize) -> Self {
         Self { ptr }
     }

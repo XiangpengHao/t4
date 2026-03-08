@@ -56,10 +56,6 @@ impl Node4 {
         Some(self.children[idx])
     }
 
-    pub(crate) fn meta(&self) -> &NodeMeta {
-        &self.meta
-    }
-
     pub(crate) fn meta_mut(&mut self) -> &mut NodeMeta {
         &mut self.meta
     }
@@ -93,7 +89,8 @@ impl ArtNode for Node4 {
     ) -> InsertStep {
         let prefix_depth = depth;
         let prefix_len = self.meta.prefix_len();
-        let matched = common_prefix_len(&self.meta.prefix()[..prefix_len], &terminated_key[depth..]);
+        let matched =
+            common_prefix_len(&self.meta.prefix()[..prefix_len], &terminated_key[depth..]);
         if matched != prefix_len {
             return InsertStep::Split { matched };
         }

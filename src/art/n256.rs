@@ -1,8 +1,8 @@
 use crate::art::{
+    ArtNode, InsertStep,
     art::common_prefix_len,
     meta::{NodeMeta, NodeType},
     ptr::TaggedPointer,
-    ArtNode, InsertStep,
 };
 
 #[repr(C, align(16))]
@@ -51,24 +51,8 @@ impl Node256 {
         Some(self.children[key_idx])
     }
 
-    pub(crate) fn meta(&self) -> &NodeMeta {
-        &self.meta
-    }
-
     pub(crate) fn meta_mut(&mut self) -> &mut NodeMeta {
         &mut self.meta
-    }
-
-    pub(crate) fn is_full(&self) -> bool {
-        self.meta.len() == self.children.len()
-    }
-
-    pub(crate) fn for_each_child(&self, mut f: impl FnMut(u8, TaggedPointer)) {
-        for key in 0..=u8::MAX {
-            if let Some(child) = self.get(key) {
-                f(key, child);
-            }
-        }
     }
 }
 
@@ -80,7 +64,8 @@ impl ArtNode for Node256 {
         depth: usize,
     ) -> InsertStep {
         let prefix_len = self.meta.prefix_len();
-        let matched = common_prefix_len(&self.meta.prefix()[..prefix_len], &terminated_key[depth..]);
+        let matched =
+            common_prefix_len(&self.meta.prefix()[..prefix_len], &terminated_key[depth..]);
         if matched != prefix_len {
             return InsertStep::Split { matched };
         }

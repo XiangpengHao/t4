@@ -1,8 +1,12 @@
-use crate::art::ptr::TaggedPointer;
 use crate::art::art::common_prefix_len;
+use crate::art::ptr::TaggedPointer;
+
+pub use art::ArtIndex;
 
 pub(crate) enum InsertStep {
-    Split { matched: usize },
+    Split {
+        matched: usize,
+    },
     Descend {
         edge: u8,
         child: TaggedPointer,

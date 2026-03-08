@@ -1,4 +1,4 @@
-mod art;
+pub mod art;
 mod buffer;
 mod error;
 mod io_task;

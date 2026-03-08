@@ -44,10 +44,6 @@ impl NodeMeta {
         self.prefix
     }
 
-    pub(crate) const fn node_type(self) -> NodeType {
-        self.node_type
-    }
-
     pub(crate) fn set_prefix(&mut self, prefix: &[u8]) {
         assert!(
             prefix.len() <= self.prefix.len(),

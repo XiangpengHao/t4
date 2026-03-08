@@ -17,7 +17,7 @@ pub struct ArtIndex {
 }
 
 impl ArtIndex {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             root: TaggedPointer::default(),
         }
@@ -62,8 +62,14 @@ impl ArtIndex {
                     let step = node.insert_step(&terminated_key, value_ptr, depth);
                     match step {
                         InsertStep::Split { matched } => {
-                            let replacement =
-                                split_node(node, current, &terminated_key, value_ptr, depth, matched);
+                            let replacement = split_node(
+                                node,
+                                current,
+                                &terminated_key,
+                                value_ptr,
+                                depth,
+                                matched,
+                            );
                             update_parent(parent, replacement);
                             return;
                         }
@@ -96,8 +102,14 @@ impl ArtIndex {
                     let step = node.insert_step(&terminated_key, value_ptr, depth);
                     match step {
                         InsertStep::Split { matched } => {
-                            let replacement =
-                                split_node(node, current, &terminated_key, value_ptr, depth, matched);
+                            let replacement = split_node(
+                                node,
+                                current,
+                                &terminated_key,
+                                value_ptr,
+                                depth,
+                                matched,
+                            );
                             update_parent(parent, replacement);
                             return;
                         }
@@ -130,8 +142,14 @@ impl ArtIndex {
                     let step = node.insert_step(&terminated_key, value_ptr, depth);
                     match step {
                         InsertStep::Split { matched } => {
-                            let replacement =
-                                split_node(node, current, &terminated_key, value_ptr, depth, matched);
+                            let replacement = split_node(
+                                node,
+                                current,
+                                &terminated_key,
+                                value_ptr,
+                                depth,
+                                matched,
+                            );
                             update_parent(parent, replacement);
                             return;
                         }
@@ -164,8 +182,14 @@ impl ArtIndex {
                     let step = node.insert_step(&terminated_key, value_ptr, depth);
                     match step {
                         InsertStep::Split { matched } => {
-                            let replacement =
-                                split_node(node, current, &terminated_key, value_ptr, depth, matched);
+                            let replacement = split_node(
+                                node,
+                                current,
+                                &terminated_key,
+                                value_ptr,
+                                depth,
+                                matched,
+                            );
                             update_parent(parent, replacement);
                             return;
                         }
