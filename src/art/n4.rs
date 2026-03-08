@@ -160,12 +160,12 @@ impl Node4 {
             invariant
                 idx <= shift <= len,
                 self.meta.spec_len() == len < 4,
-                forall|i: int| 0 <= i < idx ==> self.keys[i] == old_keys[i],
-                forall|i: int| 0 <= i < idx ==> self.children[i] == old_children[i],
-                forall|i: int| idx <= i < shift ==> self.keys[i] == old_keys[i],
-                forall|i: int| idx <= i < shift ==> self.children[i] == old_children[i],
-                forall|i: int| shift <= i < len ==> self.keys[i + 1] == old_keys[i],
-                forall|i: int| shift <= i < len ==> self.children[i + 1] == old_children[i],
+                forall|i: int| 0 <= i < idx ==> self.keys[i] == #[trigger] old_keys[i],
+                forall|i: int| 0 <= i < idx ==> self.children[i] == #[trigger] old_children[i],
+                forall|i: int| idx <= i < shift ==> self.keys[i] == #[trigger] old_keys[i],
+                forall|i: int| idx <= i < shift ==> self.children[i] == #[trigger] old_children[i],
+                forall|i: int| shift <= i < len ==> self.keys[i + 1] == #[trigger] old_keys[i],
+                forall|i: int| shift <= i < len ==> self.children[i + 1] == #[trigger] old_children[i],
             decreases shift - idx,
         {
             self.keys[shift] = self.keys[shift - 1];
@@ -238,27 +238,117 @@ impl Node4 {
         }
     }
 
+    fn remove_at(&mut self, idx: usize) -> (result: TaggedPointer)
+        requires
+            old(self).wf(),
+            idx < old(self).live_len(),
+        ensures
+            self.wf(),
+            self.live_len() + 1 == old(self).live_len(),
+            result.raw() == old(self).children[idx as int],
+            forall|i: int| 0 <= i < idx ==> self.keys[i] == old(self).keys[i],
+            forall|i: int| idx <= i < self.live_len() ==> self.keys[i] == old(self).keys[i + 1],
+            forall|i: int| 0 <= i < idx ==> self.children[i] == old(self).children[i],
+            forall|i: int| idx <= i < self.live_len() ==> self.children[i] == old(self).children[i + 1],
+    {
+        let ghost old_len = self.live_len();
+        let ghost old_keys = self.keys@;
+        let ghost old_children = self.children@;
+        let len = self.meta.len();
+        let removed_raw = self.children[idx];
+        let mut shift = idx + 1;
+        while shift < len
+            invariant
+                idx + 1 <= shift <= len,
+                self.meta.spec_len() == len,
+                len == old_len,
+                len <= 4,
+                forall|i: int| 0 <= i < idx ==> self.keys[i] == #[trigger] old_keys[i],
+                forall|i: int| 0 <= i < idx ==> self.children[i] == #[trigger] old_children[i],
+                forall|i: int| idx <= i < shift - 1 ==> self.keys[i] == #[trigger] old_keys[i + 1],
+                forall|i: int| idx <= i < shift - 1 ==> self.children[i] == #[trigger] old_children[i + 1],
+                forall|i: int| shift <= i < len ==> self.keys[i] == #[trigger] old_keys[i],
+                forall|i: int| shift <= i < len ==> self.children[i] == #[trigger] old_children[i],
+            decreases len - shift,
+        {
+            self.keys[shift - 1] = self.keys[shift];
+            self.children[shift - 1] = self.children[shift];
+            shift += 1;
+        }
+
+        self.meta.decrement_len();
+
+        proof {
+            assert(self.wf()) by {
+                assert forall|i: int, j: int| 0 <= i < j < self.live_len() implies self.keys[i] < self.keys[j] by {
+                    if j < idx as int {
+                        assert(self.keys[i] == old_keys[i]);
+                        assert(self.keys[j] == old_keys[j]);
+                    } else if i < idx as int {
+                        assert(self.keys[i] == old_keys[i]);
+                        assert(self.keys[j] == old_keys[j + 1]);
+                    } else {
+                        assert(self.keys[i] == old_keys[i + 1]);
+                        assert(self.keys[j] == old_keys[j + 1]);
+                    }
+                }
+                assert forall|i: int| 0 <= i < self.live_len() implies #[trigger] TaggedPointer::wf_raw(self.children[i]) by {
+                    if i < idx as int {
+                        assert(self.children[i] == old_children[i]);
+                    } else {
+                        assert(self.children[i] == old_children[i + 1]);
+                    }
+                }
+            }
+        }
+
+        TaggedPointer::from_raw(removed_raw)
+    }
+
+    pub(crate) fn remove(&mut self, key: u8) -> (result: Option<TaggedPointer>)
+        requires
+            old(self).wf(),
+        ensures
+            self.wf(),
+            !self.has_key(key),
+            old(self).has_key(key) <==> result.is_some(),
+            result.is_some() ==> old(self).maps_to(key, result.unwrap().raw()),
+            result.is_some() ==> self.live_len() + 1 == old(self).live_len(),
+            result.is_none() ==> self.live_len() == old(self).live_len(),
+            forall|other_key: u8, raw: usize|
+                self.maps_to(other_key, raw) ==> old(self).maps_to(other_key, raw) && other_key != key,
+            forall|other_key: u8, raw: usize|
+                other_key != key && old(self).maps_to(other_key, raw) ==> self.maps_to(other_key, raw),
+    {
+        match self.search(key) {
+            SearchResult::Found(idx) => {
+                let removed = self.remove_at(idx);
+                proof {
+                    assert forall|other_key: u8, raw: usize|
+                        other_key != key && old(self).maps_to(other_key, raw) implies self.maps_to(other_key, raw) by {
+                        let i = choose|i: int| 0 <= i < old(self).live_len() && old(self).keys[i] == other_key && old(self).children[i] == raw;
+                        if i < idx as int {
+                            assert(self.keys[i] == old(self).keys[i]);
+                            assert(self.children[i] == old(self).children[i]);
+                            assert(self.maps_to(other_key, raw));
+                        } else {
+                            assert(self.keys[i - 1] == old(self).keys[i]);
+                            assert(self.children[i - 1] == old(self).children[i]);
+                            assert(self.maps_to(other_key, raw));
+                        }
+                    }
+                }
+                Some(removed)
+            }
+            SearchResult::Vacant(_) => None,
+        }
+    }
+
 }
 
 } // verus!
 
 impl Node4 {
-    pub(crate) fn remove(&mut self, key: u8) -> Option<TaggedPointer> {
-        let len = self.meta.len();
-        let idx = self.keys[..len]
-            .iter()
-            .position(|existing| *existing == key)?;
-        let removed = TaggedPointer::from_raw(self.children[idx]);
-        for shift in idx + 1..len {
-            self.keys[shift - 1] = self.keys[shift];
-            self.children[shift - 1] = self.children[shift];
-        }
-        self.keys[len - 1] = 0;
-        self.children[len - 1] = 0;
-        self.meta.decrement_len();
-        Some(removed)
-    }
-
     pub(crate) fn for_each_child(&self, mut f: impl FnMut(u8, TaggedPointer)) {
         let len = self.meta.len();
         for idx in 0..len {
