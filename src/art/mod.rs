@@ -66,7 +66,7 @@ pub(crate) trait ArtNode {
         if matched != prefix_len {
             return DeleteResult {
                 removed: None,
-                replacement: self_ptr,
+                replacement: Some(self_ptr),
             };
         }
 
@@ -75,28 +75,28 @@ pub(crate) trait ArtNode {
         let Some(child) = self.get_child(edge) else {
             return DeleteResult {
                 removed: None,
-                replacement: self_ptr,
+                replacement: Some(self_ptr),
             };
         };
 
-        let child_result = delete_at(child, terminated_key, depth + 1);
+        let child_result = delete_at(Some(child), terminated_key, depth + 1);
         let Some(removed) = child_result.removed else {
             return DeleteResult {
                 removed: None,
-                replacement: self_ptr,
+                replacement: Some(self_ptr),
             };
         };
 
-        if child_result.replacement.is_null() {
-            let _ = self.remove_child(edge);
+        if let Some(replacement) = child_result.replacement {
+            self.replace_child(edge, replacement);
         } else {
-            self.replace_child(edge, child_result.replacement);
+            let _ = self.remove_child(edge);
         }
 
         let replacement = if self.child_count() == 0 {
-            TaggedPointer::default()
+            None
         } else {
-            self_ptr
+            Some(self_ptr)
         };
 
         DeleteResult {

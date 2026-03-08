@@ -5,12 +5,13 @@ use crate::art::{
     n16::Node16,
     ptr::TaggedPointer,
 };
+use std::mem::MaybeUninit;
 
 #[repr(C, align(16))]
 pub(crate) struct Node4 {
     meta: NodeMeta,
     keys: [u8; 4],
-    children: [TaggedPointer; 4],
+    children: [MaybeUninit<TaggedPointer>; 4],
 }
 
 impl Node4 {
@@ -19,7 +20,7 @@ impl Node4 {
         Self {
             meta,
             keys: [0; 4],
-            children: [TaggedPointer::default(); 4],
+            children: [const { MaybeUninit::uninit() }; 4],
         }
     }
 
@@ -29,8 +30,8 @@ impl Node4 {
         for idx in 0..len {
             if self.keys[idx] == key {
                 let old = self.children[idx];
-                self.children[idx] = value;
-                return Some(old);
+                self.children[idx] = MaybeUninit::new(value);
+                return Some(unsafe { old.assume_init() });
             }
         }
 
@@ -43,7 +44,7 @@ impl Node4 {
         }
 
         self.keys[insert_at] = key;
-        self.children[insert_at] = value;
+        self.children[insert_at] = MaybeUninit::new(value);
         self.meta.increment_len();
         None
     }
@@ -53,7 +54,7 @@ impl Node4 {
         let idx = self.keys[..len]
             .iter()
             .position(|existing| *existing == key)?;
-        Some(self.children[idx])
+        Some(unsafe { self.children[idx].assume_init() })
     }
 
     pub(crate) fn remove(&mut self, key: u8) -> Option<TaggedPointer> {
@@ -67,9 +68,8 @@ impl Node4 {
             self.children[shift - 1] = self.children[shift];
         }
         self.keys[len - 1] = 0;
-        self.children[len - 1] = TaggedPointer::default();
         self.meta.decrement_len();
-        Some(removed)
+        Some(unsafe { removed.assume_init() })
     }
 
     pub(crate) fn meta_mut(&mut self) -> &mut NodeMeta {
@@ -83,7 +83,7 @@ impl Node4 {
     pub(crate) fn for_each_child(&self, mut f: impl FnMut(u8, TaggedPointer)) {
         let len = self.meta.len();
         for idx in 0..len {
-            f(self.keys[idx], self.children[idx]);
+            f(self.keys[idx], unsafe { self.children[idx].assume_init() });
         }
     }
 

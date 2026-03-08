@@ -5,12 +5,13 @@ use crate::art::{
     n256::Node256,
     ptr::TaggedPointer,
 };
+use std::mem::MaybeUninit;
 
 #[repr(C, align(16))]
 pub(crate) struct Node48 {
     meta: NodeMeta,
     child_idx: [u8; 256],
-    children: [TaggedPointer; 48],
+    children: [MaybeUninit<TaggedPointer>; 48],
 }
 
 impl Node48 {
@@ -19,7 +20,7 @@ impl Node48 {
         Self {
             meta,
             child_idx: [0; 256],
-            children: [TaggedPointer::default(); 48],
+            children: [const { MaybeUninit::uninit() }; 48],
         }
     }
 
@@ -30,15 +31,15 @@ impl Node48 {
         if child_idx != 0 {
             let slot = (child_idx - 1) as usize;
             let old = self.children[slot];
-            self.children[slot] = value;
-            return Some(old);
+            self.children[slot] = MaybeUninit::new(value);
+            return Some(unsafe { old.assume_init() });
         }
 
         let len = self.meta.len();
         assert!(len < self.children.len(), "Node48 is full");
 
         self.child_idx[key_idx] = (len + 1) as u8;
-        self.children[len] = value;
+        self.children[len] = MaybeUninit::new(value);
         self.meta.increment_len();
         None
     }
@@ -49,7 +50,7 @@ impl Node48 {
             return None;
         }
 
-        Some(self.children[(child_idx - 1) as usize])
+        Some(unsafe { self.children[(child_idx - 1) as usize].assume_init() })
     }
 
     pub(crate) fn remove(&mut self, key: u8) -> Option<TaggedPointer> {
@@ -76,9 +77,8 @@ impl Node48 {
             }
         }
 
-        self.children[last_slot] = TaggedPointer::default();
         self.meta.decrement_len();
-        Some(removed)
+        Some(unsafe { removed.assume_init() })
     }
 
     pub(crate) fn meta_mut(&mut self) -> &mut NodeMeta {

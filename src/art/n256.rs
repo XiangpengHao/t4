@@ -4,12 +4,13 @@ use crate::art::{
     meta::{NodeMeta, NodeType},
     ptr::TaggedPointer,
 };
+use std::mem::MaybeUninit;
 
 #[repr(C, align(16))]
 pub(crate) struct Node256 {
     meta: NodeMeta,
     key_mask: [u8; 32],
-    children: [TaggedPointer; 256],
+    children: [MaybeUninit<TaggedPointer>; 256],
 }
 
 impl Node256 {
@@ -18,7 +19,7 @@ impl Node256 {
         Self {
             meta,
             key_mask: [0; 32],
-            children: [TaggedPointer::default(); 256],
+            children: [const { MaybeUninit::uninit() }; 256],
         }
     }
 
@@ -29,12 +30,12 @@ impl Node256 {
 
         if self.key_mask[mask_idx] & bit != 0 {
             let old = self.children[key_idx];
-            self.children[key_idx] = value;
-            return Some(old);
+            self.children[key_idx] = MaybeUninit::new(value);
+            return Some(unsafe { old.assume_init() });
         }
 
         self.key_mask[mask_idx] |= bit;
-        self.children[key_idx] = value;
+        self.children[key_idx] = MaybeUninit::new(value);
         self.meta.increment_len();
         None
     }
@@ -48,7 +49,7 @@ impl Node256 {
             return None;
         }
 
-        Some(self.children[key_idx])
+        Some(unsafe { self.children[key_idx].assume_init() })
     }
 
     pub(crate) fn remove(&mut self, key: u8) -> Option<TaggedPointer> {
@@ -61,9 +62,8 @@ impl Node256 {
 
         self.key_mask[mask_idx] &= !bit;
         let removed = self.children[key_idx];
-        self.children[key_idx] = TaggedPointer::default();
         self.meta.decrement_len();
-        Some(removed)
+        Some(unsafe { removed.assume_init() })
     }
 
     pub(crate) fn meta_mut(&mut self) -> &mut NodeMeta {

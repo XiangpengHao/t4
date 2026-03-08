@@ -13,19 +13,17 @@ use crate::art::{
 };
 
 pub struct ArtIndex {
-    root: TaggedPointer,
+    root: Option<TaggedPointer>,
 }
 
 pub(crate) struct DeleteResult {
     pub(crate) removed: Option<KVPair>,
-    pub(crate) replacement: TaggedPointer,
+    pub(crate) replacement: Option<TaggedPointer>,
 }
 
 impl ArtIndex {
     pub fn new() -> Self {
-        Self {
-            root: TaggedPointer::default(),
-        }
+        Self { root: None }
     }
 
     pub fn insert(&mut self, key: &[u8], value: &[u8]) {
@@ -36,12 +34,12 @@ impl ArtIndex {
         let mut depth = 0;
 
         loop {
-            if current.is_null() {
+            let Some(current_ptr) = current else {
                 update_parent(parent, value_ptr);
                 return;
-            }
+            };
 
-            match current.next_node() {
+            match current_ptr.next_node() {
                 NextNode::Value(existing_ptr) => {
                     let existing = unsafe { &*existing_ptr };
                     let terminated_existing = terminated_key_owned(existing.key());
@@ -55,7 +53,7 @@ impl ArtIndex {
                     let split = new_branching_path(
                         &terminated_key[depth..depth + shared],
                         terminated_existing[depth + shared],
-                        current,
+                        current_ptr,
                         terminated_key[depth + shared],
                         value_ptr,
                     );
@@ -69,7 +67,7 @@ impl ArtIndex {
                         InsertStep::Split { matched } => {
                             let replacement = split_node(
                                 node,
-                                current,
+                                current_ptr,
                                 &terminated_key,
                                 value_ptr,
                                 depth,
@@ -84,7 +82,7 @@ impl ArtIndex {
                             next_depth,
                         } => {
                             parent = Parent::Node4(node_ptr, edge);
-                            current = child;
+                            current = Some(child);
                             depth = next_depth;
                         }
                         InsertStep::Grow {
@@ -96,7 +94,7 @@ impl ArtIndex {
                                     .grow(&terminated_key[prefix_depth..prefix_depth + prefix_len])
                             };
                             update_parent(parent, replacement);
-                            current = replacement;
+                            current = Some(replacement);
                             depth = prefix_depth;
                         }
                         InsertStep::Done => return,
@@ -109,7 +107,7 @@ impl ArtIndex {
                         InsertStep::Split { matched } => {
                             let replacement = split_node(
                                 node,
-                                current,
+                                current_ptr,
                                 &terminated_key,
                                 value_ptr,
                                 depth,
@@ -124,7 +122,7 @@ impl ArtIndex {
                             next_depth,
                         } => {
                             parent = Parent::Node16(node_ptr, edge);
-                            current = child;
+                            current = Some(child);
                             depth = next_depth;
                         }
                         InsertStep::Grow {
@@ -136,7 +134,7 @@ impl ArtIndex {
                                     .grow(&terminated_key[prefix_depth..prefix_depth + prefix_len])
                             };
                             update_parent(parent, replacement);
-                            current = replacement;
+                            current = Some(replacement);
                             depth = prefix_depth;
                         }
                         InsertStep::Done => return,
@@ -149,7 +147,7 @@ impl ArtIndex {
                         InsertStep::Split { matched } => {
                             let replacement = split_node(
                                 node,
-                                current,
+                                current_ptr,
                                 &terminated_key,
                                 value_ptr,
                                 depth,
@@ -164,7 +162,7 @@ impl ArtIndex {
                             next_depth,
                         } => {
                             parent = Parent::Node48(node_ptr, edge);
-                            current = child;
+                            current = Some(child);
                             depth = next_depth;
                         }
                         InsertStep::Grow {
@@ -176,7 +174,7 @@ impl ArtIndex {
                                     .grow(&terminated_key[prefix_depth..prefix_depth + prefix_len])
                             };
                             update_parent(parent, replacement);
-                            current = replacement;
+                            current = Some(replacement);
                             depth = prefix_depth;
                         }
                         InsertStep::Done => return,
@@ -189,7 +187,7 @@ impl ArtIndex {
                         InsertStep::Split { matched } => {
                             let replacement = split_node(
                                 node,
-                                current,
+                                current_ptr,
                                 &terminated_key,
                                 value_ptr,
                                 depth,
@@ -204,7 +202,7 @@ impl ArtIndex {
                             next_depth,
                         } => {
                             parent = Parent::Node256(node_ptr, edge);
-                            current = child;
+                            current = Some(child);
                             depth = next_depth;
                         }
                         InsertStep::Grow { .. } => {
@@ -223,11 +221,8 @@ impl ArtIndex {
         let mut depth = 0;
 
         loop {
-            if ptr.is_null() {
-                return None;
-            }
-
-            match ptr.next_node() {
+            let ptr_value = ptr?;
+            match ptr_value.next_node() {
                 NextNode::Value(value_ptr) => {
                     let value = unsafe { &*value_ptr };
                     return if terminated_key_owned(value.key()) == terminated_key {
@@ -237,16 +232,28 @@ impl ArtIndex {
                     };
                 }
                 NextNode::Node4(node_ptr) => {
-                    (ptr, depth) = unsafe { (&*node_ptr).get_from_node(&terminated_key, depth) }?
+                    let (next_ptr, next_depth) =
+                        unsafe { (&*node_ptr).get_from_node(&terminated_key, depth) }?;
+                    ptr = Some(next_ptr);
+                    depth = next_depth;
                 }
                 NextNode::Node16(node_ptr) => {
-                    (ptr, depth) = unsafe { (&*node_ptr).get_from_node(&terminated_key, depth) }?
+                    let (next_ptr, next_depth) =
+                        unsafe { (&*node_ptr).get_from_node(&terminated_key, depth) }?;
+                    ptr = Some(next_ptr);
+                    depth = next_depth;
                 }
                 NextNode::Node48(node_ptr) => {
-                    (ptr, depth) = unsafe { (&*node_ptr).get_from_node(&terminated_key, depth) }?
+                    let (next_ptr, next_depth) =
+                        unsafe { (&*node_ptr).get_from_node(&terminated_key, depth) }?;
+                    ptr = Some(next_ptr);
+                    depth = next_depth;
                 }
                 NextNode::Node256(node_ptr) => {
-                    (ptr, depth) = unsafe { (&*node_ptr).get_from_node(&terminated_key, depth) }?
+                    let (next_ptr, next_depth) =
+                        unsafe { (&*node_ptr).get_from_node(&terminated_key, depth) }?;
+                    ptr = Some(next_ptr);
+                    depth = next_depth;
                 }
             }
         }
@@ -262,7 +269,7 @@ impl ArtIndex {
 
 #[derive(Clone, Copy)]
 enum Parent {
-    Root(*mut TaggedPointer),
+    Root(*mut Option<TaggedPointer>),
     Node4(*mut Node4, u8),
     Node16(*mut Node16, u8),
     Node48(*mut Node48, u8),
@@ -271,7 +278,7 @@ enum Parent {
 
 fn update_parent(parent: Parent, value: TaggedPointer) {
     match parent {
-        Parent::Root(slot) => unsafe { *slot = value },
+        Parent::Root(slot) => unsafe { *slot = Some(value) },
         Parent::Node4(node_ptr, edge) => unsafe { (&mut *node_ptr).replace_child(edge, value) },
         Parent::Node16(node_ptr, edge) => unsafe { (&mut *node_ptr).replace_child(edge, value) },
         Parent::Node48(node_ptr, edge) => unsafe { (&mut *node_ptr).replace_child(edge, value) },
@@ -279,13 +286,17 @@ fn update_parent(parent: Parent, value: TaggedPointer) {
     }
 }
 
-pub(crate) fn delete_at(current: TaggedPointer, terminated_key: &[u8], depth: usize) -> DeleteResult {
-    if current.is_null() {
+pub(crate) fn delete_at(
+    current: Option<TaggedPointer>,
+    terminated_key: &[u8],
+    depth: usize,
+) -> DeleteResult {
+    let Some(current) = current else {
         return DeleteResult {
             removed: None,
-            replacement: current,
+            replacement: None,
         };
-    }
+    };
 
     match current.next_node() {
         NextNode::Value(value_ptr) => {
@@ -293,13 +304,13 @@ pub(crate) fn delete_at(current: TaggedPointer, terminated_key: &[u8], depth: us
             if terminated_key_owned(value.key()) != terminated_key {
                 return DeleteResult {
                     removed: None,
-                    replacement: current,
+                    replacement: Some(current),
                 };
             }
 
             DeleteResult {
                 removed: Some(*value),
-                replacement: TaggedPointer::default(),
+                replacement: None,
             }
         }
         NextNode::Node4(node_ptr) => unsafe {
@@ -575,7 +586,10 @@ mod tests {
         index.insert(b"prefix-path-alpha", b"alpha");
         index.insert(b"prefix-path-beta", b"beta");
 
-        assert_eq!(index.delete(b"prefix-path-beta").expect("deleted").value(), b"beta");
+        assert_eq!(
+            index.delete(b"prefix-path-beta").expect("deleted").value(),
+            b"beta"
+        );
         assert!(index.get(b"prefix-path-beta").is_none());
         assert_eq!(
             index.get(b"prefix-path-alpha").expect("alpha").value(),
@@ -621,7 +635,11 @@ mod tests {
         }
         for byte in 10u8..50 {
             let key = [b'y', byte];
-            assert!(index.get(&key).is_none(), "deleted key still present {:?}", key);
+            assert!(
+                index.get(&key).is_none(),
+                "deleted key still present {:?}",
+                key
+            );
         }
         for byte in 50u8..60 {
             let key = [b'y', byte];

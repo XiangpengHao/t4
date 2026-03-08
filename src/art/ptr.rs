@@ -1,11 +1,13 @@
+use std::num::NonZeroUsize;
+
 use crate::art::{art::KVPair, n4::Node4, n16::Node16, n48::Node48, n256::Node256};
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TaggedPointer {
     /// Lower 4 bits are the tag. It can point to a node meta or a value pair.
     /// Pointers must be aligned to 64 bit boundaries.
-    ptr: usize,
+    ptr: NonZeroUsize,
 }
 
 impl TaggedPointer {
@@ -13,19 +15,18 @@ impl TaggedPointer {
 
     #[cfg(test)]
     pub(crate) const fn from_raw(ptr: usize) -> Self {
-        Self { ptr }
-    }
-
-    pub(crate) const fn is_null(self) -> bool {
-        self.ptr == 0
+        match NonZeroUsize::new(ptr) {
+            Some(ptr) => Self { ptr },
+            None => panic!("TaggedPointer must be non-null"),
+        }
     }
 
     fn tag(&self) -> u8 {
-        (self.ptr & Self::TAG_MASK) as u8
+        (self.ptr.get() & Self::TAG_MASK) as u8
     }
 
     fn untagged_ptr(&self) -> usize {
-        self.ptr & !Self::TAG_MASK
+        self.ptr.get() & !Self::TAG_MASK
     }
 
     pub(crate) fn next_node(&self) -> NextNode {
@@ -61,8 +62,10 @@ impl TaggedPointer {
     }
 
     fn from_tagged_ptr(ptr: usize, tag: usize) -> Self {
+        assert_ne!(ptr, 0, "TaggedPointer must be non-null");
         debug_assert_eq!(ptr & Self::TAG_MASK, 0);
-        Self { ptr: ptr | tag }
+        let ptr = NonZeroUsize::new(ptr | tag).expect("TaggedPointer must be non-null");
+        Self { ptr }
     }
 }
 
