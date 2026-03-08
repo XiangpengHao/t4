@@ -4,7 +4,7 @@ version = "0.1.3"
 edition = "2021"
 description = "Verus specifications and proofs for the t4 storage model."
 license = "Apache-2.0"
-repository = "https://github.com/XiangpengHao/btfile"
+repository = "https://github.com/XiangpengHao/t4"
 
 [dependencies]
 vstd = "=0.0.0-2026-02-22-0103"
