@@ -1,3 +1,7 @@
+use vstd::prelude::*;
+
+verus! {
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum NodeType {
@@ -17,7 +21,30 @@ pub(crate) struct NodeMeta {
 }
 
 impl NodeMeta {
-    pub(crate) fn new(node_type: NodeType, prefix: &[u8]) -> Self {
+    pub closed spec fn prefix_capacity() -> usize {
+        8
+    }
+
+    pub closed spec fn raw_len(self) -> u8 {
+        self.len
+    }
+
+    pub closed spec fn raw_prefix_len(self) -> u8 {
+        self.prefix_len
+    }
+
+    #[verifier::type_invariant]
+    pub closed spec fn wf(&self) -> bool {
+        self.prefix_len as usize <= Self::prefix_capacity()
+    }
+
+    pub(crate) fn new(node_type: NodeType, prefix: &[u8]) -> (result: Self)
+        requires
+            prefix.len() <= Self::prefix_capacity(),
+        ensures
+            result.raw_len() == 0,
+            result.raw_prefix_len() as usize == prefix.len(),
+    {
         let mut meta = Self {
             len: 0,
             prefix_len: 0,
@@ -28,19 +55,47 @@ impl NodeMeta {
         meta
     }
 
-    pub(crate) const fn len(self) -> usize {
+    pub(crate) const fn len(self) -> (result: usize)
+        ensures
+            result == self.raw_len() as usize,
+    {
         self.len as usize
     }
 
-    pub(crate) fn increment_len(&mut self) {
-        self.len += 1;
+    pub(crate) fn increment_len(&mut self)
+        requires
+            old(self).raw_len() < u8::MAX,
+        ensures
+            self.raw_len() == old(self).raw_len() + 1,
+            self.raw_prefix_len() == old(self).raw_prefix_len(),
+    {
+        proof {
+            use_type_invariant(&*self);
+        }
+        self.len = self.len + 1;
     }
 
-    pub(crate) fn decrement_len(&mut self) {
-        self.len -= 1;
+    pub(crate) fn decrement_len(&mut self)
+        requires
+            old(self).raw_len() > 0,
+        ensures
+            self.raw_len() + 1 == old(self).raw_len(),
+            self.raw_prefix_len() == old(self).raw_prefix_len(),
+    {
+        proof {
+            use_type_invariant(&*self);
+        }
+        self.len = self.len - 1;
     }
 
-    pub(crate) const fn prefix_len(self) -> usize {
+    pub(crate) const fn prefix_len(self) -> (result: usize)
+        ensures
+            result == self.raw_prefix_len() as usize,
+            result <= Self::prefix_capacity(),
+    {
+        proof {
+            use_type_invariant(&self);
+        }
         self.prefix_len as usize
     }
 
@@ -48,16 +103,32 @@ impl NodeMeta {
         self.prefix
     }
 
-    pub(crate) fn set_prefix(&mut self, prefix: &[u8]) {
-        assert!(
-            prefix.len() <= self.prefix.len(),
-            "node prefixes longer than 8 bytes must be represented by subnodes"
-        );
+    pub(crate) fn set_prefix(&mut self, prefix: &[u8])
+        requires
+            prefix.len() <= Self::prefix_capacity(),
+        ensures
+            self.raw_len() == old(self).raw_len(),
+            self.raw_prefix_len() as usize == prefix.len(),
+            self.wf(),
+    {
         self.prefix_len = prefix.len() as u8;
         self.prefix = [0; 8];
-        self.prefix[..prefix.len()].copy_from_slice(prefix);
+        let mut idx = 0usize;
+        while idx < prefix.len()
+            invariant
+                self.wf(),
+                self.raw_len() == old(self).raw_len(),
+                self.raw_prefix_len() as usize == prefix.len(),
+                idx <= prefix.len(),
+            decreases prefix.len() - idx,
+        {
+            self.prefix[idx] = prefix[idx];
+            idx += 1;
+        }
     }
 }
+
+} // verus!
 
 #[cfg(test)]
 mod tests {
@@ -80,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "node prefixes longer than 8 bytes must be represented by subnodes")]
+    #[should_panic]
     fn set_prefix_rejects_prefixes_longer_than_eight_bytes() {
         let _ = NodeMeta::new(NodeType::Node16, b"prefix-path");
     }
