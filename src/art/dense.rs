@@ -2,7 +2,7 @@ use vstd::{prelude::*, slice::slice_subrange};
 
 use crate::art::{
     InsertStep,
-    art::common_prefix_len,
+    index::common_prefix_len,
     meta::{NodeMeta, NodeType},
     ptr::TaggedPointer,
 };
@@ -388,7 +388,10 @@ impl<const CAP: usize> DenseNode<CAP> {
         }
     }
 
-    pub(crate) fn child_count(&self) -> usize {
+    pub(crate) fn child_count(&self) -> (result: usize)
+        ensures
+            result == self.live_len(),
+    {
         self.meta.len()
     }
 
@@ -411,11 +414,30 @@ impl<const CAP: usize> DenseNode<CAP> {
     {
         self.meta.set_prefix(prefix);
     }
+
+    pub(crate) fn entry_at(&self, idx: usize) -> (result: (u8, TaggedPointer))
+        requires
+            self.wf(),
+            idx < self.live_len(),
+        ensures
+            self.maps_to(result.0, result.1.raw()),
+    {
+        (self.keys[idx], TaggedPointer::from_raw(self.children[idx]))
+    }
+
+    pub proof fn lemma_live_len_bound(&self)
+        requires
+            self.wf(),
+        ensures
+            self.live_len() <= CAP,
+    {
+    }
 }
 
 } // verus!
 
 impl<const CAP: usize> DenseNode<CAP> {
+    #[cfg(test)]
     pub(crate) fn for_each_child(&self, mut f: impl FnMut(u8, TaggedPointer)) {
         let len = self.meta.len();
         for idx in 0..len {

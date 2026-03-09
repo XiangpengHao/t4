@@ -67,7 +67,7 @@ impl NodeMeta {
         proof {
             use_type_invariant(&*self);
         }
-        self.len = self.len + 1;
+        self.len += 1;
     }
 
     pub(crate) fn decrement_len(&mut self)
@@ -80,7 +80,7 @@ impl NodeMeta {
         proof {
             use_type_invariant(&*self);
         }
-        self.len = self.len - 1;
+        self.len -= 1;
     }
 
     pub(crate) const fn prefix_len(self) -> (result: usize)

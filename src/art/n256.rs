@@ -2,7 +2,7 @@ use vstd::{prelude::*, slice::slice_subrange};
 
 use crate::art::{
     ArtNode, InsertStep,
-    art::common_prefix_len,
+    index::common_prefix_len,
     meta::{NodeMeta, NodeType},
     ptr::TaggedPointer,
 };

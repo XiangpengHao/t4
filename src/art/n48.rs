@@ -2,7 +2,7 @@ use vstd::{prelude::*, slice::slice_subrange};
 
 use crate::art::{
     ArtNode, InsertStep,
-    art::common_prefix_len,
+    index::common_prefix_len,
     meta::{NodeMeta, NodeType},
     n256::Node256,
     ptr::TaggedPointer,
@@ -439,25 +439,51 @@ impl Node48 {
             };
         }
     }
+
+    pub(crate) fn grow_node(&self, prefix: &[u8]) -> (result: Node256)
+        requires
+            self.wf(),
+            prefix.len() <= NodeMeta::prefix_capacity(),
+        ensures
+            result.wf(),
+    {
+        let mut grown = Node256::new(prefix);
+        let mut key = 0u8;
+        while key < u8::MAX
+            invariant
+                self.wf(),
+                prefix.len() <= NodeMeta::prefix_capacity(),
+                grown.wf(),
+                grown.live_len() <= key as int,
+            decreases (u8::MAX as int) - key as int,
+        {
+            if let Some(child) = self.get(key) {
+                proof {
+                    assert(grown.live_len() < 256) by {
+                        assert(grown.live_len() <= key as int);
+                    }
+                }
+                let _ = grown.insert(key, child);
+            }
+            key += 1;
+        }
+        if let Some(child) = self.get(u8::MAX) {
+            proof {
+                assert(grown.live_len() < 256) by {
+                    assert(grown.live_len() <= 255);
+                }
+            }
+            let _ = grown.insert(u8::MAX, child);
+        }
+        grown
+    }
 }
 
 } // verus!
 
 impl Node48 {
-    pub(crate) fn for_each_child(&self, mut f: impl FnMut(u8, TaggedPointer)) {
-        for key in 0..=u8::MAX {
-            if let Some(child) = self.get(key) {
-                f(key, child);
-            }
-        }
-    }
-
     pub(crate) fn grow(&self, prefix: &[u8]) -> TaggedPointer {
-        let mut grown = Node256::new(prefix);
-        self.for_each_child(|key, child| {
-            let _ = grown.insert(key, child);
-        });
-        TaggedPointer::from_node256(Box::new(grown))
+        TaggedPointer::from_node256(Box::new(self.grow_node(prefix)))
     }
 }
 

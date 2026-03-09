@@ -1,8 +1,8 @@
-use crate::art::art::{DeleteResult, common_prefix_len, delete_at};
+use crate::art::index::{DeleteResult, common_prefix_len, delete_at};
 use crate::art::ptr::TaggedPointer;
 use vstd::prelude::*;
 
-pub use art::ArtIndex;
+pub use index::ArtIndex;
 
 verus! {
 
@@ -109,4 +109,4 @@ mod n4;
 mod n48;
 mod ptr;
 
-mod art;
+mod index;

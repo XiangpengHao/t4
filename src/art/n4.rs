@@ -133,21 +133,57 @@ impl Node4 {
     {
         self.0.insert_step_impl(terminated_key, value_ptr, depth)
     }
+
+    pub(crate) fn grow_node(&self, prefix: &[u8]) -> (result: Node16)
+        requires
+            self.wf(),
+            prefix.len() <= crate::art::meta::NodeMeta::prefix_capacity(),
+        ensures
+            result.wf(),
+    {
+        let mut grown = Node16::new(prefix);
+        let len = self.0.child_count();
+        proof {
+            self.0.lemma_live_len_bound();
+            assert(len <= 4);
+        }
+        let mut idx = 0usize;
+        while idx < len
+            invariant
+                self.wf(),
+                prefix.len() <= crate::art::meta::NodeMeta::prefix_capacity(),
+                len == self.live_len(),
+                len <= 4,
+                idx <= len,
+                grown.wf(),
+                grown.live_len() <= idx,
+            decreases len - idx,
+        {
+            let (key, child) = self.0.entry_at(idx);
+            proof {
+                assert(grown.live_len() < 16) by {
+                    assert(grown.live_len() <= idx);
+                    assert(idx < len);
+                    assert(len <= 4);
+                }
+            }
+            let _ = grown.insert(key, child);
+            idx += 1;
+        }
+        grown
+    }
 }
 
 } // verus!
 
 impl Node4 {
+    #[cfg(test)]
     pub(crate) fn for_each_child(&self, f: impl FnMut(u8, TaggedPointer)) {
         self.0.for_each_child(f);
     }
 
     pub(crate) fn grow(&self, prefix: &[u8]) -> TaggedPointer {
-        let mut grown = Node16::new(prefix);
-        self.for_each_child(|key, child| {
-            let _ = grown.insert(key, child);
-        });
-        TaggedPointer::from_node16(Box::new(grown))
+        TaggedPointer::from_node16(Box::new(self.grow_node(prefix)))
     }
 }
 

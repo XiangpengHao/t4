@@ -269,6 +269,12 @@ impl ArtIndex {
     }
 }
 
+impl Default for ArtIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Parent {
     Root(*mut Option<TaggedPointer>),

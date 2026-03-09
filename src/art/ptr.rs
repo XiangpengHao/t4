@@ -1,6 +1,6 @@
 use vstd::prelude::*;
 
-use crate::art::{art::KVPair, n4::Node4, n16::Node16, n48::Node48, n256::Node256};
+use crate::art::{index::KVPair, n4::Node4, n16::Node16, n48::Node48, n256::Node256};
 
 verus! {
 
