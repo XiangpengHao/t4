@@ -181,45 +181,16 @@ impl<const CAP: usize> DenseNode<CAP> {
         self.children[idx] = value_raw;
         self.meta.increment_len();
         proof {
-            assert(self.wf()) by {
-                assert forall|i: int, j: int| 0 <= i < j < self.live_len() implies self.keys[i]
-                    < self.keys[j] by {
-                    if j < idx as int {
-                        assert(self.keys[i] == old_keys[i]);
-                        assert(self.keys[j] == old_keys[j]);
-                    } else if j == idx as int {
-                        assert(self.keys[j] == key);
-                        if i < idx as int {
-                            assert(self.keys[i] == old_keys[i]);
-                            assert(old_keys[i] < key);
-                        }
-                    } else if i < idx as int {
-                        assert(self.keys[i] == old_keys[i]);
-                        assert(self.keys[j] == old_keys[j - 1]);
-                        assert(old_keys[i] < key);
-                        assert(key < old_keys[j - 1]);
-                    } else if i == idx as int {
-                        assert(self.keys[i] == key);
-                        assert(self.keys[j] == old_keys[j - 1]);
-                        assert(key < old_keys[j - 1]);
-                    } else {
-                        assert(self.keys[i] == old_keys[i - 1]);
-                        assert(self.keys[j] == old_keys[j - 1]);
-                    }
-                }
-                assert forall|i: int|
-                    0 <= i < self.live_len() implies #[trigger] TaggedPointer::wf_raw(
-                    self.children[i],
-                ) by {
-                    if i == idx as int {
-                        assert(self.children[i] == value_raw);
-                    } else if i < idx as int {
-                        assert(self.children[i] == old_children[i]);
-                    } else {
-                        assert(self.children[i] == old_children[i - 1]);
-                    }
-                }
-            }
+            assert forall|i: int| 0 <= i < self.live_len() implies self.keys[i] == (
+                if i < idx as int { old_keys[i] }
+                else if i == idx as int { key }
+                else { old_keys[i - 1] }
+            ) by {};
+            assert forall|i: int| 0 <= i < self.live_len() implies self.children[i] == (
+                if i < idx as int { old_children[i] }
+                else if i == idx as int { value_raw }
+                else { old_children[i - 1] }
+            ) by {};
         }
     }
 
@@ -291,31 +262,12 @@ impl<const CAP: usize> DenseNode<CAP> {
         self.meta.decrement_len();
 
         proof {
-            assert(self.wf()) by {
-                assert forall|i: int, j: int| 0 <= i < j < self.live_len() implies self.keys[i]
-                    < self.keys[j] by {
-                    if j < idx as int {
-                        assert(self.keys[i] == old_keys[i]);
-                        assert(self.keys[j] == old_keys[j]);
-                    } else if i < idx as int {
-                        assert(self.keys[i] == old_keys[i]);
-                        assert(self.keys[j] == old_keys[j + 1]);
-                    } else {
-                        assert(self.keys[i] == old_keys[i + 1]);
-                        assert(self.keys[j] == old_keys[j + 1]);
-                    }
-                }
-                assert forall|i: int|
-                    0 <= i < self.live_len() implies #[trigger] TaggedPointer::wf_raw(
-                    self.children[i],
-                ) by {
-                    if i < idx as int {
-                        assert(self.children[i] == old_children[i]);
-                    } else {
-                        assert(self.children[i] == old_children[i + 1]);
-                    }
-                }
-            }
+            assert forall|i: int| 0 <= i < self.live_len() implies self.keys[i] == (
+                if i < idx as int { old_keys[i] } else { old_keys[i + 1] }
+            ) by {};
+            assert forall|i: int| 0 <= i < self.live_len() implies self.children[i] == (
+                if i < idx as int { old_children[i] } else { old_children[i + 1] }
+            ) by {};
         }
 
         TaggedPointer::from_raw(removed_raw)
@@ -350,17 +302,14 @@ impl<const CAP: usize> DenseNode<CAP> {
                         raw,
                     ) by {
                         let i = choose|i: int|
-                            0 <= i < old(self).live_len() && old(self).keys[i] == other_key && old(
-                                self,
-                            ).children[i] == raw;
+                            0 <= i < old(self).live_len() && old(self).keys[i] == other_key
+                                && old(self).children[i] == raw;
                         if i < idx as int {
                             assert(self.keys[i] == old(self).keys[i]);
                             assert(self.children[i] == old(self).children[i]);
-                            assert(self.maps_to(other_key, raw));
                         } else {
                             assert(self.keys[i - 1] == old(self).keys[i]);
                             assert(self.children[i - 1] == old(self).children[i]);
-                            assert(self.maps_to(other_key, raw));
                         }
                     }
                 }
