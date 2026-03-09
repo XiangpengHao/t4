@@ -1,11 +1,7 @@
 use vstd::prelude::*;
 
 use crate::art::{
-    ArtNode, InsertStep,
-    dense::DenseNode,
-    meta::NodeType,
-    n16::Node16,
-    ptr::TaggedPointer,
+    ArtNode, InsertStep, dense::DenseNode, meta::NodeType, n16::Node16, ptr::TaggedPointer,
 };
 
 verus! {

@@ -8,7 +8,7 @@ use crate::le_bytes::{
     u16_from_le_bytes, u32_from_le_bytes, u64_from_le_bytes, write_u16_le, write_u32_le,
     write_u64_le,
 };
-use crate::{copy_into_page, PAGE_SIZE};
+use crate::{PAGE_SIZE, copy_into_page};
 
 const _: [(); WAL_PAGE_HEADER_SIZE] = [(); std::mem::size_of::<WalPageHeader>()];
 

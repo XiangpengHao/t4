@@ -5,7 +5,7 @@ use vstd::prelude::*;
 
 use crate::input_kv::{T4Key, ValueRef};
 use crate::wal::{WalEntryRef, WalEntryState, WalPage};
-use crate::{align_up_u64, allocate_next_lsn, PAGE_SIZE};
+use crate::{PAGE_SIZE, align_up_u64, allocate_next_lsn};
 
 verus! {
 
