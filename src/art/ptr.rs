@@ -93,6 +93,19 @@ impl TaggedPointer {
         Self { ptr: raw }
     }
 
+    pub proof fn lemma_wf_raw_nonzero(raw: usize)
+        requires
+            Self::wf_raw(raw),
+        ensures
+            raw != 0,
+    {
+        assert(raw & !TAG_MASK != 0);
+        assert(raw != 0usize) by (bit_vector)
+            requires
+                raw & !TAG_MASK != 0,
+        ;
+    }
+
     fn from_tagged_ptr(ptr: usize, tag: usize) -> (result: Self)
         requires
             ptr != 0,

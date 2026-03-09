@@ -1,86 +1,416 @@
+use vstd::{prelude::*, slice::slice_subrange};
+
 use crate::art::{
     ArtNode, InsertStep,
     art::common_prefix_len,
     meta::{NodeMeta, NodeType},
     ptr::TaggedPointer,
 };
-use std::mem::MaybeUninit;
+
+verus! {
+
+spec fn live_child_count(children: [usize; 256], upto: int) -> int
+    decreases upto
+{
+    if upto <= 0 {
+        0int
+    } else {
+        live_child_count(children, upto - 1)
+            + if children[upto - 1] == 0 { 0int } else { 1int }
+    }
+}
+
+proof fn lemma_live_child_count_replace(
+    old_children: [usize; 256],
+    new_children: [usize; 256],
+    key: int,
+    upto: int,
+)
+    requires
+        0 <= key < 256,
+        0 <= upto <= 256,
+        old_children[key] != 0,
+        new_children[key] != 0,
+        forall|idx: int| 0 <= idx < 256 ==> new_children[idx] == (
+            if idx == key { new_children[key] } else { old_children[idx] }
+        ),
+    ensures
+        live_child_count(new_children, upto) == live_child_count(old_children, upto),
+    decreases upto,
+{
+    if upto > 0 {
+        lemma_live_child_count_replace(old_children, new_children, key, upto - 1);
+        if upto - 1 == key {
+        } else {
+            assert(new_children[upto - 1] == old_children[upto - 1]);
+        }
+    }
+}
+
+proof fn lemma_live_child_count_insert(
+    old_children: [usize; 256],
+    new_children: [usize; 256],
+    key: int,
+    upto: int,
+)
+    requires
+        0 <= key < 256,
+        0 <= upto <= 256,
+        old_children[key] == 0,
+        new_children[key] != 0,
+        forall|idx: int| 0 <= idx < 256 ==> new_children[idx] == (
+            if idx == key { new_children[key] } else { old_children[idx] }
+        ),
+    ensures
+        live_child_count(new_children, upto) == live_child_count(old_children, upto)
+            + if key < upto { 1int } else { 0int },
+    decreases upto,
+{
+    if upto > 0 {
+        lemma_live_child_count_insert(old_children, new_children, key, upto - 1);
+        if upto - 1 == key {
+        } else {
+            assert(new_children[upto - 1] == old_children[upto - 1]);
+        }
+    }
+}
+
+proof fn lemma_live_child_count_remove(
+    old_children: [usize; 256],
+    new_children: [usize; 256],
+    key: int,
+    upto: int,
+)
+    requires
+        0 <= key < 256,
+        0 <= upto <= 256,
+        old_children[key] != 0,
+        new_children[key] == 0,
+        forall|idx: int| 0 <= idx < 256 ==> new_children[idx] == (
+            if idx == key { 0usize } else { old_children[idx] }
+        ),
+    ensures
+        live_child_count(old_children, upto) == live_child_count(new_children, upto)
+            + if key < upto { 1int } else { 0int },
+    decreases upto,
+{
+    if upto > 0 {
+        lemma_live_child_count_remove(old_children, new_children, key, upto - 1);
+        if upto - 1 == key {
+        } else {
+            assert(new_children[upto - 1] == old_children[upto - 1]);
+        }
+    }
+}
+
+proof fn lemma_live_child_count_all_zero(children: [usize; 256], upto: int)
+    requires
+        0 <= upto <= 256,
+        forall|idx: int| 0 <= idx < upto ==> children[idx] == 0,
+    ensures
+        live_child_count(children, upto) == 0int,
+    decreases upto,
+{
+    if upto > 0 {
+        lemma_live_child_count_all_zero(children, upto - 1);
+    }
+}
+
+proof fn lemma_live_child_count_upper(children: [usize; 256], upto: int)
+    requires
+        0 <= upto <= 256,
+    ensures
+        live_child_count(children, upto) <= upto,
+    decreases upto,
+{
+    if upto > 0 {
+        lemma_live_child_count_upper(children, upto - 1);
+    }
+}
+
+proof fn lemma_live_child_count_nonnegative(children: [usize; 256], upto: int)
+    requires
+        0 <= upto <= 256,
+    ensures
+        0 <= live_child_count(children, upto),
+    decreases upto,
+{
+    if upto > 0 {
+        lemma_live_child_count_nonnegative(children, upto - 1);
+    }
+}
+
+proof fn lemma_live_child_count_positive(children: [usize; 256], key: int, upto: int)
+    requires
+        0 <= key < upto <= 256,
+        children[key] != 0,
+    ensures
+        live_child_count(children, upto) > 0,
+    decreases upto,
+{
+    if upto - 1 == key {
+        lemma_live_child_count_nonnegative(children, upto - 1);
+    } else {
+        lemma_live_child_count_positive(children, key, upto - 1);
+    }
+}
+
+proof fn lemma_live_child_count_missing_bound(children: [usize; 256], key: int, upto: int)
+    requires
+        0 <= key < upto <= 256,
+        children[key] == 0,
+    ensures
+        live_child_count(children, upto) < upto,
+    decreases upto,
+{
+    if upto - 1 == key {
+        lemma_live_child_count_upper(children, upto - 1);
+    } else {
+        lemma_live_child_count_missing_bound(children, key, upto - 1);
+    }
+}
 
 #[repr(C, align(16))]
 pub(crate) struct Node256 {
     meta: NodeMeta,
-    key_mask: [u8; 32],
-    children: [MaybeUninit<TaggedPointer>; 256],
+    children: [usize; 256],
 }
 
 impl Node256 {
-    pub(crate) fn new(prefix: &[u8]) -> Self {
+    pub closed spec fn live_len(self) -> usize {
+        self.meta.spec_len() as usize
+    }
+
+    pub closed spec fn raw_prefix_len(self) -> usize {
+        self.meta.raw_prefix_len() as usize
+    }
+
+    pub closed spec fn has_key(self, key: u8) -> bool {
+        self.children[key as int] != 0
+    }
+
+    pub closed spec fn maps_to(self, key: u8, raw: usize) -> bool {
+        self.has_key(key) && self.children[key as int] == raw
+    }
+
+    pub closed spec fn wf(&self) -> bool {
+        &&& self.live_len() <= 256
+        &&& self.live_len() as int == live_child_count(self.children, 256)
+        &&& forall|key: int|
+            0 <= key < 256 && self.children[key] != 0 ==> #[trigger] TaggedPointer::wf_raw(
+                self.children[key],
+            )
+    }
+
+    pub(crate) fn new(prefix: &[u8]) -> (result: Self)
+        requires
+            prefix.len() <= NodeMeta::prefix_capacity(),
+        ensures
+            result.wf(),
+            result.live_len() == 0,
+    {
         let meta = NodeMeta::new(NodeType::Node256, prefix);
-        Self {
-            meta,
-            key_mask: [0; 32],
-            children: [const { MaybeUninit::uninit() }; 256],
+        let result = Self { meta, children: [0; 256] };
+        proof {
+            lemma_live_child_count_all_zero(result.children, 256);
+        }
+        result
+    }
+
+    pub(crate) fn get(&self, key: u8) -> (result: Option<TaggedPointer>)
+        requires
+            self.wf(),
+        ensures
+            result.is_some() <==> self.has_key(key),
+            result.is_some() ==> self.maps_to(key, result.unwrap().raw()),
+    {
+        let raw = self.children[key as usize];
+        if raw == 0 {
+            None
+        } else {
+            Some(TaggedPointer::from_raw(raw))
         }
     }
 
-    pub(crate) fn insert(&mut self, key: u8, value: TaggedPointer) -> Option<TaggedPointer> {
-        let key_idx = key as usize;
-        let mask_idx = key_idx / 8;
-        let bit = 1u8 << (key_idx % 8);
+    fn insert_existing(&mut self, key: u8, value: TaggedPointer) -> (result: TaggedPointer)
+        requires
+            old(self).wf(),
+            old(self).has_key(key),
+        ensures
+            self.wf(),
+            self.live_len() == old(self).live_len(),
+            self.maps_to(key, value.raw()),
+            result.raw() == old(self).children[key as int],
+    {
+        let ghost old_children = self.children;
+        let prev = TaggedPointer::from_raw(self.children[key as usize]);
+        let value_raw = value.to_raw();
+        self.children[key as usize] = value_raw;
 
-        if self.key_mask[mask_idx] & bit != 0 {
-            let old = self.children[key_idx];
-            self.children[key_idx] = MaybeUninit::new(value);
-            return Some(unsafe { old.assume_init() });
+        proof {
+            TaggedPointer::lemma_wf_raw_nonzero(value_raw);
+            assert forall|idx: int| 0 <= idx < 256 implies self.children[idx] == (
+                if idx == key as int { value_raw } else { old_children[idx] }
+            ) by {};
+            lemma_live_child_count_replace(old_children, self.children, key as int, 256);
         }
 
-        self.key_mask[mask_idx] |= bit;
-        self.children[key_idx] = MaybeUninit::new(value);
+        prev
+    }
+
+    fn insert_fresh(&mut self, key: u8, value: TaggedPointer)
+        requires
+            old(self).wf(),
+            !old(self).has_key(key),
+            old(self).live_len() < 256,
+        ensures
+            self.wf(),
+            self.live_len() == old(self).live_len() + 1,
+            self.maps_to(key, value.raw()),
+            self.has_key(key),
+    {
+        let ghost old_children = self.children;
+        let value_raw = value.to_raw();
+        self.children[key as usize] = value_raw;
         self.meta.increment_len();
-        None
+
+        proof {
+            TaggedPointer::lemma_wf_raw_nonzero(value_raw);
+            assert forall|idx: int| 0 <= idx < 256 implies self.children[idx] == (
+                if idx == key as int { value_raw } else { old_children[idx] }
+            ) by {};
+            lemma_live_child_count_insert(old_children, self.children, key as int, 256);
+        }
     }
 
-    pub(crate) fn get(&self, key: u8) -> Option<TaggedPointer> {
-        let key_idx = key as usize;
-        let mask_idx = key_idx / 8;
-        let bit = 1u8 << (key_idx % 8);
-
-        if self.key_mask[mask_idx] & bit == 0 {
-            return None;
+    pub(crate) fn insert(&mut self, key: u8, value: TaggedPointer) -> (result: Option<
+        TaggedPointer,
+    >)
+        requires
+            old(self).wf(),
+            old(self).has_key(key) || old(self).live_len() < 256,
+        ensures
+            self.wf(),
+            self.has_key(key),
+            self.maps_to(key, value.raw()),
+            old(self).has_key(key) ==> result.is_some(),
+            !old(self).has_key(key) ==> result.is_none(),
+            result.is_some() ==> old(self).maps_to(key, result.unwrap().raw()),
+            old(self).has_key(key) ==> self.live_len() == old(self).live_len(),
+            !old(self).has_key(key) ==> self.live_len() == old(self).live_len() + 1,
+    {
+        if self.children[key as usize] != 0 {
+            Some(self.insert_existing(key, value))
+        } else {
+            self.insert_fresh(key, value);
+            None
         }
-
-        Some(unsafe { self.children[key_idx].assume_init() })
     }
 
-    pub(crate) fn remove(&mut self, key: u8) -> Option<TaggedPointer> {
-        let key_idx = key as usize;
-        let mask_idx = key_idx / 8;
-        let bit = 1u8 << (key_idx % 8);
-        if self.key_mask[mask_idx] & bit == 0 {
-            return None;
+    fn remove_existing(&mut self, key: u8) -> (result: TaggedPointer)
+        requires
+            old(self).wf(),
+            old(self).has_key(key),
+        ensures
+            self.wf(),
+            !self.has_key(key),
+            self.live_len() + 1 == old(self).live_len(),
+            result.raw() == old(self).children[key as int],
+            forall|other_key: u8, raw: usize|
+                self.maps_to(other_key, raw) ==> old(self).maps_to(other_key, raw) && other_key
+                    != key,
+            forall|other_key: u8, raw: usize|
+                other_key != key && old(self).maps_to(other_key, raw) ==> self.maps_to(
+                    other_key,
+                    raw,
+                ),
+    {
+        let ghost old_children = self.children;
+        let removed_raw = self.children[key as usize];
+        proof {
+            lemma_live_child_count_positive(old_children, key as int, 256);
+            assert(old(self).live_len() > 0);
         }
-
-        self.key_mask[mask_idx] &= !bit;
-        let removed = self.children[key_idx];
+        self.children[key as usize] = 0;
         self.meta.decrement_len();
-        Some(unsafe { removed.assume_init() })
+
+        proof {
+            assert forall|idx: int| 0 <= idx < 256 implies self.children[idx] == (
+                if idx == key as int { 0usize } else { old_children[idx] }
+            ) by {};
+            lemma_live_child_count_remove(old_children, self.children, key as int, 256);
+        }
+
+        TaggedPointer::from_raw(removed_raw)
     }
 
-    pub(crate) fn meta_mut(&mut self) -> &mut NodeMeta {
-        &mut self.meta
+    pub(crate) fn remove(&mut self, key: u8) -> (result: Option<TaggedPointer>)
+        requires
+            old(self).wf(),
+        ensures
+            self.wf(),
+            !self.has_key(key),
+            old(self).has_key(key) <==> result.is_some(),
+            result.is_some() ==> old(self).maps_to(key, result.unwrap().raw()),
+            result.is_some() ==> self.live_len() + 1 == old(self).live_len(),
+            result.is_none() ==> self.live_len() == old(self).live_len(),
+            forall|other_key: u8, raw: usize|
+                self.maps_to(other_key, raw) ==> old(self).maps_to(other_key, raw) && other_key
+                    != key,
+            forall|other_key: u8, raw: usize|
+                other_key != key && old(self).maps_to(other_key, raw) ==> self.maps_to(
+                    other_key,
+                    raw,
+                ),
+    {
+        if self.children[key as usize] == 0 {
+            None
+        } else {
+            Some(self.remove_existing(key))
+        }
     }
-}
 
-impl ArtNode for Node256 {
-    fn insert_step(
+
+    pub(crate) fn insert_step_impl(
         &mut self,
         terminated_key: &[u8],
         value_ptr: TaggedPointer,
         depth: usize,
-    ) -> InsertStep {
+    ) -> (result: InsertStep)
+        requires
+            old(self).wf(),
+            depth + old(self).raw_prefix_len() < terminated_key.len(),
+        ensures
+            self.wf(),
+            match result {
+                InsertStep::Split { .. } => self.live_len() == old(self).live_len(),
+                InsertStep::Descend { edge, child, next_depth } => {
+                    &&& self.live_len() == old(self).live_len()
+                    &&& edge == terminated_key[depth + old(self).raw_prefix_len()]
+                    &&& next_depth == depth + old(self).raw_prefix_len() + 1
+                    &&& old(self).maps_to(edge, child.raw())
+                },
+                InsertStep::Done => {
+                    &&& self.has_key(terminated_key[depth + old(self).raw_prefix_len()])
+                    &&& self.maps_to(
+                        terminated_key[depth + old(self).raw_prefix_len()],
+                        value_ptr.raw(),
+                    )
+                    &&& if old(self).has_key(terminated_key[depth + old(self).raw_prefix_len()]) {
+                        self.live_len() == old(self).live_len()
+                    } else {
+                        self.live_len() == old(self).live_len() + 1
+                    }
+                },
+                _ => false,
+            },
+    {
         let prefix_len = self.meta.prefix_len();
-        let matched =
-            common_prefix_len(&self.meta.prefix()[..prefix_len], &terminated_key[depth..]);
+        let prefix = self.meta.prefix_slice();
+        let matched = common_prefix_len(
+            slice_subrange(prefix, 0, prefix_len),
+            slice_subrange(terminated_key, depth, terminated_key.len()),
+        );
         if matched != prefix_len {
             return InsertStep::Split { matched };
         }
@@ -95,8 +425,49 @@ impl ArtNode for Node256 {
             };
         }
 
+        proof {
+            lemma_live_child_count_missing_bound(old(self).children, edge as int, 256);
+            assert(old(self).live_len() < 256);
+        }
         let _ = self.insert(edge, value_ptr);
         InsertStep::Done
+    }
+
+    pub(crate) fn child_count(&self) -> usize {
+        self.meta.len()
+    }
+
+    pub(crate) fn prefix_len(&self) -> usize {
+        self.meta.prefix_len()
+    }
+
+    pub(crate) fn prefix(&self) -> [u8; 8] {
+        self.meta.prefix()
+    }
+
+    pub(crate) fn set_prefix(&mut self, prefix: &[u8])
+        requires
+            old(self).wf(),
+            prefix.len() <= NodeMeta::prefix_capacity(),
+        ensures
+            self.wf(),
+            self.live_len() == old(self).live_len(),
+            self.raw_prefix_len() == prefix.len(),
+    {
+        self.meta.set_prefix(prefix);
+    }
+}
+
+} // verus!
+
+impl ArtNode for Node256 {
+    fn insert_step(
+        &mut self,
+        terminated_key: &[u8],
+        value_ptr: TaggedPointer,
+        depth: usize,
+    ) -> InsertStep {
+        self.insert_step_impl(terminated_key, value_ptr, depth)
     }
 
     fn replace_child(&mut self, edge: u8, child: TaggedPointer) {
@@ -108,19 +479,19 @@ impl ArtNode for Node256 {
     }
 
     fn child_count(&self) -> usize {
-        self.meta.len()
+        self.child_count()
     }
 
     fn prefix_len(&self) -> usize {
-        self.meta.prefix_len()
+        self.prefix_len()
     }
 
     fn prefix(&self) -> [u8; 8] {
-        self.meta.prefix()
+        self.prefix()
     }
 
     fn set_prefix(&mut self, prefix: &[u8]) {
-        self.meta_mut().set_prefix(prefix);
+        self.set_prefix(prefix);
     }
 
     fn get_child(&self, edge: u8) -> Option<TaggedPointer> {
@@ -141,7 +512,7 @@ mod tests {
         node.insert(127, TaggedPointer::from_test_raw(20));
         node.insert(255, TaggedPointer::from_test_raw(30));
 
-        assert_eq!(node.meta.len(), 3);
+        assert_eq!(node.child_count(), 3);
         assert_eq!(node.get(0), Some(TaggedPointer::from_test_raw(10)));
         assert_eq!(node.get(127), Some(TaggedPointer::from_test_raw(20)));
         assert_eq!(node.get(255), Some(TaggedPointer::from_test_raw(30)));
@@ -157,7 +528,7 @@ mod tests {
             node.insert(7, TaggedPointer::from_test_raw(2)),
             Some(TaggedPointer::from_test_raw(1))
         );
-        assert_eq!(node.meta.len(), 1);
+        assert_eq!(node.child_count(), 1);
         assert_eq!(node.get(7), Some(TaggedPointer::from_test_raw(2)));
     }
 

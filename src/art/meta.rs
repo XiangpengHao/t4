@@ -14,7 +14,7 @@ pub(crate) enum NodeType {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct NodeMeta {
-    len: u8,
+    len: u16,
     prefix_len: u8,
     node_type: NodeType,
     prefix: [u8; 8],
@@ -25,7 +25,7 @@ impl NodeMeta {
         8
     }
 
-    pub closed spec fn spec_len(self) -> u8 {
+    pub closed spec fn spec_len(self) -> u16 {
         self.len
     }
 
@@ -59,7 +59,7 @@ impl NodeMeta {
 
     pub(crate) fn increment_len(&mut self)
         requires
-            old(self).spec_len() < u8::MAX,
+            old(self).spec_len() < u16::MAX,
         ensures
             self.spec_len() == old(self).spec_len() + 1,
             self.raw_prefix_len() == old(self).raw_prefix_len(),

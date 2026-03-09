@@ -39,7 +39,7 @@ impl<const CAP: usize> DenseNode<CAP> {
     }
 
     pub closed spec fn wf(&self) -> bool {
-        &&& CAP < u8::MAX as usize
+        &&& CAP <= u16::MAX as usize
         &&& self.live_len() <= CAP
         &&& forall|i: int, j: int| 0 <= i < j < self.live_len() ==> self.keys[i] < self.keys[j]
         &&& forall|i: int|
@@ -48,7 +48,7 @@ impl<const CAP: usize> DenseNode<CAP> {
 
     pub(crate) fn new(node_type: NodeType, prefix: &[u8]) -> (result: Self)
         requires
-            CAP < u8::MAX as usize,
+            CAP <= u16::MAX as usize,
             prefix.len() <= NodeMeta::prefix_capacity(),
         ensures
             result.wf(),

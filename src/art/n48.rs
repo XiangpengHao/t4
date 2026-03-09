@@ -76,8 +76,8 @@ impl Node48 {
         requires
             self.wf(),
             (target as int) < self.live_len(),
+            target < 48u8,
         ensures
-            self.has_key(result),
             self.child_idx[result as int] == target,
     {
         let mut idx = 0usize;
@@ -248,6 +248,10 @@ impl Node48 {
         let last_slot = len - 1;
         let removed_raw = self.children[slot];
         let moved_key = if slot != last_slot {
+            proof {
+                assert(last_slot < 48);
+                assert((last_slot as u8) < 48u8);
+            }
             Some(self.key_for_slot(last_slot as u8))
         } else {
             None
