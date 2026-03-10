@@ -460,6 +460,17 @@ impl Node256 {
 
 } // verus!
 
+impl Node256 {
+    pub(crate) fn for_each_child(&self, mut f: impl FnMut(TaggedPointer)) {
+        for key in 0..256usize {
+            let raw = self.children[key];
+            if raw != 0 {
+                f(TaggedPointer::from_raw(raw));
+            }
+        }
+    }
+}
+
 impl ArtNode for Node256 {
     fn insert_step(
         &mut self,

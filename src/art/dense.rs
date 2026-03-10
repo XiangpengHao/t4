@@ -437,7 +437,6 @@ impl<const CAP: usize> DenseNode<CAP> {
 } // verus!
 
 impl<const CAP: usize> DenseNode<CAP> {
-    #[cfg(test)]
     pub(crate) fn for_each_child(&self, mut f: impl FnMut(u8, TaggedPointer)) {
         let len = self.meta.len();
         for idx in 0..len {

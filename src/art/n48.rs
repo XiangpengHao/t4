@@ -482,6 +482,15 @@ impl Node48 {
 } // verus!
 
 impl Node48 {
+    pub(crate) fn for_each_child(&self, mut f: impl FnMut(TaggedPointer)) {
+        for key in 0..256usize {
+            let idx = self.child_idx[key];
+            if idx != 255 {
+                f(TaggedPointer::from_raw(self.children[idx as usize]));
+            }
+        }
+    }
+
     pub(crate) fn grow(&self, prefix: &[u8]) -> TaggedPointer {
         TaggedPointer::from_node256(Box::new(self.grow_node(prefix)))
     }

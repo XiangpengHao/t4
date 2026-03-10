@@ -1,6 +1,6 @@
 use vstd::prelude::*;
 
-use crate::art::{index::KVPair, n4::Node4, n16::Node16, n48::Node48, n256::Node256};
+use crate::art::{index::KVData, n4::Node4, n16::Node16, n48::Node48, n256::Node256};
 
 verus! {
 
@@ -152,7 +152,7 @@ impl TaggedPointer {
             1 => NextNode::Node16(ptr as *mut Node16),
             2 => NextNode::Node48(ptr as *mut Node48),
             3 => NextNode::Node256(ptr as *mut Node256),
-            4 => NextNode::Value(ptr as *mut KVPair),
+            4 => NextNode::Value(ptr as *mut KVData),
             _ => unreachable!("TaggedPointer type invariant guarantees a valid tag"),
         }
     }
@@ -173,8 +173,8 @@ impl TaggedPointer {
         Self::from_tagged_ptr(Box::into_raw(node) as usize, 3)
     }
 
-    pub(crate) fn from_value(value: Box<KVPair>) -> Self {
-        Self::from_tagged_ptr(Box::into_raw(value) as usize, 4)
+    pub(crate) fn from_value(kv: crate::art::index::KVPair) -> Self {
+        Self::from_tagged_ptr(kv.into_raw() as usize, 4)
     }
 }
 
@@ -183,5 +183,5 @@ pub(crate) enum NextNode {
     Node16(*mut Node16),
     Node48(*mut Node48),
     Node256(*mut Node256),
-    Value(*mut KVPair),
+    Value(*mut KVData),
 }

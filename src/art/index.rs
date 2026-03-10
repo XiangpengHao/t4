@@ -28,9 +28,9 @@ impl ArtIndex {
         Self { root: None }
     }
 
-    pub fn insert(&mut self, key: &[u8], value: &[u8]) {
+    pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Option<KVPair> {
         let terminated_key = terminated_key_owned(key);
-        let value_ptr = TaggedPointer::from_value(Box::new(KVPair::new(key, value)));
+        let value_ptr = TaggedPointer::from_value(KVPair::new(key, value));
         let mut parent = Parent::Root(std::ptr::addr_of_mut!(self.root));
         let mut current = self.root;
         let mut depth = 0;
@@ -38,16 +38,16 @@ impl ArtIndex {
         loop {
             let Some(current_ptr) = current else {
                 update_parent(parent, value_ptr);
-                return;
+                return None;
             };
 
             match current_ptr.next_node() {
                 NextNode::Value(existing_ptr) => {
-                    let existing = unsafe { &*existing_ptr };
-                    let terminated_existing = terminated_key_owned(existing.key());
+                    let terminated_existing =
+                        terminated_key_owned(unsafe { &*existing_ptr }.key());
                     if terminated_existing == terminated_key {
                         update_parent(parent, value_ptr);
-                        return;
+                        return Some(unsafe { KVPair::from_raw(existing_ptr) });
                     }
 
                     let shared =
@@ -60,7 +60,7 @@ impl ArtIndex {
                         value_ptr,
                     );
                     update_parent(parent, split);
-                    return;
+                    return None;
                 }
                 NextNode::Node4(node_ptr) => {
                     let node = unsafe { &mut *node_ptr };
@@ -76,7 +76,7 @@ impl ArtIndex {
                                 matched,
                             );
                             update_parent(parent, replacement);
-                            return;
+                            return None;
                         }
                         InsertStep::Descend {
                             edge,
@@ -96,10 +96,11 @@ impl ArtIndex {
                                     .grow(&terminated_key[prefix_depth..prefix_depth + prefix_len])
                             };
                             update_parent(parent, replacement);
+                            drop(unsafe { Box::from_raw(node_ptr) });
                             current = Some(replacement);
                             depth = prefix_depth;
                         }
-                        InsertStep::Done => return,
+                        InsertStep::Done => return None,
                     }
                 }
                 NextNode::Node16(node_ptr) => {
@@ -116,7 +117,7 @@ impl ArtIndex {
                                 matched,
                             );
                             update_parent(parent, replacement);
-                            return;
+                            return None;
                         }
                         InsertStep::Descend {
                             edge,
@@ -136,10 +137,11 @@ impl ArtIndex {
                                     .grow(&terminated_key[prefix_depth..prefix_depth + prefix_len])
                             };
                             update_parent(parent, replacement);
+                            drop(unsafe { Box::from_raw(node_ptr) });
                             current = Some(replacement);
                             depth = prefix_depth;
                         }
-                        InsertStep::Done => return,
+                        InsertStep::Done => return None,
                     }
                 }
                 NextNode::Node48(node_ptr) => {
@@ -156,7 +158,7 @@ impl ArtIndex {
                                 matched,
                             );
                             update_parent(parent, replacement);
-                            return;
+                            return None;
                         }
                         InsertStep::Descend {
                             edge,
@@ -176,10 +178,11 @@ impl ArtIndex {
                                     .grow(&terminated_key[prefix_depth..prefix_depth + prefix_len])
                             };
                             update_parent(parent, replacement);
+                            drop(unsafe { Box::from_raw(node_ptr) });
                             current = Some(replacement);
                             depth = prefix_depth;
                         }
-                        InsertStep::Done => return,
+                        InsertStep::Done => return None,
                     }
                 }
                 NextNode::Node256(node_ptr) => {
@@ -196,7 +199,7 @@ impl ArtIndex {
                                 matched,
                             );
                             update_parent(parent, replacement);
-                            return;
+                            return None;
                         }
                         InsertStep::Descend {
                             edge,
@@ -210,14 +213,14 @@ impl ArtIndex {
                         InsertStep::Grow { .. } => {
                             unreachable!()
                         }
-                        InsertStep::Done => return,
+                        InsertStep::Done => return None,
                     }
                 }
             }
         }
     }
 
-    pub fn get(&self, key: &[u8]) -> Option<KVPair> {
+    pub fn get(&self, key: &[u8]) -> Option<(&[u8], &[u8])> {
         let terminated_key = terminated_key_owned(key);
         let mut ptr = self.root;
         let mut depth = 0;
@@ -226,9 +229,9 @@ impl ArtIndex {
             let ptr_value = ptr?;
             match ptr_value.next_node() {
                 NextNode::Value(value_ptr) => {
-                    let value = unsafe { &*value_ptr };
-                    return if terminated_key_owned(value.key()) == terminated_key {
-                        Some(*value)
+                    let leaf = unsafe { &*value_ptr };
+                    return if terminated_key_owned(leaf.key()) == terminated_key {
+                        Some((leaf.key(), leaf.value()))
                     } else {
                         None
                     };
@@ -275,6 +278,40 @@ impl Default for ArtIndex {
     }
 }
 
+unsafe fn free_subtree(ptr: TaggedPointer) {
+    unsafe {
+        match ptr.next_node() {
+            NextNode::Value(leaf_ptr) => {
+                drop(KVPair::from_raw(leaf_ptr));
+            }
+            NextNode::Node4(node_ptr) => {
+                let node = Box::from_raw(node_ptr);
+                node.for_each_child(|_, child| free_subtree(child));
+            }
+            NextNode::Node16(node_ptr) => {
+                let node = Box::from_raw(node_ptr);
+                node.for_each_child(|_, child| free_subtree(child));
+            }
+            NextNode::Node48(node_ptr) => {
+                let node = Box::from_raw(node_ptr);
+                node.for_each_child(|child| free_subtree(child));
+            }
+            NextNode::Node256(node_ptr) => {
+                let node = Box::from_raw(node_ptr);
+                node.for_each_child(|child| free_subtree(child));
+            }
+        }
+    }
+}
+
+impl Drop for ArtIndex {
+    fn drop(&mut self) {
+        if let Some(root) = self.root.take() {
+            unsafe { free_subtree(root) };
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Parent {
     Root(*mut Option<TaggedPointer>),
@@ -308,8 +345,7 @@ pub(crate) fn delete_at(
 
     match current.next_node() {
         NextNode::Value(value_ptr) => {
-            let value = unsafe { &*value_ptr };
-            if terminated_key_owned(value.key()) != terminated_key {
+            if terminated_key_owned(unsafe { &*value_ptr }.key()) != terminated_key {
                 return DeleteResult {
                     removed: None,
                     replacement: Some(current),
@@ -317,7 +353,7 @@ pub(crate) fn delete_at(
             }
 
             DeleteResult {
-                removed: Some(*value),
+                removed: Some(unsafe { KVPair::from_raw(value_ptr) }),
                 replacement: None,
             }
         }
@@ -417,33 +453,19 @@ fn terminated_key_owned(key: &[u8]) -> Vec<u8> {
     terminated
 }
 
+/// Header for a leaf allocation. The actual key and value bytes follow immediately
+/// after this header in memory (`data` is a zero-length flexible array marker).
+///
+/// Layout (16-byte aligned): `[key_len: u8][_pad: 3][value_len: u32][key bytes...][value bytes...]`
 #[repr(C, align(16))]
-#[derive(Clone, Copy)]
-pub struct KVPair {
+pub struct KVData {
     key_len: u8,
-    value_len: u8,
-    data: NonNull<u8>,
+    _pad: [u8; 3],
+    value_len: u32,
+    data: [u8; 0],
 }
 
-impl KVPair {
-    pub fn new(key: &[u8], value: &[u8]) -> Self {
-        let total_size = key.len() + value.len();
-        let layout = Layout::from_size_align(total_size.max(1), 16).unwrap();
-        let ptr = unsafe { std::alloc::alloc(layout) };
-        let ptr = NonNull::new(ptr).unwrap();
-
-        let key_ptr = ptr.as_ptr();
-        unsafe { copy_nonoverlapping(key.as_ptr(), key_ptr, key.len()) };
-        let value_ptr = unsafe { key_ptr.add(key.len()) };
-        unsafe { copy_nonoverlapping(value.as_ptr(), value_ptr, value.len()) };
-
-        Self {
-            data: ptr,
-            key_len: key.len() as u8,
-            value_len: value.len() as u8,
-        }
-    }
-
+impl KVData {
     pub fn key(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.data.as_ptr(), self.key_len as usize) }
     }
@@ -458,6 +480,63 @@ impl KVPair {
     }
 }
 
+/// Single-allocation key-value pair handle.
+pub struct KVPair(NonNull<KVData>);
+
+impl KVPair {
+    pub fn new(key: &[u8], value: &[u8]) -> Self {
+        let data_offset = std::mem::size_of::<KVData>();
+        let total_size = data_offset + key.len() + value.len();
+        let layout = Layout::from_size_align(total_size.max(1), 16).unwrap();
+        let ptr = unsafe { std::alloc::alloc(layout) } as *mut KVData;
+        let ptr = NonNull::new(ptr).unwrap();
+
+        unsafe {
+            let header = ptr.as_ptr();
+            (*header).key_len = key.len() as u8;
+            (*header)._pad = [0; 3];
+            (*header).value_len = value.len() as u32;
+            let data = (*header).data.as_mut_ptr();
+            copy_nonoverlapping(key.as_ptr(), data, key.len());
+            copy_nonoverlapping(value.as_ptr(), data.add(key.len()), value.len());
+        }
+
+        Self(ptr)
+    }
+
+    pub fn key(&self) -> &[u8] {
+        unsafe { &*self.0.as_ptr() }.key()
+    }
+
+    pub fn value(&self) -> &[u8] {
+        unsafe { &*self.0.as_ptr() }.value()
+    }
+
+    pub fn into_raw(self) -> *mut KVData {
+        let ptr = self.0.as_ptr();
+        std::mem::forget(self);
+        ptr
+    }
+
+    pub unsafe fn from_raw(ptr: *mut KVData) -> Self {
+        unsafe { Self(NonNull::new_unchecked(ptr)) }
+    }
+}
+
+impl Drop for KVPair {
+    fn drop(&mut self) {
+        unsafe {
+            let header = self.0.as_ptr();
+            let key_len = (*header).key_len as usize;
+            let value_len = (*header).value_len as usize;
+            let data_offset = std::mem::size_of::<KVData>();
+            let total_size = data_offset + key_len + value_len;
+            let layout = Layout::from_size_align(total_size.max(1), 16).unwrap();
+            std::alloc::dealloc(header as *mut u8, layout);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ArtIndex;
@@ -468,9 +547,9 @@ mod tests {
 
         index.insert(b"hello", b"world");
 
-        let kv = index.get(b"hello").expect("value");
-        assert_eq!(kv.key(), b"hello");
-        assert_eq!(kv.value(), b"world");
+        let (k, v) = index.get(b"hello").expect("value");
+        assert_eq!(k, b"hello");
+        assert_eq!(v, b"world");
     }
 
     #[test]
@@ -480,8 +559,8 @@ mod tests {
         index.insert(b"a", b"1");
         index.insert(b"ab", b"2");
 
-        assert_eq!(index.get(b"a").expect("a").value(), b"1");
-        assert_eq!(index.get(b"ab").expect("ab").value(), b"2");
+        assert_eq!(index.get(b"a").expect("a").1, b"1");
+        assert_eq!(index.get(b"ab").expect("ab").1, b"2");
         assert!(index.get(b"abc").is_none());
     }
 
@@ -492,14 +571,8 @@ mod tests {
         index.insert(b"prefix-path-alpha", b"alpha");
         index.insert(b"prefix-path-beta", b"beta");
 
-        assert_eq!(
-            index.get(b"prefix-path-alpha").expect("alpha").value(),
-            b"alpha"
-        );
-        assert_eq!(
-            index.get(b"prefix-path-beta").expect("beta").value(),
-            b"beta"
-        );
+        assert_eq!(index.get(b"prefix-path-alpha").expect("alpha").1, b"alpha");
+        assert_eq!(index.get(b"prefix-path-beta").expect("beta").1, b"beta");
     }
 
     #[test]
@@ -514,9 +587,9 @@ mod tests {
 
         for byte in 0u8..20 {
             let key = [b'x', byte];
-            let value = index.get(&key);
-            assert!(value.is_some(), "missing key {:?}", key);
-            assert_eq!(value.expect("value").value(), [byte]);
+            let result = index.get(&key);
+            assert!(result.is_some(), "missing key {:?}", key);
+            assert_eq!(result.expect("value").1, [byte]);
         }
     }
 
@@ -532,9 +605,9 @@ mod tests {
 
         for byte in 0u8..60 {
             let key = [b'y', byte];
-            let value = index.get(&key);
-            assert!(value.is_some(), "missing key {:?}", key);
-            assert_eq!(value.expect("value").value(), [byte]);
+            let result = index.get(&key);
+            assert!(result.is_some(), "missing key {:?}", key);
+            assert_eq!(result.expect("value").1, [byte]);
         }
     }
 
@@ -544,8 +617,8 @@ mod tests {
 
         index.insert(b"name\0", b"value");
 
-        assert_eq!(index.get(b"name\0").expect("value").value(), b"value");
-        assert_eq!(index.get(b"name").expect("value").value(), b"value");
+        assert_eq!(index.get(b"name\0").expect("value").1, b"value");
+        assert_eq!(index.get(b"name").expect("value").1, b"value");
     }
 
     #[test]
@@ -565,15 +638,23 @@ mod tests {
         index.insert(b"123456789abcdef-left", b"left");
         index.insert(b"123456789abcdef-right", b"right");
 
+        assert_eq!(index.get(b"123456789abcdef-left").expect("left").1, b"left");
         assert_eq!(
-            index.get(b"123456789abcdef-left").expect("left").value(),
-            b"left"
-        );
-        assert_eq!(
-            index.get(b"123456789abcdef-right").expect("right").value(),
+            index.get(b"123456789abcdef-right").expect("right").1,
             b"right"
         );
         assert!(index.get(b"123456789abcdef-middle").is_none());
+    }
+
+    #[test]
+    fn insert_replace_returns_old_value() {
+        let mut index = ArtIndex::new();
+
+        assert!(index.insert(b"key", b"v1").is_none());
+        let old = index.insert(b"key", b"v2").expect("old");
+        assert_eq!(old.key(), b"key");
+        assert_eq!(old.value(), b"v1");
+        assert_eq!(index.get(b"key").expect("value").1, b"v2");
     }
 
     #[test]
@@ -595,7 +676,7 @@ mod tests {
         index.insert(b"hello", b"world");
 
         assert!(index.delete(b"missing").is_none());
-        assert_eq!(index.get(b"hello").expect("value").value(), b"world");
+        assert_eq!(index.get(b"hello").expect("value").1, b"world");
     }
 
     #[test]
@@ -607,7 +688,7 @@ mod tests {
 
         assert_eq!(index.delete(b"a").expect("deleted").value(), b"1");
         assert!(index.get(b"a").is_none());
-        assert_eq!(index.get(b"ab").expect("ab").value(), b"2");
+        assert_eq!(index.get(b"ab").expect("ab").1, b"2");
     }
 
     #[test]
@@ -623,7 +704,7 @@ mod tests {
         );
         assert!(index.get(b"prefix-path-beta").is_none());
         assert_eq!(
-            index.get(b"prefix-path-alpha").expect("alpha").value(),
+            index.get(b"prefix-path-alpha").expect("alpha").1,
             b"alpha"
         );
     }
@@ -641,7 +722,7 @@ mod tests {
         assert!(index.get(b"ac").is_none());
 
         index.insert(b"xyz", b"new");
-        assert_eq!(index.get(b"xyz").expect("xyz").value(), b"new");
+        assert_eq!(index.get(b"xyz").expect("xyz").1, b"new");
     }
 
     #[test]
@@ -662,7 +743,7 @@ mod tests {
 
         for byte in 0u8..10 {
             let key = [b'y', byte];
-            assert_eq!(index.get(&key).expect("present").value(), [byte]);
+            assert_eq!(index.get(&key).expect("present").1, [byte]);
         }
         for byte in 10u8..50 {
             let key = [b'y', byte];
@@ -674,7 +755,7 @@ mod tests {
         }
         for byte in 50u8..60 {
             let key = [b'y', byte];
-            assert_eq!(index.get(&key).expect("present").value(), [byte]);
+            assert_eq!(index.get(&key).expect("present").1, [byte]);
         }
     }
 }

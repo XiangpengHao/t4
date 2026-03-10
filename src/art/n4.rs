@@ -177,7 +177,6 @@ impl Node4 {
 } // verus!
 
 impl Node4 {
-    #[cfg(test)]
     pub(crate) fn for_each_child(&self, f: impl FnMut(u8, TaggedPointer)) {
         self.0.for_each_child(f);
     }
