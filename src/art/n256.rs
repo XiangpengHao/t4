@@ -31,7 +31,7 @@ proof fn lemma_live_child_count_replace(
         0 <= upto <= 256,
         old_children[key] != 0,
         new_children[key] != 0,
-        forall|idx: int| 0 <= idx < 256 ==> new_children[idx] == (
+        forall|idx: int| 0 <= idx < 256 ==>  #[trigger] new_children[idx] == (
             if idx == key { new_children[key] } else { old_children[idx] }
         ),
     ensures
@@ -58,7 +58,7 @@ proof fn lemma_live_child_count_insert(
         0 <= upto <= 256,
         old_children[key] == 0,
         new_children[key] != 0,
-        forall|idx: int| 0 <= idx < 256 ==> new_children[idx] == (
+        forall|idx: int| 0 <= idx < 256 ==>  #[trigger] new_children[idx] == (
             if idx == key { new_children[key] } else { old_children[idx] }
         ),
     ensures
@@ -86,7 +86,7 @@ proof fn lemma_live_child_count_remove(
         0 <= upto <= 256,
         old_children[key] != 0,
         new_children[key] == 0,
-        forall|idx: int| 0 <= idx < 256 ==> new_children[idx] == (
+        forall|idx: int| 0 <= idx < 256 ==>  #[trigger] new_children[idx] == (
             if idx == key { 0usize } else { old_children[idx] }
         ),
     ensures
@@ -249,7 +249,7 @@ impl Node256 {
 
         proof {
             TaggedPointer::lemma_wf_raw_nonzero(value_raw);
-            assert forall|idx: int| 0 <= idx < 256 implies self.children[idx] == (
+            assert forall|idx: int| 0 <= idx < 256 implies  #[trigger] self.children[idx] == (
                 if idx == key as int { value_raw } else { old_children[idx] }
             ) by {};
             lemma_live_child_count_replace(old_children, self.children, key as int, 256);
@@ -276,7 +276,7 @@ impl Node256 {
 
         proof {
             TaggedPointer::lemma_wf_raw_nonzero(value_raw);
-            assert forall|idx: int| 0 <= idx < 256 implies self.children[idx] == (
+            assert forall|idx: int| 0 <= idx < 256 implies  #[trigger] self.children[idx] == (
                 if idx == key as int { value_raw } else { old_children[idx] }
             ) by {};
             lemma_live_child_count_insert(old_children, self.children, key as int, 256);
@@ -335,7 +335,7 @@ impl Node256 {
         self.meta.decrement_len();
 
         proof {
-            assert forall|idx: int| 0 <= idx < 256 implies self.children[idx] == (
+            assert forall|idx: int| 0 <= idx < 256 implies  #[trigger] self.children[idx] == (
                 if idx == key as int { 0usize } else { old_children[idx] }
             ) by {};
             lemma_live_child_count_remove(old_children, self.children, key as int, 256);

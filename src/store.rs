@@ -45,10 +45,10 @@ impl T4Store {
 
         let mut custom_flags = 0;
         if options.direct_io {
-            custom_flags |= libc::O_DIRECT;
+            custom_flags = custom_flags | libc::O_DIRECT;
         }
         if options.dsync {
-            custom_flags |= libc::O_DSYNC;
+            custom_flags = custom_flags | libc::O_DSYNC;
         }
         open.custom_flags(custom_flags);
 

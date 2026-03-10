@@ -411,7 +411,7 @@ pub(crate) fn common_prefix_len(a: &[u8], b: &[u8]) -> (result: usize)
         decreases limit - idx,
     {
         if a[idx] == b[idx] {
-            idx += 1;
+            idx = idx + 1;
         } else {
             return idx;
         }

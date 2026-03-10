@@ -424,7 +424,7 @@ impl<D: IoDriver> UringBackend<D> {
 
                     match push_result {
                         Ok(()) => {
-                            submitted_pages += 1;
+                            submitted_pages = submitted_pages + 1;
                         }
                         Err(err) => {
                             self.handle_write_submit_error(request_id, submitted_pages, err);
@@ -490,7 +490,7 @@ impl<D: IoDriver> UringBackend<D> {
             }
 
             if request.remaining > 0 {
-                request.remaining -= 1;
+                request.remaining = request.remaining - 1;
             }
             if request.remaining == 0 {
                 should_complete = true;

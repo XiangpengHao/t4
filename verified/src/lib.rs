@@ -1,3 +1,6 @@
+#![allow(clippy::assign_op_pattern)] // verus doesn't support assign op pattern
+#![allow(clippy::single_match)] // verus doesn't support single match
+
 pub mod input_kv;
 pub mod le_bytes;
 pub mod wal;
@@ -351,7 +354,7 @@ pub(crate) fn copy_into_page(bytes: &mut [u8; PAGE_SIZE], off: usize, src: &[u8]
         decreases src.len() - i,
     {
         bytes[off + i] = src[i];
-        i += 1;
+        i = i + 1;
     }
 }
 

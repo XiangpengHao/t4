@@ -168,7 +168,7 @@ impl Node4 {
                 }
             }
             let _ = grown.insert(key, child);
-            idx += 1;
+            idx = idx + 1;
         }
         grown
     }
@@ -256,7 +256,7 @@ mod tests {
             Some(TaggedPointer::from_test_raw(1))
         );
         let mut count = 0;
-        node.for_each_child(|_, _| count += 1);
+        node.for_each_child(|_, _| count = count + 1);
         assert_eq!(count, 1);
         assert_eq!(node.get(7), Some(TaggedPointer::from_test_raw(2)));
     }

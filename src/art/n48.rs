@@ -90,7 +90,7 @@ impl Node48 {
             if self.child_idx[idx] == target {
                 return idx as u8;
             }
-            idx += 1;
+            idx = idx + 1;
         }
 
         proof {
@@ -465,7 +465,7 @@ impl Node48 {
                 }
                 let _ = grown.insert(key, child);
             }
-            key += 1;
+            key = key + 1;
         }
         if let Some(child) = self.get(u8::MAX) {
             proof {

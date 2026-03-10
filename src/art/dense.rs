@@ -90,7 +90,7 @@ impl<const CAP: usize> DenseNode<CAP> {
             decreases len - idx,
         {
             if self.keys[idx] < key {
-                idx += 1;
+                idx = idx + 1;
             } else if self.keys[idx] == key {
                 return SearchResult::Found(idx);
             } else {
@@ -174,7 +174,7 @@ impl<const CAP: usize> DenseNode<CAP> {
         {
             self.keys[shift] = self.keys[shift - 1];
             self.children[shift] = self.children[shift - 1];
-            shift -= 1;
+            shift = shift - 1;
         }
 
         self.keys[idx] = key;
@@ -256,7 +256,7 @@ impl<const CAP: usize> DenseNode<CAP> {
         {
             self.keys[shift - 1] = self.keys[shift];
             self.children[shift - 1] = self.children[shift];
-            shift += 1;
+            shift = shift + 1;
         }
 
         self.meta.decrement_len();
