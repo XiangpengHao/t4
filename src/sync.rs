@@ -1,15 +1,4 @@
-#[cfg(feature = "shuttle")]
-pub(crate) use shuttle::sync::mpsc;
-#[cfg(feature = "shuttle")]
-pub(crate) use shuttle::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-#[cfg(not(feature = "shuttle"))]
-pub(crate) use std::sync::mpsc;
-#[cfg(not(feature = "shuttle"))]
-pub(crate) use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
-
-#[cfg(feature = "shuttle")]
-pub(crate) use shuttle::thread::spawn;
 
 #[allow(unused)]
 #[cfg(all(not(feature = "shuttle"), test))]
@@ -27,3 +16,17 @@ pub(crate) fn cooperative_yield() {
 #[cfg(not(feature = "shuttle"))]
 #[inline]
 pub(crate) fn cooperative_yield() {}
+
+
+#[cfg(all(feature = "shuttle", test))]
+pub(crate) use shuttle::sync::*;
+
+#[cfg(all(feature = "shuttle", test))]
+pub(crate) use shuttle::thread;
+
+#[cfg(not(all(feature = "shuttle", test)))]
+pub(crate) use std::sync::*;
+
+#[cfg(not(all(feature = "shuttle", test)))]
+#[allow(unused_imports)]
+pub(crate) use std::thread;

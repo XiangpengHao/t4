@@ -2,6 +2,7 @@ use crate::art::index::{DeleteResult, common_prefix_len, delete_at};
 use crate::art::ptr::TaggedPointer;
 use vstd::prelude::*;
 use vstd::slice::slice_subrange;
+mod version_lock;
 
 pub use index::ArtIndex;
 

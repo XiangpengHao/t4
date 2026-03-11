@@ -4,7 +4,7 @@ use crate::art::{index::KVData, n4::Node4, n16::Node16, n48::Node48, n256::Node2
 
 verus! {
 
-const TAG_MASK: usize = 0x0000_0000_0000_000f;
+const TAG_MASK: usize = 0x7;
 
 spec fn valid_tag(tag: usize) -> bool {
     tag < 5
@@ -13,8 +13,8 @@ spec fn valid_tag(tag: usize) -> bool {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TaggedPointer {
-    /// Lower 4 bits are the tag. It can point to a node meta or a value pair.
-    /// Pointers must be aligned so the low 4 bits are available for tagging.
+    /// Lower 3 bits are the tag. It can point to a node meta or a value pair.
+    /// Pointers must be aligned so the low 3 bits are available for tagging.
     ptr: usize,
 }
 
@@ -142,7 +142,7 @@ impl TaggedPointer {
     #[cfg(test)]
     pub(crate) const fn from_test_raw(raw: usize) -> Self {
         Self {
-            ptr: raw.wrapping_add(1) << 4,
+            ptr: raw.wrapping_add(1) << 3,
         }
     }
 
