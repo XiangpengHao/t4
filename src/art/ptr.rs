@@ -38,6 +38,14 @@ impl TaggedPointer {
         self.ptr
     }
 
+    pub closed spec fn is_value(self) -> bool {
+        self.raw() & TAG_MASK == 4
+    }
+
+    pub closed spec fn is_node(self) -> bool {
+        self.raw() & TAG_MASK < 4
+    }
+
     pub(crate) const fn to_raw(self) -> (result: usize)
         ensures
             result == self.raw(),
@@ -197,6 +205,33 @@ impl TaggedPointer {
     pub(crate) fn from_value(kv: crate::art::index::KVPair) -> Self {
         Self::from_tagged_ptr(kv.into_raw() as usize, 4)
     }
+
+    /// Safety: `self` must point to a live leaf allocation owned by this tagged pointer.
+    pub(crate) unsafe fn into_value(self) -> (result: KVPair)
+        requires
+            self.is_value(),
+    {
+        let ptr = self.untagged_ptr() as *mut KVData;
+        unsafe { KVPair::from_raw(ptr) }
+    }
+
+    /// Safety: `self` must point to a live node allocation owned by this tagged pointer.
+    pub(crate) unsafe fn drop_node(self)
+        requires
+            self.is_node(),
+    {
+        let ptr = self.untagged_ptr();
+        unsafe {
+            match self.tag() {
+                0 => drop(Box::from_raw(ptr as *mut Node4)),
+                1 => drop(Box::from_raw(ptr as *mut Node16)),
+                2 => drop(Box::from_raw(ptr as *mut Node48)),
+                3 => drop(Box::from_raw(ptr as *mut Node256)),
+                4 => unreachable!("node-tag precondition rules out value pointers"),
+                _ => unreachable!("TaggedPointer type invariant guarantees a valid tag"),
+            }
+        }
+    }
 }
 
 pub(crate) enum NextNodeRef<'a> {
@@ -246,27 +281,6 @@ impl TaggedPointer {
     pub(crate) const fn from_test_raw(raw: usize) -> Self {
         Self {
             ptr: raw.wrapping_add(1) << 3,
-        }
-    }
-
-    /// Safety: `self` must point to a live leaf allocation owned by this tagged pointer.
-    pub(crate) unsafe fn into_value(self) -> KVPair {
-        let ptr = self.untagged_ptr() as *mut KVData;
-        unsafe { KVPair::from_raw(ptr) }
-    }
-
-    /// Safety: `self` must point to a live node allocation owned by this tagged pointer.
-    pub(crate) unsafe fn drop_node(self) {
-        let ptr = self.untagged_ptr();
-        unsafe {
-            match self.tag() {
-                0 => drop(Box::from_raw(ptr as *mut Node4)),
-                1 => drop(Box::from_raw(ptr as *mut Node16)),
-                2 => drop(Box::from_raw(ptr as *mut Node48)),
-                3 => drop(Box::from_raw(ptr as *mut Node256)),
-                4 => unreachable!("value pointers cannot be dropped as nodes"),
-                _ => unreachable!("TaggedPointer type invariant guarantees a valid tag"),
-            }
         }
     }
 }
