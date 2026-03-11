@@ -106,9 +106,13 @@ impl<const CAP: usize> DenseNode<CAP> {
             self.wf(),
         ensures
             result.is_some() <==> self.has_key(key),
+            result.is_some() ==> self.maps_to(key, result.unwrap().raw()),
     {
         match self.search(key) {
-            SearchResult::Found(idx) => Some(TaggedPointer::from_raw(self.children[idx])),
+            SearchResult::Found(idx) => {
+                let result = TaggedPointer::from_raw(self.children[idx]);
+                Some(result)
+            },
             SearchResult::Vacant(_) => None,
         }
     }
@@ -395,12 +399,23 @@ impl<const CAP: usize> DenseNode<CAP> {
         self.meta.len()
     }
 
-    pub(crate) fn prefix_len(&self) -> usize {
+    pub(crate) fn prefix_len(&self) -> (result: usize)
+        ensures
+            result == self.raw_prefix_len(),
+            result <= NodeMeta::prefix_capacity(),
+    {
         self.meta.prefix_len()
     }
 
     pub(crate) fn prefix(&self) -> [u8; 8] {
         self.meta.prefix()
+    }
+
+    pub(crate) fn prefix_slice(&self) -> (result: &[u8])
+        ensures
+            result@.len() == NodeMeta::prefix_capacity(),
+    {
+        self.meta.prefix_slice()
     }
 
     pub(crate) fn set_prefix(&mut self, prefix: &[u8])

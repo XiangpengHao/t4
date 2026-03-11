@@ -6,7 +6,7 @@ use std::{
 use vstd::prelude::*;
 
 use crate::art::{
-    ArtNode, InsertStep,
+    ArtNode, InsertStep, delete_from_node, get_from_node,
     n4::Node4,
     n16::Node16,
     n48::Node48,
@@ -16,11 +16,6 @@ use crate::art::{
 
 pub struct ArtIndex {
     root: Option<TaggedPointer>,
-}
-
-pub(crate) struct DeleteResult {
-    pub(crate) removed: Option<KVPair>,
-    pub(crate) replacement: Option<TaggedPointer>,
 }
 
 impl ArtIndex {
@@ -43,8 +38,7 @@ impl ArtIndex {
 
             match current_ptr.next_node() {
                 NextNode::Value(existing_ptr) => {
-                    let terminated_existing =
-                        terminated_key_owned(unsafe { &*existing_ptr }.key());
+                    let terminated_existing = terminated_key_owned(unsafe { &*existing_ptr }.key());
                     if terminated_existing == terminated_key {
                         update_parent(parent, value_ptr);
                         return Some(unsafe { KVPair::from_raw(existing_ptr) });
@@ -238,25 +232,25 @@ impl ArtIndex {
                 }
                 NextNode::Node4(node_ptr) => {
                     let (next_ptr, next_depth) =
-                        unsafe { (&*node_ptr).get_from_node(&terminated_key, depth) }?;
+                        unsafe { get_from_node(&*node_ptr, &terminated_key, depth) }?;
                     ptr = Some(next_ptr);
                     depth = next_depth;
                 }
                 NextNode::Node16(node_ptr) => {
                     let (next_ptr, next_depth) =
-                        unsafe { (&*node_ptr).get_from_node(&terminated_key, depth) }?;
+                        unsafe { get_from_node(&*node_ptr, &terminated_key, depth) }?;
                     ptr = Some(next_ptr);
                     depth = next_depth;
                 }
                 NextNode::Node48(node_ptr) => {
                     let (next_ptr, next_depth) =
-                        unsafe { (&*node_ptr).get_from_node(&terminated_key, depth) }?;
+                        unsafe { get_from_node(&*node_ptr, &terminated_key, depth) }?;
                     ptr = Some(next_ptr);
                     depth = next_depth;
                 }
                 NextNode::Node256(node_ptr) => {
                     let (next_ptr, next_depth) =
-                        unsafe { (&*node_ptr).get_from_node(&terminated_key, depth) }?;
+                        unsafe { get_from_node(&*node_ptr, &terminated_key, depth) }?;
                     ptr = Some(next_ptr);
                     depth = next_depth;
                 }
@@ -268,7 +262,10 @@ impl ArtIndex {
         let terminated_key = terminated_key_owned(key);
         let result = delete_at(self.root, &terminated_key, 0);
         self.root = result.replacement;
-        result.removed
+        result.removed.map(|removed| match removed.next_node() {
+            NextNode::Value(value_ptr) => unsafe { KVPair::from_raw(value_ptr) },
+            _ => unreachable!(),
+        })
     }
 }
 
@@ -331,47 +328,6 @@ fn update_parent(parent: Parent, value: TaggedPointer) {
     }
 }
 
-pub(crate) fn delete_at(
-    current: Option<TaggedPointer>,
-    terminated_key: &[u8],
-    depth: usize,
-) -> DeleteResult {
-    let Some(current) = current else {
-        return DeleteResult {
-            removed: None,
-            replacement: None,
-        };
-    };
-
-    match current.next_node() {
-        NextNode::Value(value_ptr) => {
-            if terminated_key_owned(unsafe { &*value_ptr }.key()) != terminated_key {
-                return DeleteResult {
-                    removed: None,
-                    replacement: Some(current),
-                };
-            }
-
-            DeleteResult {
-                removed: Some(unsafe { KVPair::from_raw(value_ptr) }),
-                replacement: None,
-            }
-        }
-        NextNode::Node4(node_ptr) => unsafe {
-            (&mut *node_ptr).delete_from_node(current, terminated_key, depth)
-        },
-        NextNode::Node16(node_ptr) => unsafe {
-            (&mut *node_ptr).delete_from_node(current, terminated_key, depth)
-        },
-        NextNode::Node48(node_ptr) => unsafe {
-            (&mut *node_ptr).delete_from_node(current, terminated_key, depth)
-        },
-        NextNode::Node256(node_ptr) => unsafe {
-            (&mut *node_ptr).delete_from_node(current, terminated_key, depth)
-        },
-    }
-}
-
 pub(crate) fn split_node(
     node: &mut impl ArtNode,
     old_ptr: TaggedPointer,
@@ -393,6 +349,17 @@ pub(crate) fn split_node(
 }
 
 verus! {
+
+pub(crate) struct DeleteResult {
+    pub(crate) removed: Option<TaggedPointer>,
+    pub(crate) replacement: Option<TaggedPointer>,
+}
+
+pub assume_specification[ delete_at ](
+    current: Option<TaggedPointer>,
+    terminated_key: &[u8],
+    depth: usize,
+) -> (result: DeleteResult);
 
 pub(crate) fn common_prefix_len(a: &[u8], b: &[u8]) -> (result: usize)
     ensures
@@ -421,6 +388,47 @@ pub(crate) fn common_prefix_len(a: &[u8], b: &[u8]) -> (result: usize)
 }
 
 } // verus!
+
+pub(crate) fn delete_at(
+    current: Option<TaggedPointer>,
+    terminated_key: &[u8],
+    depth: usize,
+) -> DeleteResult {
+    let Some(current) = current else {
+        return DeleteResult {
+            removed: None,
+            replacement: None,
+        };
+    };
+
+    match current.next_node() {
+        NextNode::Value(value_ptr) => {
+            if terminated_key_owned(unsafe { &*value_ptr }.key()) != terminated_key {
+                return DeleteResult {
+                    removed: None,
+                    replacement: Some(current),
+                };
+            }
+
+            DeleteResult {
+                removed: Some(current),
+                replacement: None,
+            }
+        }
+        NextNode::Node4(node_ptr) => unsafe {
+            delete_from_node(&mut *node_ptr, current, terminated_key, depth)
+        },
+        NextNode::Node16(node_ptr) => unsafe {
+            delete_from_node(&mut *node_ptr, current, terminated_key, depth)
+        },
+        NextNode::Node48(node_ptr) => unsafe {
+            delete_from_node(&mut *node_ptr, current, terminated_key, depth)
+        },
+        NextNode::Node256(node_ptr) => unsafe {
+            delete_from_node(&mut *node_ptr, current, terminated_key, depth)
+        },
+    }
+}
 
 fn new_branching_path(
     prefix: &[u8],
@@ -703,10 +711,7 @@ mod tests {
             b"beta"
         );
         assert!(index.get(b"prefix-path-beta").is_none());
-        assert_eq!(
-            index.get(b"prefix-path-alpha").expect("alpha").1,
-            b"alpha"
-        );
+        assert_eq!(index.get(b"prefix-path-alpha").expect("alpha").1, b"alpha");
     }
 
     #[test]

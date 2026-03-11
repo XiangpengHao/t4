@@ -134,6 +134,7 @@ impl TaggedPointer {
         }
         Self::from_raw(raw)
     }
+
 }
 
 } // verus!

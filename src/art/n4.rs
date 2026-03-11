@@ -45,6 +45,7 @@ impl Node4 {
             self.wf(),
         ensures
             result.is_some() <==> self.has_key(key),
+            result.is_some() ==> self.maps_to(key, result.unwrap().raw()),
     {
         self.0.get(key)
     }
@@ -98,42 +99,6 @@ impl Node4 {
         self.0.remove(key)
     }
 
-    pub(crate) fn insert_step_impl(
-        &mut self,
-        terminated_key: &[u8],
-        value_ptr: TaggedPointer,
-        depth: usize,
-    ) -> (result: InsertStep)
-        requires
-            old(self).wf(),
-            depth + old(self).raw_prefix_len() < terminated_key.len(),
-        ensures
-            self.wf(),
-            match result {
-                InsertStep::Split { .. } => self.live_len() == old(self).live_len(),
-                InsertStep::Descend { edge, child, next_depth } => {
-                    &&& self.live_len() == old(self).live_len()
-                    &&& edge == terminated_key[depth + old(self).raw_prefix_len()]
-                    &&& next_depth == depth + old(self).raw_prefix_len() + 1
-                    &&& old(self).maps_to(edge, child.raw())
-                },
-                InsertStep::Grow { prefix_depth, prefix_len } => {
-                    &&& self.live_len() == old(self).live_len()
-                    &&& prefix_depth == depth
-                    &&& prefix_len == old(self).raw_prefix_len()
-                },
-                InsertStep::Done => {
-                    &&& self.live_len() == old(self).live_len() + 1
-                    &&& self.maps_to(
-                        terminated_key[depth + old(self).raw_prefix_len()],
-                        value_ptr.raw(),
-                    )
-                },
-            },
-    {
-        self.0.insert_step_impl(terminated_key, value_ptr, depth)
-    }
-
     pub(crate) fn grow_node(&self, prefix: &[u8]) -> (result: Node16)
         requires
             self.wf(),
@@ -174,6 +139,69 @@ impl Node4 {
     }
 }
 
+impl ArtNode for Node4 {
+    closed spec fn live_len(self) -> usize {
+        Node4::live_len(self)
+    }
+
+    closed spec fn has_key(self, key: u8) -> bool {
+        Node4::has_key(self, key)
+    }
+
+    closed spec fn maps_to(self, key: u8, raw: usize) -> bool {
+        Node4::maps_to(self, key, raw)
+    }
+
+    closed spec fn wf(&self) -> bool {
+        Node4::wf(self)
+    }
+
+    closed spec fn raw_prefix_len(self) -> usize {
+        Node4::raw_prefix_len(self)
+    }
+
+    fn insert_step(
+        &mut self,
+        terminated_key: &[u8],
+        value_ptr: TaggedPointer,
+        depth: usize,
+    ) -> (result: InsertStep) {
+        self.0.insert_step_impl(terminated_key, value_ptr, depth)
+    }
+
+    fn replace_child(&mut self, edge: u8, child: TaggedPointer) {
+        let _ = self.insert(edge, child);
+    }
+
+    fn remove_child(&mut self, edge: u8) -> (result: Option<TaggedPointer>) {
+        self.remove(edge)
+    }
+
+    fn child_count(&self) -> (result: usize) {
+        self.0.child_count()
+    }
+
+    fn prefix_len(&self) -> (result: usize) {
+        self.0.prefix_len()
+    }
+
+    fn prefix(&self) -> (result: [u8; 8]) {
+        self.0.prefix()
+    }
+
+    fn prefix_bytes(&self) -> (result: &[u8]) {
+        self.0.prefix_slice()
+    }
+
+    fn set_prefix(&mut self, prefix: &[u8]) {
+        self.0.set_prefix(prefix);
+    }
+
+    fn get_child(&self, edge: u8) -> (result: Option<TaggedPointer>) {
+        self.get(edge)
+    }
+}
+
 } // verus!
 
 impl Node4 {
@@ -183,45 +211,6 @@ impl Node4 {
 
     pub(crate) fn grow(&self, prefix: &[u8]) -> TaggedPointer {
         TaggedPointer::from_node16(Box::new(self.grow_node(prefix)))
-    }
-}
-
-impl ArtNode for Node4 {
-    fn insert_step(
-        &mut self,
-        terminated_key: &[u8],
-        value_ptr: TaggedPointer,
-        depth: usize,
-    ) -> InsertStep {
-        self.insert_step_impl(terminated_key, value_ptr, depth)
-    }
-
-    fn replace_child(&mut self, edge: u8, child: TaggedPointer) {
-        let _ = self.insert(edge, child);
-    }
-
-    fn remove_child(&mut self, edge: u8) -> Option<TaggedPointer> {
-        self.remove(edge)
-    }
-
-    fn child_count(&self) -> usize {
-        self.0.child_count()
-    }
-
-    fn prefix_len(&self) -> usize {
-        self.0.prefix_len()
-    }
-
-    fn prefix(&self) -> [u8; 8] {
-        self.0.prefix()
-    }
-
-    fn set_prefix(&mut self, prefix: &[u8]) {
-        self.0.set_prefix(prefix);
-    }
-
-    fn get_child(&self, edge: u8) -> Option<TaggedPointer> {
-        self.get(edge)
     }
 }
 

@@ -370,41 +370,35 @@ impl Node256 {
         }
     }
 
+}
 
-    pub(crate) fn insert_step_impl(
+impl ArtNode for Node256 {
+    closed spec fn live_len(self) -> usize {
+        Node256::live_len(self)
+    }
+
+    closed spec fn has_key(self, key: u8) -> bool {
+        Node256::has_key(self, key)
+    }
+
+    closed spec fn maps_to(self, key: u8, raw: usize) -> bool {
+        Node256::maps_to(self, key, raw)
+    }
+
+    closed spec fn wf(&self) -> bool {
+        Node256::wf(self)
+    }
+
+    closed spec fn raw_prefix_len(self) -> usize {
+        Node256::raw_prefix_len(self)
+    }
+
+    fn insert_step(
         &mut self,
         terminated_key: &[u8],
         value_ptr: TaggedPointer,
         depth: usize,
-    ) -> (result: InsertStep)
-        requires
-            old(self).wf(),
-            depth + old(self).raw_prefix_len() < terminated_key.len(),
-        ensures
-            self.wf(),
-            match result {
-                InsertStep::Split { .. } => self.live_len() == old(self).live_len(),
-                InsertStep::Descend { edge, child, next_depth } => {
-                    &&& self.live_len() == old(self).live_len()
-                    &&& edge == terminated_key[depth + old(self).raw_prefix_len()]
-                    &&& next_depth == depth + old(self).raw_prefix_len() + 1
-                    &&& old(self).maps_to(edge, child.raw())
-                },
-                InsertStep::Done => {
-                    &&& self.has_key(terminated_key[depth + old(self).raw_prefix_len()])
-                    &&& self.maps_to(
-                        terminated_key[depth + old(self).raw_prefix_len()],
-                        value_ptr.raw(),
-                    )
-                    &&& if old(self).has_key(terminated_key[depth + old(self).raw_prefix_len()]) {
-                        self.live_len() == old(self).live_len()
-                    } else {
-                        self.live_len() == old(self).live_len() + 1
-                    }
-                },
-                _ => false,
-            },
-    {
+    ) -> (result: InsertStep) {
         let prefix_len = self.meta.prefix_len();
         let prefix = self.meta.prefix_slice();
         let matched = common_prefix_len(
@@ -433,28 +427,36 @@ impl Node256 {
         InsertStep::Done
     }
 
-    pub(crate) fn child_count(&self) -> usize {
+    fn replace_child(&mut self, edge: u8, child: TaggedPointer) {
+        let _ = self.insert(edge, child);
+    }
+
+    fn remove_child(&mut self, edge: u8) -> (result: Option<TaggedPointer>) {
+        self.remove(edge)
+    }
+
+    fn child_count(&self) -> (result: usize) {
         self.meta.len()
     }
 
-    pub(crate) fn prefix_len(&self) -> usize {
+    fn prefix_len(&self) -> (result: usize) {
         self.meta.prefix_len()
     }
 
-    pub(crate) fn prefix(&self) -> [u8; 8] {
+    fn prefix(&self) -> (result: [u8; 8]) {
         self.meta.prefix()
     }
 
-    pub(crate) fn set_prefix(&mut self, prefix: &[u8])
-        requires
-            old(self).wf(),
-            prefix.len() <= NodeMeta::prefix_capacity(),
-        ensures
-            self.wf(),
-            self.live_len() == old(self).live_len(),
-            self.raw_prefix_len() == prefix.len(),
-    {
+    fn prefix_bytes(&self) -> (result: &[u8]) {
+        self.meta.prefix_slice()
+    }
+
+    fn set_prefix(&mut self, prefix: &[u8]) {
         self.meta.set_prefix(prefix);
+    }
+
+    fn get_child(&self, edge: u8) -> (result: Option<TaggedPointer>) {
+        self.get(edge)
     }
 }
 
@@ -471,49 +473,10 @@ impl Node256 {
     }
 }
 
-impl ArtNode for Node256 {
-    fn insert_step(
-        &mut self,
-        terminated_key: &[u8],
-        value_ptr: TaggedPointer,
-        depth: usize,
-    ) -> InsertStep {
-        self.insert_step_impl(terminated_key, value_ptr, depth)
-    }
-
-    fn replace_child(&mut self, edge: u8, child: TaggedPointer) {
-        let _ = self.insert(edge, child);
-    }
-
-    fn remove_child(&mut self, edge: u8) -> Option<TaggedPointer> {
-        self.remove(edge)
-    }
-
-    fn child_count(&self) -> usize {
-        self.child_count()
-    }
-
-    fn prefix_len(&self) -> usize {
-        self.prefix_len()
-    }
-
-    fn prefix(&self) -> [u8; 8] {
-        self.prefix()
-    }
-
-    fn set_prefix(&mut self, prefix: &[u8]) {
-        self.set_prefix(prefix);
-    }
-
-    fn get_child(&self, edge: u8) -> Option<TaggedPointer> {
-        self.get(edge)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::Node256;
-    use crate::art::ptr::TaggedPointer;
+    use crate::art::{ArtNode, ptr::TaggedPointer};
 
     #[test]
     fn insert_and_get_direct_slots() {
