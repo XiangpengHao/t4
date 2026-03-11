@@ -1,6 +1,12 @@
 use vstd::prelude::*;
 
-use crate::art::{index::KVData, n4::Node4, n16::Node16, n48::Node48, n256::Node256};
+use crate::art::{
+    index::{KVData, KVPair},
+    n16::Node16,
+    n256::Node256,
+    n4::Node4,
+    n48::Node48,
+};
 
 verus! {
 
@@ -48,7 +54,11 @@ impl TaggedPointer {
         Self::wf_raw(self.ptr)
     }
 
-    pub(crate) fn tag(&self) -> u8 {
+    pub(crate) fn tag(&self) -> (result: u8)
+        ensures
+            result as usize == self.raw() & TAG_MASK,
+            valid_tag(result as usize),
+    {
         proof {
             use_type_invariant(self);
         }
@@ -135,25 +145,35 @@ impl TaggedPointer {
         Self::from_raw(raw)
     }
 
-}
-
-} // verus!
-impl TaggedPointer {
-    #[cfg(test)]
-    pub(crate) const fn from_test_raw(raw: usize) -> Self {
-        Self {
-            ptr: raw.wrapping_add(1) << 3,
+    /// Safety: `self` must point to a live allocation whose concrete type matches the tag.
+    pub(crate) unsafe fn next_node_ref<'a>(&self) -> (result: NextNodeRef<'a>)
+        ensures
+            result.tag() == self.tag(),
+    {
+        let ptr = self.untagged_ptr();
+        match self.tag() {
+            0 => unsafe { NextNodeRef::Node4(&*(ptr as *const Node4)) },
+            1 => unsafe { NextNodeRef::Node16(&*(ptr as *const Node16)) },
+            2 => unsafe { NextNodeRef::Node48(&*(ptr as *const Node48)) },
+            3 => unsafe { NextNodeRef::Node256(&*(ptr as *const Node256)) },
+            4 => unsafe { NextNodeRef::Value(&*(ptr as *const KVData)) },
+            _ => unreachable!("TaggedPointer type invariant guarantees a valid tag"),
         }
     }
 
-    pub(crate) fn next_node(&self) -> NextNode {
+    /// Safety: `self` must point to a live allocation whose concrete type matches the tag, and
+    /// the caller must have exclusive access to that allocation for the duration of the borrow.
+    pub(crate) unsafe fn next_node_mut<'a>(&self) -> (result: NextNodeMut<'a>)
+        ensures
+            result.tag() == self.tag(),
+    {
         let ptr = self.untagged_ptr();
         match self.tag() {
-            0 => NextNode::Node4(ptr as *mut Node4),
-            1 => NextNode::Node16(ptr as *mut Node16),
-            2 => NextNode::Node48(ptr as *mut Node48),
-            3 => NextNode::Node256(ptr as *mut Node256),
-            4 => NextNode::Value(ptr as *mut KVData),
+            0 => unsafe { NextNodeMut::Node4(&mut *(ptr as *mut Node4)) },
+            1 => unsafe { NextNodeMut::Node16(&mut *(ptr as *mut Node16)) },
+            2 => unsafe { NextNodeMut::Node48(&mut *(ptr as *mut Node48)) },
+            3 => unsafe { NextNodeMut::Node256(&mut *(ptr as *mut Node256)) },
+            4 => unsafe { NextNodeMut::Value(&mut *(ptr as *mut KVData)) },
             _ => unreachable!("TaggedPointer type invariant guarantees a valid tag"),
         }
     }
@@ -179,10 +199,74 @@ impl TaggedPointer {
     }
 }
 
-pub(crate) enum NextNode {
-    Node4(*mut Node4),
-    Node16(*mut Node16),
-    Node48(*mut Node48),
-    Node256(*mut Node256),
-    Value(*mut KVData),
+pub(crate) enum NextNodeRef<'a> {
+    Node4(&'a Node4),
+    Node16(&'a Node16),
+    Node48(&'a Node48),
+    Node256(&'a Node256),
+    Value(&'a KVData),
+}
+
+impl<'a> NextNodeRef<'a> {
+    pub closed spec fn tag(self) -> u8 {
+        match self {
+            NextNodeRef::Node4(_) => 0,
+            NextNodeRef::Node16(_) => 1,
+            NextNodeRef::Node48(_) => 2,
+            NextNodeRef::Node256(_) => 3,
+            NextNodeRef::Value(_) => 4,
+        }
+    }
+}
+
+pub(crate) enum NextNodeMut<'a> {
+    Node4(&'a mut Node4),
+    Node16(&'a mut Node16),
+    Node48(&'a mut Node48),
+    Node256(&'a mut Node256),
+    Value(&'a mut KVData),
+}
+
+impl<'a> NextNodeMut<'a> {
+    pub closed spec fn tag(self) -> u8 {
+        match self {
+            NextNodeMut::Node4(_) => 0,
+            NextNodeMut::Node16(_) => 1,
+            NextNodeMut::Node48(_) => 2,
+            NextNodeMut::Node256(_) => 3,
+            NextNodeMut::Value(_) => 4,
+        }
+    }
+}
+
+} // verus!
+
+impl TaggedPointer {
+    #[cfg(test)]
+    pub(crate) const fn from_test_raw(raw: usize) -> Self {
+        Self {
+            ptr: raw.wrapping_add(1) << 3,
+        }
+    }
+
+    /// Safety: `self` must point to a live leaf allocation owned by this tagged pointer.
+    pub(crate) unsafe fn into_value(self) -> KVPair {
+        let ptr = self.untagged_ptr() as *mut KVData;
+        unsafe { KVPair::from_raw(ptr) }
+    }
+
+    /// Safety: `self` must point to a live node allocation owned by this tagged pointer.
+    pub(crate) unsafe fn drop_node(self) {
+        let ptr = self.untagged_ptr();
+        unsafe {
+            match self.tag() {
+                0 => drop(Box::from_raw(ptr as *mut Node4)),
+                1 => drop(Box::from_raw(ptr as *mut Node16)),
+                2 => drop(Box::from_raw(ptr as *mut Node48)),
+                3 => drop(Box::from_raw(ptr as *mut Node256)),
+                4 => unreachable!("value pointers cannot be dropped as nodes"),
+                _ => unreachable!("TaggedPointer type invariant guarantees a valid tag"),
+            }
+        }
+    }
 }
