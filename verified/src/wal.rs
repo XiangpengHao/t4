@@ -8,7 +8,7 @@ use crate::le_bytes::{
     u16_from_le_bytes, u32_from_le_bytes, u64_from_le_bytes, write_u16_le, write_u32_le,
     write_u64_le,
 };
-use crate::{copy_into_page, PAGE_SIZE};
+use crate::{PAGE_SIZE, copy_into_page};
 
 const _: [(); WAL_PAGE_HEADER_SIZE] = [(); std::mem::size_of::<WalPageHeader>()];
 
@@ -433,10 +433,11 @@ impl WalPage {
         ensures
             result == self.entry_count_spec(),
     {
-        let result = u32_from_le_bytes(
-            slice_subrange(self.bytes.as_slice(), OFF_ENTRY_COUNT, OFF_ENTRY_COUNT + 4),
-        );
-        result
+        u32_from_le_bytes(slice_subrange(
+            self.bytes.as_slice(),
+            OFF_ENTRY_COUNT,
+            OFF_ENTRY_COUNT + 4,
+        ))
     }
 
     fn magic(&self) -> [u8; 4] {
@@ -456,10 +457,11 @@ impl WalPage {
             WAL_PAGE_HEADER_SIZE as u32 <= result,
             result <= PAGE_SIZE as u32,
     {
-        let result = u32_from_le_bytes(
-            slice_subrange(self.bytes.as_slice(), OFF_USED_BYTES, OFF_USED_BYTES + 4),
-        );
-        result
+        u32_from_le_bytes(slice_subrange(
+            self.bytes.as_slice(),
+            OFF_USED_BYTES,
+            OFF_USED_BYTES + 4,
+        ))
     }
 
     fn version(&self) -> u16 {

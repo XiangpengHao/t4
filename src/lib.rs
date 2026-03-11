@@ -1,8 +1,11 @@
-mod store;
-mod error;
+#![allow(clippy::assign_op_pattern)] // verus doesn't support assign op pattern
+
+pub mod art;
 mod buffer;
+mod error;
 mod io_task;
 mod io_worker;
+mod store;
 mod sync;
 mod wal;
 
@@ -11,8 +14,8 @@ use std::{num::NonZeroU32, path::Path};
 use crate::store::T4Store;
 use crate::sync::Arc;
 
-pub use store::MountOptions;
 pub use error::{Error, Result};
+pub use store::MountOptions;
 use verified::input_kv::{T4Key, T4KeyRef, T4Value};
 
 pub const PAGE_SIZE: usize = 4096;

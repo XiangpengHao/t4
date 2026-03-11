@@ -5,7 +5,7 @@ use vstd::prelude::*;
 
 use crate::input_kv::{T4Key, ValueRef};
 use crate::wal::{WalEntryRef, WalEntryState, WalPage};
-use crate::{align_up_u64, allocate_next_lsn, PAGE_SIZE};
+use crate::{PAGE_SIZE, align_up_u64, allocate_next_lsn};
 
 verus! {
 
@@ -61,10 +61,13 @@ impl ReplayState {
         let previous_lsn = self.previous_lsn;
         let mut index = self.index;
 
-        if let Some(prev) = previous_lsn {
-            if entry.lsn <= prev {
-                return Err(ReplayError::NonMonotonicLsn);
-            }
+        match previous_lsn {
+            Some(prev) => {
+                if entry.lsn <= prev {
+                    return Err(ReplayError::NonMonotonicLsn);
+                }
+            },
+            None => {},
         }
         let max_data_end = match entry.state() {
             WalEntryState::Live => {
