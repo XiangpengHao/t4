@@ -261,11 +261,22 @@ impl ArtIndex {
     pub fn delete(&mut self, key: &[u8]) -> Option<KVPair> {
         let terminated_key = terminated_key_owned(key);
         let result = delete_at(self.root, &terminated_key, 0);
-        self.root = result.replacement;
-        result.removed.map(|removed| match removed.next_node() {
-            NextNode::Value(value_ptr) => unsafe { KVPair::from_raw(value_ptr) },
-            _ => unreachable!(),
-        })
+        match result {
+            DeleteResult::NotFound { current } => {
+                self.root = current;
+                None
+            }
+            DeleteResult::Deleted {
+                removed,
+                replacement,
+            } => {
+                self.root = replacement;
+                Some(match removed.next_node() {
+                    NextNode::Value(value_ptr) => unsafe { KVPair::from_raw(value_ptr) },
+                    _ => unreachable!(),
+                })
+            }
+        }
     }
 }
 
@@ -350,9 +361,9 @@ pub(crate) fn split_node(
 
 verus! {
 
-pub(crate) struct DeleteResult {
-    pub(crate) removed: Option<TaggedPointer>,
-    pub(crate) replacement: Option<TaggedPointer>,
+pub(crate) enum DeleteResult {
+    NotFound { current: Option<TaggedPointer> },
+    Deleted { removed: TaggedPointer, replacement: Option<TaggedPointer> },
 }
 
 pub assume_specification[ delete_at ](
@@ -395,23 +406,19 @@ pub(crate) fn delete_at(
     depth: usize,
 ) -> DeleteResult {
     let Some(current) = current else {
-        return DeleteResult {
-            removed: None,
-            replacement: None,
-        };
+        return DeleteResult::NotFound { current: None };
     };
 
     match current.next_node() {
         NextNode::Value(value_ptr) => {
             if terminated_key_owned(unsafe { &*value_ptr }.key()) != terminated_key {
-                return DeleteResult {
-                    removed: None,
-                    replacement: Some(current),
+                return DeleteResult::NotFound {
+                    current: Some(current),
                 };
             }
 
-            DeleteResult {
-                removed: Some(current),
+            DeleteResult::Deleted {
+                removed: current,
                 replacement: None,
             }
         }
