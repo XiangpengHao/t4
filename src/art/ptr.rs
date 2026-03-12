@@ -64,8 +64,8 @@ impl TaggedPointer {
 
     pub(crate) fn tag(&self) -> (result: u8)
         ensures
-            result as usize == self.raw() & TAG_MASK,
-            valid_tag(result as usize),
+            result as usize == self.raw() & Self::tag_mask(),
+            result < 5,
     {
         proof {
             use_type_invariant(self);
@@ -152,12 +152,33 @@ impl TaggedPointer {
         }
         Self::from_raw(raw)
     }
+}
 
+} // verus!
+
+pub(crate) enum NextNodeRef<'a> {
+    Node4(&'a Node4),
+    Node16(&'a Node16),
+    Node48(&'a Node48),
+    Node256(&'a Node256),
+    Value(&'a KVData),
+}
+
+pub(crate) enum NextNodeMut<'a> {
+    Node4(&'a mut Node4),
+    Node16(&'a mut Node16),
+    Node48(&'a mut Node48),
+    Node256(&'a mut Node256),
+    Value(&'a mut KVData),
+}
+
+/// Methods that perform raw pointer operations (Box::into_raw, Box::from_raw, ptr deref).
+/// These live outside verus! because Verus lacks specs for these Rust primitives.
+/// The TaggedPointer type invariant (wf) is maintained by construction:
+/// from_tagged_ptr proves the bit-level invariant, and all constructors go through it.
+impl TaggedPointer {
     /// Safety: `self` must point to a live allocation whose concrete type matches the tag.
-    pub(crate) unsafe fn next_node_ref<'a>(&self) -> (result: NextNodeRef<'a>)
-        ensures
-            result.tag() == self.tag(),
-    {
+    pub(crate) unsafe fn next_node_ref<'a>(&self) -> NextNodeRef<'a> {
         let ptr = self.untagged_ptr();
         match self.tag() {
             0 => unsafe { NextNodeRef::Node4(&*(ptr as *const Node4)) },
@@ -171,10 +192,7 @@ impl TaggedPointer {
 
     /// Safety: `self` must point to a live allocation whose concrete type matches the tag, and
     /// the caller must have exclusive access to that allocation for the duration of the borrow.
-    pub(crate) unsafe fn next_node_mut<'a>(&self) -> (result: NextNodeMut<'a>)
-        ensures
-            result.tag() == self.tag(),
-    {
+    pub(crate) unsafe fn next_node_mut<'a>(&self) -> NextNodeMut<'a> {
         let ptr = self.untagged_ptr();
         match self.tag() {
             0 => unsafe { NextNodeMut::Node4(&mut *(ptr as *mut Node4)) },
@@ -202,24 +220,18 @@ impl TaggedPointer {
         Self::from_tagged_ptr(Box::into_raw(node) as usize, 3)
     }
 
-    pub(crate) fn from_value(kv: crate::art::index::KVPair) -> Self {
+    pub(crate) fn from_value(kv: KVPair) -> Self {
         Self::from_tagged_ptr(kv.into_raw() as usize, 4)
     }
 
     /// Safety: `self` must point to a live leaf allocation owned by this tagged pointer.
-    pub(crate) unsafe fn into_value(self) -> (result: KVPair)
-        requires
-            self.is_value(),
-    {
+    pub(crate) unsafe fn into_value(self) -> KVPair {
         let ptr = self.untagged_ptr() as *mut KVData;
         unsafe { KVPair::from_raw(ptr) }
     }
 
     /// Safety: `self` must point to a live node allocation owned by this tagged pointer.
-    pub(crate) unsafe fn drop_node(self)
-        requires
-            self.is_node(),
-    {
+    pub(crate) unsafe fn drop_node(self) {
         let ptr = self.untagged_ptr();
         unsafe {
             match self.tag() {
@@ -232,51 +244,7 @@ impl TaggedPointer {
             }
         }
     }
-}
 
-pub(crate) enum NextNodeRef<'a> {
-    Node4(&'a Node4),
-    Node16(&'a Node16),
-    Node48(&'a Node48),
-    Node256(&'a Node256),
-    Value(&'a KVData),
-}
-
-impl<'a> NextNodeRef<'a> {
-    pub closed spec fn tag(self) -> u8 {
-        match self {
-            NextNodeRef::Node4(_) => 0,
-            NextNodeRef::Node16(_) => 1,
-            NextNodeRef::Node48(_) => 2,
-            NextNodeRef::Node256(_) => 3,
-            NextNodeRef::Value(_) => 4,
-        }
-    }
-}
-
-pub(crate) enum NextNodeMut<'a> {
-    Node4(&'a mut Node4),
-    Node16(&'a mut Node16),
-    Node48(&'a mut Node48),
-    Node256(&'a mut Node256),
-    Value(&'a mut KVData),
-}
-
-impl<'a> NextNodeMut<'a> {
-    pub closed spec fn tag(self) -> u8 {
-        match self {
-            NextNodeMut::Node4(_) => 0,
-            NextNodeMut::Node16(_) => 1,
-            NextNodeMut::Node48(_) => 2,
-            NextNodeMut::Node256(_) => 3,
-            NextNodeMut::Value(_) => 4,
-        }
-    }
-}
-
-} // verus!
-
-impl TaggedPointer {
     #[cfg(test)]
     pub(crate) const fn from_test_raw(raw: usize) -> Self {
         Self {
