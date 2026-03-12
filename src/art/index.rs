@@ -1,17 +1,18 @@
 use std::{
     alloc::Layout,
-    ptr::{NonNull, copy_nonoverlapping},
+    ptr::{copy_nonoverlapping, NonNull},
 };
 
 use vstd::prelude::*;
 
 use crate::art::{
-    ArtNode, InsertStep, delete_from_node, get_from_node,
-    n4::Node4,
+    delete_from_node, get_from_node,
     n16::Node16,
-    n48::Node48,
     n256::Node256,
-    ptr::{NextNode, TaggedPointer},
+    n4::Node4,
+    n48::Node48,
+    ptr::{NextNodeMut, NextNodeRef, TaggedPointer},
+    ArtNode, InsertStep,
 };
 
 pub struct ArtIndex {
@@ -26,22 +27,22 @@ impl ArtIndex {
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Option<KVPair> {
         let terminated_key = terminated_key_owned(key);
         let value_ptr = TaggedPointer::from_value(KVPair::new(key, value));
-        let mut parent = Parent::Root(std::ptr::addr_of_mut!(self.root));
         let mut current = self.root;
+        let mut parent = Parent::Root(&mut self.root);
         let mut depth = 0;
 
         loop {
             let Some(current_ptr) = current else {
-                update_parent(parent, value_ptr);
+                parent.update(value_ptr);
                 return None;
             };
 
-            match current_ptr.next_node() {
-                NextNode::Value(existing_ptr) => {
-                    let terminated_existing = terminated_key_owned(unsafe { &*existing_ptr }.key());
+            match unsafe { current_ptr.next_node_mut() } {
+                NextNodeMut::Value(existing) => {
+                    let terminated_existing = terminated_key_owned(existing.key());
                     if terminated_existing == terminated_key {
-                        update_parent(parent, value_ptr);
-                        return Some(unsafe { KVPair::from_raw(existing_ptr) });
+                        parent.update(value_ptr);
+                        return Some(unsafe { current_ptr.into_value() });
                     }
 
                     let shared =
@@ -53,11 +54,10 @@ impl ArtIndex {
                         terminated_key[depth + shared],
                         value_ptr,
                     );
-                    update_parent(parent, split);
+                    parent.update(split);
                     return None;
                 }
-                NextNode::Node4(node_ptr) => {
-                    let node = unsafe { &mut *node_ptr };
+                NextNodeMut::Node4(node) => {
                     let step = node.insert_step(&terminated_key, value_ptr, depth);
                     match step {
                         InsertStep::Split { matched } => {
@@ -69,7 +69,7 @@ impl ArtIndex {
                                 depth,
                                 matched,
                             );
-                            update_parent(parent, replacement);
+                            parent.update(replacement);
                             return None;
                         }
                         InsertStep::Descend {
@@ -77,7 +77,7 @@ impl ArtIndex {
                             child,
                             next_depth,
                         } => {
-                            parent = Parent::Node4(node_ptr, edge);
+                            parent = Parent::Node4(node, edge);
                             current = Some(child);
                             depth = next_depth;
                         }
@@ -85,20 +85,17 @@ impl ArtIndex {
                             prefix_depth,
                             prefix_len,
                         } => {
-                            let replacement = unsafe {
-                                (&*node_ptr)
-                                    .grow(&terminated_key[prefix_depth..prefix_depth + prefix_len])
-                            };
-                            update_parent(parent, replacement);
-                            drop(unsafe { Box::from_raw(node_ptr) });
+                            let replacement =
+                                node.grow(&terminated_key[prefix_depth..prefix_depth + prefix_len]);
+                            parent.update(replacement);
+                            unsafe { current_ptr.drop_node() };
                             current = Some(replacement);
                             depth = prefix_depth;
                         }
                         InsertStep::Done => return None,
                     }
                 }
-                NextNode::Node16(node_ptr) => {
-                    let node = unsafe { &mut *node_ptr };
+                NextNodeMut::Node16(node) => {
                     let step = node.insert_step(&terminated_key, value_ptr, depth);
                     match step {
                         InsertStep::Split { matched } => {
@@ -110,7 +107,7 @@ impl ArtIndex {
                                 depth,
                                 matched,
                             );
-                            update_parent(parent, replacement);
+                            parent.update(replacement);
                             return None;
                         }
                         InsertStep::Descend {
@@ -118,7 +115,7 @@ impl ArtIndex {
                             child,
                             next_depth,
                         } => {
-                            parent = Parent::Node16(node_ptr, edge);
+                            parent = Parent::Node16(node, edge);
                             current = Some(child);
                             depth = next_depth;
                         }
@@ -126,20 +123,17 @@ impl ArtIndex {
                             prefix_depth,
                             prefix_len,
                         } => {
-                            let replacement = unsafe {
-                                (&*node_ptr)
-                                    .grow(&terminated_key[prefix_depth..prefix_depth + prefix_len])
-                            };
-                            update_parent(parent, replacement);
-                            drop(unsafe { Box::from_raw(node_ptr) });
+                            let replacement =
+                                node.grow(&terminated_key[prefix_depth..prefix_depth + prefix_len]);
+                            parent.update(replacement);
+                            unsafe { current_ptr.drop_node() };
                             current = Some(replacement);
                             depth = prefix_depth;
                         }
                         InsertStep::Done => return None,
                     }
                 }
-                NextNode::Node48(node_ptr) => {
-                    let node = unsafe { &mut *node_ptr };
+                NextNodeMut::Node48(node) => {
                     let step = node.insert_step(&terminated_key, value_ptr, depth);
                     match step {
                         InsertStep::Split { matched } => {
@@ -151,7 +145,7 @@ impl ArtIndex {
                                 depth,
                                 matched,
                             );
-                            update_parent(parent, replacement);
+                            parent.update(replacement);
                             return None;
                         }
                         InsertStep::Descend {
@@ -159,7 +153,7 @@ impl ArtIndex {
                             child,
                             next_depth,
                         } => {
-                            parent = Parent::Node48(node_ptr, edge);
+                            parent = Parent::Node48(node, edge);
                             current = Some(child);
                             depth = next_depth;
                         }
@@ -167,20 +161,17 @@ impl ArtIndex {
                             prefix_depth,
                             prefix_len,
                         } => {
-                            let replacement = unsafe {
-                                (&*node_ptr)
-                                    .grow(&terminated_key[prefix_depth..prefix_depth + prefix_len])
-                            };
-                            update_parent(parent, replacement);
-                            drop(unsafe { Box::from_raw(node_ptr) });
+                            let replacement =
+                                node.grow(&terminated_key[prefix_depth..prefix_depth + prefix_len]);
+                            parent.update(replacement);
+                            unsafe { current_ptr.drop_node() };
                             current = Some(replacement);
                             depth = prefix_depth;
                         }
                         InsertStep::Done => return None,
                     }
                 }
-                NextNode::Node256(node_ptr) => {
-                    let node = unsafe { &mut *node_ptr };
+                NextNodeMut::Node256(node) => {
                     let step = node.insert_step(&terminated_key, value_ptr, depth);
                     match step {
                         InsertStep::Split { matched } => {
@@ -192,7 +183,7 @@ impl ArtIndex {
                                 depth,
                                 matched,
                             );
-                            update_parent(parent, replacement);
+                            parent.update(replacement);
                             return None;
                         }
                         InsertStep::Descend {
@@ -200,7 +191,7 @@ impl ArtIndex {
                             child,
                             next_depth,
                         } => {
-                            parent = Parent::Node256(node_ptr, edge);
+                            parent = Parent::Node256(node, edge);
                             current = Some(child);
                             depth = next_depth;
                         }
@@ -221,36 +212,31 @@ impl ArtIndex {
 
         loop {
             let ptr_value = ptr?;
-            match ptr_value.next_node() {
-                NextNode::Value(value_ptr) => {
-                    let leaf = unsafe { &*value_ptr };
+            match unsafe { ptr_value.next_node_ref() } {
+                NextNodeRef::Value(leaf) => {
                     return if terminated_key_owned(leaf.key()) == terminated_key {
                         Some((leaf.key(), leaf.value()))
                     } else {
                         None
                     };
                 }
-                NextNode::Node4(node_ptr) => {
-                    let (next_ptr, next_depth) =
-                        unsafe { get_from_node(&*node_ptr, &terminated_key, depth) }?;
+                NextNodeRef::Node4(node) => {
+                    let (next_ptr, next_depth) = get_from_node(node, &terminated_key, depth)?;
                     ptr = Some(next_ptr);
                     depth = next_depth;
                 }
-                NextNode::Node16(node_ptr) => {
-                    let (next_ptr, next_depth) =
-                        unsafe { get_from_node(&*node_ptr, &terminated_key, depth) }?;
+                NextNodeRef::Node16(node) => {
+                    let (next_ptr, next_depth) = get_from_node(node, &terminated_key, depth)?;
                     ptr = Some(next_ptr);
                     depth = next_depth;
                 }
-                NextNode::Node48(node_ptr) => {
-                    let (next_ptr, next_depth) =
-                        unsafe { get_from_node(&*node_ptr, &terminated_key, depth) }?;
+                NextNodeRef::Node48(node) => {
+                    let (next_ptr, next_depth) = get_from_node(node, &terminated_key, depth)?;
                     ptr = Some(next_ptr);
                     depth = next_depth;
                 }
-                NextNode::Node256(node_ptr) => {
-                    let (next_ptr, next_depth) =
-                        unsafe { get_from_node(&*node_ptr, &terminated_key, depth) }?;
+                NextNodeRef::Node256(node) => {
+                    let (next_ptr, next_depth) = get_from_node(node, &terminated_key, depth)?;
                     ptr = Some(next_ptr);
                     depth = next_depth;
                 }
@@ -261,11 +247,19 @@ impl ArtIndex {
     pub fn delete(&mut self, key: &[u8]) -> Option<KVPair> {
         let terminated_key = terminated_key_owned(key);
         let result = delete_at(self.root, &terminated_key, 0);
-        self.root = result.replacement;
-        result.removed.map(|removed| match removed.next_node() {
-            NextNode::Value(value_ptr) => unsafe { KVPair::from_raw(value_ptr) },
-            _ => unreachable!(),
-        })
+        match result {
+            DeleteResult::NotFound { current } => {
+                self.root = current;
+                None
+            }
+            DeleteResult::Deleted {
+                removed,
+                replacement,
+            } => {
+                self.root = replacement;
+                Some(unsafe { removed.into_value() })
+            }
+        }
     }
 }
 
@@ -277,26 +271,28 @@ impl Default for ArtIndex {
 
 unsafe fn free_subtree(ptr: TaggedPointer) {
     unsafe {
-        match ptr.next_node() {
-            NextNode::Value(leaf_ptr) => {
-                drop(KVPair::from_raw(leaf_ptr));
+        let raw = ptr.untagged_ptr();
+        match ptr.tag() {
+            4 => {
+                drop(ptr.into_value());
             }
-            NextNode::Node4(node_ptr) => {
-                let node = Box::from_raw(node_ptr);
+            0 => {
+                let node = Box::from_raw(raw as *mut Node4);
                 node.for_each_child(|_, child| free_subtree(child));
             }
-            NextNode::Node16(node_ptr) => {
-                let node = Box::from_raw(node_ptr);
+            1 => {
+                let node = Box::from_raw(raw as *mut Node16);
                 node.for_each_child(|_, child| free_subtree(child));
             }
-            NextNode::Node48(node_ptr) => {
-                let node = Box::from_raw(node_ptr);
+            2 => {
+                let node = Box::from_raw(raw as *mut Node48);
                 node.for_each_child(|child| free_subtree(child));
             }
-            NextNode::Node256(node_ptr) => {
-                let node = Box::from_raw(node_ptr);
+            3 => {
+                let node = Box::from_raw(raw as *mut Node256);
                 node.for_each_child(|child| free_subtree(child));
             }
+            _ => unreachable!("TaggedPointer type invariant guarantees a valid tag"),
         }
     }
 }
@@ -309,22 +305,23 @@ impl Drop for ArtIndex {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Parent {
-    Root(*mut Option<TaggedPointer>),
-    Node4(*mut Node4, u8),
-    Node16(*mut Node16, u8),
-    Node48(*mut Node48, u8),
-    Node256(*mut Node256, u8),
+enum Parent<'a> {
+    Root(&'a mut Option<TaggedPointer>),
+    Node4(&'a mut Node4, u8),
+    Node16(&'a mut Node16, u8),
+    Node48(&'a mut Node48, u8),
+    Node256(&'a mut Node256, u8),
 }
 
-fn update_parent(parent: Parent, value: TaggedPointer) {
-    match parent {
-        Parent::Root(slot) => unsafe { *slot = Some(value) },
-        Parent::Node4(node_ptr, edge) => unsafe { (&mut *node_ptr).replace_child(edge, value) },
-        Parent::Node16(node_ptr, edge) => unsafe { (&mut *node_ptr).replace_child(edge, value) },
-        Parent::Node48(node_ptr, edge) => unsafe { (&mut *node_ptr).replace_child(edge, value) },
-        Parent::Node256(node_ptr, edge) => unsafe { (&mut *node_ptr).replace_child(edge, value) },
+impl Parent<'_> {
+    fn update(&mut self, value: TaggedPointer) {
+        match self {
+            Parent::Root(slot) => **slot = Some(value),
+            Parent::Node4(node, edge) => (**node).replace_child(*edge, value),
+            Parent::Node16(node, edge) => (**node).replace_child(*edge, value),
+            Parent::Node48(node, edge) => (**node).replace_child(*edge, value),
+            Parent::Node256(node, edge) => (**node).replace_child(*edge, value),
+        }
     }
 }
 
@@ -350,9 +347,9 @@ pub(crate) fn split_node(
 
 verus! {
 
-pub(crate) struct DeleteResult {
-    pub(crate) removed: Option<TaggedPointer>,
-    pub(crate) replacement: Option<TaggedPointer>,
+pub(crate) enum DeleteResult {
+    NotFound { current: Option<TaggedPointer> },
+    Deleted { removed: TaggedPointer, replacement: Option<TaggedPointer> },
 }
 
 pub assume_specification[ delete_at ](
@@ -395,38 +392,26 @@ pub(crate) fn delete_at(
     depth: usize,
 ) -> DeleteResult {
     let Some(current) = current else {
-        return DeleteResult {
-            removed: None,
-            replacement: None,
-        };
+        return DeleteResult::NotFound { current: None };
     };
 
-    match current.next_node() {
-        NextNode::Value(value_ptr) => {
-            if terminated_key_owned(unsafe { &*value_ptr }.key()) != terminated_key {
-                return DeleteResult {
-                    removed: None,
-                    replacement: Some(current),
+    match unsafe { current.next_node_mut() } {
+        NextNodeMut::Value(value) => {
+            if terminated_key_owned(value.key()) != terminated_key {
+                return DeleteResult::NotFound {
+                    current: Some(current),
                 };
             }
 
-            DeleteResult {
-                removed: Some(current),
+            DeleteResult::Deleted {
+                removed: current,
                 replacement: None,
             }
         }
-        NextNode::Node4(node_ptr) => unsafe {
-            delete_from_node(&mut *node_ptr, current, terminated_key, depth)
-        },
-        NextNode::Node16(node_ptr) => unsafe {
-            delete_from_node(&mut *node_ptr, current, terminated_key, depth)
-        },
-        NextNode::Node48(node_ptr) => unsafe {
-            delete_from_node(&mut *node_ptr, current, terminated_key, depth)
-        },
-        NextNode::Node256(node_ptr) => unsafe {
-            delete_from_node(&mut *node_ptr, current, terminated_key, depth)
-        },
+        NextNodeMut::Node4(node) => delete_from_node(node, current, terminated_key, depth),
+        NextNodeMut::Node16(node) => delete_from_node(node, current, terminated_key, depth),
+        NextNodeMut::Node48(node) => delete_from_node(node, current, terminated_key, depth),
+        NextNodeMut::Node256(node) => delete_from_node(node, current, terminated_key, depth),
     }
 }
 

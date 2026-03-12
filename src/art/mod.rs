@@ -2,6 +2,7 @@ use crate::art::index::{DeleteResult, common_prefix_len, delete_at};
 use crate::art::ptr::TaggedPointer;
 use vstd::prelude::*;
 use vstd::slice::slice_subrange;
+mod version_lock;
 
 pub use index::ArtIndex;
 
@@ -154,30 +155,24 @@ pub(crate) fn delete_from_node(
         slice_subrange(terminated_key, depth, terminated_key.len()),
     );
     if matched != prefix_len {
-        return DeleteResult {
-            removed: None,
-            replacement: Some(self_ptr),
-        };
+        return DeleteResult::NotFound { current: Some(self_ptr) };
     }
 
     let depth = depth + prefix_len;
     let edge = terminated_key[depth];
     let Some(child) = node.get_child(edge) else {
-        return DeleteResult {
-            removed: None,
-            replacement: Some(self_ptr),
-        };
+        return DeleteResult::NotFound { current: Some(self_ptr) };
     };
 
     let child_result = delete_at(Some(child), terminated_key, depth + 1);
-    let Some(removed) = child_result.removed else {
-        return DeleteResult {
-            removed: None,
-            replacement: Some(self_ptr),
-        };
+    let DeleteResult::Deleted {
+        removed: removed_ptr,
+        replacement: child_replacement,
+    } = child_result else {
+        return DeleteResult::NotFound { current: Some(self_ptr) };
     };
 
-    if let Some(replacement) = child_result.replacement {
+    if let Some(replacement) = child_replacement {
         node.replace_child(edge, replacement);
     } else {
         let _ = node.remove_child(edge);
@@ -189,8 +184,8 @@ pub(crate) fn delete_from_node(
         Some(self_ptr)
     };
 
-    DeleteResult {
-        removed: Some(removed),
+    DeleteResult::Deleted {
+        removed: removed_ptr,
         replacement,
     }
 }
