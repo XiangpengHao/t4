@@ -203,7 +203,6 @@ impl ArtNode for Node16 {
 }
 
 } // verus!
-
 impl Node16 {
     pub(crate) fn for_each_child(&self, f: impl FnMut(u8, TaggedPointer)) {
         self.0.for_each_child(f);

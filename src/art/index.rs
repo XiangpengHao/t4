@@ -1,18 +1,17 @@
 use std::{
     alloc::Layout,
-    ptr::{copy_nonoverlapping, NonNull},
+    ptr::{NonNull, copy_nonoverlapping},
 };
 
 use vstd::prelude::*;
 
 use crate::art::{
-    delete_from_node, get_from_node,
-    n16::Node16,
-    n256::Node256,
+    ArtNode, InsertStep, delete_from_node, get_from_node,
     n4::Node4,
+    n16::Node16,
     n48::Node48,
+    n256::Node256,
     ptr::{NextNodeMut, NextNodeRef, TaggedPointer},
-    ArtNode, InsertStep,
 };
 
 pub struct ArtIndex {
@@ -356,7 +355,8 @@ pub assume_specification[ delete_at ](
     current: Option<TaggedPointer>,
     terminated_key: &[u8],
     depth: usize,
-) -> (result: DeleteResult);
+) -> (result: DeleteResult)
+;
 
 pub(crate) fn common_prefix_len(a: &[u8], b: &[u8]) -> (result: usize)
     ensures
@@ -364,7 +364,11 @@ pub(crate) fn common_prefix_len(a: &[u8], b: &[u8]) -> (result: usize)
         result <= b.len(),
         forall|i: int| 0 <= i < result ==> a[i] == b[i],
 {
-    let limit = if a.len() < b.len() { a.len() } else { b.len() };
+    let limit = if a.len() < b.len() {
+        a.len()
+    } else {
+        b.len()
+    };
     let mut idx = 0usize;
     while idx < limit
         invariant
@@ -385,7 +389,6 @@ pub(crate) fn common_prefix_len(a: &[u8], b: &[u8]) -> (result: usize)
 }
 
 } // verus!
-
 pub(crate) fn delete_at(
     current: Option<TaggedPointer>,
     terminated_key: &[u8],

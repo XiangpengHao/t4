@@ -48,9 +48,8 @@ impl Node48 {
             0 <= key < 256 ==> self.child_idx[key] == EMPTY_CHILD || (self.child_idx[key] as int)
                 < self.live_len()
         &&& forall|key: int|
-            0 <= key < 256 && self.child_idx[key] != EMPTY_CHILD ==> #[trigger] TaggedPointer::wf_raw(
-                self.children[self.child_idx[key] as int],
-            )
+            0 <= key < 256 && self.child_idx[key] != EMPTY_CHILD
+                ==> #[trigger] TaggedPointer::wf_raw(self.children[self.child_idx[key] as int])
         &&& forall|left: int, right: int|
             0 <= left < 256 && 0 <= right < 256 && self.child_idx[left] != EMPTY_CHILD
                 && self.child_idx[left] == self.child_idx[right] ==> left == right
@@ -65,11 +64,7 @@ impl Node48 {
             result.live_len() == 0,
     {
         let meta = NodeMeta::new(NodeType::Node48, prefix);
-        Self {
-            meta,
-            child_idx: [EMPTY_CHILD; 256],
-            children: [0; 48],
-        }
+        Self { meta, child_idx: [EMPTY_CHILD;256], children: [0;48] }
     }
 
     fn key_for_slot(&self, target: u8) -> (result: u8)
@@ -112,7 +107,6 @@ impl Node48 {
         if child_idx == EMPTY_CHILD {
             return None;
         }
-
         Some(TaggedPointer::from_raw(self.children[child_idx as usize]))
     }
 
@@ -133,19 +127,17 @@ impl Node48 {
 
         proof {
             assert forall|idx: int|
-                0 <= idx < 256 && self.child_idx[idx] != EMPTY_CHILD
-                    implies #[trigger] TaggedPointer::wf_raw(
-                    self.children[self.child_idx[idx] as int],
-                ) by {
+                0 <= idx < 256 && self.child_idx[idx]
+                    != EMPTY_CHILD implies #[trigger] TaggedPointer::wf_raw(
+                self.children[self.child_idx[idx] as int],
+            ) by {
                 if idx == key as int {
                     assert(self.children[self.child_idx[idx] as int] == value_raw);
                 }
             };
-            assert forall|s: int|
-                0 <= s < self.live_len() implies self.slot_has_key(s) by {
+            assert forall|s: int| 0 <= s < self.live_len() implies self.slot_has_key(s) by {
                 assert(old(self).slot_has_key(s));
-                let w = choose|w: int|
-                    0 <= w < 256 && old(self).child_idx[w] as int == s;
+                let w = choose|w: int| 0 <= w < 256 && old(self).child_idx[w] as int == s;
                 assert(self.child_idx[w] as int == s);
             };
             assert(self.children[slot as int] == value_raw);
@@ -172,26 +164,27 @@ impl Node48 {
         self.meta.increment_len();
 
         proof {
-            assert forall|idx: int| #![auto] 0 <= idx < 256 implies self.child_idx[idx] == (
-                if idx == key as int { len as u8 } else { old(self).child_idx[idx] }
-            ) by {};
+            assert forall|idx: int| #![auto] 0 <= idx < 256 implies self.child_idx[idx] == (if idx
+                == key as int {
+                len as u8
+            } else {
+                old(self).child_idx[idx]
+            }) by {};
             assert forall|idx: int|
-                0 <= idx < 256 && self.child_idx[idx] != EMPTY_CHILD
-                    implies #[trigger] TaggedPointer::wf_raw(
-                    self.children[self.child_idx[idx] as int],
-                ) by {
+                0 <= idx < 256 && self.child_idx[idx]
+                    != EMPTY_CHILD implies #[trigger] TaggedPointer::wf_raw(
+                self.children[self.child_idx[idx] as int],
+            ) by {
                 if idx == key as int {
                     assert(self.children[len as int] == value_raw);
                 }
             };
-            assert forall|s: int|
-                0 <= s < self.live_len() implies self.slot_has_key(s) by {
+            assert forall|s: int| 0 <= s < self.live_len() implies self.slot_has_key(s) by {
                 if s == len as int {
                     assert(self.child_idx[key as int] as int == s);
                 } else {
                     assert(old(self).slot_has_key(s));
-                    let w = choose|w: int|
-                        0 <= w < 256 && old(self).child_idx[w] as int == s;
+                    let w = choose|w: int| 0 <= w < 256 && old(self).child_idx[w] as int == s;
                     assert(self.child_idx[w] as int == s);
                 }
             };
@@ -266,24 +259,22 @@ impl Node48 {
 
         proof {
             // slot_has_key: provide existential witnesses
-            assert forall|s: int|
-                0 <= s < self.live_len() implies self.slot_has_key(s) by {
+            assert forall|s: int| 0 <= s < self.live_len() implies self.slot_has_key(s) by {
                 if moved_key.is_some() && s == slot as int {
                     assert(self.child_idx[moved_key.unwrap() as int] as int == s);
                 } else {
                     assert(old(self).slot_has_key(s));
-                    let w = choose|w: int|
-                        0 <= w < 256 && old(self).child_idx[w] as int == s;
+                    let w = choose|w: int| 0 <= w < 256 && old(self).child_idx[w] as int == s;
                     assert(self.child_idx[w] == old(self).child_idx[w]);
                 }
             };
             // maps_to: new → old
-            assert forall|other_key: u8, raw: usize|
-                self.maps_to(other_key, raw) implies old(self).maps_to(other_key, raw)
-                    && other_key != key by {
+            assert forall|other_key: u8, raw: usize| self.maps_to(other_key, raw) implies old(
+                self,
+            ).maps_to(other_key, raw) && other_key != key by {
                 let w = choose|s: int|
-                    0 <= s < 48 && self.child_idx[other_key as int] as int == s
-                        && self.children[s] == raw;
+                    0 <= s < 48 && self.child_idx[other_key as int] as int == s && self.children[s]
+                        == raw;
                 if moved_key.is_some() && other_key as int == moved_key.unwrap() as int {
                     assert(raw == old(self).children[last_slot as int]);
                 }
@@ -291,12 +282,13 @@ impl Node48 {
             // maps_to: old → new
             assert forall|other_key: u8, raw: usize|
                 other_key != key && old(self).maps_to(other_key, raw) implies self.maps_to(
-                    other_key,
-                    raw,
-                ) by {
+                other_key,
+                raw,
+            ) by {
                 let w = choose|s: int|
-                    0 <= s < 48 && old(self).child_idx[other_key as int] as int == s
-                        && old(self).children[s] == raw;
+                    0 <= s < 48 && old(self).child_idx[other_key as int] as int == s && old(
+                        self,
+                    ).children[s] == raw;
                 if moved_key.is_some() && other_key as int == moved_key.unwrap() as int {
                     assert(self.child_idx[other_key as int] == child_idx);
                     assert(self.children[child_idx as int] == raw);
@@ -418,24 +410,14 @@ impl ArtNode for Node48 {
         if matched != prefix_len {
             return InsertStep::Split { matched };
         }
-
         let depth = depth + prefix_len;
         let edge = terminated_key[depth];
         if let Some(child) = self.get(edge) {
-            return InsertStep::Descend {
-                edge,
-                child,
-                next_depth: depth + 1,
-            };
+            return InsertStep::Descend { edge, child, next_depth: depth + 1 };
         }
-
         if self.is_full() {
-            return InsertStep::Grow {
-                prefix_depth,
-                prefix_len,
-            };
+            return InsertStep::Grow { prefix_depth, prefix_len };
         }
-
         let _ = self.insert(edge, value_ptr);
         InsertStep::Done
     }
@@ -467,11 +449,11 @@ impl ArtNode for Node48 {
     fn set_prefix(&mut self, prefix: &[u8]) {
         self.meta.set_prefix(prefix);
         proof {
-            assert forall|slot: int|
-                0 <= slot < self.live_len() implies self.slot_has_key(slot) by {
+            assert forall|slot: int| 0 <= slot < self.live_len() implies self.slot_has_key(
+                slot,
+            ) by {
                 assert(old(self).slot_has_key(slot));
-                let w = choose|w: int|
-                    0 <= w < 256 && old(self).child_idx[w] as int == slot;
+                let w = choose|w: int| 0 <= w < 256 && old(self).child_idx[w] as int == slot;
                 assert(self.child_idx[w] as int == slot);
             };
         }
@@ -483,7 +465,6 @@ impl ArtNode for Node48 {
 }
 
 } // verus!
-
 impl Node48 {
     pub(crate) fn for_each_child(&self, mut f: impl FnMut(TaggedPointer)) {
         for key in 0..256usize {

@@ -10,13 +10,16 @@ use crate::art::{
 verus! {
 
 spec fn live_child_count(children: [usize; 256], upto: int) -> int
-    decreases upto
+    decreases upto,
 {
     if upto <= 0 {
         0int
     } else {
-        live_child_count(children, upto - 1)
-            + if children[upto - 1] == 0 { 0int } else { 1int }
+        live_child_count(children, upto - 1) + if children[upto - 1] == 0 {
+            0int
+        } else {
+            1int
+        }
     }
 }
 
@@ -31,9 +34,12 @@ proof fn lemma_live_child_count_replace(
         0 <= upto <= 256,
         old_children[key] != 0,
         new_children[key] != 0,
-        forall|idx: int| 0 <= idx < 256 ==>  #[trigger] new_children[idx] == (
-            if idx == key { new_children[key] } else { old_children[idx] }
-        ),
+        forall|idx: int|
+            0 <= idx < 256 ==> #[trigger] new_children[idx] == (if idx == key {
+                new_children[key]
+            } else {
+                old_children[idx]
+            }),
     ensures
         live_child_count(new_children, upto) == live_child_count(old_children, upto),
     decreases upto,
@@ -58,12 +64,19 @@ proof fn lemma_live_child_count_insert(
         0 <= upto <= 256,
         old_children[key] == 0,
         new_children[key] != 0,
-        forall|idx: int| 0 <= idx < 256 ==>  #[trigger] new_children[idx] == (
-            if idx == key { new_children[key] } else { old_children[idx] }
-        ),
+        forall|idx: int|
+            0 <= idx < 256 ==> #[trigger] new_children[idx] == (if idx == key {
+                new_children[key]
+            } else {
+                old_children[idx]
+            }),
     ensures
-        live_child_count(new_children, upto) == live_child_count(old_children, upto)
-            + if key < upto { 1int } else { 0int },
+        live_child_count(new_children, upto) == live_child_count(old_children, upto) + if key
+            < upto {
+            1int
+        } else {
+            0int
+        },
     decreases upto,
 {
     if upto > 0 {
@@ -86,12 +99,19 @@ proof fn lemma_live_child_count_remove(
         0 <= upto <= 256,
         old_children[key] != 0,
         new_children[key] == 0,
-        forall|idx: int| 0 <= idx < 256 ==>  #[trigger] new_children[idx] == (
-            if idx == key { 0usize } else { old_children[idx] }
-        ),
+        forall|idx: int|
+            0 <= idx < 256 ==> #[trigger] new_children[idx] == (if idx == key {
+                0usize
+            } else {
+                old_children[idx]
+            }),
     ensures
-        live_child_count(old_children, upto) == live_child_count(new_children, upto)
-            + if key < upto { 1int } else { 0int },
+        live_child_count(old_children, upto) == live_child_count(new_children, upto) + if key
+            < upto {
+            1int
+        } else {
+            0int
+        },
     decreases upto,
 {
     if upto > 0 {
@@ -210,7 +230,7 @@ impl Node256 {
             result.live_len() == 0,
     {
         let meta = NodeMeta::new(NodeType::Node256, prefix);
-        let result = Self { meta, children: [0; 256] };
+        let result = Self { meta, children: [0;256] };
         proof {
             lemma_live_child_count_all_zero(result.children, 256);
         }
@@ -249,9 +269,12 @@ impl Node256 {
 
         proof {
             TaggedPointer::lemma_wf_raw_nonzero(value_raw);
-            assert forall|idx: int| 0 <= idx < 256 implies  #[trigger] self.children[idx] == (
-                if idx == key as int { value_raw } else { old_children[idx] }
-            ) by {};
+            assert forall|idx: int| 0 <= idx < 256 implies #[trigger] self.children[idx] == (if idx
+                == key as int {
+                value_raw
+            } else {
+                old_children[idx]
+            }) by {};
             lemma_live_child_count_replace(old_children, self.children, key as int, 256);
         }
 
@@ -276,9 +299,12 @@ impl Node256 {
 
         proof {
             TaggedPointer::lemma_wf_raw_nonzero(value_raw);
-            assert forall|idx: int| 0 <= idx < 256 implies  #[trigger] self.children[idx] == (
-                if idx == key as int { value_raw } else { old_children[idx] }
-            ) by {};
+            assert forall|idx: int| 0 <= idx < 256 implies #[trigger] self.children[idx] == (if idx
+                == key as int {
+                value_raw
+            } else {
+                old_children[idx]
+            }) by {};
             lemma_live_child_count_insert(old_children, self.children, key as int, 256);
         }
     }
@@ -335,9 +361,12 @@ impl Node256 {
         self.meta.decrement_len();
 
         proof {
-            assert forall|idx: int| 0 <= idx < 256 implies  #[trigger] self.children[idx] == (
-                if idx == key as int { 0usize } else { old_children[idx] }
-            ) by {};
+            assert forall|idx: int| 0 <= idx < 256 implies #[trigger] self.children[idx] == (if idx
+                == key as int {
+                0usize
+            } else {
+                old_children[idx]
+            }) by {};
             lemma_live_child_count_remove(old_children, self.children, key as int, 256);
         }
 
@@ -369,7 +398,6 @@ impl Node256 {
             Some(self.remove_existing(key))
         }
     }
-
 }
 
 impl ArtNode for Node256 {
@@ -408,17 +436,11 @@ impl ArtNode for Node256 {
         if matched != prefix_len {
             return InsertStep::Split { matched };
         }
-
         let depth = depth + prefix_len;
         let edge = terminated_key[depth];
         if let Some(child) = self.get(edge) {
-            return InsertStep::Descend {
-                edge,
-                child,
-                next_depth: depth + 1,
-            };
+            return InsertStep::Descend { edge, child, next_depth: depth + 1 };
         }
-
         proof {
             lemma_live_child_count_missing_bound(old(self).children, edge as int, 256);
             assert(old(self).live_len() < 256);
@@ -461,7 +483,6 @@ impl ArtNode for Node256 {
 }
 
 } // verus!
-
 impl Node256 {
     pub(crate) fn for_each_child(&self, mut f: impl FnMut(TaggedPointer)) {
         for key in 0..256usize {

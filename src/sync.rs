@@ -1,5 +1,3 @@
-
-
 #[allow(unused)]
 #[cfg(all(not(feature = "shuttle"), test))]
 pub(crate) use std::thread::JoinHandle;
@@ -16,7 +14,6 @@ pub(crate) fn cooperative_yield() {
 #[cfg(not(feature = "shuttle"))]
 #[inline]
 pub(crate) fn cooperative_yield() {}
-
 
 #[cfg(all(feature = "shuttle", test))]
 pub(crate) use shuttle::sync::*;

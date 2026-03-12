@@ -55,11 +55,7 @@ impl<const CAP: usize> DenseNode<CAP> {
             result.live_len() == 0,
     {
         let meta = NodeMeta::new(node_type, prefix);
-        Self {
-            meta,
-            keys: [0; CAP],
-            children: [0; CAP],
-        }
+        Self { meta, keys: [0;CAP], children: [0;CAP] }
     }
 
     fn search(&self, key: u8) -> (result: SearchResult)
@@ -185,16 +181,22 @@ impl<const CAP: usize> DenseNode<CAP> {
         self.children[idx] = value_raw;
         self.meta.increment_len();
         proof {
-            assert forall|i: int| 0 <= i < self.live_len() implies self.keys[i] == (
-                if i < idx as int { old_keys[i] }
-                else if i == idx as int { key }
-                else { old_keys[i - 1] }
-            ) by {};
-            assert forall|i: int| 0 <= i < self.live_len() implies self.children[i] == (
-                if i < idx as int { old_children[i] }
-                else if i == idx as int { value_raw }
-                else { old_children[i - 1] }
-            ) by {};
+            assert forall|i: int| 0 <= i < self.live_len() implies self.keys[i] == (if i
+                < idx as int {
+                old_keys[i]
+            } else if i == idx as int {
+                key
+            } else {
+                old_keys[i - 1]
+            }) by {};
+            assert forall|i: int| 0 <= i < self.live_len() implies self.children[i] == (if i
+                < idx as int {
+                old_children[i]
+            } else if i == idx as int {
+                value_raw
+            } else {
+                old_children[i - 1]
+            }) by {};
         }
     }
 
@@ -266,12 +268,18 @@ impl<const CAP: usize> DenseNode<CAP> {
         self.meta.decrement_len();
 
         proof {
-            assert forall|i: int| 0 <= i < self.live_len() implies self.keys[i] == (
-                if i < idx as int { old_keys[i] } else { old_keys[i + 1] }
-            ) by {};
-            assert forall|i: int| 0 <= i < self.live_len() implies self.children[i] == (
-                if i < idx as int { old_children[i] } else { old_children[i + 1] }
-            ) by {};
+            assert forall|i: int| 0 <= i < self.live_len() implies self.keys[i] == (if i
+                < idx as int {
+                old_keys[i]
+            } else {
+                old_keys[i + 1]
+            }) by {};
+            assert forall|i: int| 0 <= i < self.live_len() implies self.children[i] == (if i
+                < idx as int {
+                old_children[i]
+            } else {
+                old_children[i + 1]
+            }) by {};
         }
 
         TaggedPointer::from_raw(removed_raw)
@@ -306,8 +314,9 @@ impl<const CAP: usize> DenseNode<CAP> {
                         raw,
                     ) by {
                         let i = choose|i: int|
-                            0 <= i < old(self).live_len() && old(self).keys[i] == other_key
-                                && old(self).children[i] == raw;
+                            0 <= i < old(self).live_len() && old(self).keys[i] == other_key && old(
+                                self,
+                            ).children[i] == raw;
                         if i < idx as int {
                             assert(self.keys[i] == old(self).keys[i]);
                             assert(self.children[i] == old(self).children[i]);
@@ -366,24 +375,16 @@ impl<const CAP: usize> DenseNode<CAP> {
         if matched != prefix_len {
             return InsertStep::Split { matched };
         }
-
         let depth = depth + prefix_len;
         let edge = terminated_key[depth];
         match self.search(edge) {
             SearchResult::Found(idx) => {
                 let child = TaggedPointer::from_raw(self.children[idx]);
-                InsertStep::Descend {
-                    edge,
-                    child,
-                    next_depth: depth + 1,
-                }
+                InsertStep::Descend { edge, child, next_depth: depth + 1 }
             },
             SearchResult::Vacant(_) => {
                 if self.is_full() {
-                    InsertStep::Grow {
-                        prefix_depth,
-                        prefix_len,
-                    }
+                    InsertStep::Grow { prefix_depth, prefix_len }
                 } else {
                     let _ = self.insert(edge, value_ptr);
                     InsertStep::Done
@@ -450,7 +451,6 @@ impl<const CAP: usize> DenseNode<CAP> {
 }
 
 } // verus!
-
 impl<const CAP: usize> DenseNode<CAP> {
     pub(crate) fn for_each_child(&self, mut f: impl FnMut(u8, TaggedPointer)) {
         let len = self.meta.len();

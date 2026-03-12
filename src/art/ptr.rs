@@ -2,10 +2,10 @@ use vstd::prelude::*;
 
 use crate::art::{
     index::{KVData, KVPair},
-    n16::Node16,
-    n256::Node256,
     n4::Node4,
+    n16::Node16,
     n48::Node48,
+    n256::Node256,
 };
 
 verus! {
@@ -155,7 +155,6 @@ impl TaggedPointer {
 }
 
 } // verus!
-
 pub(crate) enum NextNodeRef<'a> {
     Node4(&'a Node4),
     Node16(&'a Node16),
