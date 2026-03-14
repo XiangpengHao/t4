@@ -1,4 +1,6 @@
-use crate::art::index::{DeleteResult, common_prefix_len, delete_at};
+use crate::art::index::{
+    DeleteResult, TerminatedKeyRef, common_prefix_len_slice_terminated, delete_at,
+};
 use crate::art::ptr::TaggedPointer;
 use vstd::prelude::*;
 use vstd::slice::slice_subrange;
@@ -29,20 +31,23 @@ pub(crate) trait ArtNode {
 
     fn insert_step(
         &mut self,
-        terminated_key: &[u8],
+        terminated_key: TerminatedKeyRef<'_>,
         value_ptr: TaggedPointer,
         depth: usize,
     ) -> (result: InsertStep)
         requires
             old(self).wf(),
-            depth + old(self).raw_prefix_len() < terminated_key.len(),
+            terminated_key.wf(),
+            ((depth + old(self).raw_prefix_len()) as int) < terminated_key.spec_len(),
         ensures
             self.wf(),
             match result {
                 InsertStep::Split { .. } => self.live_len() == old(self).live_len(),
                 InsertStep::Descend { edge, child, next_depth } => {
                     &&& self.live_len() == old(self).live_len()
-                    &&& edge == terminated_key[depth + old(self).raw_prefix_len()]
+                    &&& edge == terminated_key.spec_index(
+                        (depth + old(self).raw_prefix_len()) as int,
+                    )
                     &&& next_depth == depth + old(self).raw_prefix_len() + 1
                     &&& old(self).maps_to(edge, child.raw())
                 },
@@ -121,49 +126,53 @@ pub(crate) trait ArtNode {
     ;
 }
 
-pub(crate) fn get_from_node(node: &impl ArtNode, terminated_key: &[u8], depth: usize) -> (result:
+pub(crate) fn get_from_node(node: &impl ArtNode, terminated_key: TerminatedKeyRef<'_>, depth: usize) -> (result:
     Option<(TaggedPointer, usize)>)
     requires
         node.wf(),
-        depth + node.raw_prefix_len() < terminated_key.len(),
+        terminated_key.wf(),
+        ((depth + node.raw_prefix_len()) as int) < terminated_key.spec_len(),
 {
+    let _key_len = terminated_key.len();
     let prefix_len = node.prefix_len();
     let inline_prefix = node.prefix_bytes();
-    let matched = common_prefix_len(
+    let matched = common_prefix_len_slice_terminated(
         slice_subrange(inline_prefix, 0, prefix_len),
-        slice_subrange(terminated_key, depth, terminated_key.len()),
+        terminated_key.suffix(depth),
     );
     if matched != prefix_len {
         return None;
     }
     let depth = depth + prefix_len;
-    let child = node.get_child(terminated_key[depth])?;
+    let child = node.get_child(terminated_key.byte(depth))?;
     Some((child, depth + 1))
 }
 
 pub(crate) fn delete_from_node(
     node: &mut impl ArtNode,
     self_ptr: TaggedPointer,
-    terminated_key: &[u8],
+    terminated_key: TerminatedKeyRef<'_>,
     depth: usize,
 ) -> (result: DeleteResult)
     requires
         old(node).wf(),
-        depth + old(node).raw_prefix_len() < terminated_key.len(),
+        terminated_key.wf(),
+        ((depth + old(node).raw_prefix_len()) as int) < terminated_key.spec_len(),
     ensures
         node.wf(),
 {
+    let _key_len = terminated_key.len();
     let prefix_len = node.prefix_len();
     let prefix = node.prefix_bytes();
-    let matched = common_prefix_len(
+    let matched = common_prefix_len_slice_terminated(
         slice_subrange(prefix, 0, prefix_len),
-        slice_subrange(terminated_key, depth, terminated_key.len()),
+        terminated_key.suffix(depth),
     );
     if matched != prefix_len {
         return DeleteResult::NotFound { current: Some(self_ptr) };
     }
     let depth = depth + prefix_len;
-    let edge = terminated_key[depth];
+    let edge = terminated_key.byte(depth);
     let Some(child) = node.get_child(edge) else {
         return DeleteResult::NotFound { current: Some(self_ptr) };
     };

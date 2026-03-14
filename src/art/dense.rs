@@ -2,7 +2,6 @@ use vstd::{prelude::*, slice::slice_subrange};
 
 use crate::art::{
     InsertStep,
-    index::common_prefix_len,
     meta::{NodeMeta, NodeType},
     ptr::TaggedPointer,
 };
@@ -334,20 +333,23 @@ impl<const CAP: usize> DenseNode<CAP> {
 
     pub(crate) fn insert_step_impl(
         &mut self,
-        terminated_key: &[u8],
+        terminated_key: crate::art::index::TerminatedKeyRef<'_>,
         value_ptr: TaggedPointer,
         depth: usize,
     ) -> (result: InsertStep)
         requires
             old(self).wf(),
-            depth + old(self).raw_prefix_len() < terminated_key.len(),
+            terminated_key.wf(),
+            ((depth + old(self).raw_prefix_len()) as int) < terminated_key.spec_len(),
         ensures
             self.wf(),
             match result {
                 InsertStep::Split { .. } => self.live_len() == old(self).live_len(),
                 InsertStep::Descend { edge, child, next_depth } => {
                     &&& self.live_len() == old(self).live_len()
-                    &&& edge == terminated_key[depth + old(self).raw_prefix_len()]
+                    &&& edge == terminated_key.spec_index(
+                        (depth + old(self).raw_prefix_len()) as int,
+                    )
                     &&& next_depth == depth + old(self).raw_prefix_len() + 1
                     &&& old(self).maps_to(edge, child.raw())
                 },
@@ -359,24 +361,25 @@ impl<const CAP: usize> DenseNode<CAP> {
                 InsertStep::Done => {
                     &&& self.live_len() == old(self).live_len() + 1
                     &&& self.maps_to(
-                        terminated_key[depth + old(self).raw_prefix_len()],
+                        terminated_key.spec_index((depth + old(self).raw_prefix_len()) as int),
                         value_ptr.raw(),
                     )
                 },
             },
     {
+        let _key_len = terminated_key.len();
         let prefix_depth = depth;
         let prefix_len = self.meta.prefix_len();
         let prefix = self.meta.prefix_slice();
-        let matched = common_prefix_len(
+        let matched = crate::art::index::common_prefix_len_slice_terminated(
             slice_subrange(prefix, 0, prefix_len),
-            slice_subrange(terminated_key, depth, terminated_key.len()),
+            terminated_key.suffix(depth),
         );
         if matched != prefix_len {
             return InsertStep::Split { matched };
         }
         let depth = depth + prefix_len;
-        let edge = terminated_key[depth];
+        let edge = terminated_key.byte(depth);
         match self.search(edge) {
             SearchResult::Found(idx) => {
                 let child = TaggedPointer::from_raw(self.children[idx]);

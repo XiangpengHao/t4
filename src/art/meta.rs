@@ -21,7 +21,7 @@ pub(crate) struct NodeMeta {
 }
 
 impl NodeMeta {
-    pub closed spec fn prefix_capacity() -> usize {
+    pub open spec fn prefix_capacity() -> usize {
         8
     }
 

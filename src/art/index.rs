@@ -2,6 +2,7 @@ use std::{alloc::Layout, ptr::copy_nonoverlapping};
 
 use vstd::prelude::*;
 use vstd::raw_ptr;
+use vstd::slice::slice_subrange;
 use vstd::simple_pptr::PPtr;
 
 use crate::art::{
@@ -13,7 +14,30 @@ use crate::art::{
     ptr::{NextNodeMut, NextNodeRef, TaggedPointer},
 };
 
+const KV_HEADER_SIZE: usize = 16;
+const KV_HEADER_ALIGN: usize = 16;
+
 verus! {
+
+pub const KV_HEADER_SIZE_VERUS: usize = 16;
+pub const KV_HEADER_ALIGN_VERUS: usize = 16;
+#[allow(dead_code)]
+pub const MAX_LEAF_ALLOC_VERUS: usize =
+    isize::MAX as usize - (isize::MAX as usize % KV_HEADER_ALIGN_VERUS);
+
+#[repr(C, align(16))]
+pub struct KVData {
+    key_len: u8,
+    _pad: [u8; 3],
+    value_len: u32,
+    data: [u8; 0],
+}
+
+/// Single-allocation key-value pair handle.
+pub struct KVPairOwned {
+    ptr: PPtr<KVData>,
+    perm: Tracked<KVLeafPerm>,
+}
 
 #[allow(dead_code)]
 pub tracked struct KVLeafPerm {
@@ -21,6 +45,164 @@ pub tracked struct KVLeafPerm {
     payload: raw_ptr::PointsToRaw,
     dealloc: raw_ptr::Dealloc,
     exposed: raw_ptr::IsExposed,
+}
+
+impl KVLeafPerm {
+    pub closed spec fn wf(self, ptr: PPtr<KVData>) -> bool {
+        &&& self.header.ptr().addr() == ptr.addr()
+        &&& self.header.is_init()
+        &&& self.payload.is_range(
+            ptr.addr() as int + vstd::layout::size_of::<KVData>() as int,
+            self.header.value().key_len as int + self.header.value().value_len as int,
+        )
+        &&& self.dealloc.addr() == ptr.addr()
+        &&& self.dealloc.size()
+            == vstd::layout::size_of::<KVData>() + self.header.value().key_len as nat
+                + self.header.value().value_len as nat
+        &&& self.dealloc.size() <= usize::MAX
+        &&& self.dealloc.align() == 16
+        &&& self.header.ptr()@.provenance == self.dealloc.provenance()
+        &&& self.payload.provenance() == self.dealloc.provenance()
+        &&& self.exposed.provenance() == self.dealloc.provenance()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TerminatedKeyRef<'a> {
+    key: &'a [u8],
+    start: usize,
+    needs_terminator: bool,
+}
+
+impl<'a> TerminatedKeyRef<'a> {
+    pub closed spec fn wf(&self) -> bool {
+        &&& self.key@.len() < usize::MAX
+        &&& self.start as nat
+            <= self.key@.len() + if self.needs_terminator { 1nat } else { 0nat }
+    }
+
+    pub closed spec fn spec_len(self) -> int
+        recommends
+            self.wf(),
+    {
+        self.key@.len() as int + if self.needs_terminator { 1int } else { 0int }
+            - self.start as int
+    }
+
+    pub closed spec fn spec_index(self, i: int) -> u8
+        recommends
+            self.wf(),
+            0 <= i < self.spec_len(),
+    {
+        if self.start as int + i < self.key@.len() as int {
+            self.key[self.start as int + i]
+        } else {
+            0
+        }
+    }
+
+    pub fn new(key: &'a [u8]) -> (result: Self)
+        requires
+            key.len() < usize::MAX,
+        ensures
+            result.wf(),
+            result.spec_len()
+                == key@.len() as int
+                    + if key@.len() > 0 && key[key@.len() - 1] == 0 { 0int } else { 1int },
+    {
+        let needs_terminator = key.last() != Some(&0);
+        Self { key, start: 0, needs_terminator }
+    }
+
+    pub fn len(&self) -> (result: usize)
+        requires
+            self.wf(),
+        ensures
+            result as int == self.spec_len(),
+    {
+        let full_len = if self.needs_terminator {
+            self.key.len() + 1
+        } else {
+            self.key.len()
+        };
+        full_len - self.start
+    }
+
+    pub fn byte(self, idx: usize) -> (result: u8)
+        requires
+            self.wf(),
+            (idx as int) < self.spec_len(),
+        ensures
+            result == self.spec_index(idx as int),
+    {
+        let abs = self.start + idx;
+        if abs < self.key.len() {
+            self.key[abs]
+        } else {
+            0
+        }
+    }
+
+    pub fn suffix(self, n: usize) -> (result: Self)
+        requires
+            self.wf(),
+            n as int <= self.spec_len(),
+        ensures
+            result.wf(),
+            result.spec_len() == self.spec_len() - n as int,
+    {
+        Self { key: self.key, start: self.start + n, needs_terminator: self.needs_terminator }
+    }
+
+    pub fn materialized_subrange(self, start: usize, end: usize) -> (result: &'a [u8])
+        requires
+            self.wf(),
+            start <= end,
+            end as int <= self.spec_len(),
+        ensures
+            result@.len() <= end - start,
+    {
+        let abs_start = self.start + start;
+        let clamped_start = if abs_start < self.key.len() {
+            abs_start
+        } else {
+            self.key.len()
+        };
+        let abs_end_unclamped = self.start + end;
+        let abs_end = if abs_end_unclamped < self.key.len() {
+            abs_end_unclamped
+        } else {
+            self.key.len()
+        };
+        slice_subrange(self.key, clamped_start, abs_end)
+    }
+
+    pub fn eq(self, other: Self) -> (result: bool)
+        requires
+            self.wf(),
+            other.wf(),
+    {
+        if self.len() != other.len() {
+            return false;
+        }
+
+        let mut i = 0usize;
+        while i < self.len()
+            invariant
+                self.wf(),
+                other.wf(),
+                self.spec_len() == other.spec_len(),
+                i as int <= self.spec_len(),
+                forall|j: int| 0 <= j < i ==> self.spec_index(j) == other.spec_index(j),
+            decreases self.spec_len() - i as int,
+        {
+            if self.byte(i) != other.byte(i) {
+                return false;
+            }
+            i = i + 1;
+        }
+        true
+    }
 }
 
 pub struct ArtIndex {
@@ -37,7 +219,6 @@ impl ArtIndex {
         }
     }
 
-    #[verifier::external_body]
     pub fn new() -> (result: Self)
         ensures
             result.wf(),
@@ -51,10 +232,11 @@ impl ArtIndex {
             old(self).wf(),
             key.len() <= u8::MAX as usize,
             value.len() <= u32::MAX as usize,
+            KV_HEADER_SIZE_VERUS + key.len() + value.len() <= MAX_LEAF_ALLOC_VERUS,
         ensures
             self.wf(),
     {
-        let terminated_key = terminated_key_owned(key);
+        let terminated_key = TerminatedKeyRef::new(key);
         let value = KVPairOwned::new(key, value);
         let (value_leaf_ptr, Tracked(value_perm)) = value.into_parts();
         let value_ptr = TaggedPointer::from_value(value_leaf_ptr);
@@ -73,8 +255,8 @@ impl ArtIndex {
             
             match unsafe { current_ptr.next_node_mut() } {
                 NextNodeMut::Value(existing) => {
-                    let terminated_existing = terminated_key_owned(existing.key());
-                    if terminated_existing == terminated_key {
+                    let terminated_existing = TerminatedKeyRef::new(existing.key());
+                    if terminated_existing.eq(terminated_key) {
                         let value_leaf_ptr = current_ptr.value_ptr();
                         let tracked removed_perm = self.leaf_perms.borrow_mut().tracked_remove(
                             value_leaf_ptr.addr(),
@@ -82,28 +264,28 @@ impl ArtIndex {
                         parent.update(value_ptr);
                         return Some(KVPairOwned::from_parts(value_leaf_ptr, Tracked(removed_perm)));
                     }
-                    let shared = common_prefix_len(
-                        &terminated_existing[depth..],
-                        &terminated_key[depth..],
+                    let shared = common_prefix_len_terminated(
+                        terminated_existing.suffix(depth),
+                        terminated_key.suffix(depth),
                     );
                     let split = new_branching_path(
-                        &terminated_key[depth..depth + shared],
-                        terminated_existing[depth + shared],
+                        terminated_key.materialized_subrange(depth, depth + shared),
+                        terminated_existing.byte(depth + shared),
                         current_ptr,
-                        terminated_key[depth + shared],
+                        terminated_key.byte(depth + shared),
                         value_ptr,
                     );
                     parent.update(split);
                     return None;
                 },
                 NextNodeMut::Node4(node) => {
-                    let step = node.insert_step(&terminated_key, value_ptr, depth);
+                    let step = node.insert_step(terminated_key, value_ptr, depth);
                     match step {
                         InsertStep::Split { matched } => {
                             let replacement = split_node(
                                 node,
                                 current_ptr,
-                                &terminated_key,
+                                terminated_key,
                                 value_ptr,
                                 depth,
                                 matched,
@@ -118,7 +300,10 @@ impl ArtIndex {
                         },
                         InsertStep::Grow { prefix_depth, prefix_len } => {
                             let replacement = node.grow(
-                                &terminated_key[prefix_depth..prefix_depth + prefix_len],
+                                terminated_key.materialized_subrange(
+                                    prefix_depth,
+                                    prefix_depth + prefix_len,
+                                ),
                             );
                             parent.update(replacement);
                             unsafe { current_ptr.drop_node() };
@@ -129,13 +314,13 @@ impl ArtIndex {
                     }
                 },
                 NextNodeMut::Node16(node) => {
-                    let step = node.insert_step(&terminated_key, value_ptr, depth);
+                    let step = node.insert_step(terminated_key, value_ptr, depth);
                     match step {
                         InsertStep::Split { matched } => {
                             let replacement = split_node(
                                 node,
                                 current_ptr,
-                                &terminated_key,
+                                terminated_key,
                                 value_ptr,
                                 depth,
                                 matched,
@@ -150,7 +335,10 @@ impl ArtIndex {
                         },
                         InsertStep::Grow { prefix_depth, prefix_len } => {
                             let replacement = node.grow(
-                                &terminated_key[prefix_depth..prefix_depth + prefix_len],
+                                terminated_key.materialized_subrange(
+                                    prefix_depth,
+                                    prefix_depth + prefix_len,
+                                ),
                             );
                             parent.update(replacement);
                             unsafe { current_ptr.drop_node() };
@@ -161,13 +349,13 @@ impl ArtIndex {
                     }
                 },
                 NextNodeMut::Node48(node) => {
-                    let step = node.insert_step(&terminated_key, value_ptr, depth);
+                    let step = node.insert_step(terminated_key, value_ptr, depth);
                     match step {
                         InsertStep::Split { matched } => {
                             let replacement = split_node(
                                 node,
                                 current_ptr,
-                                &terminated_key,
+                                terminated_key,
                                 value_ptr,
                                 depth,
                                 matched,
@@ -182,7 +370,10 @@ impl ArtIndex {
                         },
                         InsertStep::Grow { prefix_depth, prefix_len } => {
                             let replacement = node.grow(
-                                &terminated_key[prefix_depth..prefix_depth + prefix_len],
+                                terminated_key.materialized_subrange(
+                                    prefix_depth,
+                                    prefix_depth + prefix_len,
+                                ),
                             );
                             parent.update(replacement);
                             unsafe { current_ptr.drop_node() };
@@ -193,13 +384,13 @@ impl ArtIndex {
                     }
                 },
                 NextNodeMut::Node256(node) => {
-                    let step = node.insert_step(&terminated_key, value_ptr, depth);
+                    let step = node.insert_step(terminated_key, value_ptr, depth);
                     match step {
                         InsertStep::Split { matched } => {
                             let replacement = split_node(
                                 node,
                                 current_ptr,
-                                &terminated_key,
+                                terminated_key,
                                 value_ptr,
                                 depth,
                                 matched,
@@ -228,7 +419,7 @@ impl ArtIndex {
         ensures
             self.wf(),
     {
-        let terminated_key = terminated_key_owned(key);
+        let terminated_key = TerminatedKeyRef::new(key);
         let mut ptr = self.root;
         let mut depth = 0;
 
@@ -236,29 +427,29 @@ impl ArtIndex {
             let ptr_value = ptr?;
             match unsafe { ptr_value.next_node_ref() } {
                 NextNodeRef::Value(leaf) => {
-                    return if terminated_key_owned(leaf.key()) == terminated_key {
+                    return if TerminatedKeyRef::new(leaf.key()).eq(terminated_key) {
                         Some((leaf.key(), leaf.value()))
                     } else {
                         None
                     };
                 },
                 NextNodeRef::Node4(node) => {
-                    let (next_ptr, next_depth) = get_from_node(node, &terminated_key, depth)?;
+                    let (next_ptr, next_depth) = get_from_node(node, terminated_key, depth)?;
                     ptr = Some(next_ptr);
                     depth = next_depth;
                 },
                 NextNodeRef::Node16(node) => {
-                    let (next_ptr, next_depth) = get_from_node(node, &terminated_key, depth)?;
+                    let (next_ptr, next_depth) = get_from_node(node, terminated_key, depth)?;
                     ptr = Some(next_ptr);
                     depth = next_depth;
                 },
                 NextNodeRef::Node48(node) => {
-                    let (next_ptr, next_depth) = get_from_node(node, &terminated_key, depth)?;
+                    let (next_ptr, next_depth) = get_from_node(node, terminated_key, depth)?;
                     ptr = Some(next_ptr);
                     depth = next_depth;
                 },
                 NextNodeRef::Node256(node) => {
-                    let (next_ptr, next_depth) = get_from_node(node, &terminated_key, depth)?;
+                    let (next_ptr, next_depth) = get_from_node(node, terminated_key, depth)?;
                     ptr = Some(next_ptr);
                     depth = next_depth;
                 },
@@ -274,8 +465,8 @@ impl ArtIndex {
         ensures
             self.wf(),
     {
-        let terminated_key = terminated_key_owned(key);
-        let result = delete_at(self.root, &terminated_key, 0);
+        let terminated_key = TerminatedKeyRef::new(key);
+        let result = delete_at(self.root, terminated_key, 0);
         match result {
             DeleteResult::NotFound { current } => {
                 self.root = current;
@@ -294,6 +485,10 @@ impl ArtIndex {
 }
 
 } // verus!
+
+const _: [(); KV_HEADER_SIZE] = [(); std::mem::size_of::<KVData>()];
+const _: [(); KV_HEADER_ALIGN] = [(); std::mem::align_of::<KVData>()];
+
 impl Default for ArtIndex {
     fn default() -> Self {
         Self::new()
@@ -308,9 +503,9 @@ unsafe fn free_subtree(ptr: TaggedPointer) {
                 let header = raw as *mut KVData;
                 let key_len = (*header).key_len as usize;
                 let value_len = (*header).value_len as usize;
-                let data_offset = std::mem::size_of::<KVData>();
+                let data_offset = KV_HEADER_SIZE;
                 let total_size = data_offset + key_len + value_len;
-                let layout = Layout::from_size_align(total_size.max(1), 16).unwrap();
+                let layout = Layout::from_size_align(total_size.max(1), KV_HEADER_ALIGN).unwrap();
                 std::alloc::dealloc(header as *mut u8, layout);
             }
             0 => {
@@ -365,7 +560,7 @@ impl Parent<'_> {
 pub(crate) fn split_node(
     node: &mut impl ArtNode,
     old_ptr: TaggedPointer,
-    terminated_key: &[u8],
+    terminated_key: TerminatedKeyRef<'_>,
     value_ptr: TaggedPointer,
     depth: usize,
     matched: usize,
@@ -377,7 +572,7 @@ pub(crate) fn split_node(
 
     node.set_prefix(&old_prefix[matched + 1..old_prefix_len]);
     let _ = parent.insert(old_prefix[matched], old_ptr);
-    let _ = parent.insert(terminated_key[depth + matched], value_ptr);
+    let _ = parent.insert(terminated_key.byte(depth + matched), value_ptr);
 
     TaggedPointer::from_node4(Box::new(parent))
 }
@@ -392,7 +587,7 @@ pub(crate) enum DeleteResult {
 #[verifier::external_body]
 pub(crate) fn delete_at(
     current: Option<TaggedPointer>,
-    terminated_key: &[u8],
+    terminated_key: TerminatedKeyRef<'_>,
     depth: usize,
 ) -> (result: DeleteResult) {
     let Some(current) = current else {
@@ -401,7 +596,7 @@ pub(crate) fn delete_at(
 
     match unsafe { current.next_node_mut() } {
         NextNodeMut::Value(value) => {
-            if terminated_key_owned(value.key()) != terminated_key {
+            if !TerminatedKeyRef::new(value.key()).eq(terminated_key) {
                 return DeleteResult::NotFound { current: Some(current) };
             }
             DeleteResult::Deleted { removed: current, replacement: None }
@@ -413,11 +608,13 @@ pub(crate) fn delete_at(
     }
 }
 
-pub(crate) fn common_prefix_len(a: &[u8], b: &[u8]) -> (result: usize)
+pub(crate) fn common_prefix_len_slice_terminated(a: &[u8], b: TerminatedKeyRef<'_>) -> (result: usize)
+    requires
+        b.wf(),
     ensures
         result <= a.len(),
-        result <= b.len(),
-        forall|i: int| 0 <= i < result ==> a[i] == b[i],
+        result as int <= b.spec_len(),
+        forall|i: int| 0 <= i < result ==> a[i] == #[trigger] b.spec_index(i),
 {
     let limit = if a.len() < b.len() {
         a.len()
@@ -427,13 +624,17 @@ pub(crate) fn common_prefix_len(a: &[u8], b: &[u8]) -> (result: usize)
     let mut idx = 0usize;
     while idx < limit
         invariant
+            b.wf(),
             idx <= limit,
             limit <= a.len(),
-            limit <= b.len(),
-            forall|i: int| 0 <= i < idx ==> a[i] == b[i],
+            limit as int <= b.spec_len(),
+            forall|i: int| 0 <= i < idx ==> a[i] == #[trigger] b.spec_index(i),
         decreases limit - idx,
     {
-        if a[idx] == b[idx] {
+        proof {
+            assert((idx as int) < b.spec_len());
+        }
+        if a[idx] == b.byte(idx) {
             idx = idx + 1;
         } else {
             return idx;
@@ -443,37 +644,96 @@ pub(crate) fn common_prefix_len(a: &[u8], b: &[u8]) -> (result: usize)
     idx
 }
 
-} // verus!
-fn new_branching_path(
+pub(crate) fn common_prefix_len_terminated(
+    a: TerminatedKeyRef<'_>,
+    b: TerminatedKeyRef<'_>,
+) -> (result: usize)
+    requires
+        a.wf(),
+        b.wf(),
+    ensures
+        result as int <= a.spec_len(),
+        result as int <= b.spec_len(),
+        forall|i: int| 0 <= i < result ==> a.spec_index(i) == b.spec_index(i),
+{
+    let limit = if a.len() < b.len() {
+        a.len()
+    } else {
+        b.len()
+    };
+    let mut idx = 0usize;
+    while idx < limit
+        invariant
+            a.wf(),
+            b.wf(),
+            idx <= limit,
+            limit as int <= a.spec_len(),
+            limit as int <= b.spec_len(),
+            forall|i: int| 0 <= i < idx ==> a.spec_index(i) == b.spec_index(i),
+        decreases limit - idx,
+    {
+        proof {
+            assert((idx as int) < a.spec_len());
+            assert((idx as int) < b.spec_len());
+        }
+        if a.byte(idx) == b.byte(idx) {
+            idx = idx + 1;
+        } else {
+            return idx;
+        }
+    }
+
+    idx
+}
+
+pub assume_specification[crate::art::ptr::TaggedPointer::from_node4](node: Box<Node4>) -> (result:
+    TaggedPointer)
+    ensures
+        result.wf(),
+;
+
+pub(crate) fn new_branching_path(
     prefix: &[u8],
     left_edge: u8,
     left_child: TaggedPointer,
     right_edge: u8,
     right_child: TaggedPointer,
-) -> TaggedPointer {
+) -> (result: TaggedPointer)
+    decreases prefix.len(),
+{
     if prefix.len() <= 8 {
+        proof {
+            assert(crate::art::meta::NodeMeta::prefix_capacity() == 8) by (compute);
+            assert(prefix.len() <= crate::art::meta::NodeMeta::prefix_capacity());
+        }
         let mut node = Node4::new(prefix);
         let _ = node.insert(left_edge, left_child);
         let _ = node.insert(right_edge, right_child);
         return TaggedPointer::from_node4(Box::new(node));
     }
 
-    let mut node = Node4::new(&prefix[..8]);
-    let child = new_branching_path(&prefix[9..], left_edge, left_child, right_edge, right_child);
+    let prefix8 = slice_subrange(prefix, 0, 8);
+    proof {
+        assert(crate::art::meta::NodeMeta::prefix_capacity() == 8) by (compute);
+        assert(prefix8@.len() == 8) by {
+            assert(prefix8@ == prefix@.subrange(0, 8));
+        }
+        assert(prefix8.len() == 8);
+        assert(prefix8.len() <= crate::art::meta::NodeMeta::prefix_capacity());
+    }
+    let mut node = Node4::new(prefix8);
+    let child = new_branching_path(
+        slice_subrange(prefix, 9, prefix.len()),
+        left_edge,
+        left_child,
+        right_edge,
+        right_child,
+    );
     let _ = node.insert(prefix[8], child);
     TaggedPointer::from_node4(Box::new(node))
 }
 
-fn terminated_key_owned(key: &[u8]) -> Vec<u8> {
-    if key.last() == Some(&0) {
-        return key.to_vec();
-    }
-
-    let mut terminated = Vec::with_capacity(key.len() + 1);
-    terminated.extend_from_slice(key);
-    terminated.push(0);
-    terminated
-}
+} // verus!
 
 // Header for a leaf allocation. The actual key and value bytes follow immediately
 // after this header in memory (`data` is a zero-length flexible array marker).
@@ -481,44 +741,121 @@ fn terminated_key_owned(key: &[u8]) -> Vec<u8> {
 // Layout (16-byte aligned): `[key_len: u8][_pad: 3][value_len: u32][key bytes...][value bytes...]`
 verus! {
 
-#[repr(C, align(16))]
-pub struct KVData {
-    key_len: u8,
-    _pad: [u8; 3],
-    value_len: u32,
-    data: [u8; 0],
-}
-
-/// Single-allocation key-value pair handle.
-pub struct KVPairOwned {
-    ptr: PPtr<KVData>,
-    perm: Tracked<KVLeafPerm>,
-}
-
 impl KVData {
-    #[verifier::external_body]
-    pub fn key(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.data.as_ptr(), self.key_len as usize) }
+    pub closed spec fn key_len_spec(&self) -> nat {
+        self.key_len as nat
     }
 
-    #[verifier::external_body]
-    pub fn value(&self) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(
-                self.data.as_ptr().add(self.key_len as usize),
-                self.value_len as usize,
-            )
-        }
+    pub closed spec fn value_len_spec(&self) -> nat {
+        self.value_len as nat
     }
+
+    pub fn key(&self) -> (result: &[u8])
+        ensures
+            result@.len() == self.key_len_spec() as int,
+    {
+        let key_len = self.key_len as usize;
+        kv_bytes(self, 0, key_len)
+    }
+
+    pub fn value(&self) -> (result: &[u8])
+        ensures
+            result@.len() == self.value_len_spec() as int,
+    {
+        let key_len = self.key_len as usize;
+        let value_len = self.value_len as usize;
+        kv_bytes(self, key_len, value_len)
+    }
+}
+
+#[verifier::external_body]
+fn kv_bytes<'a>(header: &'a KVData, offset: usize, len: usize) -> (result: &'a [u8])
+    ensures
+        result@.len() == len as int,
+    opens_invariants none
+    no_unwind
+{
+    unsafe { std::slice::from_raw_parts(header.data.as_ptr().add(offset), len) }
+}
+
+#[verifier::external_body]
+fn kv_owned_header(this: &KVPairOwned) -> (result: &KVData)
+    requires
+        this.wf(),
+    ensures
+        result.key_len_spec() == this.perm@.header.value().key_len as nat,
+        result.value_len_spec() == this.perm@.header.value().value_len as nat,
+    opens_invariants none
+    no_unwind
+{
+    unsafe { &*(this.ptr.addr() as *const KVData) }
+}
+
+#[verifier::external_body]
+fn write_kv_payload(ptr: *mut KVData, key: &[u8], value: &[u8])
+    opens_invariants none
+    no_unwind
+{
+    unsafe {
+        let data = (*ptr).data.as_mut_ptr();
+        copy_nonoverlapping(key.as_ptr(), data, key.len());
+        copy_nonoverlapping(value.as_ptr(), data.add(key.len()), value.len());
+    }
+}
+
+#[verifier::external_body]
+proof fn kv_data_layout()
+    ensures
+        vstd::layout::size_of::<KVData>() == KV_HEADER_SIZE_VERUS,
+        vstd::layout::align_of::<KVData>() == KV_HEADER_ALIGN_VERUS,
+        vstd::layout::valid_layout(MAX_LEAF_ALLOC_VERUS, KV_HEADER_ALIGN_VERUS),
+{
 }
 
 impl KVPairOwned {
-    #[verifier::external_body]
-    pub fn new(key: &[u8], value: &[u8]) -> Self {
-        let data_offset = std::mem::size_of::<KVData>();
-        let total_size = data_offset + key.len() + value.len();
-        let _layout = Layout::from_size_align(total_size.max(1), 16).unwrap();
-        let (ptr_u8, Tracked(raw), Tracked(dealloc)) = raw_ptr::allocate(total_size.max(1), 16);
+    pub closed spec fn wf(&self) -> bool {
+        self.perm@.wf(self.ptr)
+    }
+
+    pub closed spec fn key_len_spec(&self) -> nat
+        recommends
+            self.wf(),
+    {
+        self.perm@.header.value().key_len as nat
+    }
+
+    pub closed spec fn value_len_spec(&self) -> nat
+        recommends
+            self.wf(),
+    {
+        self.perm@.header.value().value_len as nat
+    }
+
+    pub fn new(key: &[u8], value: &[u8]) -> (result: Self)
+        requires
+            key.len() <= u8::MAX as usize,
+            value.len() <= u32::MAX as usize,
+            KV_HEADER_SIZE_VERUS + key.len() + value.len() <= MAX_LEAF_ALLOC_VERUS,
+        ensures
+            result.wf(),
+    {
+        let data_offset = KV_HEADER_SIZE_VERUS;
+        let total_size = data_offset
+            .checked_add(key.len())
+            .unwrap()
+            .checked_add(value.len())
+            .unwrap();
+        proof {
+            kv_data_layout();
+            assert(total_size == data_offset + key.len() + value.len());
+            assert(vstd::layout::valid_layout(total_size, KV_HEADER_ALIGN_VERUS)) by {
+                assert(vstd::layout::valid_layout(MAX_LEAF_ALLOC_VERUS, KV_HEADER_ALIGN_VERUS));
+                assert(total_size <= MAX_LEAF_ALLOC_VERUS);
+            }
+            assert(total_size != 0);
+        }
+        let (ptr_u8, Tracked(raw), Tracked(dealloc)) =
+            raw_ptr::allocate(total_size, KV_HEADER_ALIGN_VERUS);
         let Tracked(exposed) = raw_ptr::expose_provenance(ptr_u8);
         let ptr = ptr_u8 as *mut KVData;
         let tracked header;
@@ -543,37 +880,42 @@ impl KVPairOwned {
             },
         );
         let tracked header = header_perm;
+        write_kv_payload(ptr, key, value);
 
-        unsafe {
-            let data = (*ptr).data.as_mut_ptr();
-            copy_nonoverlapping(key.as_ptr(), data, key.len());
-            copy_nonoverlapping(value.as_ptr(), data.add(key.len()), value.len());
-        }
-
-        Self { ptr: PPtr::from_usize(ptr as usize), perm: Tracked(KVLeafPerm { header, payload, dealloc, exposed }) }
-    }
-
-    #[verifier::external_body]
-    pub fn key(&self) -> &[u8] {
-        unsafe {
-            let header = self.ptr.addr() as *const KVData;
-            std::slice::from_raw_parts((*header).data.as_ptr(), (*header).key_len as usize)
+        Self {
+            ptr: PPtr::from_usize(ptr as usize),
+            perm: Tracked(KVLeafPerm { header, payload, dealloc, exposed }),
         }
     }
 
-    #[verifier::external_body]
-    pub fn value(&self) -> &[u8] {
-        unsafe {
-            let header = self.ptr.addr() as *const KVData;
-            std::slice::from_raw_parts(
-                (*header).data.as_ptr().add((*header).key_len as usize),
-                (*header).value_len as usize,
-            )
-        }
+    pub fn key(&self) -> (result: &[u8])
+        requires
+            self.wf(),
+        ensures
+            result@.len() == self.key_len_spec() as int,
+    {
+        let header = kv_owned_header(self);
+        header.key()
+    }
+
+    pub fn value(&self) -> (result: &[u8])
+        requires
+            self.wf(),
+        ensures
+            result@.len() == self.value_len_spec() as int,
+    {
+        let header = kv_owned_header(self);
+        header.value()
     }
 
     #[verifier::external_body]
-    pub fn into_parts(self) -> (result: (PPtr<KVData>, Tracked<KVLeafPerm>)) {
+    pub fn into_parts(self) -> (result: (PPtr<KVData>, Tracked<KVLeafPerm>))
+        requires
+            self.wf(),
+        ensures
+            result.1@.wf(result.0),
+        opens_invariants none
+    {
         let mut this = std::mem::ManuallyDrop::new(self);
         let ptr = this.ptr;
         let perm = std::mem::replace(&mut this.perm, Tracked::assume_new());
@@ -584,8 +926,92 @@ impl KVPairOwned {
     pub fn from_parts(
         ptr: PPtr<KVData>,
         Tracked(perm): Tracked<KVLeafPerm>,
-    ) -> Self {
+    ) -> (result: Self)
+        requires
+            perm.wf(ptr),
+        ensures
+            result.wf(),
+    {
         Self { ptr, perm: Tracked(perm) }
+    }
+
+    pub fn free(self)
+        requires
+            self.wf(),
+    {
+        let (ptr, Tracked(perm)) = self.into_parts();
+        let tracked KVLeafPerm { header, payload, dealloc, exposed } = perm;
+        let addr = ptr.0;
+        let header_ptr: *mut KVData = raw_ptr::with_exposed_provenance(addr, Tracked(exposed));
+        let tracked mut header_perm = header;
+        let ghost stored_header = header_perm.value();
+        let header_value = raw_ptr::ptr_mut_read(header_ptr, Tracked(&mut header_perm));
+        let key_len = header_value.key_len as usize;
+        let value_len = header_value.value_len as usize;
+        proof {
+            assert(header_value == stored_header);
+            assert(key_len == stored_header.key_len as usize);
+            assert(value_len == stored_header.value_len as usize);
+            assert(vstd::layout::size_of::<KVData>() + key_len as nat <= usize::MAX) by {
+                assert(vstd::layout::size_of::<KVData>() + key_len as nat + value_len as nat
+                    <= usize::MAX);
+            }
+            assert(vstd::layout::size_of::<KVData>() + key_len as nat + value_len as nat
+                <= usize::MAX) by {
+                assert(vstd::layout::size_of::<KVData>() + stored_header.key_len as nat
+                    + stored_header.value_len as nat == dealloc.size());
+            }
+        }
+        let total_size = std::mem::size_of::<KVData>() + key_len + value_len;
+        let tracked header_raw = header_perm.into_raw();
+        let tracked full_raw = header_raw.join(payload);
+        let dealloc_ptr: *mut u8 = raw_ptr::with_exposed_provenance(addr, Tracked(exposed));
+        proof {
+            assert(full_raw.is_range(addr as int, total_size as int)) by {
+                assert(
+                    vstd::set_lib::set_int_range(
+                        addr as int,
+                        addr as int + total_size as int,
+                    ) =~= vstd::set_lib::set_int_range(
+                        addr as int,
+                        addr as int + vstd::layout::size_of::<KVData>() as int,
+                    ) + vstd::set_lib::set_int_range(
+                        addr as int + vstd::layout::size_of::<KVData>() as int,
+                        addr as int + total_size as int,
+                    )
+                ) by {
+                    assert(full_raw.dom() =~=
+                        vstd::set_lib::set_int_range(
+                            addr as int,
+                            addr as int + vstd::layout::size_of::<KVData>() as int,
+                        ) + vstd::set_lib::set_int_range(
+                            addr as int + vstd::layout::size_of::<KVData>() as int,
+                            addr as int + total_size as int,
+                        )
+                    );
+                };
+                assert forall|i: int|
+                    #[trigger] vstd::set_lib::set_int_range(
+                        addr as int,
+                        addr as int + total_size as int,
+                    ).contains(i) <==> #[trigger] (
+                    vstd::set_lib::set_int_range(
+                        addr as int,
+                        addr as int + vstd::layout::size_of::<KVData>() as int,
+                    ) + vstd::set_lib::set_int_range(
+                        addr as int + vstd::layout::size_of::<KVData>() as int,
+                        addr as int + total_size as int,
+                    )
+                ).contains(i) by {};
+            };
+        }
+        raw_ptr::deallocate(
+            dealloc_ptr,
+            total_size,
+            16,
+            Tracked(full_raw),
+            Tracked(dealloc),
+        );
     }
 }
 
@@ -595,15 +1021,7 @@ impl Drop for KVPairOwned {
         opens_invariants none
         no_unwind
     {
-        unsafe {
-            let header = self.ptr.addr() as *mut KVData;
-            let key_len = (*header).key_len as usize;
-            let value_len = (*header).value_len as usize;
-            let data_offset = std::mem::size_of::<KVData>();
-            let total_size = data_offset + key_len + value_len;
-            let layout = Layout::from_size_align(total_size.max(1), 16).unwrap();
-            std::alloc::dealloc(header as *mut u8, layout);
-        }
+        unsafe { std::ptr::read(self).free() }
     }
 }
 

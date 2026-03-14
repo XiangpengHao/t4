@@ -162,7 +162,7 @@ impl ArtNode for Node16 {
 
     fn insert_step(
         &mut self,
-        terminated_key: &[u8],
+        terminated_key: crate::art::index::TerminatedKeyRef<'_>,
         value_ptr: TaggedPointer,
         depth: usize,
     ) -> (result: InsertStep) {

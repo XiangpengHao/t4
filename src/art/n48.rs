@@ -2,7 +2,6 @@ use vstd::{prelude::*, slice::slice_subrange};
 
 use crate::art::{
     ArtNode, InsertStep,
-    index::common_prefix_len,
     meta::{NodeMeta, NodeType},
     n256::Node256,
     ptr::TaggedPointer,
@@ -396,22 +395,23 @@ impl ArtNode for Node48 {
 
     fn insert_step(
         &mut self,
-        terminated_key: &[u8],
+        terminated_key: crate::art::index::TerminatedKeyRef<'_>,
         value_ptr: TaggedPointer,
         depth: usize,
     ) -> (result: InsertStep) {
+        let _key_len = terminated_key.len();
         let prefix_depth = depth;
         let prefix_len = self.meta.prefix_len();
         let prefix = self.meta.prefix_slice();
-        let matched = common_prefix_len(
+        let matched = crate::art::index::common_prefix_len_slice_terminated(
             slice_subrange(prefix, 0, prefix_len),
-            slice_subrange(terminated_key, depth, terminated_key.len()),
+            terminated_key.suffix(depth),
         );
         if matched != prefix_len {
             return InsertStep::Split { matched };
         }
         let depth = depth + prefix_len;
-        let edge = terminated_key[depth];
+        let edge = terminated_key.byte(depth);
         if let Some(child) = self.get(edge) {
             return InsertStep::Descend { edge, child, next_depth: depth + 1 };
         }
