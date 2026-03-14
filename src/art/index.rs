@@ -34,7 +34,7 @@ impl ArtIndex {
     }
 
     #[verifier::external_body]
-    pub fn insert(&mut self, key: &[u8], value: &[u8]) -> (result: Option<KVPair>)
+    pub fn insert(&mut self, key: &[u8], value: &[u8]) -> (result: Option<KVPairOwned>)
         requires
             old(self).wf(),
             key.len() <= u8::MAX as usize,
@@ -43,7 +43,7 @@ impl ArtIndex {
             self.wf(),
     {
         let terminated_key = terminated_key_owned(key);
-        let value_ptr = TaggedPointer::from_value(KVPair::new(key, value));
+        let value_ptr = TaggedPointer::from_value(KVPairOwned::new(key, value));
         let mut current = self.root;
         let mut parent = Parent::Root(&mut self.root);
         let mut depth = 0;
@@ -246,7 +246,7 @@ impl ArtIndex {
     }
 
     #[verifier::external_body]
-    pub fn delete(&mut self, key: &[u8]) -> (result: Option<KVPair>)
+    pub fn delete(&mut self, key: &[u8]) -> (result: Option<KVPairOwned>)
         requires
             old(self).wf(),
             key.len() <= u8::MAX as usize,
@@ -459,14 +459,15 @@ pub struct KVData {
 }
 
 /// Single-allocation key-value pair handle.
-pub struct KVPair(*mut KVData);
+pub struct KVPairOwned(*mut KVData);
 
-} // verus!
 impl KVData {
+    #[verifier::external_body]
     pub fn key(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.data.as_ptr(), self.key_len as usize) }
     }
 
+    #[verifier::external_body]
     pub fn value(&self) -> &[u8] {
         unsafe {
             std::slice::from_raw_parts(
@@ -477,7 +478,8 @@ impl KVData {
     }
 }
 
-impl KVPair {
+impl KVPairOwned {
+    #[verifier::external_body]
     pub fn new(key: &[u8], value: &[u8]) -> Self {
         let data_offset = std::mem::size_of::<KVData>();
         let total_size = data_offset + key.len() + value.len();
@@ -498,27 +500,35 @@ impl KVPair {
         Self(ptr)
     }
 
+    #[verifier::external_body]
     pub fn key(&self) -> &[u8] {
         unsafe { &*self.0 }.key()
     }
 
+    #[verifier::external_body]
     pub fn value(&self) -> &[u8] {
         unsafe { &*self.0 }.value()
     }
 
+    #[verifier::external_body]
     pub fn into_raw(self) -> *mut KVData {
         let ptr = self.0;
         std::mem::forget(self);
         ptr
     }
 
+    #[verifier::external_body]
     pub unsafe fn from_raw(ptr: *mut KVData) -> Self {
         Self(ptr)
     }
 }
 
-impl Drop for KVPair {
-    fn drop(&mut self) {
+impl Drop for KVPairOwned {
+    #[verifier::external_body]
+    fn drop(&mut self)
+        opens_invariants none
+        no_unwind
+    {
         unsafe {
             let header = self.0;
             let key_len = (*header).key_len as usize;
@@ -530,6 +540,8 @@ impl Drop for KVPair {
         }
     }
 }
+
+} // verus!
 
 #[cfg(test)]
 mod tests {
