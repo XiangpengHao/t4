@@ -17,7 +17,8 @@ verus! {
 
 #[allow(dead_code)]
 pub tracked struct KVLeafPerm {
-    raw: raw_ptr::PointsToRaw,
+    header: raw_ptr::PointsTo<KVData>,
+    payload: raw_ptr::PointsToRaw,
     dealloc: raw_ptr::Dealloc,
     exposed: raw_ptr::IsExposed,
 }
@@ -79,9 +80,7 @@ impl ArtIndex {
                             value_leaf_ptr.addr(),
                         );
                         parent.update(value_ptr);
-                        return Some(unsafe {
-                            KVPairOwned::from_raw_parts(value_leaf_ptr, Tracked(removed_perm))
-                        });
+                        return Some(KVPairOwned::from_parts(value_leaf_ptr, Tracked(removed_perm)));
                     }
                     let shared = common_prefix_len(
                         &terminated_existing[depth..],
@@ -288,7 +287,7 @@ impl ArtIndex {
                     removed_ptr.addr(),
                 );
                 self.root = replacement;
-                Some(unsafe { KVPairOwned::from_raw_parts(removed_ptr, Tracked(removed_perm)) })
+                Some(KVPairOwned::from_parts(removed_ptr, Tracked(removed_perm)))
             },
         }
     }
@@ -493,8 +492,6 @@ pub struct KVData {
 /// Single-allocation key-value pair handle.
 pub struct KVPairOwned {
     ptr: PPtr<KVData>,
-    key_len: u8,
-    value_len: u32,
     perm: Tracked<KVLeafPerm>,
 }
 
@@ -520,36 +517,47 @@ impl KVPairOwned {
     pub fn new(key: &[u8], value: &[u8]) -> Self {
         let data_offset = std::mem::size_of::<KVData>();
         let total_size = data_offset + key.len() + value.len();
-        let layout = Layout::from_size_align(total_size.max(1), 16).unwrap();
-        let ptr = unsafe { std::alloc::alloc(layout) } as *mut KVData;
-        let ptr = std::ptr::NonNull::new(ptr).unwrap().as_ptr();
-        let Tracked(raw): Tracked<raw_ptr::PointsToRaw> = Tracked::assume_new();
-        let Tracked(dealloc): Tracked<raw_ptr::Dealloc> = Tracked::assume_new();
-        let Tracked(exposed): Tracked<raw_ptr::IsExposed> = Tracked::assume_new();
+        let _layout = Layout::from_size_align(total_size.max(1), 16).unwrap();
+        let (ptr_u8, Tracked(raw), Tracked(dealloc)) = raw_ptr::allocate(total_size.max(1), 16);
+        let Tracked(exposed) = raw_ptr::expose_provenance(ptr_u8);
+        let ptr = ptr_u8 as *mut KVData;
+        let tracked header;
+        let tracked payload;
+        proof {
+            let tracked (header_raw, payload_raw) = raw.split(vstd::set_lib::set_int_range(
+                ptr_u8.addr() as int,
+                ptr_u8.addr() as int + data_offset as int,
+            ));
+            header = header_raw.into_typed::<KVData>(ptr_u8.addr());
+            payload = payload_raw;
+        }
+        let tracked mut header_perm = header;
+        raw_ptr::ptr_mut_write(
+            ptr,
+            Tracked(&mut header_perm),
+            KVData {
+                key_len: key.len() as u8,
+                _pad: [0; 3],
+                value_len: value.len() as u32,
+                data: [],
+            },
+        );
+        let tracked header = header_perm;
 
         unsafe {
-            let header = ptr;
-            (*header).key_len = key.len() as u8;
-            (*header)._pad = [0; 3];
-            (*header).value_len = value.len() as u32;
-            let data = (*header).data.as_mut_ptr();
+            let data = (*ptr).data.as_mut_ptr();
             copy_nonoverlapping(key.as_ptr(), data, key.len());
             copy_nonoverlapping(value.as_ptr(), data.add(key.len()), value.len());
         }
 
-        Self {
-            ptr: PPtr::from_usize(ptr as usize),
-            key_len: key.len() as u8,
-            value_len: value.len() as u32,
-            perm: Tracked(KVLeafPerm { raw, dealloc, exposed }),
-        }
+        Self { ptr: PPtr::from_usize(ptr as usize), perm: Tracked(KVLeafPerm { header, payload, dealloc, exposed }) }
     }
 
     #[verifier::external_body]
     pub fn key(&self) -> &[u8] {
         unsafe {
             let header = self.ptr.addr() as *const KVData;
-            std::slice::from_raw_parts((*header).data.as_ptr(), self.key_len as usize)
+            std::slice::from_raw_parts((*header).data.as_ptr(), (*header).key_len as usize)
         }
     }
 
@@ -558,8 +566,8 @@ impl KVPairOwned {
         unsafe {
             let header = self.ptr.addr() as *const KVData;
             std::slice::from_raw_parts(
-                (*header).data.as_ptr().add(self.key_len as usize),
-                self.value_len as usize,
+                (*header).data.as_ptr().add((*header).key_len as usize),
+                (*header).value_len as usize,
             )
         }
     }
@@ -573,18 +581,11 @@ impl KVPairOwned {
         (ptr, Tracked(perm))
     }
 
-    #[verifier::external_body]
-    pub unsafe fn from_raw_parts(
+    pub fn from_parts(
         ptr: PPtr<KVData>,
         Tracked(perm): Tracked<KVLeafPerm>,
     ) -> Self {
-        let header = ptr.addr() as *mut KVData;
-        Self {
-            ptr,
-            key_len: unsafe { (*header).key_len },
-            value_len: unsafe { (*header).value_len },
-            perm: Tracked(perm),
-        }
+        Self { ptr, perm: Tracked(perm) }
     }
 }
 
@@ -596,8 +597,8 @@ impl Drop for KVPairOwned {
     {
         unsafe {
             let header = self.ptr.addr() as *mut KVData;
-            let key_len = self.key_len as usize;
-            let value_len = self.value_len as usize;
+            let key_len = (*header).key_len as usize;
+            let value_len = (*header).value_len as usize;
             let data_offset = std::mem::size_of::<KVData>();
             let total_size = data_offset + key_len + value_len;
             let layout = Layout::from_size_align(total_size.max(1), 16).unwrap();
