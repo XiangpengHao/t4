@@ -1,6 +1,8 @@
 use std::{alloc::Layout, ptr::copy_nonoverlapping};
 
 use vstd::prelude::*;
+use vstd::raw_ptr;
+use vstd::simple_pptr::PPtr;
 
 use crate::art::{
     ArtNode, InsertStep, delete_from_node, get_from_node,
@@ -13,8 +15,17 @@ use crate::art::{
 
 verus! {
 
+#[allow(dead_code)]
+pub tracked struct KVLeafPerm {
+    raw: raw_ptr::PointsToRaw,
+    dealloc: raw_ptr::Dealloc,
+    exposed: raw_ptr::IsExposed,
+}
+
 pub struct ArtIndex {
     root: Option<TaggedPointer>,
+    #[allow(dead_code)]
+    leaf_perms: Tracked<Map<usize, KVLeafPerm>>,
 }
 
 impl ArtIndex {
@@ -30,7 +41,7 @@ impl ArtIndex {
         ensures
             result.wf(),
     {
-        Self { root: None }
+        Self { root: None, leaf_perms: Tracked(Map::tracked_empty()) }
     }
 
     #[verifier::external_body]
@@ -43,7 +54,12 @@ impl ArtIndex {
             self.wf(),
     {
         let terminated_key = terminated_key_owned(key);
-        let value_ptr = TaggedPointer::from_value(KVPairOwned::new(key, value));
+        let value = KVPairOwned::new(key, value);
+        let (value_leaf_ptr, Tracked(value_perm)) = value.into_parts();
+        let value_ptr = TaggedPointer::from_value(value_leaf_ptr);
+        proof {
+            self.leaf_perms.borrow_mut().tracked_insert(value_leaf_ptr.addr(), value_perm);
+        }
         let mut current = self.root;
         let mut parent = Parent::Root(&mut self.root);
         let mut depth = 0;
@@ -53,13 +69,19 @@ impl ArtIndex {
                 parent.update(value_ptr);
                 return None;
             };
-
+            
             match unsafe { current_ptr.next_node_mut() } {
                 NextNodeMut::Value(existing) => {
                     let terminated_existing = terminated_key_owned(existing.key());
                     if terminated_existing == terminated_key {
+                        let value_leaf_ptr = current_ptr.value_ptr();
+                        let tracked removed_perm = self.leaf_perms.borrow_mut().tracked_remove(
+                            value_leaf_ptr.addr(),
+                        );
                         parent.update(value_ptr);
-                        return Some(unsafe { current_ptr.into_value() });
+                        return Some(unsafe {
+                            KVPairOwned::from_raw_parts(value_leaf_ptr, Tracked(removed_perm))
+                        });
                     }
                     let shared = common_prefix_len(
                         &terminated_existing[depth..],
@@ -261,8 +283,12 @@ impl ArtIndex {
                 None
             },
             DeleteResult::Deleted { removed, replacement } => {
+                let removed_ptr = removed.value_ptr();
+                let tracked removed_perm = self.leaf_perms.borrow_mut().tracked_remove(
+                    removed_ptr.addr(),
+                );
                 self.root = replacement;
-                Some(unsafe { removed.into_value() })
+                Some(unsafe { KVPairOwned::from_raw_parts(removed_ptr, Tracked(removed_perm)) })
             },
         }
     }
@@ -280,7 +306,13 @@ unsafe fn free_subtree(ptr: TaggedPointer) {
         let raw = ptr.untagged_ptr();
         match ptr.tag() {
             4 => {
-                drop(ptr.into_value());
+                let header = raw as *mut KVData;
+                let key_len = (*header).key_len as usize;
+                let value_len = (*header).value_len as usize;
+                let data_offset = std::mem::size_of::<KVData>();
+                let total_size = data_offset + key_len + value_len;
+                let layout = Layout::from_size_align(total_size.max(1), 16).unwrap();
+                std::alloc::dealloc(header as *mut u8, layout);
             }
             0 => {
                 let node = Box::from_raw(raw as *mut Node4);
@@ -459,7 +491,12 @@ pub struct KVData {
 }
 
 /// Single-allocation key-value pair handle.
-pub struct KVPairOwned(*mut KVData);
+pub struct KVPairOwned {
+    ptr: PPtr<KVData>,
+    key_len: u8,
+    value_len: u32,
+    perm: Tracked<KVLeafPerm>,
+}
 
 impl KVData {
     #[verifier::external_body]
@@ -486,6 +523,9 @@ impl KVPairOwned {
         let layout = Layout::from_size_align(total_size.max(1), 16).unwrap();
         let ptr = unsafe { std::alloc::alloc(layout) } as *mut KVData;
         let ptr = std::ptr::NonNull::new(ptr).unwrap().as_ptr();
+        let Tracked(raw): Tracked<raw_ptr::PointsToRaw> = Tracked::assume_new();
+        let Tracked(dealloc): Tracked<raw_ptr::Dealloc> = Tracked::assume_new();
+        let Tracked(exposed): Tracked<raw_ptr::IsExposed> = Tracked::assume_new();
 
         unsafe {
             let header = ptr;
@@ -497,29 +537,54 @@ impl KVPairOwned {
             copy_nonoverlapping(value.as_ptr(), data.add(key.len()), value.len());
         }
 
-        Self(ptr)
+        Self {
+            ptr: PPtr::from_usize(ptr as usize),
+            key_len: key.len() as u8,
+            value_len: value.len() as u32,
+            perm: Tracked(KVLeafPerm { raw, dealloc, exposed }),
+        }
     }
 
     #[verifier::external_body]
     pub fn key(&self) -> &[u8] {
-        unsafe { &*self.0 }.key()
+        unsafe {
+            let header = self.ptr.addr() as *const KVData;
+            std::slice::from_raw_parts((*header).data.as_ptr(), self.key_len as usize)
+        }
     }
 
     #[verifier::external_body]
     pub fn value(&self) -> &[u8] {
-        unsafe { &*self.0 }.value()
+        unsafe {
+            let header = self.ptr.addr() as *const KVData;
+            std::slice::from_raw_parts(
+                (*header).data.as_ptr().add(self.key_len as usize),
+                self.value_len as usize,
+            )
+        }
     }
 
     #[verifier::external_body]
-    pub fn into_raw(self) -> *mut KVData {
-        let ptr = self.0;
-        std::mem::forget(self);
-        ptr
+    pub fn into_parts(self) -> (result: (PPtr<KVData>, Tracked<KVLeafPerm>)) {
+        let mut this = std::mem::ManuallyDrop::new(self);
+        let ptr = this.ptr;
+        let perm = std::mem::replace(&mut this.perm, Tracked::assume_new());
+        let Tracked(perm) = perm;
+        (ptr, Tracked(perm))
     }
 
     #[verifier::external_body]
-    pub unsafe fn from_raw(ptr: *mut KVData) -> Self {
-        Self(ptr)
+    pub unsafe fn from_raw_parts(
+        ptr: PPtr<KVData>,
+        Tracked(perm): Tracked<KVLeafPerm>,
+    ) -> Self {
+        let header = ptr.addr() as *mut KVData;
+        Self {
+            ptr,
+            key_len: unsafe { (*header).key_len },
+            value_len: unsafe { (*header).value_len },
+            perm: Tracked(perm),
+        }
     }
 }
 
@@ -530,9 +595,9 @@ impl Drop for KVPairOwned {
         no_unwind
     {
         unsafe {
-            let header = self.0;
-            let key_len = (*header).key_len as usize;
-            let value_len = (*header).value_len as usize;
+            let header = self.ptr.addr() as *mut KVData;
+            let key_len = self.key_len as usize;
+            let value_len = self.value_len as usize;
             let data_offset = std::mem::size_of::<KVData>();
             let total_size = data_offset + key_len + value_len;
             let layout = Layout::from_size_align(total_size.max(1), 16).unwrap();

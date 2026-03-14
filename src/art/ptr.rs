@@ -1,7 +1,8 @@
 use vstd::prelude::*;
+use vstd::simple_pptr::PPtr;
 
 use crate::art::{
-    index::{KVData, KVPairOwned},
+    index::KVData,
     n4::Node4,
     n16::Node16,
     n48::Node48,
@@ -219,14 +220,13 @@ impl TaggedPointer {
         Self::from_tagged_ptr(Box::into_raw(node) as usize, 3)
     }
 
-    pub(crate) fn from_value(kv: KVPairOwned) -> Self {
-        Self::from_tagged_ptr(kv.into_raw() as usize, 4)
+    pub(crate) fn from_value(ptr: PPtr<KVData>) -> Self {
+        Self::from_tagged_ptr(ptr.addr(), 4)
     }
 
     /// Safety: `self` must point to a live leaf allocation owned by this tagged pointer.
-    pub(crate) unsafe fn into_value(self) -> KVPairOwned {
-        let ptr = self.untagged_ptr() as *mut KVData;
-        unsafe { KVPairOwned::from_raw(ptr) }
+    pub(crate) fn value_ptr(self) -> PPtr<KVData> {
+        PPtr::from_usize(self.untagged_ptr())
     }
 
     /// Safety: `self` must point to a live node allocation owned by this tagged pointer.
