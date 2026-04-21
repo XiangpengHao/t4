@@ -8,37 +8,16 @@ use io_uring::{IoUring, opcode, types};
 
 use crate::buffer::AlignedBuf;
 use crate::error::{Error, Result};
-use crate::io_task::{
-    FileFsyncTask, FileReadTask, FileWriteTask, PageWrite, WorkerRequest, worker_disconnected_error,
-};
 use crate::sync::Arc;
 use crate::sync::mpsc;
 
-fn worker_failed_error(message: impl Into<String>) -> Error {
-    Error::Io(std::io::Error::other(message.into()))
-}
-
-fn complete_request_with_error(request: WorkerRequest, err: Error) {
-    match request {
-        WorkerRequest::Read { completion, .. } => completion.complete(Err(err)),
-        WorkerRequest::Write { completion, .. } => completion.complete(Err(err)),
-        WorkerRequest::Fsync { completion, .. } => completion.complete(Err(err)),
-    }
-}
-use crate::io_task::{FsyncCompletion, ReadCompletion, WriteCompletion};
-
-#[derive(Debug, Clone, Copy)]
-struct CompletionEvent {
-    user_data: u64,
-    result: i32,
-}
-
-fn decode_cqe_result(result: i32) -> Result<usize> {
-    if result < 0 {
-        return Err(Error::Io(std::io::Error::from_raw_os_error(-result)));
-    }
-    Ok(result as usize)
-}
+use super::common::{
+    CompletionEvent, InflightRequest, InflightRequestKind, RequestId, complete_request_with_error,
+    decode_cqe_result, decode_user_data, encode_user_data, request_op_count, worker_failed_error,
+};
+use super::io_task::{
+    FileFsyncTask, FileReadTask, FileWriteTask, PageWrite, WorkerRequest, worker_disconnected_error,
+};
 
 struct UringDriver {
     ring: IoUring,
@@ -144,71 +123,6 @@ impl IoDriver for UringDriver {
             result: cqe.result(),
         })
     }
-}
-
-type RequestId = u32;
-
-struct InflightRequest {
-    remaining: usize,
-    error: Option<Error>,
-    kind: InflightRequestKind,
-}
-
-enum InflightRequestKind {
-    Read {
-        buf: Option<AlignedBuf>,
-        completion: ReadCompletion,
-        result: Option<usize>,
-    },
-    Write {
-        pages: Vec<PageWrite>,
-        completion: WriteCompletion,
-    },
-    Fsync {
-        completion: FsyncCompletion,
-    },
-}
-
-impl InflightRequest {
-    fn complete(self) {
-        match self.kind {
-            InflightRequestKind::Read {
-                buf,
-                completion,
-                result,
-            } => match self.error {
-                Some(err) => completion.complete(Err(err)),
-                None => completion.complete(Ok((
-                    buf.expect("read buffer missing at completion"),
-                    result.expect("read result missing at completion"),
-                ))),
-            },
-            InflightRequestKind::Write { completion, .. } => match self.error {
-                Some(err) => completion.complete(Err(err)),
-                None => completion.complete(Ok(())),
-            },
-            InflightRequestKind::Fsync { completion } => match self.error {
-                Some(err) => completion.complete(Err(err)),
-                None => completion.complete(Ok(())),
-            },
-        }
-    }
-
-    fn complete_with_error(self, err: Error) {
-        match self.kind {
-            InflightRequestKind::Read { completion, .. } => completion.complete(Err(err)),
-            InflightRequestKind::Write { completion, .. } => completion.complete(Err(err)),
-            InflightRequestKind::Fsync { completion } => completion.complete(Err(err)),
-        }
-    }
-}
-
-fn encode_user_data(request_id: RequestId, op_index: usize) -> u64 {
-    ((request_id as u64) << 32) | (op_index as u32 as u64)
-}
-
-fn decode_user_data(user_data: u64) -> (RequestId, usize) {
-    ((user_data >> 32) as RequestId, user_data as u32 as usize)
 }
 
 struct UringBackend<D: IoDriver> {
@@ -572,13 +486,6 @@ impl<D: IoDriver> UringBackend<D> {
                 return self.next_request_id;
             }
         }
-    }
-}
-
-fn request_op_count(request: &WorkerRequest) -> usize {
-    match request {
-        WorkerRequest::Read { .. } | WorkerRequest::Fsync { .. } => 1,
-        WorkerRequest::Write { writes, .. } => writes.len(),
     }
 }
 
