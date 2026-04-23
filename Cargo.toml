@@ -13,7 +13,6 @@ members = [".", "fuzz", "verified"]
 default = []
 shuttle = ["dep:shuttle"]
 io-uring = ["dep:io-uring"]
-kqueue = ["dep:kqueue", "dep:ringbuf"]
 
 [dependencies]
 cfg-if = "1.0.4"
@@ -24,10 +23,6 @@ vstd = "=0.0.0-2026-02-22-0103"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7", optional = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-kqueue = { version = "1", optional = true }
-ringbuf = { version = "0.4.8", optional = true }
 
 [dev-dependencies]
 pollster = "0.4"

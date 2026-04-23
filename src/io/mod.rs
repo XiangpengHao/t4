@@ -8,7 +8,5 @@ pub(crate) mod sync;
 #[cfg(target_os = "linux")]
 pub(crate) mod io_uring;
 
-// TODO: Uncomment this after working on it
-// #[cfg(feature = "kqueue")]
-#[cfg(target_os = "macos")]
-pub(crate) mod kqueue;
+#[cfg(not(feature = "io-uring"))]
+pub(crate) mod generic;

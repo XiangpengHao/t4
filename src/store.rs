@@ -9,9 +9,7 @@ use verified::{CheckedRangeU32, RangeRequestU32};
 
 use crate::buffer::{AlignedBuf, align_down_u64, align_up_u32, align_up_u64};
 use crate::io::error::{Error, Result};
-#[cfg(feature = "io-uring")]
-#[cfg(target_os = "linux")]
-use crate::io::io_uring::IoWorker;
+use crate::io::io_worker::IoWorker;
 use crate::io::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::wal::Wal;
 use crate::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U64};
@@ -46,10 +44,12 @@ impl T4Store {
         open.read(true).write(true).create(true);
 
         let mut custom_flags = 0;
+        #[cfg(target_os = "linux")]
         if options.direct_io {
             custom_flags = custom_flags | libc::O_DIRECT;
         }
 
+        #[cfg(not(target_os = "linux"))]
         if options.direct_io {
             return Err(Error::InvalidArgument(
                 "direct_io not supported on target_os",

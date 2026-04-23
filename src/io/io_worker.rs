@@ -5,7 +5,7 @@ use std::sync::{Arc, mpsc};
 use std::thread::spawn;
 
 use crate::buffer::AlignedBuf;
-use crate::io::kqueue::KqueueBackend;
+use crate::io::generic::GenericIoBackend;
 use crate::{Error, Result};
 
 use crate::io::io_task::{
@@ -48,8 +48,8 @@ impl IoWorker {
                             }
                         };
                         backend.run();
-                } else if #[cfg(all(feature = "kqueue", target_os = "macos"))] {
-                        let backend = match KqueueBackend::new(file, queue_depth as usize, rx) {
+                } else {
+                        let backend = match GenericIoBackend::new(file, queue_depth as usize, rx) {
                             Ok(backend) => {
                                 let _ = init_tx.send(Ok(()));
                                 backend

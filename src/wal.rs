@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::buffer::AlignedBuf;
 use crate::io::error::{Error, Result};
 use crate::io::io_task::PageWrite;
-use crate::io::io_uring::IoWorker;
+use crate::io::io_worker::IoWorker;
 use crate::io::sync::{Mutex, MutexGuard};
 use crate::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U32, PAGE_SIZE_U64};
 

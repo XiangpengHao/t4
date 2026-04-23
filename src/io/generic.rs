@@ -2,8 +2,6 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::os::fd::AsRawFd;
 
-use ringbuf::traits::{Observer, Producer};
-
 use crate::buffer::AlignedBuf;
 use crate::io::common::{
     CompletionEvent, InflightRequest, InflightRequestKind, RequestId, complete_request_with_error,
@@ -11,7 +9,7 @@ use crate::io::common::{
 };
 use crate::io::error::{Error, Result};
 use crate::io::io_task::WorkerRequest;
-use crate::io::sync::mpsc;
+use crate::io::sync::{Arc, Mutex, mpsc, thread};
 
 pub(super) struct IoJob {
     pub(super) fd: i32,
@@ -56,18 +54,11 @@ impl IoJob {
     }
 }
 
-struct KqueueDriver {
-    // TODO: replace with { pool_tx, kq_fd, completion_deque } once the
-    // thread-pool backend lands. Kept as a ringbuf for now so the sketch
-    // still type-checks against the current submit path.
-    buffer: ringbuf::HeapRb<IoJob>,
-}
-
-trait IoDriver {
-    fn available_submission_slots(&mut self) -> usize;
-    fn push(&mut self, job: IoJob) -> Result<()>;
-    fn submit(&mut self) -> Result<usize>;
-    fn pop_completion(&mut self) -> Option<CompletionEvent>;
+struct GenericIoDriver {
+    queue_size: usize,
+    inflight: usize,
+    job_tx: mpsc::SyncSender<IoJob>,
+    completion_rx: mpsc::Receiver<CompletionEvent>,
 }
 
 struct ReadEntry<'a> {
@@ -127,94 +118,110 @@ impl From<FsyncEntry> for IoJob {
     }
 }
 
-impl KqueueDriver {
-    fn new(queue_depth: usize) -> Result<Self> {
+impl GenericIoDriver {
+    fn new(queue_size: usize) -> Result<Self> {
+        let num_threads = std::thread::available_parallelism().map(|n| n.get())?;
+        let (job_tx, job_rx) = mpsc::sync_channel::<IoJob>(queue_size);
+        let (completion_tx, completion_rx) = mpsc::channel::<CompletionEvent>();
+        let job_rx = Arc::new(Mutex::new(job_rx));
+
+        for _ in 0..num_threads {
+            let job_rx = Arc::clone(&job_rx);
+            let completion_tx = completion_tx.clone();
+            thread::spawn(move || worker_loop(job_rx, completion_tx));
+        }
+
         Ok(Self {
-            buffer: ringbuf::HeapRb::<KqueueEntry>::new(queue_depth),
+            queue_size,
+            inflight: 0,
+            job_tx,
+            completion_rx,
         })
     }
 
-    fn push_entry(&mut self, entry: KqueueEntry) -> Result<()> {
-        self.buffer.try_push(entry).map_err(|_| {
+    fn available_submission_slots(&self) -> usize {
+        self.queue_size.saturating_sub(self.inflight)
+    }
+
+    fn push(&mut self, job: IoJob) -> Result<()> {
+        self.job_tx.try_send(job).map_err(|_| {
             Error::Io(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
                 "submission queue is full",
             ))
         })?;
+        self.inflight = self.inflight + 1;
         Ok(())
-    }
-}
-
-impl IoDriver for KqueueDriver {
-    fn available_submission_slots(&mut self) -> usize {
-        self.buffer.occupied_len() - self.buffer.vacant_len()
-    }
-
-    fn push(&mut self, entry: KqueueEntry) -> Result<()> {
-        self.push_entry(entry)
     }
 
     fn submit(&mut self) -> Result<usize> {
-        Ok(self.ring.submit()?)
+        Ok(0)
     }
 
     fn pop_completion(&mut self) -> Option<CompletionEvent> {
-        let mut cq = self.ring.completion();
-        cq.next().map(|cqe| CompletionEvent {
-            user_data: cqe.user_data(),
-            result: cqe.result(),
-        })
+        match self.completion_rx.try_recv() {
+            Ok(event) => {
+                self.inflight = self.inflight.saturating_sub(1);
+                Some(event)
+            }
+            Err(_) => None,
+        }
     }
 }
 
-pub(crate) struct KqueueBackend<D: IoDriver> {
+fn worker_loop(
+    job_rx: Arc<Mutex<mpsc::Receiver<IoJob>>>,
+    completion_tx: mpsc::Sender<CompletionEvent>,
+) {
+    loop {
+        let job = {
+            let rx = job_rx.lock().expect("worker job queue mutex poisoned");
+            match rx.recv() {
+                Ok(job) => job,
+                Err(_) => return,
+            }
+        };
+        let result = job.execute();
+        let event = CompletionEvent {
+            user_data: job.user_data,
+            result,
+        };
+        if completion_tx.send(event).is_err() {
+            return;
+        }
+    }
+}
+
+pub(crate) struct GenericIoBackend {
     receiver: mpsc::Receiver<WorkerRequest>,
     file: File,
-    ring: D,
     queue_depth: usize,
     inflight_requests: HashMap<RequestId, InflightRequest>,
     next_request_id: RequestId,
+    driver: GenericIoDriver,
 }
 
-impl KqueueBackend<KqueueDriver> {
+impl GenericIoBackend {
     pub(crate) fn new(
         file: File,
         queue_depth: usize,
         rx: mpsc::Receiver<WorkerRequest>,
     ) -> Result<Self> {
-        let ring = KqueueDriver::new(queue_depth)?;
-        Ok(KqueueBackend::with_driver(
-            file,
-            queue_depth as usize,
-            rx,
-            ring,
-        ))
-    }
-}
-
-impl<D: IoDriver> KqueueBackend<D> {
-    fn with_driver(
-        file: File,
-        queue_depth: usize,
-        rx: mpsc::Receiver<WorkerRequest>,
-        ring: D,
-    ) -> Self {
-        Self {
+        let driver = GenericIoDriver::new(queue_depth)?;
+        Ok(Self {
             receiver: rx,
             file,
-            ring,
             queue_depth,
             inflight_requests: HashMap::new(),
             next_request_id: 0,
-        }
+            driver,
+        })
     }
 
     pub fn run(mut self) {
         self.thread_loop();
     }
-}
 
-impl<D: IoDriver> KqueueBackend<D> {
     fn thread_loop(&mut self) {
         let mut pending_request = None;
         loop {
@@ -262,7 +269,7 @@ impl<D: IoDriver> KqueueBackend<D> {
                 );
                 continue;
             }
-            if self.ring.available_submission_slots() < op_count {
+            if self.driver.available_submission_slots() < op_count {
                 *pending_request = Some(request);
                 break;
             }
@@ -272,7 +279,7 @@ impl<D: IoDriver> KqueueBackend<D> {
         }
 
         if submitted_any {
-            let _ = self.ring.submit()?;
+            let _ = self.driver.submit()?;
         }
 
         Ok(false)
@@ -307,7 +314,7 @@ impl<D: IoDriver> KqueueBackend<D> {
                     let InflightRequestKind::Read { buf, .. } = &mut request.kind else {
                         unreachable!("request kind changed while submitting read");
                     };
-                    self.ring.push(
+                    self.driver.push(
                         ReadEntry {
                             fd: self.file.as_raw_fd(),
                             buf: buf.as_mut().expect("read buffer missing while submitting"),
@@ -329,7 +336,7 @@ impl<D: IoDriver> KqueueBackend<D> {
                     },
                 );
 
-                let push_result = self.ring.push(
+                let push_result = self.driver.push(
                     FsyncEntry {
                         fd: self.file.as_raw_fd(),
                         user_data: encode_user_data(request_id, 0),
@@ -354,7 +361,6 @@ impl<D: IoDriver> KqueueBackend<D> {
 
                 let mut submitted_pages = 0;
                 for index in 0..page_count {
-                    let is_last = index + 1 == page_count;
                     let push_result = {
                         let request = self
                             .inflight_requests
@@ -366,17 +372,12 @@ impl<D: IoDriver> KqueueBackend<D> {
                         let page = pages
                             .get(index)
                             .expect("write page missing while submitting");
-                        self.ring.push(
+                        self.driver.push(
                             WriteEntry {
                                 fd: self.file.as_raw_fd(),
                                 buf: &page.buf,
                                 offset: page.offset,
                                 user_data: encode_user_data(request_id, index),
-                                flags: if is_last {
-                                    io_uring::squeue::Flags::empty()
-                                } else {
-                                    io_uring::squeue::Flags::IO_LINK
-                                },
                             }
                             .into(),
                         )
@@ -399,7 +400,7 @@ impl<D: IoDriver> KqueueBackend<D> {
     }
 
     fn poll_completions(&mut self) {
-        while let Some(cqe) = self.ring.pop_completion() {
+        while let Some(cqe) = self.driver.pop_completion() {
             let (request_id, op_index) = decode_user_data(cqe.user_data);
             let mut should_complete = false;
 

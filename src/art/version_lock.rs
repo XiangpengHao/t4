@@ -165,7 +165,7 @@ mod tests {
     use std::{cell::UnsafeCell, sync::Arc};
 
     use super::{Restart, VersionLock};
-    use crate::sync::atomic::{AtomicUsize, Ordering};
+    use crate::io::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn optimistic_read_returns_value_when_version_is_stable() {
