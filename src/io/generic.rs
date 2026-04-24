@@ -2,22 +2,23 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::os::fd::AsRawFd;
 
-use crate::buffer::AlignedBuf;
+use crossbeam_channel::{Receiver, Select, Sender, TryRecvError, bounded, unbounded};
+
 use crate::io::common::{
     CompletionEvent, InflightRequest, InflightRequestKind, RequestId, complete_request_with_error,
     decode_cqe_result, decode_user_data, encode_user_data, request_op_count, worker_failed_error,
 };
 use crate::io::error::{Error, Result};
 use crate::io::io_task::WorkerRequest;
-use crate::io::sync::{Arc, Mutex, mpsc, thread};
+use crate::io::sync::{mpsc, thread};
 
-pub(super) struct IoJob {
-    pub(super) fd: i32,
-    pub(super) user_data: u64,
-    pub(super) kind: IoJobKind,
+struct IoJob {
+    fd: i32,
+    user_data: u64,
+    kind: IoJobKind,
 }
 
-pub(super) enum IoJobKind {
+enum IoJobKind {
     Read {
         buf: *mut u8,
         len: usize,
@@ -34,7 +35,7 @@ pub(super) enum IoJobKind {
 unsafe impl Send for IoJob {}
 
 impl IoJob {
-    pub(super) fn execute(&self) -> i32 {
+    fn execute(&self) -> i32 {
         unsafe {
             let ret: isize = match self.kind {
                 IoJobKind::Read { buf, len, offset } => {
@@ -46,7 +47,7 @@ impl IoJob {
                 IoJobKind::Fsync => libc::fsync(self.fd) as isize,
             };
             if ret < 0 {
-                -(*libc::__error())
+                -std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
             } else {
                 ret as i32
             }
@@ -57,76 +58,20 @@ impl IoJob {
 struct GenericIoDriver {
     queue_size: usize,
     inflight: usize,
-    job_tx: mpsc::SyncSender<IoJob>,
-    completion_rx: mpsc::Receiver<CompletionEvent>,
-}
-
-struct ReadEntry<'a> {
-    fd: i32,
-    buf: &'a mut AlignedBuf,
-    offset: u64,
-    user_data: u64,
-}
-
-impl From<ReadEntry<'_>> for IoJob {
-    fn from(v: ReadEntry<'_>) -> Self {
-        Self {
-            fd: v.fd,
-            user_data: v.user_data,
-            kind: IoJobKind::Read {
-                buf: v.buf.as_mut_ptr(),
-                len: v.buf.len(),
-                offset: v.offset,
-            },
-        }
-    }
-}
-
-struct WriteEntry<'a> {
-    fd: i32,
-    buf: &'a AlignedBuf,
-    offset: u64,
-    user_data: u64,
-}
-
-impl From<WriteEntry<'_>> for IoJob {
-    fn from(v: WriteEntry<'_>) -> Self {
-        Self {
-            fd: v.fd,
-            user_data: v.user_data,
-            kind: IoJobKind::Write {
-                buf: v.buf.as_ptr(),
-                len: v.buf.len(),
-                offset: v.offset,
-            },
-        }
-    }
-}
-
-struct FsyncEntry {
-    fd: i32,
-    user_data: u64,
-}
-
-impl From<FsyncEntry> for IoJob {
-    fn from(v: FsyncEntry) -> Self {
-        Self {
-            fd: v.fd,
-            user_data: v.user_data,
-            kind: IoJobKind::Fsync,
-        }
-    }
+    job_tx: Sender<IoJob>,
+    completion_rx: Receiver<CompletionEvent>,
 }
 
 impl GenericIoDriver {
     fn new(queue_size: usize) -> Result<Self> {
-        let num_threads = std::thread::available_parallelism().map(|n| n.get())?;
-        let (job_tx, job_rx) = mpsc::sync_channel::<IoJob>(queue_size);
-        let (completion_tx, completion_rx) = mpsc::channel::<CompletionEvent>();
-        let job_rx = Arc::new(Mutex::new(job_rx));
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get())?
+            .min(queue_size.max(1));
+        let (job_tx, job_rx) = bounded::<IoJob>(queue_size);
+        let (completion_tx, completion_rx) = unbounded::<CompletionEvent>();
 
         for _ in 0..num_threads {
-            let job_rx = Arc::clone(&job_rx);
+            let job_rx = job_rx.clone();
             let completion_tx = completion_tx.clone();
             thread::spawn(move || worker_loop(job_rx, completion_tx));
         }
@@ -150,14 +95,8 @@ impl GenericIoDriver {
                 "submission queue is full",
             ))
         })?;
-        self.inflight = self.inflight + 1;
+        self.inflight += 1;
         Ok(())
-    }
-
-    // submit is a noop, the generic io driver processes
-    // events as they are pushed through the channel.
-    fn submit(&mut self) -> Result<usize> {
-        Ok(0)
     }
 
     fn pop_completion(&mut self) -> Option<CompletionEvent> {
@@ -171,22 +110,11 @@ impl GenericIoDriver {
     }
 }
 
-fn worker_loop(
-    job_rx: Arc<Mutex<mpsc::Receiver<IoJob>>>,
-    completion_tx: mpsc::Sender<CompletionEvent>,
-) {
-    loop {
-        let job = {
-            let rx = job_rx.lock().expect("worker job queue mutex poisoned");
-            match rx.recv() {
-                Ok(job) => job,
-                Err(_) => return,
-            }
-        };
-        let result = job.execute();
+fn worker_loop(job_rx: Receiver<IoJob>, completion_tx: Sender<CompletionEvent>) {
+    while let Ok(job) = job_rx.recv() {
         let event = CompletionEvent {
             user_data: job.user_data,
-            result,
+            result: job.execute(),
         };
         if completion_tx.send(event).is_err() {
             return;
@@ -206,9 +134,10 @@ pub(crate) struct GenericIoBackend {
 impl GenericIoBackend {
     pub(crate) fn new(
         file: File,
-        queue_depth: usize,
+        queue_depth: u32,
         rx: mpsc::Receiver<WorkerRequest>,
     ) -> Result<Self> {
+        let queue_depth = queue_depth as usize;
         let driver = GenericIoDriver::new(queue_depth)?;
         Ok(Self {
             receiver: rx,
@@ -240,20 +169,32 @@ impl GenericIoBackend {
 
             self.poll_completions();
 
-            crate::io::sync::cooperative_yield();
+            // Block until either a new request arrives or a worker
+            // completion lands. `Select::ready` does not consume the
+            // message — the next loop iteration drains it via
+            // submit_requests / poll_completions.
+            if self.inflight_requests.is_empty() && pending_request.is_none() {
+                match self.receiver.recv() {
+                    Ok(request) => pending_request = Some(request),
+                    Err(_) => return,
+                }
+            } else {
+                let mut sel = Select::new();
+                sel.recv(&self.receiver);
+                sel.recv(&self.driver.completion_rx);
+                sel.ready();
+            }
         }
     }
 
     fn submit_requests(&mut self, pending_request: &mut Option<WorkerRequest>) -> Result<bool> {
-        let mut submitted_any = false;
-
         loop {
             let request = match pending_request.take() {
                 Some(request) => request,
                 None => match self.receiver.try_recv() {
                     Ok(request) => request,
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => return Ok(true),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => return Ok(true),
                 },
             };
             let op_count = request_op_count(&request);
@@ -275,20 +216,15 @@ impl GenericIoBackend {
                 *pending_request = Some(request);
                 break;
             }
-            if self.submit_request(request)? {
-                submitted_any = true;
-            }
-        }
-
-        if submitted_any {
-            let _ = self.driver.submit()?;
+            self.submit_request(request)?;
         }
 
         Ok(false)
     }
 
-    fn submit_request(&mut self, request: WorkerRequest) -> Result<bool> {
+    fn submit_request(&mut self, request: WorkerRequest) -> Result<()> {
         let request_id = self.allocate_request_id();
+        let fd = self.file.as_raw_fd();
         match request {
             WorkerRequest::Read {
                 buf,
@@ -316,15 +252,16 @@ impl GenericIoBackend {
                     let InflightRequestKind::Read { buf, .. } = &mut request.kind else {
                         unreachable!("request kind changed while submitting read");
                     };
-                    self.driver.push(
-                        ReadEntry {
-                            fd: self.file.as_raw_fd(),
-                            buf: buf.as_mut().expect("read buffer missing while submitting"),
+                    let buf = buf.as_mut().expect("read buffer missing while submitting");
+                    self.driver.push(IoJob {
+                        fd,
+                        user_data: encode_user_data(request_id, 0),
+                        kind: IoJobKind::Read {
+                            buf: buf.as_mut_ptr(),
+                            len: buf.len(),
                             offset,
-                            user_data: encode_user_data(request_id, 0),
-                        }
-                        .into(),
-                    )
+                        },
+                    })
                 };
                 self.finish_single_submit(request_id, push_result)
             }
@@ -338,13 +275,11 @@ impl GenericIoBackend {
                     },
                 );
 
-                let push_result = self.driver.push(
-                    FsyncEntry {
-                        fd: self.file.as_raw_fd(),
-                        user_data: encode_user_data(request_id, 0),
-                    }
-                    .into(),
-                );
+                let push_result = self.driver.push(IoJob {
+                    fd,
+                    user_data: encode_user_data(request_id, 0),
+                    kind: IoJobKind::Fsync,
+                });
                 self.finish_single_submit(request_id, push_result)
             }
             WorkerRequest::Write { writes, completion } => {
@@ -374,29 +309,27 @@ impl GenericIoBackend {
                         let page = pages
                             .get(index)
                             .expect("write page missing while submitting");
-                        self.driver.push(
-                            WriteEntry {
-                                fd: self.file.as_raw_fd(),
-                                buf: &page.buf,
+                        self.driver.push(IoJob {
+                            fd,
+                            user_data: encode_user_data(request_id, index),
+                            kind: IoJobKind::Write {
+                                buf: page.buf.as_ptr(),
+                                len: page.buf.len(),
                                 offset: page.offset,
-                                user_data: encode_user_data(request_id, index),
-                            }
-                            .into(),
-                        )
+                            },
+                        })
                     };
 
                     match push_result {
-                        Ok(()) => {
-                            submitted_pages = submitted_pages + 1;
-                        }
+                        Ok(()) => submitted_pages += 1,
                         Err(err) => {
                             self.handle_write_submit_error(request_id, submitted_pages, err);
-                            return Ok(submitted_pages > 0);
+                            return Ok(());
                         }
                     }
                 }
 
-                Ok(true)
+                Ok(())
             }
         }
     }
@@ -404,7 +337,6 @@ impl GenericIoBackend {
     fn poll_completions(&mut self) {
         while let Some(cqe) = self.driver.pop_completion() {
             let (request_id, op_index) = decode_user_data(cqe.user_data);
-            let mut should_complete = false;
 
             let Some(request) = self.inflight_requests.get_mut(&request_id) else {
                 debug_assert!(false, "missing inflight request for cqe {}", cqe.user_data);
@@ -453,13 +385,9 @@ impl GenericIoBackend {
             }
 
             if request.remaining > 0 {
-                request.remaining = request.remaining - 1;
+                request.remaining -= 1;
             }
             if request.remaining == 0 {
-                should_complete = true;
-            }
-
-            if should_complete {
                 let request = self
                     .inflight_requests
                     .remove(&request_id)
@@ -489,18 +417,15 @@ impl GenericIoBackend {
         &mut self,
         request_id: RequestId,
         push_result: Result<()>,
-    ) -> Result<bool> {
-        match push_result {
-            Ok(()) => Ok(true),
-            Err(err) => {
-                let request = self
-                    .inflight_requests
-                    .remove(&request_id)
-                    .expect("request missing after failed submit");
-                request.complete_with_error(err);
-                Ok(false)
-            }
+    ) -> Result<()> {
+        if let Err(err) = push_result {
+            let request = self
+                .inflight_requests
+                .remove(&request_id)
+                .expect("request missing after failed submit");
+            request.complete_with_error(err);
         }
+        Ok(())
     }
 
     fn handle_write_submit_error(

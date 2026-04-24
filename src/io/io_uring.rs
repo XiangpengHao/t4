@@ -1,24 +1,18 @@
 use std::collections::HashMap;
-use std::fmt;
 use std::fs::File;
-use std::num::NonZeroU32;
 use std::os::fd::AsRawFd;
-use std::thread::spawn;
 
 use io_uring::{IoUring, opcode, types};
 
 use crate::buffer::AlignedBuf;
 use crate::io::error::{Error, Result};
-use crate::io::sync::Arc;
 use crate::io::sync::mpsc;
 
 use super::common::{
     CompletionEvent, InflightRequest, InflightRequestKind, RequestId, complete_request_with_error,
     decode_cqe_result, decode_user_data, encode_user_data, request_op_count, worker_failed_error,
 };
-use super::io_task::{
-    FileFsyncTask, FileReadTask, FileWriteTask, PageWrite, WorkerRequest, worker_disconnected_error,
-};
+use super::io_task::WorkerRequest;
 
 struct UringDriver {
     ring: IoUring,
@@ -126,7 +120,7 @@ impl IoDriver for UringDriver {
     }
 }
 
-struct UringBackend<D: IoDriver> {
+pub(crate) struct UringBackend<D: IoDriver = UringDriver> {
     receiver: mpsc::Receiver<WorkerRequest>,
     file: File,
     ring: D,
@@ -136,7 +130,11 @@ struct UringBackend<D: IoDriver> {
 }
 
 impl UringBackend<UringDriver> {
-    fn new(file: File, queue_depth: u32, rx: mpsc::Receiver<WorkerRequest>) -> Result<Self> {
+    pub(crate) fn new(
+        file: File,
+        queue_depth: u32,
+        rx: mpsc::Receiver<WorkerRequest>,
+    ) -> Result<Self> {
         let ring = UringDriver::new(queue_depth)?;
         Ok(UringBackend::with_driver(
             file,
@@ -164,7 +162,7 @@ impl<D: IoDriver> UringBackend<D> {
         }
     }
 
-    fn run(mut self) {
+    pub(crate) fn run(mut self) {
         self.thread_loop();
     }
 }
@@ -487,73 +485,5 @@ impl<D: IoDriver> UringBackend<D> {
                 return self.next_request_id;
             }
         }
-    }
-}
-
-/// Handle to the I/O worker thread.
-///
-/// Cloning shares the same underlying worker. The worker thread exits
-/// automatically once every clone is dropped (channel disconnects).
-#[derive(Clone)]
-pub struct IoWorker {
-    tx: Arc<mpsc::Sender<WorkerRequest>>,
-}
-
-impl fmt::Debug for IoWorker {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("IoWorker").finish_non_exhaustive()
-    }
-}
-
-impl IoWorker {
-    pub fn new(queue_depth: NonZeroU32, file: File) -> Result<Self> {
-        let queue_depth = queue_depth.get();
-
-        let (tx, rx) = mpsc::channel::<WorkerRequest>();
-        let (init_tx, init_rx) = mpsc::sync_channel::<Result<()>>(1);
-
-        spawn(move || {
-            let backend = match UringBackend::new(file, queue_depth, rx) {
-                Ok(backend) => {
-                    let _ = init_tx.send(Ok(()));
-                    backend
-                }
-                Err(err) => {
-                    let _ = init_tx.send(Err(err));
-                    return;
-                }
-            };
-            backend.run();
-        });
-
-        match init_rx.recv() {
-            Ok(Ok(())) => Ok(Self { tx: Arc::new(tx) }),
-            Ok(Err(err)) => Err(err),
-            Err(_) => Err(worker_disconnected_error()),
-        }
-    }
-
-    pub fn read_at(&self, buf: AlignedBuf, offset: u64) -> FileReadTask {
-        FileReadTask::new((*self.tx).clone(), buf, offset)
-    }
-
-    pub fn write(&self, writes: Vec<PageWrite>) -> FileWriteTask {
-        FileWriteTask::new((*self.tx).clone(), writes)
-    }
-
-    pub fn fsync(&self) -> FileFsyncTask {
-        FileFsyncTask::new((*self.tx).clone())
-    }
-
-    pub async fn read_exact_at(&self, buf: AlignedBuf, offset: u64) -> Result<AlignedBuf> {
-        let expected = buf.len();
-        let (buf, n) = self.read_at(buf, offset).await?;
-        if n != expected {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                format!("short read: expected {expected}, got {n}"),
-            )));
-        }
-        Ok(buf)
     }
 }
