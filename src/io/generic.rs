@@ -154,6 +154,8 @@ impl GenericIoDriver {
         Ok(())
     }
 
+    // submit is a noop, the generic io driver processes
+    // events as they are pushed through the channel.
     fn submit(&mut self) -> Result<usize> {
         Ok(0)
     }
