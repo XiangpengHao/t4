@@ -14,8 +14,8 @@ fn main() {
     divan::main();
 }
 
-const QUEUE_DEPTH: u32 = 128;
-const BATCH_SIZES: &[usize] = &[1, 4, 16, 64];
+const QUEUE_DEPTH: u32 = 256;
+const BATCH_SIZES: &[usize] = &[1, 4, 16, 64, 128];
 
 fn new_worker() -> IoWorker {
     let file = tempfile_in(BENCH_DIR).expect("tempfile");
