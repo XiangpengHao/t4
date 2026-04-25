@@ -2,10 +2,13 @@ use std::num::NonZero;
 
 use divan::counter::BytesCount;
 use pollster::block_on;
-use tempfile::tempfile;
+use tempfile::tempfile_in;
 
 use t4::__bench::{AlignedBuf, IoWorker, PageWrite};
 use t4::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U64};
+
+// Place the temp file on the crate's filesystem (real disk), not /tmp,
+const BENCH_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
 fn main() {
     divan::main();
@@ -15,7 +18,7 @@ const QUEUE_DEPTH: u32 = 128;
 const BATCH_SIZES: &[usize] = &[1, 4, 16, 64];
 
 fn new_worker() -> IoWorker {
-    let file = tempfile().expect("tempfile");
+    let file = tempfile_in(BENCH_DIR).expect("tempfile");
     IoWorker::new(NonZero::new(QUEUE_DEPTH).unwrap(), file).expect("io worker")
 }
 
