@@ -16,9 +16,9 @@ pub(super) fn complete_request_with_error(request: WorkerRequest, err: Error) {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct CompletionEvent {
-    pub(super) user_data: u64,
-    pub(super) result: i32,
+pub(crate) struct CompletionEvent {
+    pub(crate) user_data: u64,
+    pub(crate) result: i32,
 }
 
 pub(super) fn decode_cqe_result(result: i32) -> Result<usize> {

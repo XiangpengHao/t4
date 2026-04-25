@@ -13,9 +13,9 @@ pub(crate) type WriteCompletion = Arc<TaskCompletion<()>>;
 pub(crate) type FsyncCompletion = Arc<TaskCompletion<()>>;
 
 #[derive(Debug)]
-pub(crate) struct PageWrite {
-    pub(crate) buf: AlignedBuf,
-    pub(crate) offset: u64,
+pub struct PageWrite {
+    pub buf: AlignedBuf,
+    pub offset: u64,
 }
 
 pub(crate) struct TaskCompletion<T> {
@@ -119,7 +119,7 @@ struct PendingRead {
     offset: u64,
 }
 
-pub(crate) struct FileReadTask {
+pub struct FileReadTask {
     state: FileReadTaskState,
 }
 
@@ -182,7 +182,7 @@ struct PendingWrite {
     writes: Option<Vec<PageWrite>>,
 }
 
-pub(crate) struct FileWriteTask {
+pub struct FileWriteTask {
     state: FileWriteTaskState,
 }
 
@@ -242,7 +242,7 @@ struct PendingFsync {
     tx: mpsc::Sender<WorkerRequest>,
 }
 
-pub(crate) struct FileFsyncTask {
+pub struct FileFsyncTask {
     state: FileFsyncTaskState,
 }
 

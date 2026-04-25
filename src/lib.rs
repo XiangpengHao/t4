@@ -15,6 +15,14 @@ pub use io::error::{Error, Result};
 pub use store::MountOptions;
 use verified::input_kv::{T4Key, T4KeyRef, T4Value};
 
+#[cfg(feature = "__bench")]
+#[doc(hidden)]
+pub mod __bench {
+    pub use crate::buffer::AlignedBuf;
+    pub use crate::io::io_task::PageWrite;
+    pub use crate::io::io_worker::IoWorker;
+}
+
 pub const PAGE_SIZE: usize = 4096;
 pub const PAGE_SIZE_U32: u32 = PAGE_SIZE as u32;
 pub const PAGE_SIZE_NZ_U32: NonZeroU32 = match NonZeroU32::new(PAGE_SIZE_U32) {

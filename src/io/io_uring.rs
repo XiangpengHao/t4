@@ -14,11 +14,11 @@ use super::common::{
 };
 use super::io_task::WorkerRequest;
 
-struct UringDriver {
+pub(crate) struct UringDriver {
     ring: IoUring,
 }
 
-trait IoDriver {
+pub(crate) trait IoDriver {
     fn available_submission_slots(&mut self) -> usize;
     fn push(&mut self, entry: io_uring::squeue::Entry) -> Result<()>;
     fn submit(&mut self) -> Result<usize>;

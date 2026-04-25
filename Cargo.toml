@@ -13,6 +13,9 @@ members = [".", "fuzz", "verified"]
 default = []
 shuttle = ["dep:shuttle"]
 io-uring = ["dep:io-uring"]
+# Exposes internal types (IoWorker, AlignedBuf, PageWrite) for benchmarking.
+# Not part of the public API; the leading underscores signal "do not depend on this".
+__bench = []
 
 [dependencies]
 cfg-if = "1.0.4"
@@ -21,6 +24,8 @@ shuttle = { version = "0.8", optional = true }
 verified = { package = "t4-verified", version = "0.1.3", path = "verified" }
 vstd = "=0.0.0-2026-02-22-0103"
 crossbeam-channel = "0.5"
+divan = "0.1.21"
+fastrand = "2.4.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7", optional = true }
@@ -34,3 +39,8 @@ verify = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }
+
+[[bench]]
+name = "io_worker_throughput"
+harness = false
+required-features = ["__bench"]
