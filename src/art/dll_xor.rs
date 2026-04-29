@@ -145,7 +145,6 @@ impl<V> DListXor<V> {
                 });
             }
             self.push_empty_case(v);
-            return ;
         } else {
             let tail_ptr_u64 = self.tail;
             proof {

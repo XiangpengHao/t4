@@ -760,7 +760,7 @@ impl KVData {
 }
 
 #[verifier::external_body]
-fn kv_bytes<'a>(header: &'a KVData, offset: usize, len: usize) -> (result: &'a [u8])
+fn kv_bytes(header: &KVData, offset: usize, len: usize) -> (result: &[u8])
     ensures
         result@.len() == len as int,
     opens_invariants none
