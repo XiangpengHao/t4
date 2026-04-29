@@ -1,13 +1,7 @@
 use vstd::prelude::*;
 use vstd::simple_pptr::PPtr;
 
-use crate::art::{
-    index::KVData,
-    n4::Node4,
-    n16::Node16,
-    n48::Node48,
-    n256::Node256,
-};
+use crate::art::{index::KVData, n4::Node4, n16::Node16, n48::Node48, n256::Node256};
 
 verus! {
 

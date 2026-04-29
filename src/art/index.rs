@@ -2,8 +2,8 @@ use std::{alloc::Layout, ptr::copy_nonoverlapping};
 
 use vstd::prelude::*;
 use vstd::raw_ptr;
-use vstd::slice::slice_subrange;
 use vstd::simple_pptr::PPtr;
+use vstd::slice::slice_subrange;
 
 use crate::art::{
     ArtNode, InsertStep, delete_from_node, get_from_node,
@@ -252,7 +252,7 @@ impl ArtIndex {
                 parent.update(value_ptr);
                 return None;
             };
-            
+
             match unsafe { current_ptr.next_node_mut() } {
                 NextNodeMut::Value(existing) => {
                     let terminated_existing = TerminatedKeyRef::new(existing.key());

@@ -7,7 +7,7 @@ license = "Apache-2.0"
 repository = "https://github.com/XiangpengHao/t4"
 
 [dependencies]
-vstd = "=0.0.0-2026-02-22-0103"
+vstd = "=0.0.0-2026-04-20-1748"
 
 [package.metadata.verus]
 verify = true
