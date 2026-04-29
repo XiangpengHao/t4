@@ -30,8 +30,8 @@
             "llvm-tools-preview"
           ];
         };
-        verusVersion = "0.2026.02.22.2c9a6a0";
-        verusRustToolchain = pkgs.rust-bin.stable."1.93.0".default.override {
+        verusVersion = "0.2026.04.24.f8e1704";
+        verusRustToolchain = pkgs.rust-bin.stable."1.95.0".default.override {
           extensions = [
             "rustc-dev"
             "llvm-tools"
@@ -44,7 +44,7 @@
 
           src = pkgs.fetchzip {
             url = "https://github.com/verus-lang/verus/releases/download/release%2F${verusVersion}/verus-${verusVersion}-x86-linux.zip";
-            hash = "sha256-vTh7kek4D4GpJJk3sjlXDjmpqdJYjMvxgsHWeIfYU0Y=";
+            hash = "sha256-8od59DF+WQNd+lJt5mRdkY7t3BE52R6GVPXfpnme4vw=";
             stripRoot = false;
           };
 
