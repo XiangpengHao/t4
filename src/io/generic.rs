@@ -7,8 +7,10 @@ use crate::io::error::{Error, Result};
 use crate::io::io_task::WorkerRequest;
 use crate::io::sync::{mpsc, thread};
 
+use super::common::FileType;
+
 struct IoJob {
-    fd: i32,
+    file: FileType,
     user_data: u64,
     kind: IoJobKind,
 }
@@ -31,23 +33,53 @@ unsafe impl Send for IoJob {}
 
 impl IoJob {
     fn execute(&self) -> i32 {
-        unsafe {
-            let ret: isize = match self.kind {
-                IoJobKind::Read { buf, len, offset } => {
-                    libc::pread(self.fd, buf.cast(), len, offset as libc::off_t)
-                }
-                IoJobKind::Write { buf, len, offset } => {
-                    libc::pwrite(self.fd, buf.cast(), len, offset as libc::off_t)
-                }
-                IoJobKind::Fsync => libc::fsync(self.fd) as isize,
-            };
-            if ret < 0 {
-                -std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
-            } else {
-                ret as i32
+        let file = match &self.file {
+            FileType::File(file) => file.as_ref(),
+            FileType::RawFd(_) => unimplemented!("generic io driver uses normal file types."),
+        };
+
+        let result: std::io::Result<usize> = match self.kind {
+            IoJobKind::Read { buf, len, offset } => {
+                let slice = unsafe { std::slice::from_raw_parts_mut(buf, len) };
+                read_at(file, slice, offset)
             }
+            IoJobKind::Write { buf, len, offset } => {
+                let slice = unsafe { std::slice::from_raw_parts(buf, len) };
+                write_at(file, slice, offset)
+            }
+            IoJobKind::Fsync => file.sync_all().map(|_| 0),
+        };
+
+        match result {
+            Ok(n) => n as i32,
+            // Fallback to EIO(5) if no raw_os_error
+            Err(err) => -err.raw_os_error().unwrap_or(5),
         }
     }
+}
+
+#[cfg(unix)]
+fn read_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+    file.read_at(buf, offset)
+}
+
+#[cfg(windows)]
+fn read_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+    file.seek_read(buf, offset)
+}
+
+#[cfg(unix)]
+fn write_at(file: &File, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+    file.write_at(buf, offset)
+}
+
+#[cfg(windows)]
+fn write_at(file: &File, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+    file.seek_write(buf, offset)
 }
 
 pub(crate) struct GenericIoDriver {
@@ -88,13 +120,13 @@ impl IoDriver for GenericIoDriver {
     fn push(&mut self, entry: SubmissionEntry) -> Result<()> {
         let job = match entry {
             SubmissionEntry::Read {
-                fd,
+                file,
                 buf_ptr,
                 buf_len,
                 offset,
                 user_data,
             } => IoJob {
-                fd,
+                file,
                 user_data,
                 kind: IoJobKind::Read {
                     buf: buf_ptr,
@@ -103,14 +135,14 @@ impl IoDriver for GenericIoDriver {
                 },
             },
             SubmissionEntry::Write {
-                fd,
+                file,
                 buf_ptr,
                 buf_len,
                 offset,
                 user_data,
                 is_last_in_batch: _,
             } => IoJob {
-                fd,
+                file,
                 user_data,
                 kind: IoJobKind::Write {
                     buf: buf_ptr,
@@ -118,8 +150,8 @@ impl IoDriver for GenericIoDriver {
                     offset,
                 },
             },
-            SubmissionEntry::Fsync { fd, user_data } => IoJob {
-                fd,
+            SubmissionEntry::Fsync { file, user_data } => IoJob {
+                file,
                 user_data,
                 kind: IoJobKind::Fsync,
             },
@@ -153,6 +185,10 @@ impl IoDriver for GenericIoDriver {
         sel.recv(request_rx);
         sel.recv(&self.completion_rx);
         sel.ready();
+    }
+
+    fn use_raw_fd(&mut self) -> bool {
+        false
     }
 }
 

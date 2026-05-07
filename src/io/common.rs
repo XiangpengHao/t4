@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::os::fd::AsRawFd;
+use std::sync::Arc;
 
 use crate::buffer::AlignedBuf;
 use crate::io::error::{Error, Result};
@@ -105,17 +106,26 @@ fn request_op_count(request: &WorkerRequest) -> usize {
     }
 }
 
+/// FileType indicates whether our submission is using a raw file
+/// descriptor or a rust std library [File] type.
+#[derive(Clone)]
+pub(crate) enum FileType {
+    #[allow(dead_code)]
+    RawFd(i32),
+    File(Arc<File>),
+}
+
 /// Backend-agnostic submission record handed to a driver.
 pub(crate) enum SubmissionEntry {
     Read {
-        fd: i32,
+        file: FileType,
         buf_ptr: *mut u8,
         buf_len: u32,
         offset: u64,
         user_data: u64,
     },
     Write {
-        fd: i32,
+        file: FileType,
         buf_ptr: *const u8,
         buf_len: u32,
         offset: u64,
@@ -125,7 +135,7 @@ pub(crate) enum SubmissionEntry {
         is_last_in_batch: bool,
     },
     Fsync {
-        fd: i32,
+        file: FileType,
         user_data: u64,
     },
 }
@@ -142,11 +152,14 @@ pub(crate) trait IoDriver {
     /// Block until either a new request lands on `request_rx` or some
     /// inflight op completes. Only invoked when at least one op is inflight.
     fn wait_for_progress(&mut self, request_rx: &mpsc::Receiver<WorkerRequest>);
+    /// Should this IoDriver use a raw file descriptor? Generally only used
+    /// for io_uring or on unix systems.
+    fn use_raw_fd(&mut self) -> bool;
 }
 
 pub(crate) struct BackendLoop<D: IoDriver> {
     receiver: mpsc::Receiver<WorkerRequest>,
-    file: File,
+    file: Arc<File>,
     driver: D,
     queue_depth: usize,
     inflight_requests: HashMap<RequestId, InflightRequest>,
@@ -162,7 +175,7 @@ impl<D: IoDriver> BackendLoop<D> {
     ) -> Self {
         Self {
             receiver: rx,
-            file,
+            file: Arc::new(file),
             driver,
             queue_depth,
             inflight_requests: HashMap::new(),
@@ -242,7 +255,11 @@ impl<D: IoDriver> BackendLoop<D> {
 
     fn submit_request(&mut self, request: WorkerRequest) -> Result<bool> {
         let request_id = self.allocate_request_id();
-        let fd = self.file.as_raw_fd();
+        let file = if self.driver.use_raw_fd() {
+            FileType::RawFd(self.file.as_raw_fd())
+        } else {
+            FileType::File(Arc::clone(&self.file))
+        };
         match request {
             WorkerRequest::Read {
                 buf,
@@ -272,7 +289,7 @@ impl<D: IoDriver> BackendLoop<D> {
                     };
                     let buf = buf.as_mut().expect("read buffer missing while submitting");
                     self.driver.push(SubmissionEntry::Read {
-                        fd,
+                        file,
                         buf_ptr: buf.as_mut_ptr(),
                         buf_len: buf.len_u32(),
                         offset,
@@ -292,7 +309,7 @@ impl<D: IoDriver> BackendLoop<D> {
                 );
 
                 let push_result = self.driver.push(SubmissionEntry::Fsync {
-                    fd,
+                    file,
                     user_data: encode_user_data(request_id, 0),
                 });
                 self.finish_single_submit(request_id, push_result)
@@ -326,7 +343,7 @@ impl<D: IoDriver> BackendLoop<D> {
                             .get(index)
                             .expect("write page missing while submitting");
                         self.driver.push(SubmissionEntry::Write {
-                            fd,
+                            file: file.clone(),
                             buf_ptr: page.buf.as_ptr(),
                             buf_len: page.buf.len_u32(),
                             offset: page.offset,
