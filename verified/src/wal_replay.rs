@@ -62,12 +62,10 @@ impl ReplayState {
         let mut index = self.index;
 
         match previous_lsn {
-            Some(prev) => {
-                if entry.lsn <= prev {
-                    return Err(ReplayError::NonMonotonicLsn);
-                }
+            Some(prev) if entry.lsn <= prev => {
+                return Err(ReplayError::NonMonotonicLsn);
             },
-            None => {},
+            _ => {},
         }
         let max_data_end = match entry.state() {
             WalEntryState::Live => {

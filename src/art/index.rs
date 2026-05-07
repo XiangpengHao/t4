@@ -2,8 +2,8 @@ use std::{alloc::Layout, ptr::copy_nonoverlapping};
 
 use vstd::prelude::*;
 use vstd::raw_ptr;
-use vstd::slice::slice_subrange;
 use vstd::simple_pptr::PPtr;
+use vstd::slice::slice_subrange;
 
 use crate::art::{
     ArtNode, InsertStep, delete_from_node, get_from_node,
@@ -252,7 +252,7 @@ impl ArtIndex {
                 parent.update(value_ptr);
                 return None;
             };
-            
+
             match unsafe { current_ptr.next_node_mut() } {
                 NextNodeMut::Value(existing) => {
                     let terminated_existing = TerminatedKeyRef::new(existing.key());
@@ -686,12 +686,6 @@ pub(crate) fn common_prefix_len_terminated(
     idx
 }
 
-pub assume_specification[crate::art::ptr::TaggedPointer::from_node4](node: Box<Node4>) -> (result:
-    TaggedPointer)
-    ensures
-        result.wf(),
-;
-
 pub(crate) fn new_branching_path(
     prefix: &[u8],
     left_edge: u8,
@@ -733,13 +727,10 @@ pub(crate) fn new_branching_path(
     TaggedPointer::from_node4(Box::new(node))
 }
 
-} // verus!
-
 // Header for a leaf allocation. The actual key and value bytes follow immediately
 // after this header in memory (`data` is a zero-length flexible array marker).
 //
 // Layout (16-byte aligned): `[key_len: u8][_pad: 3][value_len: u32][key bytes...][value bytes...]`
-verus! {
 
 impl KVData {
     pub closed spec fn key_len_spec(&self) -> nat {
@@ -769,7 +760,7 @@ impl KVData {
 }
 
 #[verifier::external_body]
-fn kv_bytes<'a>(header: &'a KVData, offset: usize, len: usize) -> (result: &'a [u8])
+fn kv_bytes(header: &KVData, offset: usize, len: usize) -> (result: &[u8])
     ensures
         result@.len() == len as int,
     opens_invariants none

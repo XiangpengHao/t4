@@ -3,6 +3,9 @@
 pub(crate) use std::thread::JoinHandle;
 
 #[cfg(feature = "shuttle")]
+pub(crate) use shuttle::thread::spawn;
+
+#[cfg(feature = "shuttle")]
 #[inline]
 pub(crate) fn cooperative_yield() {
     shuttle::thread::yield_now();
@@ -12,16 +15,19 @@ pub(crate) fn cooperative_yield() {
 #[inline]
 pub(crate) fn cooperative_yield() {}
 
-#[cfg(all(feature = "shuttle", test))]
+#[cfg(feature = "shuttle")]
 pub(crate) use shuttle::sync::*;
 
-#[cfg(all(feature = "shuttle", test))]
+#[cfg(feature = "shuttle")]
+#[allow(unused_imports)]
 pub(crate) use shuttle::thread;
 
 #[cfg(not(all(feature = "shuttle", test)))]
-pub(crate) use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, atomic};
+pub(crate) use std::sync::{
+    Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, atomic,
+};
 
-#[cfg(not(all(feature = "shuttle", test)))]
+#[cfg(not(feature = "shuttle"))]
 #[allow(unused_imports)]
 pub(crate) use std::thread;
 

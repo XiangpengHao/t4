@@ -7,3 +7,5 @@
 ## Verus 
 
 1. Always ask before using `external_body`.
+2. Make sure the verus version in cargo is consistent with the verus version in flake.nix.
+

@@ -1,13 +1,7 @@
 use vstd::prelude::*;
 use vstd::simple_pptr::PPtr;
 
-use crate::art::{
-    index::KVData,
-    n4::Node4,
-    n16::Node16,
-    n48::Node48,
-    n256::Node256,
-};
+use crate::art::{index::KVData, n4::Node4, n16::Node16, n48::Node48, n256::Node256};
 
 verus! {
 
@@ -153,9 +147,42 @@ impl TaggedPointer {
         }
         Self::from_raw(raw)
     }
+
+    #[verifier::external_body]
+    pub(crate) fn from_node4(node: Box<Node4>) -> (result: Self)
+        ensures
+            result.wf(),
+    {
+        Self::from_tagged_ptr(Box::into_raw(node) as usize, 0)
+    }
+
+    #[verifier::external_body]
+    pub(crate) fn from_node16(node: Box<Node16>) -> (result: Self)
+        ensures
+            result.wf(),
+    {
+        Self::from_tagged_ptr(Box::into_raw(node) as usize, 1)
+    }
+
+    #[verifier::external_body]
+    pub(crate) fn from_node48(node: Box<Node48>) -> (result: Self)
+        ensures
+            result.wf(),
+    {
+        Self::from_tagged_ptr(Box::into_raw(node) as usize, 2)
+    }
+
+    #[verifier::external_body]
+    pub(crate) fn from_node256(node: Box<Node256>) -> (result: Self)
+        ensures
+            result.wf(),
+    {
+        Self::from_tagged_ptr(Box::into_raw(node) as usize, 3)
+    }
 }
 
 } // verus!
+
 pub(crate) enum NextNodeRef<'a> {
     Node4(&'a Node4),
     Node16(&'a Node16),
@@ -202,22 +229,6 @@ impl TaggedPointer {
             4 => unsafe { NextNodeMut::Value(&mut *(ptr as *mut KVData)) },
             _ => unreachable!("TaggedPointer type invariant guarantees a valid tag"),
         }
-    }
-
-    pub(crate) fn from_node4(node: Box<Node4>) -> Self {
-        Self::from_tagged_ptr(Box::into_raw(node) as usize, 0)
-    }
-
-    pub(crate) fn from_node16(node: Box<Node16>) -> Self {
-        Self::from_tagged_ptr(Box::into_raw(node) as usize, 1)
-    }
-
-    pub(crate) fn from_node48(node: Box<Node48>) -> Self {
-        Self::from_tagged_ptr(Box::into_raw(node) as usize, 2)
-    }
-
-    pub(crate) fn from_node256(node: Box<Node256>) -> Self {
-        Self::from_tagged_ptr(Box::into_raw(node) as usize, 3)
     }
 
     pub(crate) fn from_value(ptr: PPtr<KVData>) -> Self {

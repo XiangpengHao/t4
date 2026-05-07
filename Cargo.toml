@@ -1,6 +1,6 @@
 [package]
 name = "t4"
-version = "0.1.3"
+version = "0.1.6"
 edition = "2024"
 description = "Local embedded high-performance object store."
 license = "Apache-2.0"
@@ -19,9 +19,9 @@ __bench = []
 
 [dependencies]
 cfg-if = "1.0.4"
-shuttle = { version = "0.8", optional = true }
-verified = { package = "t4-verified", version = "0.1.3", path = "verified" }
-vstd = "=0.0.0-2026-02-22-0103"
+shuttle = { version = "0.9.1", optional = true }
+verified = { package = "t4-verified", version = "0.1.6", path = "verified" }
+vstd = "=0.0.0-2026-04-20-1748"
 crossbeam-channel = "0.5"
 divan = "0.1.21"
 fastrand = "2.4.1"
