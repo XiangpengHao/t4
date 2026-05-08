@@ -1,0 +1,27 @@
+# Default: treat as text, normalize to LF in the repo
+* text=auto eol=lf
+
+# Source / config — explicit for clarity
+*.rs       text eol=lf
+*.toml     text eol=lf
+*.lock     text eol=lf
+*.md       text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+*.json     text eol=lf
+*.sh       text eol=lf
+
+# Windows-only files keep CRLF
+*.bat      text eol=crlf
+*.cmd      text eol=crlf
+*.ps1      text eol=crlf
+
+# Binaries — never touch
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.gif      binary
+*.ico      binary
+*.pdf      binary
+*.zip      binary
+*.gz       binary
