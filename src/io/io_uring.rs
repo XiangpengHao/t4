@@ -68,7 +68,9 @@ fn build_sqe(entry: SubmissionEntry) -> io_uring::squeue::Entry {
             super::common::FileType::RawFd(fd) => opcode::Fsync::new(types::Fd(fd))
                 .build()
                 .user_data(user_data),
-            super::common::FileType::File(_) => unimplemented!("io_uring uses raw file descriptor."),
+            super::common::FileType::File(_) => {
+                unimplemented!("io_uring uses raw file descriptor.")
+            }
         },
     }
 }

@@ -28,7 +28,8 @@ pub struct IoWorker {
 impl fmt::Debug for IoWorker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("IoWorker").finish_non_exhaustive()
-    }}
+    }
+}
 
 impl IoWorker {
     pub fn new(queue_depth: NonZeroU32, file: File) -> Result<Self> {
