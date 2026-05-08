@@ -33,7 +33,7 @@ assert!(removed);
 
 `t4` ships with two interchangeable I/O backends, selected at compile time:
 
-- **Generic** (default, BSD/Linux): a thread pool dispatching POSIX `pread`/`pwrite`/`fsync`. 
+- **Generic** (default, BSD/Linux/Windows): a thread pool dispatching `std` library file I/O. 
 - **`io_uring`** (Linux 6.x+ only): opt in with the `io-uring` Cargo feature. 
 
 ```sh
