@@ -320,10 +320,7 @@ impl FileHole {
         if length == 0 {
             return None;
         }
-        match offset.checked_add(length) {
-            Some(_) => Some(Self { offset, length }),
-            None => None,
-        }
+        offset.checked_add(length).map(|_| Self { offset, length })
     }
 }
 
