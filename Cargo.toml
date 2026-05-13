@@ -23,7 +23,6 @@ shuttle = { version = "0.9.1", optional = true }
 verified = { package = "t4-verified", version = "0.1.6", path = "verified" }
 vstd = "=0.0.0-2026-04-20-1748"
 crossbeam-channel = "0.5"
-divan = "0.1.21"
 fastrand = "2.4.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -35,6 +34,7 @@ libc = "0.2"
 [dev-dependencies]
 pollster = "0.4"
 tempfile = "3"
+divan = "0.1.21"
 
 [package.metadata.verus]
 verify = true

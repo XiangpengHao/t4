@@ -289,11 +289,14 @@ impl ValueRef {
         align_up_u64(self.length as u64, PAGE_SIZE as u64).unwrap()
     }
 
-    pub fn file_hole(self) -> Option<FileHole> {
+    pub fn file_hole(self) -> (result: Option<FileHole>)
+        ensures
+            result.is_some() ==> result.unwrap().wf(),
+    {
         if self.is_empty() {
             None
         } else {
-            Some(FileHole { offset: self.offset, length: self.padded_length() })
+            FileHole::new(self.offset, self.padded_length())
         }
     }
 }
@@ -306,6 +309,155 @@ impl ValueRef {
 pub struct FileHole {
     pub offset: u64,
     pub length: u64,
+}
+
+impl FileHole {
+    pub closed spec fn wf(self) -> bool {
+        self.length > 0 && self.offset as int + self.length as int <= u64::MAX as int
+    }
+
+    pub fn new(offset: u64, length: u64) -> (result: Option<Self>)
+        ensures
+            result.is_some() ==> result.unwrap().wf(),
+    {
+        if length == 0 {
+            return None;
+        }
+        match offset.checked_add(length) {
+            Some(_) => Some(Self { offset, length }),
+            None => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct FileHoles {
+    holes: Vec<FileHole>,
+}
+
+impl FileHoles {
+    pub closed spec fn vec_wf(holes: Vec<FileHole>) -> bool {
+        forall|i: int| 0 <= i < holes@.len() ==> #[trigger] holes@[i].wf()
+    }
+
+    pub closed spec fn wf(self) -> bool {
+        Self::vec_wf(self.holes)
+    }
+
+    pub fn empty() -> (result: Self)
+        ensures
+            result.wf(),
+    {
+        Self { holes: Vec::new() }
+    }
+
+    pub fn release_hole(&mut self, hole: FileHole)
+        requires
+            old(self).wf(),
+            hole.wf(),
+        ensures
+            self.wf(),
+    {
+        self.holes.push(hole);
+    }
+
+    pub fn release_value(&mut self, value: ValueRef)
+        requires
+            old(self).wf(),
+        ensures
+            self.wf(),
+    {
+        match value.file_hole() {
+            Some(hole) => self.release_hole(hole),
+            None => {},
+        }
+    }
+
+    pub fn reserve(&mut self, len: u32) -> (result: Option<u64>)
+        requires
+            old(self).wf(),
+        ensures
+            self.wf(),
+    {
+        let len = len as u64;
+        if len == 0 {
+            return None;
+        }
+        let mut idx = 0;
+        while idx < self.holes.len()
+            invariant
+                idx <= self.holes.len(),
+                Self::vec_wf(self.holes),
+            decreases self.holes.len() - idx,
+        {
+            let hole = self.holes[idx];
+            if hole.length >= len {
+                let offset = hole.offset;
+                if hole.length == len {
+                    self.holes.swap_remove(idx);
+                } else {
+                    let next_offset = hole.offset + len;
+                    let next_length = hole.length - len;
+                    self.holes[idx] = FileHole { offset: next_offset, length: next_length };
+                }
+                return Some(offset);
+            }
+            idx = idx + 1;
+        }
+        None
+    }
+
+    pub fn consume(&mut self, offset: u64, length: u64) -> (result: Option<()>)
+        requires
+            old(self).wf(),
+        ensures
+            self.wf(),
+    {
+        let end = match offset.checked_add(length) {
+            Some(v) => v,
+            None => {
+                return None;
+            },
+        };
+        if end < offset {
+            return None;
+        }
+        let mut idx = 0;
+        while idx < self.holes.len()
+            invariant
+                offset <= end,
+                idx <= self.holes.len(),
+                Self::vec_wf(self.holes),
+            decreases self.holes.len() - idx,
+        {
+            let hole = self.holes[idx];
+            proof {
+                assert(hole.wf());
+            }
+            let hole_end = hole.offset + hole.length;
+            if hole.offset <= offset && end <= hole_end {
+                if offset == hole.offset {
+                    if end == hole_end {
+                        self.holes.remove(idx);
+                    } else {
+                        let next_length = hole_end - end;
+                        self.holes[idx] = FileHole { offset: end, length: next_length };
+                    }
+                } else if end == hole_end {
+                    let next_length = offset - hole.offset;
+                    self.holes[idx] = FileHole { offset: hole.offset, length: next_length };
+                } else {
+                    let left_length = offset - hole.offset;
+                    let right_length = hole_end - end;
+                    self.holes[idx] = FileHole { offset: hole.offset, length: left_length };
+                    self.holes.insert(idx + 1, FileHole { offset: end, length: right_length });
+                }
+                return Some(());
+            }
+            idx = idx + 1;
+        }
+        Some(())
+    }
 }
 
 } // verus!

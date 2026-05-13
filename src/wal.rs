@@ -7,7 +7,7 @@ use crate::io::io_worker::IoWorker;
 use crate::io::sync::{Mutex, MutexGuard};
 use crate::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U32, PAGE_SIZE_U64};
 
-use verified::input_kv::{FileHole, T4Key, T4Value, ValueRef};
+use verified::input_kv::{FileHoles, T4Key, T4Value, ValueRef};
 use verified::wal::{AppendEntry, WalPage};
 use verified::wal_replay::ReplayState;
 use verified::{allocate_next_lsn, reserve_space};
@@ -18,7 +18,7 @@ struct WalState {
     tail: WalPage,
     tail_offset: u64,
     next_lsn: u64,
-    holes: Vec<FileHole>,
+    holes: FileHoles,
 }
 
 pub struct Wal {
@@ -46,7 +46,7 @@ impl Wal {
                 tail: page,
                 tail_offset: 0,
                 next_lsn: 0,
-                holes: Vec::new(),
+                holes: FileHoles::empty(),
             }),
         })
     }
@@ -122,10 +122,7 @@ impl Wal {
     }
 
     pub fn release_value_space(&self, value: ValueRef) -> Result<()> {
-        let Some(hole) = value.file_hole() else {
-            return Ok(());
-        };
-        self.lock_state()?.holes.push(hole);
+        self.lock_state()?.holes.release_value(value);
         Ok(())
     }
 
@@ -137,7 +134,7 @@ impl Wal {
 
     fn reserve_value_space(&self, padded_len: u32) -> Result<u64> {
         let mut state = self.lock_state()?;
-        if let Some(offset) = Self::reserve_hole_locked(&mut state.holes, padded_len) {
+        if let Some(offset) = state.holes.reserve(padded_len) {
             return Ok(offset);
         }
         Self::reserve_tail_space_locked(&mut state, padded_len)
@@ -148,28 +145,6 @@ impl Wal {
             .ok_or_else(|| Error::Format("file tail overflow".into()))?;
         state.file_tail = reservation.next_tail;
         Ok(reservation.offset)
-    }
-
-    fn reserve_hole_locked(holes: &mut Vec<FileHole>, len: u32) -> Option<u64> {
-        let len = u64::from(len);
-        let mut idx = 0;
-        while idx < holes.len() {
-            let hole = holes[idx];
-            if hole.length >= len {
-                let offset = hole.offset;
-                if hole.length == len {
-                    holes.swap_remove(idx);
-                } else {
-                    holes[idx] = FileHole {
-                        offset: hole.offset + len,
-                        length: hole.length - len,
-                    };
-                }
-                return Some(offset);
-            }
-            idx += 1;
-        }
-        None
     }
 
     async fn append_entry(&self, pending: AppendEntry) -> Result<()> {

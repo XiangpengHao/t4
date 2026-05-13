@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use vstd::prelude::*;
 
-use crate::input_kv::{FileHole, T4Key, ValueRef};
+use crate::input_kv::{FileHoles, T4Key, ValueRef};
 use crate::wal::{WalEntryRef, WalEntryState, WalPage};
 use crate::{PAGE_SIZE, align_up_u64, allocate_next_lsn};
 
@@ -28,10 +28,14 @@ pub struct ReplayState {
     pub max_wal_end: u64,
     pub previous_lsn: Option<u64>,
     pub index: HashMap<T4Key, ValueRef>,
-    pub holes: Vec<FileHole>,
+    pub holes: FileHoles,
 }
 
 impl ReplayState {
+    pub closed spec fn wf(self) -> bool {
+        self.holes.wf()
+    }
+
     /// Fresh state before any pages have been scanned.
     /// Both bounds start at PAGE_SIZE because page 0 occupies [0, PAGE_SIZE).
     pub fn init() -> (result: Self)
@@ -39,80 +43,29 @@ impl ReplayState {
             result.max_data_end == PAGE_SIZE as u64,
             result.max_wal_end == PAGE_SIZE as u64,
             result.previous_lsn.is_none(),
+            result.wf(),
     {
         Self {
             max_data_end: PAGE_SIZE as u64,
             max_wal_end: PAGE_SIZE as u64,
             previous_lsn: None,
             index: HashMap::new(),
-            holes: Vec::new(),
+            holes: FileHoles::empty(),
         }
-    }
-
-    fn release_value(holes: &mut Vec<FileHole>, value: ValueRef) -> (result: Result<
-        (),
-        ReplayError,
-    >) {
-        match value.file_hole() {
-            Some(hole) => holes.push(hole),
-            None => {},
-        }
-        Ok(())
-    }
-
-    fn consume_hole(
-        holes: &mut Vec<FileHole>,
-        offset: u64,
-        length: u64,
-    ) -> (result: Result<(), ReplayError>) {
-        let end = match offset.checked_add(length) {
-            Some(v) => v,
-            None => {
-                return Err(ReplayError::Overflow);
-            },
-        };
-        let mut idx = 0;
-        while idx < holes.len()
-            invariant
-                idx <= holes.len(),
-            decreases holes.len() - idx,
-        {
-            let hole = holes[idx];
-            let hole_end = match hole.offset.checked_add(hole.length) {
-                Some(v) => v,
-                None => {
-                    return Err(ReplayError::Overflow);
-                },
-            };
-            if hole.offset <= offset && end <= hole_end {
-                if offset == hole.offset {
-                    if end == hole_end {
-                        holes.remove(idx);
-                    } else {
-                        holes[idx] = FileHole { offset: end, length: hole_end - end };
-                    }
-                } else if end == hole_end {
-                    holes[idx] = FileHole { offset: hole.offset, length: offset - hole.offset };
-                } else {
-                    holes[idx] = FileHole { offset: hole.offset, length: offset - hole.offset };
-                    holes.insert(idx + 1, FileHole { offset: end, length: hole_end - end });
-                }
-                return Ok(());
-            }
-            idx = idx + 1;
-        }
-        Ok(())
     }
 
     /// Process a single WAL entry: verify LSN monotonicity, update data-end
     /// tracking, and apply key effects into the hash index.
     fn process_entry(self, entry: &WalEntryRef) -> (result: Result<Self, ReplayError>)
+        requires
+            self.wf(),
         ensures
             result.is_ok() ==> result.unwrap().max_data_end >= self.max_data_end,
             result.is_ok() ==> result.unwrap().max_wal_end == self.max_wal_end,
             result.is_ok() ==> result.unwrap().previous_lsn == Some(entry.lsn),
             result.is_ok() ==> self.previous_lsn.is_some() ==> self.previous_lsn.unwrap()
                 < result.unwrap().previous_lsn.unwrap(),
+            result.is_ok() ==> result.unwrap().wf(),
     {
         let prev_max_data_end = self.max_data_end;
         let max_wal_end = self.max_wal_end;
@@ -139,7 +92,9 @@ impl ReplayState {
                     },
                 };
                 let key = T4Key::try_from_slice(entry.key.as_bytes()).unwrap();
-                Self::consume_hole(&mut holes, entry.offset, padded)?;
+                if holes.consume(entry.offset, padded).is_none() {
+                    return Err(ReplayError::Overflow);
+                }
                 let value = match ValueRef::try_new(entry.offset, entry.value_length) {
                     Some(value) => value,
                     None => {
@@ -148,7 +103,7 @@ impl ReplayState {
                 };
                 let old = index.insert(key, value);
                 match old {
-                    Some(value) => Self::release_value(&mut holes, value)?,
+                    Some(value) => holes.release_value(value),
                     None => {},
                 }
                 if data_end > prev_max_data_end {
@@ -160,7 +115,7 @@ impl ReplayState {
             WalEntryState::Tombstone => {
                 let old = index.remove(entry.key.as_bytes());
                 match old {
-                    Some(value) => Self::release_value(&mut holes, value)?,
+                    Some(value) => holes.release_value(value),
                     None => {},
                 }
                 prev_max_data_end
@@ -172,10 +127,13 @@ impl ReplayState {
 
     /// Record that a WAL page at `page_offset` was read.
     fn advance_wal_end(self, page_offset: u64) -> (result: Result<Self, ReplayError>)
+        requires
+            self.wf(),
         ensures
             result.is_ok() ==> result.unwrap().max_wal_end >= self.max_wal_end,
             result.is_ok() ==> result.unwrap().max_data_end == self.max_data_end,
             result.is_ok() ==> result.unwrap().previous_lsn == self.previous_lsn,
+            result.is_ok() ==> result.unwrap().wf(),
     {
         let prev_max_wal_end = self.max_wal_end;
         let max_data_end = self.max_data_end;
@@ -199,10 +157,15 @@ impl ReplayState {
     pub fn process_page(self, page: &WalPage) -> (result: Result<(Self, Option<u64>), ReplayError>)
         requires
             page.wf(),
+            self.wf(),
+        ensures
+            result.is_ok() ==> result.unwrap().0.wf(),
     {
         let mut state = self;
         let mut iter = page.iter();
         loop
+            invariant
+                state.wf(),
             decreases iter.remaining(),
         {
             let entry = match iter.next() {
@@ -223,14 +186,17 @@ impl ReplayState {
 
     /// Compute final file_tail and next_lsn from the accumulated replay state.
     pub fn finalize(self, file_len: u64) -> (result: Result<
-        (u64, u64, HashMap<T4Key, ValueRef>, Vec<FileHole>),
+        (u64, u64, HashMap<T4Key, ValueRef>, FileHoles),
         ReplayError,
     >)
+        requires
+            self.wf(),
         ensures
             result.is_ok() ==> result.unwrap().0 >= self.max_data_end,
             result.is_ok() ==> result.unwrap().0 >= self.max_wal_end,
             result.is_ok() ==> result.unwrap().0 >= file_len,
             result.is_ok() ==> result.unwrap().0 & sub(PAGE_SIZE as u64, 1) == 0,
+            result.is_ok() ==> result.unwrap().3.wf(),
     {
         let a = if file_len > self.max_data_end {
             file_len
