@@ -126,8 +126,11 @@ pub(crate) trait ArtNode {
     ;
 }
 
-pub(crate) fn get_from_node(node: &impl ArtNode, terminated_key: TerminatedKeyRef<'_>, depth: usize) -> (result:
-    Option<(TaggedPointer, usize)>)
+pub(crate) fn get_from_node(
+    node: &impl ArtNode,
+    terminated_key: TerminatedKeyRef<'_>,
+    depth: usize,
+) -> (result: Option<(TaggedPointer, usize)>)
     requires
         node.wf(),
         terminated_key.wf(),

@@ -30,7 +30,7 @@
             "llvm-tools-preview"
           ];
         };
-        verusVersion = "0.2026.04.24.f8e1704";
+        verusVersion = "0.2026.05.13.fae8859";
         verusRustToolchain = pkgs.rust-bin.stable."1.95.0".default.override {
           extensions = [
             "rustc-dev"
@@ -43,8 +43,8 @@
           version = verusVersion;
 
           src = pkgs.fetchzip {
-            url = "https://github.com/verus-lang/verus/releases/download/release%2F${verusVersion}/verus-${verusVersion}-x86-linux.zip";
-            hash = "sha256-8od59DF+WQNd+lJt5mRdkY7t3BE52R6GVPXfpnme4vw=";
+            url = "https://github.com/verus-lang/verus/releases/download/release%2Frolling%2F${verusVersion}/verus-${verusVersion}-x86-linux.zip";
+            hash = "sha256-lNWmo+5pD1tAu54/Gq86upQriqGGseDDhKYaECWXbIY=";
             stripRoot = false;
           };
 
@@ -95,16 +95,16 @@
         };
         verusfmt = pkgs.rustPlatform.buildRustPackage (finalAttrs: {
           pname = "verusfmt";
-          version = "0.6.1";
+          version = "0.7.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "verus-lang";
             repo = "verusfmt";
             tag = "v${finalAttrs.version}";
-            hash = "sha256-+NHI2dvCxEGVIUF9zO2aVvVbPSLRtsHFCIHU4cfRzUY=";
+            hash = "sha256-H9vD67Jrxrt515Wjd696Aoqc1n5LuxCaSxIXX9dNEZw=";
           };
 
-          cargoHash = "sha256-8r8PzBrYZWibeFDh2nENctEEkigUzQeD9uD0Jl/Nv5U=";
+          cargoHash = "sha256-d13J2xhPDbHH2qyqx/Lnv925bwlqRTUSjqnH5BU7BxE=";
 
           nativeCheckInputs = [
             pkgs.cargo

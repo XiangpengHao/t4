@@ -29,33 +29,6 @@ assert!(removed);
 ```
 
 
-## I/O backends
-
-`t4` ships with two interchangeable I/O backends, selected at compile time:
-
-- **Generic** (default, BSD/Linux/Windows): a thread pool dispatching `std` library file I/O. 
-- **`io_uring`** (Linux 6.x+ only): opt in with the `io-uring` Cargo feature. 
-
-```sh
-cargo build --features io-uring
-```
-
-Adding additional backends is a matter of implementing the `IoDriver` trait in `src/io/common.rs`
-
-## Benchmarks
-
-```sh
-# Generic backend
-cargo bench --features __bench --bench io_worker_throughput
-
-# io_uring backend
-cargo bench --features "__bench io-uring" --bench io_worker_throughput
-```
-
-```sh
-cargo bench --features __bench --bench io_worker_throughput -- --sample-count 50
-```
-
 ## Limitations
 
 File name is up to 256 bytes, file size is up to 4 GB.

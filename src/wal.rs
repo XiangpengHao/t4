@@ -7,7 +7,7 @@ use crate::io::io_worker::IoWorker;
 use crate::io::sync::{Mutex, MutexGuard};
 use crate::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U32, PAGE_SIZE_U64};
 
-use verified::input_kv::{T4Key, T4Value, ValueRef};
+use verified::input_kv::{FileHoles, T4Key, T4Value, ValueRef};
 use verified::wal::{AppendEntry, WalPage};
 use verified::wal_replay::ReplayState;
 use verified::{allocate_next_lsn, reserve_space};
@@ -18,6 +18,7 @@ struct WalState {
     tail: WalPage,
     tail_offset: u64,
     next_lsn: u64,
+    holes: FileHoles,
 }
 
 pub struct Wal {
@@ -45,6 +46,7 @@ impl Wal {
                 tail: page,
                 tail_offset: 0,
                 next_lsn: 0,
+                holes: FileHoles::empty(),
             }),
         })
     }
@@ -70,7 +72,7 @@ impl Wal {
             }
         };
 
-        let (file_tail, next_lsn, replay_index) = replay_state
+        let (file_tail, next_lsn, replay_index, holes) = replay_state
             .finalize(file_len)
             .map_err(|_| Error::Format("replay finalize overflow".into()))?;
         let wal = Self {
@@ -80,6 +82,7 @@ impl Wal {
                 tail: last_page,
                 tail_offset: last_offset,
                 next_lsn,
+                holes,
             }),
         };
         Ok((wal, replay_index))
@@ -109,15 +112,18 @@ impl Wal {
         })
         .await?;
 
-        Ok(ValueRef {
-            offset: value_offset,
-            length: value_len,
-        })
+        ValueRef::try_new(value_offset, value_len)
+            .ok_or_else(|| Error::Format("invalid value reference allocated".into()))
     }
 
     /// Append a tombstone entry to the WAL.
     pub async fn tombstone(&self, key: T4Key) -> Result<()> {
         self.append_entry(AppendEntry::Tombstone { key }).await
+    }
+
+    pub fn release_value_space(&self, value: ValueRef) -> Result<()> {
+        self.lock_state()?.holes.release_value(value);
+        Ok(())
     }
 
     // -- private -------------------------------------------------------------
@@ -128,10 +134,13 @@ impl Wal {
 
     fn reserve_value_space(&self, padded_len: u32) -> Result<u64> {
         let mut state = self.lock_state()?;
-        Self::reserve_space_locked(&mut state, padded_len)
+        if let Some(offset) = state.holes.reserve(padded_len) {
+            return Ok(offset);
+        }
+        Self::reserve_tail_space_locked(&mut state, padded_len)
     }
 
-    fn reserve_space_locked(state: &mut WalState, len: u32) -> Result<u64> {
+    fn reserve_tail_space_locked(state: &mut WalState, len: u32) -> Result<u64> {
         let reservation = reserve_space(state.file_tail, len)
             .ok_or_else(|| Error::Format("file tail overflow".into()))?;
         state.file_tail = reservation.next_tail;
@@ -149,7 +158,7 @@ impl Wal {
                 state.tail.append(&pending, lsn)?;
                 vec![self.encode_page_write(state.tail_offset, &state.tail)?]
             } else {
-                let new_page_offset = Self::reserve_space_locked(&mut state, PAGE_SIZE_U32)?;
+                let new_page_offset = Self::reserve_tail_space_locked(&mut state, PAGE_SIZE_U32)?;
 
                 let old_tail_offset = state.tail_offset;
                 state.tail.set_next_page(new_page_offset);

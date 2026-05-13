@@ -118,7 +118,10 @@ impl T4Store {
 
     pub async fn put(&self, key: T4Key, value: T4Value) -> Result<()> {
         let value_ref = self.wal.put(key.clone(), &value).await?;
-        self.write_index()?.insert(key, value_ref);
+        let old = self.write_index()?.insert(key, value_ref);
+        if let Some(old) = old {
+            self.wal.release_value_space(old)?;
+        }
         Ok(())
     }
 
@@ -127,13 +130,13 @@ impl T4Store {
             let index = self.read_index()?;
             *index.get(key.as_bytes()).ok_or(Error::NotFound)?
         };
-        let Some(value_len_u32) = NonZeroU32::new(value.length) else {
+        let Some(value_len_u32) = NonZeroU32::new(value.length()) else {
             return Ok(Vec::new());
         };
         let padded_u32 = align_up_u32(value_len_u32, PAGE_SIZE_NZ_U32)
             .map_err(|_| Error::Format("value length exceeds io buffer limit".into()))?;
         let buf = AlignedBuf::new_zeroed(padded_u32)?;
-        let buf = self.io.read_exact_at(buf, value.offset).await?;
+        let buf = self.io.read_exact_at(buf, value.offset()).await?;
         let value_len = value_len_u32.get() as usize;
         Ok(buf.as_slice()[..value_len].to_vec())
     }
@@ -145,18 +148,18 @@ impl T4Store {
         };
 
         let range: CheckedRangeU32 = range
-            .checked_against(value.length)
+            .checked_against(value.length())
             .ok_or(Error::RangeOutOfBounds)?;
         if range.is_empty() {
             return Ok(Vec::new());
         }
 
         let abs_start = value
-            .offset
+            .offset()
             .checked_add(u64::from(range.start()))
             .ok_or(Error::RangeOutOfBounds)?;
         let abs_end = value
-            .offset
+            .offset()
             .checked_add(u64::from(range.end()))
             .ok_or(Error::RangeOutOfBounds)?;
 
@@ -188,8 +191,12 @@ impl T4Store {
 
     pub async fn remove(&self, key: T4Key) -> Result<bool> {
         self.wal.tombstone(key.clone()).await?;
-        let existed = self.write_index()?.remove(&key).is_some();
-        Ok(existed)
+        let old = self.write_index()?.remove(&key);
+        if let Some(old) = old {
+            self.wal.release_value_space(old)?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     pub async fn sync(&self) -> Result<()> {
@@ -202,5 +209,207 @@ impl T4Store {
 
     pub fn is_empty(&self) -> Result<bool> {
         Ok(self.read_index()?.is_empty())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_options() -> MountOptions {
+        MountOptions {
+            queue_depth: 8,
+            direct_io: false,
+            dsync: true,
+        }
+    }
+
+    #[test]
+    fn reuses_deleted_hole_after_remount() {
+        pollster::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("reuse-after-remount.t4");
+            let value_a = vec![b'a'; 1000];
+            let value_b = vec![b'b'; 1000];
+            let value_c = vec![b'c'; 1000];
+
+            {
+                let store = T4Store::mount_with_options(&path, test_options())
+                    .await
+                    .unwrap();
+                store
+                    .put(
+                        T4Key::try_from_slice(b"a").unwrap(),
+                        T4Value::try_from_vec(value_a).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                store.sync().await.unwrap();
+                let len_after_first_put = std::fs::metadata(&path).unwrap().len();
+                assert!(
+                    store
+                        .remove(T4Key::try_from_slice(b"a").unwrap())
+                        .await
+                        .unwrap()
+                );
+                store
+                    .put(
+                        T4Key::try_from_slice(b"b").unwrap(),
+                        T4Value::try_from_vec(value_b.clone()).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                store.sync().await.unwrap();
+                assert_eq!(std::fs::metadata(&path).unwrap().len(), len_after_first_put);
+            }
+
+            let len_after_reuse = std::fs::metadata(&path).unwrap().len();
+
+            {
+                let store = T4Store::mount_with_options(&path, test_options())
+                    .await
+                    .unwrap();
+                store
+                    .put(
+                        T4Key::try_from_slice(b"c").unwrap(),
+                        T4Value::try_from_vec(value_c).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                store.sync().await.unwrap();
+                assert_eq!(
+                    store
+                        .get(T4KeyRef::try_from_slice(b"b").unwrap())
+                        .await
+                        .unwrap(),
+                    value_b
+                );
+            }
+
+            assert!(std::fs::metadata(&path).unwrap().len() > len_after_reuse);
+        });
+    }
+
+    #[test]
+    fn split_hole_survives_remount() {
+        pollster::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("split-hole-remount.t4");
+            let value_a = vec![b'a'; 5000];
+            let value_b = vec![b'b'; 1000];
+            let value_c = vec![b'c'; 1000];
+
+            {
+                let store = T4Store::mount_with_options(&path, test_options())
+                    .await
+                    .unwrap();
+                store
+                    .put(
+                        T4Key::try_from_slice(b"a").unwrap(),
+                        T4Value::try_from_vec(value_a).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .remove(T4Key::try_from_slice(b"a").unwrap())
+                        .await
+                        .unwrap()
+                );
+                store
+                    .put(
+                        T4Key::try_from_slice(b"b").unwrap(),
+                        T4Value::try_from_vec(value_b.clone()).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                store.sync().await.unwrap();
+            }
+
+            let len_after_first_reuse = std::fs::metadata(&path).unwrap().len();
+
+            {
+                let store = T4Store::mount_with_options(&path, test_options())
+                    .await
+                    .unwrap();
+                store
+                    .put(
+                        T4Key::try_from_slice(b"c").unwrap(),
+                        T4Value::try_from_vec(value_c).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                store.sync().await.unwrap();
+                assert_eq!(
+                    store
+                        .get(T4KeyRef::try_from_slice(b"b").unwrap())
+                        .await
+                        .unwrap(),
+                    value_b
+                );
+            }
+
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().len(),
+                len_after_first_reuse
+            );
+        });
+    }
+
+    #[test]
+    fn overwrite_hole_survives_remount() {
+        pollster::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("overwrite-hole-remount.t4");
+            let old_value = vec![b'a'; 1000];
+            let new_value = vec![b'b'; 1000];
+            let other_value = vec![b'c'; 1000];
+
+            {
+                let store = T4Store::mount_with_options(&path, test_options())
+                    .await
+                    .unwrap();
+                store
+                    .put(
+                        T4Key::try_from_slice(b"a").unwrap(),
+                        T4Value::try_from_vec(old_value).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                store
+                    .put(
+                        T4Key::try_from_slice(b"a").unwrap(),
+                        T4Value::try_from_vec(new_value.clone()).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                store.sync().await.unwrap();
+            }
+
+            let len_after_overwrite = std::fs::metadata(&path).unwrap().len();
+
+            {
+                let store = T4Store::mount_with_options(&path, test_options())
+                    .await
+                    .unwrap();
+                store
+                    .put(
+                        T4Key::try_from_slice(b"b").unwrap(),
+                        T4Value::try_from_vec(other_value).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                store.sync().await.unwrap();
+                assert_eq!(
+                    store
+                        .get(T4KeyRef::try_from_slice(b"a").unwrap())
+                        .await
+                        .unwrap(),
+                    new_value
+                );
+            }
+
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), len_after_overwrite);
+        });
     }
 }
