@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use vstd::prelude::*;
 
-use crate::input_kv::{T4Key, ValueRef};
+use crate::input_kv::{FileHole, T4Key, ValueRef};
 use crate::wal::{WalEntryRef, WalEntryState, WalPage};
 use crate::{PAGE_SIZE, align_up_u64, allocate_next_lsn};
 
@@ -19,6 +19,7 @@ pub enum ReplayError {
     Overflow,
     UnknownFlag,
     InvalidKey,
+    InvalidValueRef,
 }
 
 #[derive(Debug)]
@@ -27,6 +28,7 @@ pub struct ReplayState {
     pub max_wal_end: u64,
     pub previous_lsn: Option<u64>,
     pub index: HashMap<T4Key, ValueRef>,
+    pub holes: Vec<FileHole>,
 }
 
 impl ReplayState {
@@ -43,7 +45,63 @@ impl ReplayState {
             max_wal_end: PAGE_SIZE as u64,
             previous_lsn: None,
             index: HashMap::new(),
+            holes: Vec::new(),
         }
+    }
+
+    fn release_value(holes: &mut Vec<FileHole>, value: ValueRef) -> (result: Result<
+        (),
+        ReplayError,
+    >) {
+        match value.file_hole() {
+            Some(hole) => holes.push(hole),
+            None => {},
+        }
+        Ok(())
+    }
+
+    fn consume_hole(
+        holes: &mut Vec<FileHole>,
+        offset: u64,
+        length: u64,
+    ) -> (result: Result<(), ReplayError>) {
+        let end = match offset.checked_add(length) {
+            Some(v) => v,
+            None => {
+                return Err(ReplayError::Overflow);
+            },
+        };
+        let mut idx = 0;
+        while idx < holes.len()
+            invariant
+                idx <= holes.len(),
+            decreases holes.len() - idx,
+        {
+            let hole = holes[idx];
+            let hole_end = match hole.offset.checked_add(hole.length) {
+                Some(v) => v,
+                None => {
+                    return Err(ReplayError::Overflow);
+                },
+            };
+            if hole.offset <= offset && end <= hole_end {
+                if offset == hole.offset {
+                    if end == hole_end {
+                        holes.remove(idx);
+                    } else {
+                        holes[idx] = FileHole { offset: end, length: hole_end - end };
+                    }
+                } else if end == hole_end {
+                    holes[idx] = FileHole { offset: hole.offset, length: offset - hole.offset };
+                } else {
+                    holes[idx] = FileHole { offset: hole.offset, length: offset - hole.offset };
+                    holes.insert(idx + 1, FileHole { offset: end, length: hole_end - end });
+                }
+                return Ok(());
+            }
+            idx = idx + 1;
+        }
+        Ok(())
     }
 
     /// Process a single WAL entry: verify LSN monotonicity, update data-end
@@ -60,6 +118,7 @@ impl ReplayState {
         let max_wal_end = self.max_wal_end;
         let previous_lsn = self.previous_lsn;
         let mut index = self.index;
+        let mut holes = self.holes;
 
         match previous_lsn {
             Some(prev) if entry.lsn <= prev => {
@@ -80,7 +139,18 @@ impl ReplayState {
                     },
                 };
                 let key = T4Key::try_from_slice(entry.key.as_bytes()).unwrap();
-                index.insert(key, ValueRef { offset: entry.offset, length: entry.value_length });
+                Self::consume_hole(&mut holes, entry.offset, padded)?;
+                let value = match ValueRef::try_new(entry.offset, entry.value_length) {
+                    Some(value) => value,
+                    None => {
+                        return Err(ReplayError::InvalidValueRef);
+                    },
+                };
+                let old = index.insert(key, value);
+                match old {
+                    Some(value) => Self::release_value(&mut holes, value)?,
+                    None => {},
+                }
                 if data_end > prev_max_data_end {
                     data_end
                 } else {
@@ -88,12 +158,16 @@ impl ReplayState {
                 }
             },
             WalEntryState::Tombstone => {
-                index.remove(entry.key.as_bytes());
+                let old = index.remove(entry.key.as_bytes());
+                match old {
+                    Some(value) => Self::release_value(&mut holes, value)?,
+                    None => {},
+                }
                 prev_max_data_end
             },
         };
 
-        Ok(ReplayState { max_data_end, max_wal_end, previous_lsn: Some(entry.lsn), index })
+        Ok(ReplayState { max_data_end, max_wal_end, previous_lsn: Some(entry.lsn), index, holes })
     }
 
     /// Record that a WAL page at `page_offset` was read.
@@ -107,6 +181,7 @@ impl ReplayState {
         let max_data_end = self.max_data_end;
         let previous_lsn = self.previous_lsn;
         let index = self.index;
+        let holes = self.holes;
         let wal_end = match page_offset.checked_add(PAGE_SIZE as u64) {
             Some(v) => v,
             None => {
@@ -118,7 +193,7 @@ impl ReplayState {
         } else {
             prev_max_wal_end
         };
-        Ok(ReplayState { max_data_end, max_wal_end, previous_lsn, index })
+        Ok(ReplayState { max_data_end, max_wal_end, previous_lsn, index, holes })
     }
 
     pub fn process_page(self, page: &WalPage) -> (result: Result<(Self, Option<u64>), ReplayError>)
@@ -148,7 +223,7 @@ impl ReplayState {
 
     /// Compute final file_tail and next_lsn from the accumulated replay state.
     pub fn finalize(self, file_len: u64) -> (result: Result<
-        (u64, u64, HashMap<T4Key, ValueRef>),
+        (u64, u64, HashMap<T4Key, ValueRef>, Vec<FileHole>),
         ReplayError,
     >)
         ensures
@@ -187,7 +262,7 @@ impl ReplayState {
             },
             None => 0u64,
         };
-        Ok((file_tail, next_lsn, self.index))
+        Ok((file_tail, next_lsn, self.index, self.holes))
     }
 }
 

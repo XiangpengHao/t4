@@ -2,6 +2,8 @@ use std::borrow::Borrow;
 
 use vstd::{prelude::*, slice::slice_to_vec};
 
+use crate::{PAGE_SIZE, align_up_u64};
+
 verus! {
 
 #[derive(Debug)]
@@ -190,9 +192,120 @@ impl T4Value {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Logical location of a live value.
+///
+/// Empty values are represented as `(offset = 0, length = 0)`. Non-empty values
+/// have a page-aligned data offset and a page-padded physical extent that fits
+/// in the file address space.
 pub struct ValueRef {
+    offset: u64,
+    length: u32,
+}
+
+impl ValueRef {
+    closed spec fn padded_extent_wf(length: u32, padded: u64) -> bool {
+        padded >= length as u64 && padded & sub(PAGE_SIZE as u64, 1) == 0 && padded
+            - (length as u64) < (PAGE_SIZE as u64)
+    }
+
+    pub closed spec fn wf(self) -> bool {
+        self.length == 0 && self.offset == 0 || self.length != 0
+            && self.offset >= PAGE_SIZE as u64
+            && self.offset & sub(PAGE_SIZE as u64, 1) == 0
+            && exists|padded: u64|
+                Self::padded_extent_wf(self.length, padded)
+                    && self.offset as int + padded as int <= u64::MAX as int
+    }
+
+    #[verifier::type_invariant]
+    spec fn type_inv(&self) -> bool {
+        self.wf()
+    }
+
+    pub fn empty() -> (result: Self)
+        ensures
+            result.wf(),
+    {
+        Self { offset: 0, length: 0 }
+    }
+
+    pub fn try_new(offset: u64, length: u32) -> (result: Option<Self>)
+        ensures
+            result.is_some() ==> result.unwrap().wf(),
+    {
+        if length == 0 {
+            if offset == 0 {
+                return Some(Self::empty());
+            }
+            return None;
+        }
+        if offset < PAGE_SIZE as u64 {
+            return None;
+        }
+        proof {
+            assert(PAGE_SIZE as u64 & sub(PAGE_SIZE as u64, 1) == 0u64) by (bit_vector);
+        }
+        if offset & (PAGE_SIZE as u64 - 1) != 0 {
+            return None;
+        }
+        let padded = align_up_u64(length as u64, PAGE_SIZE as u64).unwrap();
+        match offset.checked_add(padded) {
+            Some(_) => {
+                proof {
+                    assert(Self::padded_extent_wf(length, padded));
+                    assert(offset as int + padded as int <= u64::MAX as int);
+                    assert(exists|padded_witness: u64|
+                        Self::padded_extent_wf(length, padded_witness)
+                            && offset as int + padded_witness as int <= u64::MAX as int
+                    ) by {
+                        let padded_witness = padded;
+                    };
+                }
+                Some(Self { offset, length })
+            },
+            None => None,
+        }
+    }
+
+    pub fn offset(self) -> u64 {
+        self.offset
+    }
+
+    pub fn length(self) -> u32 {
+        self.length
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.length == 0
+    }
+
+    pub fn padded_length(self) -> u64 {
+        if self.length == 0 {
+            return 0;
+        }
+        proof {
+            assert(PAGE_SIZE as u64 & sub(PAGE_SIZE as u64, 1) == 0u64) by (bit_vector);
+        }
+        align_up_u64(self.length as u64, PAGE_SIZE as u64).unwrap()
+    }
+
+    pub fn file_hole(self) -> Option<FileHole> {
+        if self.is_empty() {
+            None
+        } else {
+            Some(FileHole { offset: self.offset, length: self.padded_length() })
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Physical free extent in the store file.
+///
+/// Unlike `ValueRef::length`, this length is the page-padded number of bytes
+/// available for reuse.
+pub struct FileHole {
     pub offset: u64,
-    pub length: u32,
+    pub length: u64,
 }
 
 } // verus!
