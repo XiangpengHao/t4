@@ -466,13 +466,13 @@ impl WalPage {
         requires
             old(self).wf(),
         ensures
-            self.wf(),
-            result.is_ok() ==> self.used_bytes_spec() > old(self).used_bytes_spec(),
-            result.is_ok() ==> self.entry_count_spec() == (old(self).entry_count_spec() + 1),
-            result.is_err() ==> self.entry_count_spec() == old(self).entry_count_spec(),
-            result.is_err() ==> self.used_bytes_spec() == old(self).used_bytes_spec(),
-            result.is_err() ==> self.entry_count_spec() == old(self).entry_count_spec(),
-            result.is_err() ==> self.used_bytes_spec() == old(self).used_bytes_spec(),
+            final(self).wf(),
+            result.is_ok() ==> final(self).used_bytes_spec() > old(self).used_bytes_spec(),
+            result.is_ok() ==> final(self).entry_count_spec() == (old(self).entry_count_spec() + 1),
+            result.is_err() ==> final(self).entry_count_spec() == old(self).entry_count_spec(),
+            result.is_err() ==> final(self).used_bytes_spec() == old(self).used_bytes_spec(),
+            result.is_err() ==> final(self).entry_count_spec() == old(self).entry_count_spec(),
+            result.is_err() ==> final(self).used_bytes_spec() == old(self).used_bytes_spec(),
             result.is_err() ==> result.unwrap_err() == WalError::InsufficientSpace,
     {
         let old_used = self.used_bytes();
@@ -549,14 +549,12 @@ impl<'a> WalIter<'a> {
     }
 }
 
-impl<'a> Iterator for WalIter<'a> {
-    type Item = WalEntryRef<'a>;
-
-    fn next(&mut self) -> (result: Option<Self::Item>)
+impl<'a> WalIter<'a> {
+    pub fn next_impl(&mut self) -> (result: Option<WalEntryRef<'a>>)
         ensures
-            result.is_some() ==> self.remaining() < old(self).remaining(),
+            result.is_some() ==> final(self).remaining() < old(self).remaining(),
             result.is_some() ==> result.unwrap().wf(),
-            result.is_none() ==> self.remaining() == 0,
+            result.is_none() ==> final(self).remaining() == 0,
     {
         proof {
             use_type_invariant(&*self);
@@ -573,6 +571,15 @@ impl<'a> Iterator for WalIter<'a> {
         let next_remaining = self.remaining - 1;
         *self = Self { page: self.page, cursor: next_cursor, remaining: next_remaining };
         Some(entry)
+    }
+}
+
+#[cfg(not(verus_only))]
+impl<'a> Iterator for WalIter<'a> {
+    type Item = WalEntryRef<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        WalIter::next_impl(self)
     }
 }
 

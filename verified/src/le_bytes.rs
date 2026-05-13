@@ -55,15 +55,14 @@ pub fn write_u32_le(bytes: &mut [u8; PAGE_SIZE], off: usize, v: u32)
         off + 3 < PAGE_SIZE,
     ensures
         u32_from_4(
-            bytes@[off as int],
-            bytes@[off as int + 1],
-            bytes@[off as int + 2],
-            bytes@[off as int + 3],
+            final(bytes)@[off as int],
+            final(bytes)@[off as int + 1],
+            final(bytes)@[off as int + 2],
+            final(bytes)@[off as int + 3],
         ) == v,
         forall|i: int|
-            0 <= i < PAGE_SIZE as int && !(off as int <= i <= off as int + 3) ==> bytes@[i] == old(
-                bytes,
-            )@[i],
+            0 <= i < PAGE_SIZE as int && !(off as int <= i <= off as int + 3) ==> final(bytes)@[i]
+                == old(bytes)@[i],
 {
     bytes[off] = (v & 0x000000ff) as u8;
     bytes[off + 1] = ((v >> 8) & 0x000000ff) as u8;

@@ -313,6 +313,7 @@ impl FileHole {
         self.length > 0 && self.offset as int + self.length as int <= u64::MAX as int
     }
 
+    #[allow(clippy::manual_map)]
     pub fn new(offset: u64, length: u64) -> (result: Option<Self>)
         ensures
             result.is_some() ==> result.unwrap().wf(),
@@ -320,7 +321,10 @@ impl FileHole {
         if length == 0 {
             return None;
         }
-        offset.checked_add(length).map(|_| Self { offset, length })
+        match offset.checked_add(length) {
+            Some(_) => Some(Self { offset, length }),
+            None => None,
+        }
     }
 }
 
@@ -350,7 +354,7 @@ impl FileHoles {
             old(self).wf(),
             hole.wf(),
         ensures
-            self.wf(),
+            final(self).wf(),
     {
         self.holes.push(hole);
     }
@@ -359,7 +363,7 @@ impl FileHoles {
         requires
             old(self).wf(),
         ensures
-            self.wf(),
+            final(self).wf(),
     {
         match value.file_hole() {
             Some(hole) => self.release_hole(hole),
@@ -371,7 +375,7 @@ impl FileHoles {
         requires
             old(self).wf(),
         ensures
-            self.wf(),
+            final(self).wf(),
     {
         let len = len as u64;
         if len == 0 {
@@ -390,6 +394,9 @@ impl FileHoles {
                 if hole.length == len {
                     self.holes.swap_remove(idx);
                 } else {
+                    proof {
+                        assert(hole.wf());
+                    }
                     let next_offset = hole.offset + len;
                     let next_length = hole.length - len;
                     self.holes[idx] = FileHole { offset: next_offset, length: next_length };
@@ -405,7 +412,7 @@ impl FileHoles {
         requires
             old(self).wf(),
         ensures
-            self.wf(),
+            final(self).wf(),
     {
         let end = match offset.checked_add(length) {
             Some(v) => v,

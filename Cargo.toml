@@ -21,7 +21,7 @@ __bench = []
 cfg-if = "1.0.4"
 shuttle = { version = "0.9.1", optional = true }
 verified = { package = "t4-verified", version = "0.1.6", path = "verified" }
-vstd = "=0.0.0-2026-04-20-1748"
+vstd = "=0.0.0-2026-05-10-0145"
 crossbeam-channel = "0.5"
 fastrand = "2.4.1"
 

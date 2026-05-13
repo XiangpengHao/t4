@@ -168,7 +168,7 @@ impl ReplayState {
                 state.wf(),
             decreases iter.remaining(),
         {
-            let entry = match iter.next() {
+            let entry = match iter.next_impl() {
                 Some(v) => v,
                 None => {
                     break;
