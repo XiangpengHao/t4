@@ -204,17 +204,15 @@ pub struct ValueRef {
 
 impl ValueRef {
     closed spec fn padded_extent_wf(length: u32, padded: u64) -> bool {
-        padded >= length as u64 && padded & sub(PAGE_SIZE as u64, 1) == 0 && padded
-            - (length as u64) < (PAGE_SIZE as u64)
+        padded >= length as u64 && padded & sub(PAGE_SIZE as u64, 1) == 0 && padded - (
+        length as u64) < (PAGE_SIZE as u64)
     }
 
     pub closed spec fn wf(self) -> bool {
-        self.length == 0 && self.offset == 0 || self.length != 0
-            && self.offset >= PAGE_SIZE as u64
-            && self.offset & sub(PAGE_SIZE as u64, 1) == 0
-            && exists|padded: u64|
-                Self::padded_extent_wf(self.length, padded)
-                    && self.offset as int + padded as int <= u64::MAX as int
+        self.length == 0 && self.offset == 0 || self.length != 0 && self.offset >= PAGE_SIZE as u64
+            && self.offset & sub(PAGE_SIZE as u64, 1) == 0 && exists|padded: u64|
+            Self::padded_extent_wf(self.length, padded) && self.offset as int + padded as int
+                <= u64::MAX as int
     }
 
     #[verifier::type_invariant]
@@ -255,9 +253,8 @@ impl ValueRef {
                     assert(Self::padded_extent_wf(length, padded));
                     assert(offset as int + padded as int <= u64::MAX as int);
                     assert(exists|padded_witness: u64|
-                        Self::padded_extent_wf(length, padded_witness)
-                            && offset as int + padded_witness as int <= u64::MAX as int
-                    ) by {
+                        Self::padded_extent_wf(length, padded_witness) && offset as int
+                            + padded_witness as int <= u64::MAX as int) by {
                         let padded_witness = padded;
                     };
                 }

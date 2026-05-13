@@ -433,11 +433,9 @@ impl WalPage {
         ensures
             result == self.entry_count_spec(),
     {
-        u32_from_le_bytes(slice_subrange(
-            self.bytes.as_slice(),
-            OFF_ENTRY_COUNT,
-            OFF_ENTRY_COUNT + 4,
-        ))
+        u32_from_le_bytes(
+            slice_subrange(self.bytes.as_slice(), OFF_ENTRY_COUNT, OFF_ENTRY_COUNT + 4),
+        )
     }
 
     fn magic(&self) -> [u8; 4] {
@@ -457,11 +455,7 @@ impl WalPage {
             WAL_PAGE_HEADER_SIZE as u32 <= result,
             result <= PAGE_SIZE as u32,
     {
-        u32_from_le_bytes(slice_subrange(
-            self.bytes.as_slice(),
-            OFF_USED_BYTES,
-            OFF_USED_BYTES + 4,
-        ))
+        u32_from_le_bytes(slice_subrange(self.bytes.as_slice(), OFF_USED_BYTES, OFF_USED_BYTES + 4))
     }
 
     fn version(&self) -> u16 {

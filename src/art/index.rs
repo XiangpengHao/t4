@@ -20,10 +20,12 @@ const KV_HEADER_ALIGN: usize = 16;
 verus! {
 
 pub const KV_HEADER_SIZE_VERUS: usize = 16;
+
 pub const KV_HEADER_ALIGN_VERUS: usize = 16;
+
 #[allow(dead_code)]
-pub const MAX_LEAF_ALLOC_VERUS: usize =
-    isize::MAX as usize - (isize::MAX as usize % KV_HEADER_ALIGN_VERUS);
+pub const MAX_LEAF_ALLOC_VERUS: usize = isize::MAX as usize - (isize::MAX as usize
+    % KV_HEADER_ALIGN_VERUS);
 
 #[repr(C, align(16))]
 pub struct KVData {
@@ -56,9 +58,8 @@ impl KVLeafPerm {
             self.header.value().key_len as int + self.header.value().value_len as int,
         )
         &&& self.dealloc.addr() == ptr.addr()
-        &&& self.dealloc.size()
-            == vstd::layout::size_of::<KVData>() + self.header.value().key_len as nat
-                + self.header.value().value_len as nat
+        &&& self.dealloc.size() == vstd::layout::size_of::<KVData>()
+            + self.header.value().key_len as nat + self.header.value().value_len as nat
         &&& self.dealloc.size() <= usize::MAX
         &&& self.dealloc.align() == 16
         &&& self.header.ptr()@.provenance == self.dealloc.provenance()
@@ -77,16 +78,22 @@ pub(crate) struct TerminatedKeyRef<'a> {
 impl<'a> TerminatedKeyRef<'a> {
     pub closed spec fn wf(&self) -> bool {
         &&& self.key@.len() < usize::MAX
-        &&& self.start as nat
-            <= self.key@.len() + if self.needs_terminator { 1nat } else { 0nat }
+        &&& self.start as nat <= self.key@.len() + if self.needs_terminator {
+            1nat
+        } else {
+            0nat
+        }
     }
 
     pub closed spec fn spec_len(self) -> int
         recommends
             self.wf(),
     {
-        self.key@.len() as int + if self.needs_terminator { 1int } else { 0int }
-            - self.start as int
+        self.key@.len() as int + if self.needs_terminator {
+            1int
+        } else {
+            0int
+        } - self.start as int
     }
 
     pub closed spec fn spec_index(self, i: int) -> u8
@@ -106,9 +113,11 @@ impl<'a> TerminatedKeyRef<'a> {
             key.len() < usize::MAX,
         ensures
             result.wf(),
-            result.spec_len()
-                == key@.len() as int
-                    + if key@.len() > 0 && key[key@.len() - 1] == 0 { 0int } else { 1int },
+            result.spec_len() == key@.len() as int + if key@.len() > 0 && key[key@.len() - 1] == 0 {
+                0int
+            } else {
+                1int
+            },
     {
         let needs_terminator = key.last() != Some(&0);
         Self { key, start: 0, needs_terminator }
@@ -185,7 +194,6 @@ impl<'a> TerminatedKeyRef<'a> {
         if self.len() != other.len() {
             return false;
         }
-
         let mut i = 0usize;
         while i < self.len()
             invariant
@@ -485,7 +493,6 @@ impl ArtIndex {
 }
 
 } // verus!
-
 const _: [(); KV_HEADER_SIZE] = [(); std::mem::size_of::<KVData>()];
 const _: [(); KV_HEADER_ALIGN] = [(); std::mem::align_of::<KVData>()];
 
@@ -608,7 +615,8 @@ pub(crate) fn delete_at(
     }
 }
 
-pub(crate) fn common_prefix_len_slice_terminated(a: &[u8], b: TerminatedKeyRef<'_>) -> (result: usize)
+pub(crate) fn common_prefix_len_slice_terminated(a: &[u8], b: TerminatedKeyRef<'_>) -> (result:
+    usize)
     requires
         b.wf(),
     ensures
@@ -705,7 +713,6 @@ pub(crate) fn new_branching_path(
         let _ = node.insert(right_edge, right_child);
         return TaggedPointer::from_node4(Box::new(node));
     }
-
     let prefix8 = slice_subrange(prefix, 0, 8);
     proof {
         assert(crate::art::meta::NodeMeta::prefix_capacity() == 8) by (compute);
@@ -731,7 +738,6 @@ pub(crate) fn new_branching_path(
 // after this header in memory (`data` is a zero-length flexible array marker).
 //
 // Layout (16-byte aligned): `[key_len: u8][_pad: 3][value_len: u32][key bytes...][value bytes...]`
-
 impl KVData {
     pub closed spec fn key_len_spec(&self) -> nat {
         self.key_len as nat
@@ -831,11 +837,9 @@ impl KVPairOwned {
             result.wf(),
     {
         let data_offset = KV_HEADER_SIZE_VERUS;
-        let total_size = data_offset
-            .checked_add(key.len())
-            .unwrap()
-            .checked_add(value.len())
-            .unwrap();
+        let total_size = data_offset.checked_add(key.len()).unwrap().checked_add(
+            value.len(),
+        ).unwrap();
         proof {
             kv_data_layout();
             assert(total_size == data_offset + key.len() + value.len());
@@ -845,17 +849,21 @@ impl KVPairOwned {
             }
             assert(total_size != 0);
         }
-        let (ptr_u8, Tracked(raw), Tracked(dealloc)) =
-            raw_ptr::allocate(total_size, KV_HEADER_ALIGN_VERUS);
+        let (ptr_u8, Tracked(raw), Tracked(dealloc)) = raw_ptr::allocate(
+            total_size,
+            KV_HEADER_ALIGN_VERUS,
+        );
         let Tracked(exposed) = raw_ptr::expose_provenance(ptr_u8);
         let ptr = ptr_u8 as *mut KVData;
         let tracked header;
         let tracked payload;
         proof {
-            let tracked (header_raw, payload_raw) = raw.split(vstd::set_lib::set_int_range(
-                ptr_u8.addr() as int,
-                ptr_u8.addr() as int + data_offset as int,
-            ));
+            let tracked (header_raw, payload_raw) = raw.split(
+                vstd::set_lib::set_int_range(
+                    ptr_u8.addr() as int,
+                    ptr_u8.addr() as int + data_offset as int,
+                ),
+            );
             header = header_raw.into_typed::<KVData>(ptr_u8.addr());
             payload = payload_raw;
         }
@@ -865,7 +873,7 @@ impl KVPairOwned {
             Tracked(&mut header_perm),
             KVData {
                 key_len: key.len() as u8,
-                _pad: [0; 3],
+                _pad: [0;3],
                 value_len: value.len() as u32,
                 data: [],
             },
@@ -914,10 +922,7 @@ impl KVPairOwned {
         (ptr, Tracked(perm))
     }
 
-    pub fn from_parts(
-        ptr: PPtr<KVData>,
-        Tracked(perm): Tracked<KVLeafPerm>,
-    ) -> (result: Self)
+    pub fn from_parts(ptr: PPtr<KVData>, Tracked(perm): Tracked<KVLeafPerm>) -> (result: Self)
         requires
             perm.wf(ptr),
         ensures
@@ -959,50 +964,36 @@ impl KVPairOwned {
         let dealloc_ptr: *mut u8 = raw_ptr::with_exposed_provenance(addr, Tracked(exposed));
         proof {
             assert(full_raw.is_range(addr as int, total_size as int)) by {
-                assert(
-                    vstd::set_lib::set_int_range(
-                        addr as int,
-                        addr as int + total_size as int,
-                    ) =~= vstd::set_lib::set_int_range(
+                assert(vstd::set_lib::set_int_range(addr as int, addr as int + total_size as int)
+                    =~= vstd::set_lib::set_int_range(
+                    addr as int,
+                    addr as int + vstd::layout::size_of::<KVData>() as int,
+                ) + vstd::set_lib::set_int_range(
+                    addr as int + vstd::layout::size_of::<KVData>() as int,
+                    addr as int + total_size as int,
+                )) by {
+                    assert(full_raw.dom() =~= vstd::set_lib::set_int_range(
                         addr as int,
                         addr as int + vstd::layout::size_of::<KVData>() as int,
                     ) + vstd::set_lib::set_int_range(
                         addr as int + vstd::layout::size_of::<KVData>() as int,
                         addr as int + total_size as int,
-                    )
-                ) by {
-                    assert(full_raw.dom() =~=
-                        vstd::set_lib::set_int_range(
-                            addr as int,
-                            addr as int + vstd::layout::size_of::<KVData>() as int,
-                        ) + vstd::set_lib::set_int_range(
-                            addr as int + vstd::layout::size_of::<KVData>() as int,
-                            addr as int + total_size as int,
-                        )
-                    );
+                    ));
                 };
-                assert forall|i: int|
-                    #[trigger] vstd::set_lib::set_int_range(
+                assert forall|i: int| #[trigger]
+                    vstd::set_lib::set_int_range(
                         addr as int,
                         addr as int + total_size as int,
-                    ).contains(i) <==> #[trigger] (
-                    vstd::set_lib::set_int_range(
+                    ).contains(i) <==> #[trigger] (vstd::set_lib::set_int_range(
                         addr as int,
                         addr as int + vstd::layout::size_of::<KVData>() as int,
                     ) + vstd::set_lib::set_int_range(
                         addr as int + vstd::layout::size_of::<KVData>() as int,
                         addr as int + total_size as int,
-                    )
-                ).contains(i) by {};
+                    )).contains(i) by {};
             };
         }
-        raw_ptr::deallocate(
-            dealloc_ptr,
-            total_size,
-            16,
-            Tracked(full_raw),
-            Tracked(dealloc),
-        );
+        raw_ptr::deallocate(dealloc_ptr, total_size, 16, Tracked(full_raw), Tracked(dealloc));
     }
 }
 
@@ -1017,7 +1008,6 @@ impl Drop for KVPairOwned {
 }
 
 } // verus!
-
 #[cfg(test)]
 mod tests {
     use super::ArtIndex;

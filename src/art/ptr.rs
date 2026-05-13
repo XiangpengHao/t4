@@ -182,7 +182,6 @@ impl TaggedPointer {
 }
 
 } // verus!
-
 pub(crate) enum NextNodeRef<'a> {
     Node4(&'a Node4),
     Node16(&'a Node16),

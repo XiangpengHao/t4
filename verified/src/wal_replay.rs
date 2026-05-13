@@ -171,7 +171,7 @@ impl ReplayState {
             let entry = match iter.next() {
                 Some(v) => v,
                 None => {
-                    break ;
+                    break;
                 },
             };
             state = state.process_entry(&entry)?;
