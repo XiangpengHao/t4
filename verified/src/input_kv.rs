@@ -1,4 +1,5 @@
 use std::borrow::Borrow;
+use std::collections::HashMap;
 
 use vstd::{prelude::*, slice::slice_to_vec};
 
@@ -329,24 +330,26 @@ impl FileHole {
 }
 
 #[derive(Debug)]
+/// Free space tracker bucketed by exact size.
+///
+/// `by_size[len]` holds the offsets of released extents whose padded length is
+/// `len`. `reserve` only succeeds when the requested length exactly matches a
+/// non-empty bucket; there is no splitting and no coalescing. Unreusable holes
+/// accumulate until GC compacts them away.
 pub struct FileHoles {
-    holes: Vec<FileHole>,
+    by_size: HashMap<u64, Vec<u64>>,
 }
 
 impl FileHoles {
-    pub closed spec fn vec_wf(holes: Vec<FileHole>) -> bool {
-        forall|i: int| 0 <= i < holes@.len() ==> #[trigger] holes@[i].wf()
-    }
-
     pub closed spec fn wf(self) -> bool {
-        Self::vec_wf(self.holes)
+        true
     }
 
     pub fn empty() -> (result: Self)
         ensures
             result.wf(),
     {
-        Self { holes: Vec::new() }
+        Self { by_size: HashMap::new() }
     }
 
     pub fn release_hole(&mut self, hole: FileHole)
@@ -356,7 +359,12 @@ impl FileHoles {
         ensures
             final(self).wf(),
     {
-        self.holes.push(hole);
+        let mut bucket = match self.by_size.remove(&hole.length) {
+            Some(b) => b,
+            None => Vec::new(),
+        };
+        bucket.push(hole.offset);
+        self.by_size.insert(hole.length, bucket);
     }
 
     pub fn release_value(&mut self, value: ValueRef)
@@ -377,35 +385,19 @@ impl FileHoles {
         ensures
             final(self).wf(),
     {
-        let len = len as u64;
-        if len == 0 {
+        let len_u64 = len as u64;
+        if len_u64 == 0 {
             return None;
         }
-        let mut idx = 0;
-        while idx < self.holes.len()
-            invariant
-                idx <= self.holes.len(),
-                Self::vec_wf(self.holes),
-            decreases self.holes.len() - idx,
-        {
-            let hole = self.holes[idx];
-            if hole.length >= len {
-                let offset = hole.offset;
-                if hole.length == len {
-                    self.holes.swap_remove(idx);
-                } else {
-                    proof {
-                        assert(hole.wf());
-                    }
-                    let next_offset = hole.offset + len;
-                    let next_length = hole.length - len;
-                    self.holes[idx] = FileHole { offset: next_offset, length: next_length };
-                }
-                return Some(offset);
-            }
-            idx = idx + 1;
+        if !self.by_size.contains_key(&len_u64) {
+            return None;
         }
-        None
+        let mut bucket = self.by_size.remove(&len_u64).unwrap();
+        let popped = bucket.pop();
+        if !bucket.is_empty() {
+            self.by_size.insert(len_u64, bucket);
+        }
+        popped
     }
 
     pub fn consume(&mut self, offset: u64, length: u64) -> (result: Option<()>)
@@ -414,48 +406,24 @@ impl FileHoles {
         ensures
             final(self).wf(),
     {
-        let end = match offset.checked_add(length) {
-            Some(v) => v,
-            None => {
-                return None;
-            },
-        };
-        if end < offset {
-            return None;
+        if !self.by_size.contains_key(&length) {
+            return Some(());
         }
+        let mut bucket = self.by_size.remove(&length).unwrap();
         let mut idx = 0;
-        while idx < self.holes.len()
+        while idx < bucket.len()
             invariant
-                offset <= end,
-                idx <= self.holes.len(),
-                Self::vec_wf(self.holes),
-            decreases self.holes.len() - idx,
+                idx <= bucket.len(),
+            decreases bucket.len() - idx,
         {
-            let hole = self.holes[idx];
-            proof {
-                assert(hole.wf());
-            }
-            let hole_end = hole.offset + hole.length;
-            if hole.offset <= offset && end <= hole_end {
-                if offset == hole.offset {
-                    if end == hole_end {
-                        self.holes.remove(idx);
-                    } else {
-                        let next_length = hole_end - end;
-                        self.holes[idx] = FileHole { offset: end, length: next_length };
-                    }
-                } else if end == hole_end {
-                    let next_length = offset - hole.offset;
-                    self.holes[idx] = FileHole { offset: hole.offset, length: next_length };
-                } else {
-                    let left_length = offset - hole.offset;
-                    let right_length = hole_end - end;
-                    self.holes[idx] = FileHole { offset: hole.offset, length: left_length };
-                    self.holes.insert(idx + 1, FileHole { offset: end, length: right_length });
-                }
-                return Some(());
+            if bucket[idx] == offset {
+                bucket.swap_remove(idx);
+                break;
             }
             idx = idx + 1;
+        }
+        if !bucket.is_empty() {
+            self.by_size.insert(length, bucket);
         }
         Some(())
     }

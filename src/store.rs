@@ -291,13 +291,17 @@ mod tests {
     }
 
     #[test]
-    fn split_hole_survives_remount() {
+    fn exact_size_hole_survives_remount() {
+        // FileHoles buckets released extents by exact padded length. A put with
+        // a different padded length cannot reuse the bucket and must extend the
+        // tail, while a put with the matching padded length reuses it — even
+        // across a remount.
         pollster::block_on(async {
             let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("split-hole-remount.t4");
-            let value_a = vec![b'a'; 5000];
-            let value_b = vec![b'b'; 1000];
-            let value_c = vec![b'c'; 1000];
+            let path = dir.path().join("exact-size-hole-remount.t4");
+            let value_a = vec![b'a'; 5000]; // padded 8192
+            let value_b = vec![b'b'; 1000]; // padded 4096 — wrong size for a's hole
+            let value_c = vec![b'c'; 5000]; // padded 8192 — matches a's hole
 
             {
                 let store = T4Store::mount_with_options(&path, test_options())
@@ -326,7 +330,7 @@ mod tests {
                 store.sync().await.unwrap();
             }
 
-            let len_after_first_reuse = std::fs::metadata(&path).unwrap().len();
+            let len_after_b = std::fs::metadata(&path).unwrap().len();
 
             {
                 let store = T4Store::mount_with_options(&path, test_options())
@@ -335,7 +339,7 @@ mod tests {
                 store
                     .put(
                         T4Key::try_from_slice(b"c").unwrap(),
-                        T4Value::try_from_vec(value_c).unwrap(),
+                        T4Value::try_from_vec(value_c.clone()).unwrap(),
                     )
                     .await
                     .unwrap();
@@ -347,12 +351,17 @@ mod tests {
                         .unwrap(),
                     value_b
                 );
+                assert_eq!(
+                    store
+                        .get(T4KeyRef::try_from_slice(b"c").unwrap())
+                        .await
+                        .unwrap(),
+                    value_c
+                );
             }
 
-            assert_eq!(
-                std::fs::metadata(&path).unwrap().len(),
-                len_after_first_reuse
-            );
+            // c reused a's freed 8192 slot — file size did not grow.
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), len_after_b);
         });
     }
 
