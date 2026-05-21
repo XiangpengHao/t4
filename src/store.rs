@@ -291,13 +291,16 @@ mod tests {
     }
 
     #[test]
-    fn split_hole_survives_remount() {
+    fn oversized_hole_split_survives_remount() {
+        // A put whose padded length is within 2× of a freed hole reuses it,
+        // splitting off the remainder as a smaller hole. Both the split reuse
+        // and the leftover survive a remount.
         pollster::block_on(async {
             let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("split-hole-remount.t4");
-            let value_a = vec![b'a'; 5000];
-            let value_b = vec![b'b'; 1000];
-            let value_c = vec![b'c'; 1000];
+            let path = dir.path().join("oversized-hole-split.t4");
+            let value_a = vec![b'a'; 5000]; // padded 8192
+            let value_b = vec![b'b'; 1000]; // padded 4096 — fits in a's 8192 hole (within 2×)
+            let value_c = vec![b'c'; 1000]; // padded 4096 — should reuse the 4096 remainder
 
             {
                 let store = T4Store::mount_with_options(&path, test_options())
@@ -316,6 +319,15 @@ mod tests {
                         .await
                         .unwrap()
                 );
+                store.sync().await.unwrap();
+            }
+
+            let len_after_free = std::fs::metadata(&path).unwrap().len();
+
+            {
+                let store = T4Store::mount_with_options(&path, test_options())
+                    .await
+                    .unwrap();
                 store
                     .put(
                         T4Key::try_from_slice(b"b").unwrap(),
@@ -326,7 +338,13 @@ mod tests {
                 store.sync().await.unwrap();
             }
 
-            let len_after_first_reuse = std::fs::metadata(&path).unwrap().len();
+            // b split a's 8192 hole into a used 4096 slot and a freed 4096
+            // remainder — file size unchanged.
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().len(),
+                len_after_free,
+                "b should reuse a's 8192 hole via split"
+            );
 
             {
                 let store = T4Store::mount_with_options(&path, test_options())
@@ -335,7 +353,7 @@ mod tests {
                 store
                     .put(
                         T4Key::try_from_slice(b"c").unwrap(),
-                        T4Value::try_from_vec(value_c).unwrap(),
+                        T4Value::try_from_vec(value_c.clone()).unwrap(),
                     )
                     .await
                     .unwrap();
@@ -347,11 +365,20 @@ mod tests {
                         .unwrap(),
                     value_b
                 );
+                assert_eq!(
+                    store
+                        .get(T4KeyRef::try_from_slice(b"c").unwrap())
+                        .await
+                        .unwrap(),
+                    value_c
+                );
             }
 
+            // c reused the 4096 remainder — still no growth.
             assert_eq!(
                 std::fs::metadata(&path).unwrap().len(),
-                len_after_first_reuse
+                len_after_free,
+                "c should reuse the split remainder across remount"
             );
         });
     }

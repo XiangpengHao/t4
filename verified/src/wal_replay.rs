@@ -92,9 +92,7 @@ impl ReplayState {
                     },
                 };
                 let key = T4Key::try_from_slice(entry.key.as_bytes()).unwrap();
-                if holes.consume(entry.offset, padded).is_none() {
-                    return Err(ReplayError::Overflow);
-                }
+                holes.consume(entry.offset, padded);
                 let value = match ValueRef::try_new(entry.offset, entry.value_length) {
                     Some(value) => value,
                     None => {

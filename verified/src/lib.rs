@@ -1,5 +1,6 @@
 #![allow(clippy::assign_op_pattern)] // verus doesn't support assign op pattern
 #![allow(clippy::single_match)] // verus doesn't support single match
+#![allow(clippy::manual_unwrap_or_default)] // verus doesn't spec unwrap_or_default
 
 pub mod input_kv;
 pub mod le_bytes;
