@@ -636,7 +636,6 @@ dependencies = [
  "cfg-if",
  "crossbeam-channel",
  "divan",
- "fastrand",
  "io-uring",
  "libc",
  "pollster",
