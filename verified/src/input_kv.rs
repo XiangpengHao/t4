@@ -369,7 +369,7 @@ fn size_holding_offset(
         result.is_some() ==> lo <= result.unwrap() <= hi,
 {
     by_size.range(lo..=hi).find_map(
-        |(k, v)| { if v.iter().any(|o| *o == offset) { Some(*k) } else { None } },
+        |(k, v)| { if v.contains(&offset) { Some(*k) } else { None } },
     )
 }
 
@@ -466,33 +466,21 @@ impl FileHoles {
         // `len: u32` so `len_u64 * 2 <= 2 * u32::MAX < u64::MAX`.
         let lo = len_u64 + 1;
         let hi = len_u64 * 2;
-        let size = match smallest_size_in_range(&self.by_size, lo, hi) {
-            Some(s) => s,
-            None => return None,
-        };
+        let size = smallest_size_in_range(&self.by_size, lo, hi)?;
         let mut bucket = self.by_size.remove(&size).unwrap();
         proof {
             assert(Self::bucket_wf(size, bucket@));
         }
-        let offset = match bucket.pop() {
-            Some(o) => o,
-            None => return None,
-        };
+        let offset = bucket.pop()?;
         if !bucket.is_empty() {
             self.by_size.insert(size, bucket);
         }
         // Push the leftover (offset + len, size - len) back as a smaller hole.
         // Overflow check is defensive — bucket_wf guarantees offset + size
         // <= u64::MAX, and len_u64 < size.
-        let remainder_offset = match offset.checked_add(len_u64) {
-            Some(v) => v,
-            None => return None,
-        };
+        let remainder_offset = offset.checked_add(len_u64)?;
         let remainder_len = size - len_u64;
-        let new_hole = match FileHole::new(remainder_offset, remainder_len) {
-            Some(h) => h,
-            None => return None,
-        };
+        let new_hole = FileHole::new(remainder_offset, remainder_len)?;
         self.release_hole(new_hole);
         Some(offset)
     }
