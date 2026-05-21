@@ -1,9 +1,8 @@
 use core::fmt;
 use std::fs::File;
 use std::num::NonZeroU32;
-use std::thread::spawn;
-
 use crate::buffer::AlignedBuf;
+use crate::io::sync::thread::spawn;
 use crate::io::io_task::{
     FileFsyncTask, FileReadTask, FileWriteTask, PageWrite, WorkerRequest, worker_disconnected_error,
 };

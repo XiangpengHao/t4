@@ -439,4 +439,85 @@ mod tests {
             assert_eq!(std::fs::metadata(&path).unwrap().len(), len_after_overwrite);
         });
     }
+
+    // bug from: https://github.com/XiangpengHao/t4/issues/10
+    #[cfg(feature = "shuttle")]
+    #[test]
+    fn shuttle_concurrent_put_same_key_index_matches_replay() {
+        use super::*;
+        use crate::io::sync::Arc;
+        use verified::input_kv::{T4Key, T4KeyRef, T4Value};
+
+        fn test_options() -> MountOptions {
+            MountOptions {
+                queue_depth: 4,
+                direct_io: false,
+                dsync: false,
+            }
+        }
+
+        shuttle::check_random(
+            || {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("shuttle-put-race.t4");
+
+                shuttle::future::block_on(async move {
+                    let store = Arc::new(
+                        T4Store::mount_with_options(&path, test_options())
+                            .await
+                            .unwrap(),
+                    );
+
+                    let value_a = vec![b'a'; 16];
+                    let value_b = vec![b'b'; 16];
+
+                    let s_a = store.clone();
+                    let s_b = store.clone();
+                    let t_a = shuttle::future::spawn(async move {
+                        s_a.put(
+                            T4Key::try_from_slice(b"k").unwrap(),
+                            T4Value::try_from_vec(value_a).unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    });
+                    let t_b = shuttle::future::spawn(async move {
+                        s_b.put(
+                            T4Key::try_from_slice(b"k").unwrap(),
+                            T4Value::try_from_vec(value_b).unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    });
+                    t_a.await.unwrap();
+                    t_b.await.unwrap();
+
+                    let live = store
+                        .get(T4KeyRef::try_from_slice(b"k").unwrap())
+                        .await
+                        .unwrap();
+
+                    // Drop the live store (flushes IoWorker, closes file),
+                    // remount, and re-read. With the bug, replay picks the
+                    // *highest LSN* WAL record, which can disagree with the
+                    // value-ref the in-memory index ended up holding.
+                    drop(store);
+
+                    let store2 = T4Store::mount_with_options(&path, test_options())
+                        .await
+                        .unwrap();
+                    let replayed = store2
+                        .get(T4KeyRef::try_from_slice(b"k").unwrap())
+                        .await
+                        .unwrap();
+
+                    assert_eq!(
+                        live, replayed,
+                        "live in-memory view disagrees with what replay reconstructs",
+                    );
+                });
+            },
+            200,
+        );
+    }
 }
