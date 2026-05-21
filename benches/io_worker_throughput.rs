@@ -38,15 +38,15 @@ fn write(bencher: divan::Bencher, batch: usize) {
         .counter(BytesCount::new(batch * PAGE_SIZE_U64 as usize))
         .with_inputs(|| page_writes(batch, 0))
         .bench_values(|writes| {
-            block_on(worker.write(writes)).unwrap();
+            block_on(worker.write(writes).unwrap()).unwrap();
         });
 }
 
 #[divan::bench(args = BATCH_SIZES)]
 fn read(bencher: divan::Bencher, batch: usize) {
     let worker = new_worker();
-    block_on(worker.write(page_writes(batch, 0))).unwrap();
-    block_on(worker.fsync()).unwrap();
+    block_on(worker.write(page_writes(batch, 0)).unwrap()).unwrap();
+    block_on(worker.fsync().unwrap()).unwrap();
 
     bencher
         .counter(BytesCount::new(batch * PAGE_SIZE_U64 as usize))
@@ -62,8 +62,8 @@ fn read(bencher: divan::Bencher, batch: usize) {
 #[divan::bench]
 fn fsync(bencher: divan::Bencher) {
     let worker = new_worker();
-    block_on(worker.write(page_writes(1, 0))).unwrap();
+    block_on(worker.write(page_writes(1, 0)).unwrap()).unwrap();
     bencher.bench(|| {
-        block_on(worker.fsync()).unwrap();
+        block_on(worker.fsync().unwrap()).unwrap();
     });
 }

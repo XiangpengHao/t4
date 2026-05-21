@@ -115,11 +115,7 @@ impl Index {
         Ok(map.get(key).and_then(IndexEntry::live_vref))
     }
 
-    pub(crate) fn apply_put(
-        &self,
-        key: T4Key,
-        commit: WalCommit<'_>,
-    ) -> Result<ApplyPutOutcome> {
+    pub(crate) fn apply_put(&self, key: T4Key, commit: WalCommit<'_>) -> Result<ApplyPutOutcome> {
         let (lsn, vref) = commit.into_parts();
         let mut map = self.map.write().map_err(|_| Error::LockPoisoned)?;
         if let Some(existing) = map.get(&key)
@@ -164,9 +160,7 @@ impl Index {
 
     fn is_empty(&self) -> Result<bool> {
         let map = self.map.read().map_err(|_| Error::LockPoisoned)?;
-        Ok(map
-            .values()
-            .all(|e| !matches!(e, IndexEntry::Live { .. })))
+        Ok(map.values().all(|e| !matches!(e, IndexEntry::Live { .. })))
     }
 }
 

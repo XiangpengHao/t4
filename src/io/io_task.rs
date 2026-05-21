@@ -180,10 +180,7 @@ impl FileWriteTask {
     /// within a critical section. Deferring the send to `poll` would
     /// expose the channel to the async scheduler's choice of poll order
     /// (see the comment in `Wal::append_entry`).
-    pub(crate) fn new(
-        tx: mpsc::Sender<WorkerRequest>,
-        writes: Vec<PageWrite>,
-    ) -> Result<Self> {
+    pub(crate) fn new(tx: mpsc::Sender<WorkerRequest>, writes: Vec<PageWrite>) -> Result<Self> {
         let completion = Arc::new(TaskCompletion::new());
         let request = WorkerRequest::Write {
             writes,
