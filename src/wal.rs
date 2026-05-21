@@ -12,6 +12,55 @@ use verified::wal::{AppendEntry, WalPage};
 use verified::wal_replay::ReplayState;
 use verified::{allocate_next_lsn, reserve_space};
 
+/// Durable WAL receipt for a put. Carries the LSN that decides ordering
+/// when the put is applied to the index and the on-disk location of the
+/// value bytes. Construct only via [`Wal::put`]; consume via
+/// [`crate::store::Index::apply_put`].
+///
+/// If the receipt is dropped without being applied, the reserved value
+/// space is released back to the WAL so it doesn't leak. (The on-disk
+/// WAL record stays — replay will see it dominated by any later record
+/// for the same key, exactly as it would for any in-flight crash.)
+#[must_use = "WalCommit must be applied to the index via Index::apply_put \
+              (Rejected outcomes hand back the vref to release explicitly)"]
+pub(crate) struct WalCommit<'a> {
+    lsn: u64,
+    vref: ValueRef,
+    wal: &'a Wal,
+}
+
+impl WalCommit<'_> {
+    /// Extract the (lsn, vref) and *suppress* the Drop-time release.
+    /// Used by the index after a successful apply to take ownership of
+    /// the vref without freeing its space.
+    pub(crate) fn into_parts(self) -> (u64, ValueRef) {
+        let parts = (self.lsn, self.vref);
+        std::mem::forget(self);
+        parts
+    }
+}
+
+impl Drop for WalCommit<'_> {
+    fn drop(&mut self) {
+        let _ = self.wal.release_value_space(self.vref);
+    }
+}
+
+/// Durable WAL receipt for a tombstone. Carries the LSN that decides
+/// ordering. Tombstones don't allocate value space, so dropping the
+/// receipt without applying it is harmless (the on-disk tombstone just
+/// won't be reflected in the live index until the next remount).
+#[must_use = "WalTombstoneCommit must be applied via Index::apply_remove"]
+pub(crate) struct WalTombstoneCommit {
+    lsn: u64,
+}
+
+impl WalTombstoneCommit {
+    pub(crate) fn lsn(&self) -> u64 {
+        self.lsn
+    }
+}
+
 #[derive(Debug)]
 struct WalState {
     file_tail: u64,
@@ -38,7 +87,7 @@ impl Wal {
         let page = WalPage::empty();
         let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32)?;
         buf.as_mut_slice().copy_from_slice(page.as_slice());
-        io.write(vec![PageWrite { buf, offset: 0 }]).await?;
+        io.write(vec![PageWrite { buf, offset: 0 }])?.await?;
         Ok(Self {
             io,
             state: Mutex::new(WalState {
@@ -89,7 +138,9 @@ impl Wal {
     }
 
     /// Write value bytes into data space and append a live WAL entry.
-    pub async fn put(&self, key: T4Key, value: &T4Value) -> Result<ValueRef> {
+    /// Returns a [`WalCommit`] carrying the assigned LSN — pass it to
+    /// `Index::apply_put` so the index's ordering matches the WAL's.
+    pub async fn put<'a>(&'a self, key: T4Key, value: &T4Value) -> Result<WalCommit<'a>> {
         let value_len = value.len_u32();
         let value_offset = if value_len == 0 {
             0
@@ -100,25 +151,32 @@ impl Wal {
                 .write(vec![PageWrite {
                     buf,
                     offset: value_offset,
-                }])
+                }])?
                 .await?;
             value_offset
         };
 
-        self.append_entry(AppendEntry::Live {
-            key,
-            offset: value_offset,
-            length: value_len,
-        })
-        .await?;
+        let lsn = self
+            .append_entry(AppendEntry::Live {
+                key,
+                offset: value_offset,
+                length: value_len,
+            })
+            .await?;
 
-        ValueRef::try_new(value_offset, value_len)
-            .ok_or_else(|| Error::Format("invalid value reference allocated".into()))
+        let vref = ValueRef::try_new(value_offset, value_len)
+            .ok_or_else(|| Error::Format("invalid value reference allocated".into()))?;
+        Ok(WalCommit {
+            lsn,
+            vref,
+            wal: self,
+        })
     }
 
     /// Append a tombstone entry to the WAL.
-    pub async fn tombstone(&self, key: T4Key) -> Result<()> {
-        self.append_entry(AppendEntry::Tombstone { key }).await
+    pub async fn tombstone(&self, key: T4Key) -> Result<WalTombstoneCommit> {
+        let lsn = self.append_entry(AppendEntry::Tombstone { key }).await?;
+        Ok(WalTombstoneCommit { lsn })
     }
 
     pub fn release_value_space(&self, value: ValueRef) -> Result<()> {
@@ -147,8 +205,8 @@ impl Wal {
         Ok(reservation.offset)
     }
 
-    async fn append_entry(&self, pending: AppendEntry) -> Result<()> {
-        let write = {
+    async fn append_entry(&self, pending: AppendEntry) -> Result<u64> {
+        let (write, lsn) = {
             let mut state = self.lock_state()?;
             let lsn = state.next_lsn;
             let next_lsn =
@@ -175,11 +233,11 @@ impl Wal {
             };
 
             state.next_lsn = next_lsn;
-            self.io.write(writes)
+            (self.io.write(writes)?, lsn)
         };
 
         write.await?;
-        Ok(())
+        Ok(lsn)
     }
 
     fn encode_page_write(&self, offset: u64, page: &WalPage) -> Result<PageWrite> {

@@ -14,9 +14,161 @@ use verified::{CheckedRangeU32, RangeRequestU32};
 use crate::buffer::{AlignedBuf, align_down_u64, align_up_u32, align_up_u64};
 use crate::io::error::{Error, Result};
 use crate::io::io_worker::IoWorker;
-use crate::io::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use crate::wal::Wal;
+use crate::io::sync::RwLock;
+use crate::wal::{Wal, WalCommit, WalTombstoneCommit};
 use crate::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U64};
+
+// ---------------------------------------------------------------------------
+// Index
+//
+// The in-memory view over the WAL. Each entry carries the LSN of the WAL
+// record that produced it, so `apply_put` / `apply_remove` can enforce the
+// store's core invariant:
+//
+//     for every key K, index[K] reflects the WAL record for K with the
+//     highest LSN
+//
+// The WAL's LSN order is authoritative. If the index lock is acquired in
+// a different order than LSNs were assigned, the LSN check rejects the
+// out-of-order writer; the "loser" releases its own value space. Both
+// orderings converge to the same final state, matching what `Wal::replay`
+// would reconstruct after a remount.
+//
+// Tombstones live in the index (not just on disk) so that a put whose
+// LSN is older than a concurrent remove's LSN can be rejected even when
+// the key wasn't present beforehand. Their cost is one entry per
+// deleted key; they're dropped on remount because replay produces only
+// live entries.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy)]
+enum IndexEntry {
+    Live { lsn: u64, vref: ValueRef },
+    Tomb { lsn: u64 },
+}
+
+impl IndexEntry {
+    fn lsn(&self) -> u64 {
+        match self {
+            Self::Live { lsn, .. } | Self::Tomb { lsn } => *lsn,
+        }
+    }
+
+    fn live_vref(&self) -> Option<ValueRef> {
+        match self {
+            Self::Live { vref, .. } => Some(*vref),
+            Self::Tomb { .. } => None,
+        }
+    }
+}
+
+pub(crate) enum ApplyPutOutcome {
+    /// Our LSN was the newest; the index now points at our vref.
+    /// `displaced` is the previous vref if the key was Live before.
+    Inserted { displaced: Option<ValueRef> },
+    /// A newer LSN already won the race. Our vref is shadowed by the
+    /// newer WAL record — release it so the hole list stays consistent
+    /// with what replay would derive.
+    Rejected { our_vref: ValueRef },
+}
+
+pub(crate) enum ApplyRemoveOutcome {
+    /// Our tombstone won and the key was Live; release the old vref.
+    Removed { displaced: ValueRef },
+    /// Our tombstone won but the key wasn't Live (absent, or already a
+    /// tombstone with a smaller LSN).
+    MarkedAbsent,
+    /// A newer LSN already won the race; nothing to release.
+    Rejected,
+}
+
+#[derive(Debug)]
+pub(crate) struct Index {
+    map: RwLock<HashMap<T4Key, IndexEntry>>,
+}
+
+impl Index {
+    fn from_replay(initial: HashMap<T4Key, ValueRef>) -> Self {
+        // Replay produces only Live entries; they all predate any
+        // live operation, so lsn=0 is a safe lower bound (the WAL's
+        // post-replay `next_lsn` is strictly greater than any LSN we
+        // can newly allocate, so live ops always displace replayed
+        // entries — unless a fresh remove for that key gets to them
+        // first, which is also correct).
+        let map = initial
+            .into_iter()
+            .map(|(k, v)| (k, IndexEntry::Live { lsn: 0, vref: v }))
+            .collect();
+        Self {
+            map: RwLock::new(map),
+        }
+    }
+
+    fn new_empty() -> Self {
+        Self {
+            map: RwLock::new(HashMap::new()),
+        }
+    }
+
+    fn get(&self, key: &[u8]) -> Result<Option<ValueRef>> {
+        let map = self.map.read().map_err(|_| Error::LockPoisoned)?;
+        Ok(map.get(key).and_then(IndexEntry::live_vref))
+    }
+
+    pub(crate) fn apply_put(
+        &self,
+        key: T4Key,
+        commit: WalCommit<'_>,
+    ) -> Result<ApplyPutOutcome> {
+        let (lsn, vref) = commit.into_parts();
+        let mut map = self.map.write().map_err(|_| Error::LockPoisoned)?;
+        if let Some(existing) = map.get(&key)
+            && existing.lsn() >= lsn
+        {
+            return Ok(ApplyPutOutcome::Rejected { our_vref: vref });
+        }
+        let displaced = map
+            .insert(key, IndexEntry::Live { lsn, vref })
+            .and_then(|e| e.live_vref());
+        Ok(ApplyPutOutcome::Inserted { displaced })
+    }
+
+    pub(crate) fn apply_remove(
+        &self,
+        key: T4Key,
+        commit: WalTombstoneCommit,
+    ) -> Result<ApplyRemoveOutcome> {
+        let lsn = commit.lsn();
+        let mut map = self.map.write().map_err(|_| Error::LockPoisoned)?;
+        if let Some(existing) = map.get(&key)
+            && existing.lsn() >= lsn
+        {
+            return Ok(ApplyRemoveOutcome::Rejected);
+        }
+        let displaced = map
+            .insert(key, IndexEntry::Tomb { lsn })
+            .and_then(|e| e.live_vref());
+        match displaced {
+            Some(vref) => Ok(ApplyRemoveOutcome::Removed { displaced: vref }),
+            None => Ok(ApplyRemoveOutcome::MarkedAbsent),
+        }
+    }
+
+    fn len(&self) -> Result<usize> {
+        let map = self.map.read().map_err(|_| Error::LockPoisoned)?;
+        Ok(map
+            .values()
+            .filter(|e| matches!(e, IndexEntry::Live { .. }))
+            .count())
+    }
+
+    fn is_empty(&self) -> Result<bool> {
+        let map = self.map.read().map_err(|_| Error::LockPoisoned)?;
+        Ok(map
+            .values()
+            .all(|e| !matches!(e, IndexEntry::Live { .. })))
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct MountOptions {
@@ -39,7 +191,7 @@ impl Default for MountOptions {
 pub(crate) struct T4Store {
     io: IoWorker,
     wal: Wal,
-    index: RwLock<HashMap<T4Key, ValueRef>>,
+    index: Index,
 }
 
 impl T4Store {
@@ -96,40 +248,35 @@ impl T4Store {
 
         let (wal, index) = if len == 0 {
             let wal = Wal::create(io.clone()).await?;
-            (wal, HashMap::new())
+            (wal, Index::new_empty())
         } else {
-            Wal::replay(io.clone(), len).await?
+            let (wal, replay_map) = Wal::replay(io.clone(), len).await?;
+            (wal, Index::from_replay(replay_map))
         };
 
-        Ok(Self {
-            io,
-            wal,
-            index: RwLock::new(index),
-        })
-    }
-
-    fn read_index(&self) -> Result<RwLockReadGuard<'_, HashMap<T4Key, ValueRef>>> {
-        self.index.read().map_err(|_| Error::LockPoisoned)
-    }
-
-    fn write_index(&self) -> Result<RwLockWriteGuard<'_, HashMap<T4Key, ValueRef>>> {
-        self.index.write().map_err(|_| Error::LockPoisoned)
+        Ok(Self { io, wal, index })
     }
 
     pub async fn put(&self, key: T4Key, value: T4Value) -> Result<()> {
-        let value_ref = self.wal.put(key.clone(), &value).await?;
-        let old = self.write_index()?.insert(key, value_ref);
-        if let Some(old) = old {
-            self.wal.release_value_space(old)?;
+        let commit = self.wal.put(key.clone(), &value).await?;
+        match self.index.apply_put(key, commit)? {
+            ApplyPutOutcome::Inserted {
+                displaced: Some(old),
+            } => self.wal.release_value_space(old)?,
+            ApplyPutOutcome::Inserted { displaced: None } => {}
+            ApplyPutOutcome::Rejected { our_vref } => {
+                // A concurrent put or remove with a later LSN beat us
+                // to the index. Our WAL record still exists but will be
+                // shadowed on replay; free its space so the in-memory
+                // hole list stays consistent with what replay derives.
+                self.wal.release_value_space(our_vref)?;
+            }
         }
         Ok(())
     }
 
     pub async fn get(&self, key: T4KeyRef<'_>) -> Result<Vec<u8>> {
-        let value = {
-            let index = self.read_index()?;
-            *index.get(key.as_bytes()).ok_or(Error::NotFound)?
-        };
+        let value = self.index.get(key.as_bytes())?.ok_or(Error::NotFound)?;
         let Some(value_len_u32) = NonZeroU32::new(value.length()) else {
             return Ok(Vec::new());
         };
@@ -142,10 +289,7 @@ impl T4Store {
     }
 
     pub async fn get_range(&self, key: T4KeyRef<'_>, range: RangeRequestU32) -> Result<Vec<u8>> {
-        let value = {
-            let index = self.read_index()?;
-            *index.get(key.as_bytes()).ok_or(Error::NotFound)?
-        };
+        let value = self.index.get(key.as_bytes())?.ok_or(Error::NotFound)?;
 
         let range: CheckedRangeU32 = range
             .checked_against(value.length())
@@ -190,25 +334,27 @@ impl T4Store {
     }
 
     pub async fn remove(&self, key: T4Key) -> Result<bool> {
-        self.wal.tombstone(key.clone()).await?;
-        let old = self.write_index()?.remove(&key);
-        if let Some(old) = old {
-            self.wal.release_value_space(old)?;
-            return Ok(true);
+        let commit = self.wal.tombstone(key.clone()).await?;
+        match self.index.apply_remove(key, commit)? {
+            ApplyRemoveOutcome::Removed { displaced } => {
+                self.wal.release_value_space(displaced)?;
+                Ok(true)
+            }
+            ApplyRemoveOutcome::MarkedAbsent => Ok(false),
+            ApplyRemoveOutcome::Rejected => Ok(false),
         }
-        Ok(false)
     }
 
     pub async fn sync(&self) -> Result<()> {
-        self.io.fsync().await
+        self.io.fsync()?.await
     }
 
     pub fn len(&self) -> Result<usize> {
-        Ok(self.read_index()?.len())
+        self.index.len()
     }
 
     pub fn is_empty(&self) -> Result<bool> {
-        Ok(self.read_index()?.is_empty())
+        self.index.is_empty()
     }
 }
 
@@ -517,7 +663,7 @@ mod tests {
                     );
                 });
             },
-            200,
+            500,
         );
     }
 }

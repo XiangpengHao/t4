@@ -113,31 +113,36 @@ pub(crate) enum WorkerRequest {
     },
 }
 
-struct PendingRead {
-    tx: mpsc::Sender<WorkerRequest>,
-    buf: Option<AlignedBuf>,
-    offset: u64,
+enum FileReadTaskState {
+    Waiting(ReadCompletion),
+    Done,
 }
 
 pub struct FileReadTask {
     state: FileReadTaskState,
 }
 
-enum FileReadTaskState {
-    Init(PendingRead),
-    Waiting(ReadCompletion),
-    Done,
-}
-
 impl FileReadTask {
-    pub(crate) fn new(tx: mpsc::Sender<WorkerRequest>, buf: AlignedBuf, offset: u64) -> Self {
-        Self {
-            state: FileReadTaskState::Init(PendingRead {
-                tx,
-                buf: Some(buf),
-                offset,
-            }),
-        }
+    /// Submit the read to the worker eagerly. The returned future just
+    /// waits for the completion to be signalled. Submitting inside
+    /// `IoWorker::read_at` (rather than on first poll) is what makes the
+    /// IoWorker channel order match caller-side request order — see the
+    /// comment on `FileWriteTask::new`.
+    pub(crate) fn new(
+        tx: mpsc::Sender<WorkerRequest>,
+        buf: AlignedBuf,
+        offset: u64,
+    ) -> Result<Self> {
+        let completion = Arc::new(TaskCompletion::new());
+        let request = WorkerRequest::Read {
+            buf,
+            offset,
+            completion: Arc::clone(&completion),
+        };
+        tx.send(request).map_err(|_| worker_disconnected_error())?;
+        Ok(Self {
+            state: FileReadTaskState::Waiting(completion),
+        })
     }
 }
 
@@ -146,60 +151,48 @@ impl Future for FileReadTask {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-
-        loop {
-            match &mut this.state {
-                FileReadTaskState::Init(pending) => {
-                    let completion = Arc::new(TaskCompletion::new());
-                    let request = WorkerRequest::Read {
-                        buf: pending.buf.take().expect("read task buffer missing"),
-                        offset: pending.offset,
-                        completion: Arc::clone(&completion),
-                    };
-                    if pending.tx.send(request).is_err() {
-                        this.state = FileReadTaskState::Done;
-                        return Poll::Ready(Err(worker_disconnected_error()));
-                    }
-                    cooperative_yield();
-                    this.state = FileReadTaskState::Waiting(completion);
+        match &mut this.state {
+            FileReadTaskState::Waiting(completion) => {
+                let poll = completion.poll_result(cx);
+                if poll.is_ready() {
+                    this.state = FileReadTaskState::Done;
                 }
-                FileReadTaskState::Waiting(completion) => {
-                    let completion = Arc::clone(completion);
-                    let poll = completion.poll_result(cx);
-                    if poll.is_ready() {
-                        this.state = FileReadTaskState::Done;
-                    }
-                    return poll;
-                }
-                FileReadTaskState::Done => panic!("FileReadTask polled after completion"),
+                poll
             }
+            FileReadTaskState::Done => panic!("FileReadTask polled after completion"),
         }
     }
 }
 
-struct PendingWrite {
-    tx: mpsc::Sender<WorkerRequest>,
-    writes: Option<Vec<PageWrite>>,
+enum FileWriteTaskState {
+    Waiting(WriteCompletion),
+    Done,
 }
 
 pub struct FileWriteTask {
     state: FileWriteTaskState,
 }
 
-enum FileWriteTaskState {
-    Init(PendingWrite),
-    Waiting(WriteCompletion),
-    Done,
-}
-
 impl FileWriteTask {
-    pub(crate) fn new(tx: mpsc::Sender<WorkerRequest>, writes: Vec<PageWrite>) -> Self {
-        Self {
-            state: FileWriteTaskState::Init(PendingWrite {
-                tx,
-                writes: Some(writes),
-            }),
-        }
+    /// Submit the write to the worker eagerly. The request enters the
+    /// IoWorker channel at construction time — *not* on first poll —
+    /// so that callers can fix the channel order by calling `new` from
+    /// within a critical section. Deferring the send to `poll` would
+    /// expose the channel to the async scheduler's choice of poll order
+    /// (see the comment in `Wal::append_entry`).
+    pub(crate) fn new(
+        tx: mpsc::Sender<WorkerRequest>,
+        writes: Vec<PageWrite>,
+    ) -> Result<Self> {
+        let completion = Arc::new(TaskCompletion::new());
+        let request = WorkerRequest::Write {
+            writes,
+            completion: Arc::clone(&completion),
+        };
+        tx.send(request).map_err(|_| worker_disconnected_error())?;
+        Ok(Self {
+            state: FileWriteTaskState::Waiting(completion),
+        })
     }
 }
 
@@ -208,55 +201,38 @@ impl Future for FileWriteTask {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-
-        loop {
-            match &mut this.state {
-                FileWriteTaskState::Init(pending) => {
-                    let completion = Arc::new(TaskCompletion::new());
-                    let request = WorkerRequest::Write {
-                        writes: pending.writes.take().expect("write task payload missing"),
-                        completion: Arc::clone(&completion),
-                    };
-                    if pending.tx.send(request).is_err() {
-                        this.state = FileWriteTaskState::Done;
-                        return Poll::Ready(Err(worker_disconnected_error()));
-                    }
-                    cooperative_yield();
-                    this.state = FileWriteTaskState::Waiting(completion);
+        match &mut this.state {
+            FileWriteTaskState::Waiting(completion) => {
+                let poll = completion.poll_result(cx);
+                if poll.is_ready() {
+                    this.state = FileWriteTaskState::Done;
                 }
-                FileWriteTaskState::Waiting(completion) => {
-                    let completion = Arc::clone(completion);
-                    let poll = completion.poll_result(cx);
-                    if poll.is_ready() {
-                        this.state = FileWriteTaskState::Done;
-                    }
-                    return poll;
-                }
-                FileWriteTaskState::Done => panic!("FileWriteTask polled after completion"),
+                poll
             }
+            FileWriteTaskState::Done => panic!("FileWriteTask polled after completion"),
         }
     }
 }
 
-struct PendingFsync {
-    tx: mpsc::Sender<WorkerRequest>,
+enum FileFsyncTaskState {
+    Waiting(FsyncCompletion),
+    Done,
 }
 
 pub struct FileFsyncTask {
     state: FileFsyncTaskState,
 }
 
-enum FileFsyncTaskState {
-    Init(PendingFsync),
-    Waiting(FsyncCompletion),
-    Done,
-}
-
 impl FileFsyncTask {
-    pub(crate) fn new(tx: mpsc::Sender<WorkerRequest>) -> Self {
-        Self {
-            state: FileFsyncTaskState::Init(PendingFsync { tx }),
-        }
+    pub(crate) fn new(tx: mpsc::Sender<WorkerRequest>) -> Result<Self> {
+        let completion = Arc::new(TaskCompletion::new());
+        let request = WorkerRequest::Fsync {
+            completion: Arc::clone(&completion),
+        };
+        tx.send(request).map_err(|_| worker_disconnected_error())?;
+        Ok(Self {
+            state: FileFsyncTaskState::Waiting(completion),
+        })
     }
 }
 
@@ -265,31 +241,15 @@ impl Future for FileFsyncTask {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-
-        loop {
-            match &mut this.state {
-                FileFsyncTaskState::Init(pending) => {
-                    let completion = Arc::new(TaskCompletion::new());
-                    let request = WorkerRequest::Fsync {
-                        completion: Arc::clone(&completion),
-                    };
-                    if pending.tx.send(request).is_err() {
-                        this.state = FileFsyncTaskState::Done;
-                        return Poll::Ready(Err(worker_disconnected_error()));
-                    }
-                    cooperative_yield();
-                    this.state = FileFsyncTaskState::Waiting(completion);
+        match &mut this.state {
+            FileFsyncTaskState::Waiting(completion) => {
+                let poll = completion.poll_result(cx);
+                if poll.is_ready() {
+                    this.state = FileFsyncTaskState::Done;
                 }
-                FileFsyncTaskState::Waiting(completion) => {
-                    let completion = Arc::clone(completion);
-                    let poll = completion.poll_result(cx);
-                    if poll.is_ready() {
-                        this.state = FileFsyncTaskState::Done;
-                    }
-                    return poll;
-                }
-                FileFsyncTaskState::Done => panic!("FileFsyncTask polled after completion"),
+                poll
             }
+            FileFsyncTaskState::Done => panic!("FileFsyncTask polled after completion"),
         }
     }
 }
