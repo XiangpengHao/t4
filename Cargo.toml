@@ -23,6 +23,7 @@ shuttle = { version = "0.9.1", optional = true }
 verified = { package = "t4-verified", version = "0.1.6", path = "verified" }
 vstd = "=0.0.0-2026-05-10-0145"
 crossbeam-channel = "0.5"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7", optional = true }

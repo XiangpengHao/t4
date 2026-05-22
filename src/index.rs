@@ -4,7 +4,7 @@ use verified::input_kv::{T4Key, ValueRef};
 
 use crate::disk::{WalCommit, WalTombstoneCommit};
 use crate::io::error::{Error, Result};
-use crate::io::sync::RwLock;
+use crate::io::sync::{RwLock, RwLockReadGuard};
 
 // ---------------------------------------------------------------------------
 // Index
@@ -143,5 +143,26 @@ impl Index {
     pub(crate) fn is_empty(&self) -> Result<bool> {
         let map = self.map.read().map_err(|_| Error::LockPoisoned)?;
         Ok(map.values().all(|e| !matches!(e, IndexEntry::Live { .. })))
+    }
+
+    /// Acquire a read-locked view of the index. The returned guard blocks
+    /// concurrent puts/removes for its lifetime, so vrefs yielded by
+    /// `iter_live` stay valid while the caller reads their backing slots
+    /// asynchronously.
+    pub(crate) fn read_locked(&self) -> Result<LockedView<'_>> {
+        let guard = self.map.read().map_err(|_| Error::LockPoisoned)?;
+        Ok(LockedView { guard })
+    }
+}
+
+pub(crate) struct LockedView<'a> {
+    guard: RwLockReadGuard<'a, HashMap<T4Key, IndexEntry>>,
+}
+
+impl LockedView<'_> {
+    pub(crate) fn iter_live(&self) -> impl Iterator<Item = (&T4Key, ValueRef)> + '_ {
+        self.guard
+            .iter()
+            .filter_map(|(k, e)| e.live_vref().map(|v| (k, v)))
     }
 }
