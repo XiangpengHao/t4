@@ -34,3 +34,6 @@ jobs:
 
       - name: Run proof check
         run: nix develop -c cargo verus verify -p t4-verified
+
+      - name: Run shuttle tests
+        run: nix develop -c cargo test --features shuttle shuttle

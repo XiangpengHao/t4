@@ -1,14 +1,13 @@
-use core::fmt;
-use std::fs::File;
-use std::num::NonZeroU32;
-use std::thread::spawn;
-
 use crate::buffer::AlignedBuf;
 use crate::io::io_task::{
     FileFsyncTask, FileReadTask, FileWriteTask, PageWrite, WorkerRequest, worker_disconnected_error,
 };
 use crate::io::sync::mpsc;
+use crate::io::sync::thread::spawn;
 use crate::{Error, Result};
+use core::fmt;
+use std::fs::File;
+use std::num::NonZeroU32;
 
 #[cfg(all(feature = "io-uring", target_os = "linux"))]
 use crate::io::io_uring::new_backend;
@@ -59,21 +58,21 @@ impl IoWorker {
         }
     }
 
-    pub fn read_at(&self, buf: AlignedBuf, offset: u64) -> FileReadTask {
+    pub fn read_at(&self, buf: AlignedBuf, offset: u64) -> Result<FileReadTask> {
         FileReadTask::new(self.tx.clone(), buf, offset)
     }
 
-    pub fn write(&self, writes: Vec<PageWrite>) -> FileWriteTask {
+    pub fn write(&self, writes: Vec<PageWrite>) -> Result<FileWriteTask> {
         FileWriteTask::new(self.tx.clone(), writes)
     }
 
-    pub fn fsync(&self) -> FileFsyncTask {
+    pub fn fsync(&self) -> Result<FileFsyncTask> {
         FileFsyncTask::new(self.tx.clone())
     }
 
     pub async fn read_exact_at(&self, buf: AlignedBuf, offset: u64) -> Result<AlignedBuf> {
         let expected = buf.len();
-        let (buf, n) = self.read_at(buf, offset).await?;
+        let (buf, n) = self.read_at(buf, offset)?.await?;
         if n != expected {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
@@ -105,10 +104,14 @@ mod test {
         let mut write_buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
         write_buf.as_mut_slice()[..5].copy_from_slice(b"hello");
 
-        block_on(io_worker.write(vec![PageWrite {
-            buf: write_buf,
-            offset: 0,
-        }]))
+        block_on(
+            io_worker
+                .write(vec![PageWrite {
+                    buf: write_buf,
+                    offset: 0,
+                }])
+                .unwrap(),
+        )
         .unwrap();
 
         let read_buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
@@ -144,7 +147,7 @@ mod test {
                         offset: (base + i) * PAGE_SIZE_U64,
                     });
                 }
-                block_on(worker.write(writes)).unwrap();
+                block_on(worker.write(writes).unwrap()).unwrap();
 
                 for i in 0..PAGES_PER_THREAD {
                     let read_buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
@@ -161,6 +164,6 @@ mod test {
             h.join().unwrap();
         }
 
-        block_on(io_worker.fsync()).unwrap();
+        block_on(io_worker.fsync().unwrap()).unwrap();
     }
 }

@@ -2,6 +2,8 @@
 
 pub mod art;
 mod buffer;
+mod disk;
+mod index;
 mod io;
 mod store;
 mod wal;
@@ -119,6 +121,19 @@ impl Store {
     pub fn sync(&self) -> impl std::future::Future<Output = Result<()>> {
         let this = self.clone();
         async move { this.inner.sync().await }
+    }
+
+    /// Stop-the-world snapshot. Creates a new store at `path` containing
+    /// only the currently-live entries — no holes, WAL has only inserts.
+    /// `path` must not already exist. Concurrent puts/removes on `self`
+    /// block until snapshot finishes.
+    pub fn snapshot(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> impl std::future::Future<Output = Result<()>> {
+        let this = self.clone();
+        let path = path.as_ref().to_path_buf();
+        async move { this.inner.snapshot(path, MountOptions::default()).await }
     }
 
     pub fn len(&self) -> impl std::future::Future<Output = Result<usize>> {
