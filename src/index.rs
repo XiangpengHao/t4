@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use verified::input_kv::{T4Key, ValueRef};
 
+use crate::disk::{WalCommit, WalTombstoneCommit};
 use crate::io::error::{Error, Result};
 use crate::io::sync::RwLock;
-use crate::wal::{WalCommit, WalTombstoneCommit};
 
 // ---------------------------------------------------------------------------
 // Index
@@ -89,12 +89,6 @@ impl Index {
             .collect();
         Self {
             map: RwLock::new(map),
-        }
-    }
-
-    pub(crate) fn new_empty() -> Self {
-        Self {
-            map: RwLock::new(HashMap::new()),
         }
     }
 

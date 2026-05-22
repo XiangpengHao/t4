@@ -2,6 +2,7 @@
 
 pub mod art;
 mod buffer;
+mod disk;
 mod index;
 mod io;
 mod store;

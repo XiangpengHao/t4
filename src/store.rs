@@ -7,15 +7,13 @@ use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 
+use verified::RangeRequestU32;
 use verified::input_kv::{T4Key, T4KeyRef, T4Value};
-use verified::{CheckedRangeU32, RangeRequestU32};
 
-use crate::buffer::{AlignedBuf, align_down_u64, align_up_u32, align_up_u64};
+use crate::disk::DiskData;
 use crate::index::{ApplyPutOutcome, ApplyRemoveOutcome, Index};
 use crate::io::error::{Error, Result};
 use crate::io::io_worker::IoWorker;
-use crate::wal::Wal;
-use crate::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U64};
 
 #[derive(Debug, Clone, Copy)]
 pub struct MountOptions {
@@ -36,9 +34,8 @@ impl Default for MountOptions {
 
 #[derive(Debug)]
 pub(crate) struct T4Store {
-    io: IoWorker,
-    wal: Wal,
     index: Index,
+    disk_data: DiskData,
 }
 
 impl T4Store {
@@ -93,30 +90,25 @@ impl T4Store {
             .ok_or(Error::InvalidArgument("queue_depth must be > 0"))?;
         let io = IoWorker::new(queue_depth, file)?;
 
-        let (wal, index) = if len == 0 {
-            let wal = Wal::create(io.clone()).await?;
-            (wal, Index::new_empty())
-        } else {
-            let (wal, replay_map) = Wal::replay(io.clone(), len).await?;
-            (wal, Index::from_replay(replay_map))
-        };
+        let (disk_data, replay_map) = DiskData::mount(io, len).await?;
+        let index = Index::from_replay(replay_map);
 
-        Ok(Self { io, wal, index })
+        Ok(Self { index, disk_data })
     }
 
     pub async fn put(&self, key: T4Key, value: T4Value) -> Result<()> {
-        let commit = self.wal.put(key.clone(), &value).await?;
+        let commit = self.disk_data.append_put(key.clone(), &value).await?;
         match self.index.apply_put(key, commit)? {
             ApplyPutOutcome::Inserted {
                 displaced: Some(old),
-            } => self.wal.release_value_space(old)?,
+            } => self.disk_data.release_value_space(old)?,
             ApplyPutOutcome::Inserted { displaced: None } => {}
             ApplyPutOutcome::Rejected { our_vref } => {
                 // A concurrent put or remove with a later LSN beat us
                 // to the index. Our WAL record still exists but will be
                 // shadowed on replay; free its space so the in-memory
                 // hole list stays consistent with what replay derives.
-                self.wal.release_value_space(our_vref)?;
+                self.disk_data.release_value_space(our_vref)?;
             }
         }
         Ok(())
@@ -124,67 +116,19 @@ impl T4Store {
 
     pub async fn get(&self, key: T4KeyRef<'_>) -> Result<Vec<u8>> {
         let value = self.index.get(key.as_bytes())?.ok_or(Error::NotFound)?;
-        let Some(value_len_u32) = NonZeroU32::new(value.length()) else {
-            return Ok(Vec::new());
-        };
-        let padded_u32 = align_up_u32(value_len_u32, PAGE_SIZE_NZ_U32)
-            .map_err(|_| Error::Format("value length exceeds io buffer limit".into()))?;
-        let buf = AlignedBuf::new_zeroed(padded_u32)?;
-        let buf = self.io.read_exact_at(buf, value.offset()).await?;
-        let value_len = value_len_u32.get() as usize;
-        Ok(buf.as_slice()[..value_len].to_vec())
+        self.disk_data.read_value(value).await
     }
 
     pub async fn get_range(&self, key: T4KeyRef<'_>, range: RangeRequestU32) -> Result<Vec<u8>> {
         let value = self.index.get(key.as_bytes())?.ok_or(Error::NotFound)?;
-
-        let range: CheckedRangeU32 = range
-            .checked_against(value.length())
-            .ok_or(Error::RangeOutOfBounds)?;
-        if range.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let abs_start = value
-            .offset()
-            .checked_add(u64::from(range.start()))
-            .ok_or(Error::RangeOutOfBounds)?;
-        let abs_end = value
-            .offset()
-            .checked_add(u64::from(range.end()))
-            .ok_or(Error::RangeOutOfBounds)?;
-
-        let aligned_start = align_down_u64(abs_start, PAGE_SIZE_U64);
-        let aligned_end = align_up_u64(abs_end, PAGE_SIZE_U64).ok_or(Error::RangeOutOfBounds)?;
-        let read_len_u64 = aligned_end
-            .checked_sub(aligned_start)
-            .ok_or(Error::RangeOutOfBounds)?;
-        let read_len_u32: u32 = read_len_u64
-            .try_into()
-            .map_err(|_| Error::RangeOutOfBounds)?;
-        let read_len_u32 = NonZeroU32::new(read_len_u32).ok_or(Error::RangeOutOfBounds)?;
-        let buf = AlignedBuf::new_zeroed(read_len_u32)?;
-        let buf = self.io.read_exact_at(buf, aligned_start).await?;
-
-        let slice_start_u64 = abs_start
-            .checked_sub(aligned_start)
-            .ok_or(Error::RangeOutOfBounds)?;
-        let slice_start_u32: u32 = slice_start_u64
-            .try_into()
-            .map_err(|_| Error::RangeOutOfBounds)?;
-        let slice_start = slice_start_u32 as usize;
-        let slice_len = range.len() as usize;
-        let slice_end = slice_start
-            .checked_add(slice_len)
-            .ok_or(Error::RangeOutOfBounds)?;
-        Ok(buf.as_slice()[slice_start..slice_end].to_vec())
+        self.disk_data.read_value_range(value, range).await
     }
 
     pub async fn remove(&self, key: T4Key) -> Result<bool> {
-        let commit = self.wal.tombstone(key.clone()).await?;
+        let commit = self.disk_data.append_tombstone(key.clone()).await?;
         match self.index.apply_remove(key, commit)? {
             ApplyRemoveOutcome::Removed { displaced } => {
-                self.wal.release_value_space(displaced)?;
+                self.disk_data.release_value_space(displaced)?;
                 Ok(true)
             }
             ApplyRemoveOutcome::MarkedAbsent => Ok(false),
@@ -193,7 +137,7 @@ impl T4Store {
     }
 
     pub async fn sync(&self) -> Result<()> {
-        self.io.fsync()?.await
+        self.disk_data.sync().await
     }
 
     pub fn len(&self) -> Result<usize> {
