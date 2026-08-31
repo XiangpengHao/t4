@@ -568,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "t4"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "cfg-if",
  "crossbeam-channel",
@@ -597,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "t4-verified"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "vstd",
 ]
