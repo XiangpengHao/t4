@@ -21,15 +21,15 @@ jobs:
     environment: crates-io
     steps:
       - name: Checkout merged commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v19
+        uses: DeterminateSystems/nix-installer-action@v22
 
       - name: Configure Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@v13
+        uses: DeterminateSystems/magic-nix-cache-action@v14
 
       - name: Verify proofs
         run: nix develop -c cargo verus verify -p t4-verified

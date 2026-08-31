@@ -1,11 +1,13 @@
 use std::fs::File;
 
-use crossbeam_channel::{Receiver, Select, Sender, bounded, unbounded};
+#[cfg(not(all(feature = "shuttle", test)))]
+use crossbeam_channel::Select;
+use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 
 use crate::io::common::{BackendLoop, CompletionEvent, IoDriver, SubmissionEntry};
 use crate::io::error::{Error, Result};
 use crate::io::io_task::WorkerRequest;
-use crate::io::sync::{mpsc, thread};
+use crate::io::sync::mpsc;
 
 use super::common::FileType;
 
@@ -100,7 +102,10 @@ impl GenericIoDriver {
         for _ in 0..num_threads {
             let job_rx = job_rx.clone();
             let completion_tx = completion_tx.clone();
-            thread::spawn(move || worker_loop(job_rx, completion_tx));
+            // Always real OS threads, even under shuttle: the pool is an external
+            // I/O executor (like the kernel for io_uring) and blocks on a crossbeam
+            // channel, which shuttle's scheduler must not be asked to schedule.
+            std::thread::spawn(move || worker_loop(job_rx, completion_tx));
         }
 
         Ok(Self {
@@ -180,11 +185,19 @@ impl IoDriver for GenericIoDriver {
         }
     }
 
+    #[cfg(not(all(feature = "shuttle", test)))]
     fn wait_for_progress(&mut self, request_rx: &mpsc::Receiver<WorkerRequest>) {
         let mut sel = Select::new();
         sel.recv(request_rx);
         sel.recv(&self.completion_rx);
         sel.ready();
+    }
+
+    // Under shuttle the request channel is shuttle's own type, which crossbeam's
+    // `Select` cannot wait on; yield and let the scheduler drive progress instead.
+    #[cfg(all(feature = "shuttle", test))]
+    fn wait_for_progress(&mut self, _request_rx: &mpsc::Receiver<WorkerRequest>) {
+        crate::io::sync::cooperative_yield();
     }
 
     fn use_raw_fd(&mut self) -> bool {

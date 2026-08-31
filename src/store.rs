@@ -57,7 +57,18 @@ impl T4Store {
             open.custom_flags(custom_flags);
         }
 
-        #[cfg(all(unix, not(target_os = "linux")))]
+        // macOS has no O_DIRECT; page-cache bypass is requested per-fd via
+        // F_NOCACHE after open (see below), which has no alignment requirements.
+        #[cfg(target_os = "macos")]
+        {
+            let mut custom_flags: i32 = 0;
+            if options.dsync {
+                custom_flags |= libc::O_DSYNC;
+            }
+            open.custom_flags(custom_flags);
+        }
+
+        #[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
         {
             if options.direct_io {
                 return Err(Error::InvalidArgument(
@@ -87,6 +98,16 @@ impl T4Store {
         }
 
         let file = open.open(path)?;
+
+        #[cfg(target_os = "macos")]
+        if options.direct_io {
+            use std::os::fd::AsRawFd;
+            // SAFETY: `file` was just opened, so its fd is valid.
+            if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) } == -1 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+        }
+
         let len = file.metadata()?.len();
         let queue_depth = NonZeroU32::new(options.queue_depth)
             .ok_or(Error::InvalidArgument("queue_depth must be > 0"))?;
@@ -192,6 +213,33 @@ mod tests {
             direct_io: false,
             dsync: true,
         }
+    }
+
+    #[test]
+    fn mounts_with_default_options() {
+        // Default options enable direct I/O: O_DIRECT on Linux, F_NOCACHE on
+        // macOS. This must work on every platform CI runs on.
+        pollster::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("default-options.t4");
+            let store = T4Store::mount_with_options(&path, MountOptions::default())
+                .await
+                .unwrap();
+            store
+                .put(
+                    T4Key::try_from_slice(b"k").unwrap(),
+                    T4Value::try_from_vec(vec![b'v'; 100]).unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .get(T4KeyRef::try_from_slice(b"k").unwrap())
+                    .await
+                    .unwrap(),
+                vec![b'v'; 100]
+            );
+        });
     }
 
     #[test]
