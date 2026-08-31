@@ -317,7 +317,7 @@ impl DiskData {
         let (write, lsn) = {
             let mut state = self.lock_state()?;
             let (lsn, writes) = state.prepare_append(entry)?;
-            (self.io.write(writes)?, lsn)
+            (self.io.write_ordered(writes)?, lsn)
         };
         write.await?;
         Ok(lsn)

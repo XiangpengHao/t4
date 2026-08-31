@@ -313,11 +313,7 @@ impl WalPage {
             return false;
         }
         let next = cursor + consumed;
-        let ok = Self::entries_wf_exec(bytes, next, remaining - 1, used);
-        if !ok {
-            return false;
-        }
-        true
+        Self::entries_wf_exec(bytes, next, remaining - 1, used)
     }
 
     pub fn empty() -> (result: Self)
