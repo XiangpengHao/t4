@@ -485,8 +485,7 @@ impl ArtNode for Node256 {
 } // verus!
 impl Node256 {
     pub(crate) fn for_each_child(&self, mut f: impl FnMut(TaggedPointer)) {
-        for key in 0..256usize {
-            let raw = self.children[key];
+        for &raw in self.children.iter() {
             if raw != 0 {
                 f(TaggedPointer::from_raw(raw));
             }
