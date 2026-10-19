@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::os::fd::AsRawFd;
 
 use io_uring::{IoUring, opcode, types};
 
@@ -9,69 +10,51 @@ use crate::io::sync::mpsc;
 
 pub(crate) struct UringDriver {
     ring: IoUring,
+    file: File,
 }
 
 impl UringDriver {
-    fn new(queue_depth: u32) -> Result<Self> {
+    fn new(file: File, queue_depth: u32) -> Result<Self> {
         Ok(Self {
             ring: IoUring::new(queue_depth)?,
+            file,
         })
     }
-}
 
-fn build_sqe(entry: SubmissionEntry) -> io_uring::squeue::Entry {
-    match entry {
-        SubmissionEntry::Read {
-            file,
-            buf_ptr,
-            buf_len,
-            offset,
-            user_data,
-        } => match file {
-            super::common::FileType::RawFd(fd) => {
-                opcode::Read::new(types::Fd(fd), buf_ptr, buf_len)
-                    .offset(offset)
-                    .build()
-                    .user_data(user_data)
-            }
-            super::common::FileType::File(_) => {
-                unimplemented!("io_uring uses raw file descriptor.")
-            }
-        },
-        SubmissionEntry::Write {
-            file,
-            buf_ptr,
-            buf_len,
-            offset,
-            user_data,
-            is_last_in_batch,
-        } => {
-            let flags = if is_last_in_batch {
-                io_uring::squeue::Flags::empty()
-            } else {
-                io_uring::squeue::Flags::IO_LINK
-            };
-            match file {
-                super::common::FileType::RawFd(fd) => {
-                    opcode::Write::new(types::Fd(fd), buf_ptr, buf_len)
-                        .offset(offset)
-                        .build()
-                        .flags(flags)
-                        .user_data(user_data)
-                }
-                super::common::FileType::File(_) => {
-                    unimplemented!("io_uring uses raw file descriptor.")
-                }
-            }
-        }
-        SubmissionEntry::Fsync { file, user_data } => match file {
-            super::common::FileType::RawFd(fd) => opcode::Fsync::new(types::Fd(fd))
+    fn build_sqe(&self, entry: SubmissionEntry) -> io_uring::squeue::Entry {
+        let fd = types::Fd(self.file.as_raw_fd());
+        match entry {
+            SubmissionEntry::Read {
+                buf_ptr,
+                buf_len,
+                offset,
+                user_data,
+            } => opcode::Read::new(fd, buf_ptr, buf_len)
+                .offset(offset)
                 .build()
                 .user_data(user_data),
-            super::common::FileType::File(_) => {
-                unimplemented!("io_uring uses raw file descriptor.")
+            SubmissionEntry::Write {
+                buf_ptr,
+                buf_len,
+                offset,
+                user_data,
+                is_last_in_batch,
+            } => {
+                let flags = if is_last_in_batch {
+                    io_uring::squeue::Flags::empty()
+                } else {
+                    io_uring::squeue::Flags::IO_LINK
+                };
+                opcode::Write::new(fd, buf_ptr, buf_len)
+                    .offset(offset)
+                    .build()
+                    .flags(flags)
+                    .user_data(user_data)
             }
-        },
+            SubmissionEntry::Fsync { user_data } => {
+                opcode::Fsync::new(fd).build().user_data(user_data)
+            }
+        }
     }
 }
 
@@ -82,7 +65,7 @@ impl IoDriver for UringDriver {
     }
 
     fn push(&mut self, entry: SubmissionEntry) -> Result<()> {
-        let sqe = build_sqe(entry);
+        let sqe = self.build_sqe(entry);
         let mut sq = self.ring.submission();
         unsafe {
             sq.push(&sqe).map_err(|_| {
@@ -108,13 +91,9 @@ impl IoDriver for UringDriver {
         })
     }
 
-    fn wait_for_progress(&mut self, _request_rx: &mpsc::Receiver<WorkerRequest>) {
-        crate::io::sync::cooperative_yield();
-    }
-
-    fn use_raw_fd(&mut self) -> bool {
-        true
-    }
+    /// Returns at once: the loop polls the ring again, busy-waiting while
+    /// I/O is in flight.
+    fn wait_for_progress(&mut self, _request_rx: &mpsc::Receiver<WorkerRequest>) {}
 }
 
 pub(crate) fn new_backend(
@@ -122,6 +101,6 @@ pub(crate) fn new_backend(
     queue_depth: u32,
     rx: mpsc::Receiver<WorkerRequest>,
 ) -> Result<BackendLoop<UringDriver>> {
-    let driver = UringDriver::new(queue_depth)?;
-    Ok(BackendLoop::new(file, queue_depth as usize, rx, driver))
+    let driver = UringDriver::new(file, queue_depth)?;
+    Ok(BackendLoop::new(queue_depth as usize, rx, driver))
 }

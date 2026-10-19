@@ -9,11 +9,7 @@ use core::fmt;
 use std::fs::File;
 use std::num::NonZeroU32;
 
-#[cfg(all(feature = "io-uring", target_os = "linux"))]
-use crate::io::io_uring::new_backend;
-
-#[cfg(not(all(feature = "io-uring", target_os = "linux")))]
-use crate::io::generic::new_backend;
+use crate::io::new_backend;
 
 /// Handle to the I/O worker thread.
 ///
