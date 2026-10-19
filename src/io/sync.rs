@@ -25,7 +25,7 @@ pub(crate) use shuttle::sync::*;
 pub(crate) use shuttle::thread;
 
 #[cfg(not(all(feature = "shuttle", test)))]
-pub(crate) use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, atomic};
+pub(crate) use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 
 #[cfg(not(feature = "shuttle"))]
 #[allow(unused_imports)]

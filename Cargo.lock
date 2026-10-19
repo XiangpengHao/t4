@@ -580,7 +580,6 @@ dependencies = [
  "shuttle",
  "t4-verified",
  "tempfile",
- "vstd",
 ]
 
 [[package]]

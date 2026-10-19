@@ -105,7 +105,7 @@ mod tests {
             )
             .is_ok()
         {
-            i = i + 1;
+            i += 1;
         }
         assert!(i > 0);
         assert!(!page.can_fit(&AppendEntry::Live {
