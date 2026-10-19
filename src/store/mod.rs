@@ -10,13 +10,15 @@ use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 
-use crate::disk::{DiskData, FreedExtents};
+use crate::buffer::AlignedBuf;
+use crate::disk::{DiskData, Extent, FreedExtents, PaddedValue, ValueWindow};
 use crate::index::Index;
 use crate::input_kv::{T4Key, T4KeyRef, T4Value};
 use crate::io::error::{Error, Result};
 use crate::io::io_worker::IoWorker;
 #[cfg(all(feature = "shuttle", test))]
 use crate::io::simulated::SimDisk;
+use crate::io::sync::Arc;
 use crate::range::RangeRequestU32;
 
 /// How a store opens its file. Writes always go to it with `O_DSYNC`
@@ -230,19 +232,47 @@ impl T4Store {
     }
 
     pub async fn put(&self, key: T4Key, value: T4Value) -> Result<()> {
-        let commit = self.disk_data.append_put(key.clone(), &value).await?;
+        self.put_padded(key, PaddedValue::copy_of(&value)?).await
+    }
+
+    /// Puts a value already laid out as the store writes it: what a server
+    /// does with a value in memory its client shares.
+    pub(crate) async fn put_padded(&self, key: T4Key, value: PaddedValue) -> Result<()> {
+        let commit = self.disk_data.append_put(key.clone(), value).await?;
         self.index.apply_put(key, commit);
         Ok(())
     }
 
     pub async fn get(&self, key: T4KeyRef<'_>) -> Result<Vec<u8>> {
-        let extent = self.index.get(key.as_bytes()).ok_or(Error::NotFound)?;
-        self.disk_data.read_value(&extent).await
+        let extent = self.lookup(key)?;
+        self.read(&extent, &extent.whole_window()?).await
     }
 
     pub async fn get_range(&self, key: T4KeyRef<'_>, range: RangeRequestU32) -> Result<Vec<u8>> {
-        let extent = self.index.get(key.as_bytes()).ok_or(Error::NotFound)?;
-        self.disk_data.read_value_range(&extent, range).await
+        let extent = self.lookup(key)?;
+        self.read(&extent, &extent.range_window(range)?).await
+    }
+
+    /// Where `key`'s value is: a handle that keeps its space from being
+    /// reused while the caller reads it.
+    pub(crate) fn lookup(&self, key: T4KeyRef<'_>) -> Result<Arc<Extent>> {
+        self.index.get(key.as_bytes()).ok_or(Error::NotFound)
+    }
+
+    /// Reads `window` of the value in `extent`: the bytes it asks for.
+    pub(crate) async fn read(&self, extent: &Extent, window: &ValueWindow) -> Result<Vec<u8>> {
+        self.disk_data.read_window(extent, window).await
+    }
+
+    /// Reads `window` of the value in `extent` into `buf`, which holds
+    /// exactly the window: what a server does with memory its client shares.
+    pub(crate) async fn read_into(
+        &self,
+        extent: &Extent,
+        window: &ValueWindow,
+        buf: AlignedBuf,
+    ) -> Result<AlignedBuf> {
+        self.disk_data.read_window_into(extent, window, buf).await
     }
 
     pub async fn remove(&self, key: T4Key) -> Result<bool> {

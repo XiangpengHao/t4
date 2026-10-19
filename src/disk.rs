@@ -3,8 +3,8 @@ use std::sync::PoisonError;
 
 use vstd::prelude::*;
 
-use crate::buffer::{AlignedBuf, align_down_u64, align_up_u32, align_up_u64};
-use crate::input_kv::{FileHoles, T4Key, T4Value, ValueRef};
+use crate::buffer::{AlignedBuf, align_down_u64, align_up_u64};
+use crate::input_kv::{FileHoles, InputError, T4Key, T4Value, ValueRef};
 use crate::io::error::{Error, Result};
 use crate::io::io_task::PageWrite;
 use crate::io::io_worker::IoWorker;
@@ -13,7 +13,7 @@ use crate::range::{CheckedRangeU32, RangeRequestU32};
 use crate::wal::page::{AppendEntry, WalPage};
 use crate::wal::replay::{ReplayIndex, ReplayState};
 use crate::wal::{INITIAL_FILE_TAIL, WalState, allocate_next_lsn, encode_page_write, read_page};
-use crate::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U32, PAGE_SIZE_U64};
+use crate::{PAGE_SIZE_U32, PAGE_SIZE_U64};
 
 // ---------------------------------------------------------------------------
 // DiskData
@@ -126,6 +126,26 @@ impl Extent {
         })
     }
 
+    /// The value's length in bytes.
+    pub(crate) fn value_len(&self) -> u32 {
+        self.value.length()
+    }
+
+    /// The window that reads the whole value.
+    pub(crate) fn whole_window(&self) -> Result<ValueWindow> {
+        ValueWindow::whole(self.value_len())
+    }
+
+    /// The window that reads `range` of the value; `RangeOutOfBounds` if
+    /// the range runs past its end.
+    pub(crate) fn range_window(&self, range: RangeRequestU32) -> Result<ValueWindow> {
+        ValueWindow::of(
+            range
+                .checked_against(self.value_len())
+                .ok_or(Error::RangeOutOfBounds)?,
+        )
+    }
+
     /// The location of an extent replay replaced, which replay frees itself:
     /// its space doesn't go back to the allocator a second time.
     pub(crate) fn into_replaced(this: Arc<Self>) -> ValueRef {
@@ -140,6 +160,128 @@ impl Drop for Extent {
         if let Some(freed) = &self.freed {
             freed.push(self.value);
         }
+    }
+}
+
+/// The pages one read of a value covers. The bytes asked for, a range of
+/// the value, lie inside a page-aligned window of it,
+/// read whole into a buffer of exactly the window's size. A value starts on
+/// a page boundary on disk, so the window depends on the range alone: a
+/// client sizes its buffer with the same arithmetic the server reads with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ValueWindow {
+    /// Where the window starts in the value: a page boundary.
+    first_byte: u32,
+    /// The window's size, in whole pages; 0 when nothing is asked for.
+    buffer_len: u32,
+    /// Where the bytes asked for start in the window.
+    start: u32,
+    len: u32,
+}
+
+impl ValueWindow {
+    /// The window for `range` of a value.
+    pub(crate) fn of(range: CheckedRangeU32) -> Result<Self> {
+        if range.is_empty() {
+            return Ok(Self {
+                first_byte: 0,
+                buffer_len: 0,
+                start: 0,
+                len: 0,
+            });
+        }
+        let first_byte = align_down_u64(u64::from(range.start()), PAGE_SIZE_U64);
+        let last_byte =
+            align_up_u64(u64::from(range.end()), PAGE_SIZE_U64).ok_or(Error::RangeOutOfBounds)?;
+        let buffer_len =
+            u32::try_from(last_byte - first_byte).map_err(|_| Error::RangeOutOfBounds)?;
+        // `first_byte` is at most `range.start()`, a `u32`.
+        let first_byte = first_byte as u32;
+        Ok(Self {
+            first_byte,
+            buffer_len,
+            start: range.start() - first_byte,
+            len: range.len(),
+        })
+    }
+
+    /// The window for `range` of a value of any length. A value starts on a
+    /// page boundary, so its length doesn't move the window, only decides
+    /// whether the range fits: that is the server's to check.
+    pub(crate) fn of_any_value(range: RangeRequestU32) -> Result<Self> {
+        Self::of(
+            range
+                .checked_against(u32::MAX)
+                .expect("every range ends within u32"),
+        )
+    }
+
+    /// The window for a whole value of `len` bytes: `len` padded to whole
+    /// pages.
+    pub(crate) fn whole(len: u32) -> Result<Self> {
+        let range = RangeRequestU32::from_u32(0, len)
+            .and_then(|range| range.checked_against(len))
+            .expect("a value holds the range of all its bytes");
+        Self::of(range).map_err(|_| Error::InputError(InputError::ValueTooLarge(len as usize)))
+    }
+
+    pub(crate) fn buffer_len(&self) -> u32 {
+        self.buffer_len
+    }
+
+    pub(crate) fn start(&self) -> u32 {
+        self.start
+    }
+
+    pub(crate) fn len(&self) -> u32 {
+        self.len
+    }
+}
+
+/// A value as the store writes it: its bytes, zero-padded to whole pages,
+/// in a buffer direct I/O writes from. An empty value has no buffer.
+pub(crate) struct PaddedValue {
+    buf: Option<AlignedBuf>,
+    len: u32,
+}
+
+impl PaddedValue {
+    /// The buffer a value of `len` bytes needs: `len` padded to whole
+    /// pages; `None` for an empty value.
+    pub(crate) fn buffer_len(len: u32) -> Result<Option<NonZeroU32>> {
+        Ok(NonZeroU32::new(ValueWindow::whole(len)?.buffer_len()))
+    }
+
+    pub(crate) fn empty() -> Self {
+        Self { buf: None, len: 0 }
+    }
+
+    /// `value`, copied into a buffer of its own.
+    pub(crate) fn copy_of(value: &T4Value) -> Result<Self> {
+        let len = value.len_u32();
+        if Self::buffer_len(len)?.is_none() {
+            return Ok(Self::empty());
+        }
+        Ok(Self {
+            buf: Some(AlignedBuf::from_padded_slice(value.as_bytes())?),
+            len,
+        })
+    }
+
+    /// The value in the first `len` bytes of `buf`, which holds exactly
+    /// [`Self::buffer_len`] bytes. The padding is zeroed here, whatever `buf`
+    /// held there, so the file holds zeros past every value.
+    pub(crate) fn in_buffer(mut buf: AlignedBuf, len: u32) -> Result<Self> {
+        if Self::buffer_len(len)?.map(NonZeroU32::get) != Some(buf.len_u32()) {
+            return Err(Error::InvalidArgument(
+                "value buffer is not its padded length",
+            ));
+        }
+        buf.zero_from(len as usize);
+        Ok(Self {
+            buf: Some(buf),
+            len,
+        })
     }
 }
 
@@ -286,20 +428,23 @@ impl DiskData {
     /// Write value bytes into a freshly-allocated slot, then append a
     /// live WAL entry. Returns a [`WalCommit`] carrying the LSN — apply
     /// it via `Index::apply_put` so the index's ordering matches the WAL's.
-    pub(crate) async fn append_put(&self, key: T4Key, value: &T4Value) -> Result<WalCommit> {
-        let value_len = value.len_u32();
-        let value_offset = if value_len == 0 {
-            0
-        } else {
-            let buf = AlignedBuf::from_padded_slice(value.as_bytes())?;
-            let value_offset = self.reserve_value_space(buf.len_u32())?;
-            self.io
-                .write(vec![PageWrite {
-                    buf,
-                    offset: value_offset,
-                }])?
-                .await?;
-            value_offset
+    pub(crate) async fn append_put(&self, key: T4Key, value: PaddedValue) -> Result<WalCommit> {
+        let PaddedValue {
+            buf,
+            len: value_len,
+        } = value;
+        let value_offset = match buf {
+            None => 0,
+            Some(buf) => {
+                let value_offset = self.reserve_value_space(buf.len_u32())?;
+                self.io
+                    .write(vec![PageWrite {
+                        buf,
+                        offset: value_offset,
+                    }])?
+                    .await?;
+                value_offset
+            }
         };
 
         let lsn = self
@@ -332,67 +477,45 @@ impl DiskData {
         })
     }
 
-    /// Read the full value in `extent` from disk.
+    /// Reads the whole value in `extent`.
     pub(crate) async fn read_value(&self, extent: &Extent) -> Result<Vec<u8>> {
-        let value = extent.value;
-        let Some(value_len_u32) = NonZeroU32::new(value.length()) else {
-            return Ok(Vec::new());
-        };
-        let padded_u32 = align_up_u32(value_len_u32, PAGE_SIZE_NZ_U32)
-            .map_err(|_| Error::Format("value length exceeds io buffer limit".into()))?;
-        let buf = AlignedBuf::new_zeroed(padded_u32)?;
-        let buf = self.io.read_exact_at(buf, value.offset()).await?;
-        let value_len = value_len_u32.get() as usize;
-        Ok(buf.as_slice()[..value_len].to_vec())
+        self.read_window(extent, &extent.whole_window()?).await
     }
 
-    /// Read a byte range within the value in `extent` from disk.
-    pub(crate) async fn read_value_range(
+    /// Reads `window` of the value in `extent`: the bytes it asks for.
+    pub(crate) async fn read_window(
         &self,
         extent: &Extent,
-        range: RangeRequestU32,
+        window: &ValueWindow,
     ) -> Result<Vec<u8>> {
-        let value = extent.value;
-        let range: CheckedRangeU32 = range
-            .checked_against(value.length())
-            .ok_or(Error::RangeOutOfBounds)?;
-        if range.is_empty() {
+        let Some(buffer_len) = NonZeroU32::new(window.buffer_len) else {
             return Ok(Vec::new());
+        };
+        let buf = AlignedBuf::new_zeroed(buffer_len)?;
+        let buf = self.read_window_into(extent, window, buf).await?;
+        let start = window.start as usize;
+        Ok(buf.as_slice()[start..start + window.len as usize].to_vec())
+    }
+
+    /// Reads `window` of the value in `extent` into `buf`, which holds
+    /// exactly the window: the bytes asked for land at `window.start()`.
+    pub(crate) async fn read_window_into(
+        &self,
+        extent: &Extent,
+        window: &ValueWindow,
+        buf: AlignedBuf,
+    ) -> Result<AlignedBuf> {
+        if buf.len_u32() != window.buffer_len {
+            return Err(Error::InvalidArgument(
+                "read buffer is not its window's size",
+            ));
         }
-
-        let abs_start = value
+        let offset = extent
+            .value
             .offset()
-            .checked_add(u64::from(range.start()))
+            .checked_add(u64::from(window.first_byte))
             .ok_or(Error::RangeOutOfBounds)?;
-        let abs_end = value
-            .offset()
-            .checked_add(u64::from(range.end()))
-            .ok_or(Error::RangeOutOfBounds)?;
-
-        let aligned_start = align_down_u64(abs_start, PAGE_SIZE_U64);
-        let aligned_end = align_up_u64(abs_end, PAGE_SIZE_U64).ok_or(Error::RangeOutOfBounds)?;
-        let read_len_u64 = aligned_end
-            .checked_sub(aligned_start)
-            .ok_or(Error::RangeOutOfBounds)?;
-        let read_len_u32: u32 = read_len_u64
-            .try_into()
-            .map_err(|_| Error::RangeOutOfBounds)?;
-        let read_len_u32 = NonZeroU32::new(read_len_u32).ok_or(Error::RangeOutOfBounds)?;
-        let buf = AlignedBuf::new_zeroed(read_len_u32)?;
-        let buf = self.io.read_exact_at(buf, aligned_start).await?;
-
-        let slice_start_u64 = abs_start
-            .checked_sub(aligned_start)
-            .ok_or(Error::RangeOutOfBounds)?;
-        let slice_start_u32: u32 = slice_start_u64
-            .try_into()
-            .map_err(|_| Error::RangeOutOfBounds)?;
-        let slice_start = slice_start_u32 as usize;
-        let slice_len = range.len() as usize;
-        let slice_end = slice_start
-            .checked_add(slice_len)
-            .ok_or(Error::RangeOutOfBounds)?;
-        Ok(buf.as_slice()[slice_start..slice_end].to_vec())
+        self.io.read_exact_at(buf, offset).await
     }
 
     // -- private -------------------------------------------------------------
@@ -463,5 +586,57 @@ pub(crate) struct WalTombstoneCommit {
 impl WalTombstoneCommit {
     pub(crate) fn lsn(&self) -> u64 {
         self.lsn
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PAGE_SIZE;
+
+    const PAGE: u32 = PAGE_SIZE as u32;
+
+    fn window(start: u32, len: u32) -> ValueWindow {
+        ValueWindow::of_any_value(RangeRequestU32::from_u32(start, len).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn windows_cover_whole_pages_around_the_range() {
+        let expect = |first_byte, buffer_len, start, len| ValueWindow {
+            first_byte,
+            buffer_len,
+            start,
+            len,
+        };
+        assert_eq!(window(0, 0), expect(0, 0, 0, 0));
+        assert_eq!(window(9000, 0), expect(0, 0, 0, 0));
+        assert_eq!(window(0, 1), expect(0, PAGE, 0, 1));
+        assert_eq!(window(0, PAGE), expect(0, PAGE, 0, PAGE));
+        assert_eq!(window(PAGE - 1, 2), expect(0, 2 * PAGE, PAGE - 1, 2));
+        assert_eq!(window(PAGE + 5, 10), expect(PAGE, PAGE, 5, 10));
+        assert_eq!(
+            ValueWindow::whole(PAGE + 1).unwrap(),
+            expect(0, 2 * PAGE, 0, PAGE + 1)
+        );
+        assert!(matches!(
+            ValueWindow::whole(u32::MAX),
+            Err(Error::InputError(InputError::ValueTooLarge(_)))
+        ));
+    }
+
+    #[test]
+    fn a_value_in_a_buffer_gets_zeroed_padding() {
+        let len = 10;
+        let buffer_len = PaddedValue::buffer_len(len).unwrap().unwrap();
+        let mut buf = AlignedBuf::new_zeroed(buffer_len).unwrap();
+        buf.as_mut_slice().fill(0xee);
+        let value = PaddedValue::in_buffer(buf, len).unwrap();
+        let bytes = value.buf.as_ref().unwrap().as_slice();
+        assert!(bytes[..len as usize].iter().all(|byte| *byte == 0xee));
+        assert!(bytes[len as usize..].iter().all(|byte| *byte == 0));
+
+        let too_large = AlignedBuf::new_zeroed(NonZeroU32::new(2 * PAGE).unwrap()).unwrap();
+        assert!(PaddedValue::in_buffer(too_large, len).is_err());
+        assert!(PaddedValue::buffer_len(0).unwrap().is_none());
     }
 }

@@ -2,7 +2,8 @@
 //! stream socket, each a little-endian `u64` body length, then the body. A
 //! handshake comes first; then requests and replies, matched by request id.
 //! A descriptor travels as `SCM_RIGHTS`, attached to the first byte of the
-//! frame that carries it.
+//! frame that carries it. Value bytes travel in the frames, or, where the
+//! client shares memory with the server (Linux), in a buffer a frame names.
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -22,27 +23,31 @@ use crate::range::RangeRequestU32;
 
 /// Bumped on any change to the frames below: a client and a server of
 /// different versions refuse each other in the handshake.
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = 2;
 /// Opens every handshake, so a server can tell a t4 client from anything
 /// else that connects.
 const HANDSHAKE_MAGIC: [u8; 4] = *b"t4sh";
 
-/// A frame on its way out: its bytes, and the descriptor attached to it.
+/// A frame on its way out: its bytes, and the descriptors attached to it.
 pub(super) struct OutgoingFrame {
     bytes: Vec<u8>,
-    fd: Option<OwnedFd>,
+    fds: Vec<OwnedFd>,
 }
 
 impl OutgoingFrame {
+    /// The most descriptors a frame carries: a handshake's two.
+    const MAX_FDS: usize = 2;
+
     pub(super) fn write_to(&self, mut socket: &UnixStream) -> io::Result<()> {
-        let Some(fd) = &self.fd else {
+        if self.fds.is_empty() {
             return socket.write_all(&self.bytes);
-        };
-        let fds = [fd.as_fd()];
-        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        }
+        let fds: Vec<_> = self.fds.iter().map(AsFd::as_fd).collect();
+        let mut space =
+            [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(OutgoingFrame::MAX_FDS))];
         let mut control = SendAncillaryBuffer::new(&mut space);
         let fits = control.push(SendAncillaryMessage::ScmRights(&fds));
-        debug_assert!(fits, "the control buffer is sized for one descriptor");
+        debug_assert!(fits, "the control buffer is sized for MAX_FDS");
         let sent = loop {
             match rustix::net::sendmsg(
                 socket,
@@ -54,7 +59,7 @@ impl OutgoingFrame {
                 result => break result?,
             }
         };
-        // The descriptor went with the first byte; the rest is plain bytes.
+        // The descriptors went with the first byte; the rest is plain bytes.
         socket.write_all(&self.bytes[sent..])
     }
 }
@@ -270,25 +275,28 @@ impl Read for FdReceiver {
 /// descriptor of the store: the kernel checked the client's permissions
 /// when it opened the file, so whoever can open the store read-write may
 /// use its server. Abstract socket names have no permissions of their own.
+/// After the store comes the memfd of the connection's shared region, if
+/// the client has one.
 pub(super) struct Handshake;
 
 impl Handshake {
-    pub(super) fn frame(store: OwnedFd) -> OutgoingFrame {
+    pub(super) fn frame(store: OwnedFd, region: Option<OwnedFd>) -> OutgoingFrame {
         let mut frame = FrameBuilder::new();
         HANDSHAKE_MAGIC.iter().for_each(|byte| frame.u8(*byte));
         frame.u32(PROTOCOL_VERSION);
+        frame.u8(u8::from(region.is_some()));
         OutgoingFrame {
             bytes: frame.finish(),
-            fd: Some(store),
+            fds: [Some(store), region].into_iter().flatten().collect(),
         }
     }
 
-    /// The store descriptor the handshake in `body` carries, or why it is
-    /// refused.
+    /// The store descriptor and the region memfd the handshake in `body`
+    /// carries, or why it is refused.
     pub(super) fn decode(
         body: &[u8],
         fds: &mut FdReceiver,
-    ) -> std::result::Result<OwnedFd, String> {
+    ) -> std::result::Result<(OwnedFd, Option<OwnedFd>), String> {
         let mut fields = FrameFields::new(body);
         let mut check = || -> io::Result<bool> {
             let magic: [u8; 4] = fields.array()?;
@@ -299,9 +307,16 @@ impl Handshake {
             Ok(true) => {}
             _ => return Err(format!("not a t4 client of protocol {PROTOCOL_VERSION}")),
         }
+        let has_region = fields.bool().map_err(|err| err.to_string())?;
         fields.finish().map_err(|err| err.to_string())?;
-        fds.take_fd()
-            .ok_or_else(|| "handshake carries no store descriptor".to_string())
+        let store = fds
+            .take_fd()
+            .ok_or_else(|| "handshake carries no store descriptor".to_string())?;
+        let region = has_region
+            .then(|| fds.take_fd())
+            .map(|region| region.ok_or_else(|| "handshake carries no region".to_string()))
+            .transpose()?;
+        Ok((store, region))
     }
 }
 
@@ -356,18 +371,89 @@ impl HandshakeReply {
     }
 }
 
-/// What a client asks of the store.
+/// Where a request's value bytes are, when not in its frame: in the
+/// connection's shared region, or in a memfd of their own the frame
+/// carries. `capacity` is the buffer's size, in whole pages.
+pub(super) enum WireBuffer {
+    Region { offset: u64, capacity: u32 },
+    Own { memfd: OwnedFd, capacity: u32 },
+}
+
+impl WireBuffer {
+    const REGION: u8 = 0;
+    const OWN: u8 = 1;
+
+    fn encode(self, frame: &mut FrameBuilder, fds: &mut Vec<OwnedFd>) {
+        match self {
+            Self::Region { offset, capacity } => {
+                frame.u8(Self::REGION);
+                frame.u64(offset);
+                frame.u32(capacity);
+            }
+            Self::Own { memfd, capacity } => {
+                frame.u8(Self::OWN);
+                frame.u32(capacity);
+                fds.push(memfd);
+            }
+        }
+    }
+
+    fn decode(fields: &mut FrameFields<'_>, fds: &mut FdReceiver) -> io::Result<Self> {
+        match fields.u8()? {
+            Self::REGION => Ok(Self::Region {
+                offset: fields.u64()?,
+                capacity: fields.u32()?,
+            }),
+            Self::OWN => Ok(Self::Own {
+                capacity: fields.u32()?,
+                memfd: fds
+                    .take_fd()
+                    .ok_or_else(|| FrameFields::malformed("buffer carries no memfd"))?,
+            }),
+            _ => Err(FrameFields::malformed("buffer")),
+        }
+    }
+
+    fn encode_optional(buffer: Option<Self>, frame: &mut FrameBuilder, fds: &mut Vec<OwnedFd>) {
+        frame.u8(u8::from(buffer.is_some()));
+        if let Some(buffer) = buffer {
+            buffer.encode(frame, fds);
+        }
+    }
+
+    fn decode_optional(
+        fields: &mut FrameFields<'_>,
+        fds: &mut FdReceiver,
+    ) -> io::Result<Option<Self>> {
+        fields
+            .bool()?
+            .then(|| Self::decode(fields, fds))
+            .transpose()
+    }
+}
+
+/// A put's value: in the frame, or `len` bytes at the start of a buffer.
+pub(super) enum ValueIn {
+    Inline(T4Value),
+    Shared { buffer: WireBuffer, len: u32 },
+}
+
+/// What a client asks of the store. A read names the buffer it wants the
+/// bytes in, if the client shares memory with the server; without one the
+/// bytes come back in the reply's frame.
 pub(super) enum Request {
     Put {
         key: T4Key,
-        value: T4Value,
+        value: ValueIn,
     },
     Get {
         key: T4Key,
+        into: Option<WireBuffer>,
     },
     GetRange {
         key: T4Key,
         range: RangeRequestU32,
+        into: Option<WireBuffer>,
     },
     Remove {
         key: T4Key,
@@ -387,25 +473,40 @@ impl Request {
     const LEN: u8 = 5;
     const SNAPSHOT: u8 = 6;
 
+    const INLINE: u8 = 0;
+    const SHARED: u8 = 1;
+
     pub(super) fn into_frame(self, id: u64) -> OutgoingFrame {
         let mut frame = FrameBuilder::new();
         frame.u64(id);
-        let mut fd = None;
+        let mut fds = Vec::new();
         match self {
             Self::Put { key, value } => {
                 frame.u8(Self::PUT);
                 frame.key(&key);
-                frame.bytes(value.as_bytes());
+                match value {
+                    ValueIn::Inline(value) => {
+                        frame.u8(Self::INLINE);
+                        frame.bytes(value.as_bytes());
+                    }
+                    ValueIn::Shared { buffer, len } => {
+                        frame.u8(Self::SHARED);
+                        frame.u32(len);
+                        buffer.encode(&mut frame, &mut fds);
+                    }
+                }
             }
-            Self::Get { key } => {
+            Self::Get { key, into } => {
                 frame.u8(Self::GET);
                 frame.key(&key);
+                WireBuffer::encode_optional(into, &mut frame, &mut fds);
             }
-            Self::GetRange { key, range } => {
+            Self::GetRange { key, range, into } => {
                 frame.u8(Self::GET_RANGE);
                 frame.key(&key);
                 frame.u32(range.start);
                 frame.u32(range.len);
+                WireBuffer::encode_optional(into, &mut frame, &mut fds);
             }
             Self::Remove { key } => {
                 frame.u8(Self::REMOVE);
@@ -414,33 +515,51 @@ impl Request {
             Self::Len => frame.u8(Self::LEN),
             Self::Snapshot { target } => {
                 frame.u8(Self::SNAPSHOT);
-                fd = Some(target.into());
+                fds.push(target.into());
             }
         }
         OutgoingFrame {
             bytes: frame.finish(),
-            fd,
+            fds,
         }
     }
 
-    /// The request in `body`, and its id. A snapshot's target is the next
-    /// descriptor `fds` received.
+    /// The request in `body`, and its id. A descriptor the request carries,
+    /// a snapshot's target or a buffer's memfd, is the next one `fds`
+    /// received.
     pub(super) fn decode(body: &[u8], fds: &mut FdReceiver) -> io::Result<(u64, Self)> {
         let mut fields = FrameFields::new(body);
         let id = fields.u64()?;
         let request = match fields.u8()? {
             Self::PUT => {
                 let key = fields.key()?;
-                let value = T4Value::try_from_vec(fields.bytes()?.to_vec())
-                    .map_err(|_| FrameFields::malformed("value too long"))?;
+                let value = match fields.u8()? {
+                    Self::INLINE => ValueIn::Inline(
+                        T4Value::try_from_vec(fields.bytes()?.to_vec())
+                            .map_err(|_| FrameFields::malformed("value too long"))?,
+                    ),
+                    Self::SHARED => {
+                        let len = fields.u32()?;
+                        ValueIn::Shared {
+                            buffer: WireBuffer::decode(&mut fields, fds)?,
+                            len,
+                        }
+                    }
+                    _ => return Err(FrameFields::malformed("value")),
+                };
                 Self::Put { key, value }
             }
-            Self::GET => Self::Get { key: fields.key()? },
+            Self::GET => {
+                let key = fields.key()?;
+                let into = WireBuffer::decode_optional(&mut fields, fds)?;
+                Self::Get { key, into }
+            }
             Self::GET_RANGE => {
                 let key = fields.key()?;
                 let range = RangeRequestU32::from_u32(fields.u32()?, fields.u32()?)
                     .ok_or_else(|| FrameFields::malformed("range"))?;
-                Self::GetRange { key, range }
+                let into = WireBuffer::decode_optional(&mut fields, fds)?;
+                Self::GetRange { key, range, into }
             }
             Self::REMOVE => Self::Remove { key: fields.key()? },
             Self::LEN => Self::Len,
@@ -463,7 +582,19 @@ impl Request {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Reply {
     Done,
+    /// A read's bytes, in the frame.
     Bytes(Vec<u8>),
+    /// A read's bytes are in the buffer the request named: `len` of them,
+    /// from `start`.
+    InBuffer {
+        start: u32,
+        len: u32,
+    },
+    /// The buffer a read named is too small: it needs `needed` bytes. The
+    /// value wasn't read.
+    TooSmall {
+        needed: u32,
+    },
     Removed(bool),
     Count(u64),
 }
@@ -474,8 +605,10 @@ impl Reply {
     const REMOVED: u8 = 2;
     const COUNT: u8 = 3;
     const FAILED: u8 = 4;
+    const IN_BUFFER: u8 = 5;
+    const TOO_SMALL: u8 = 6;
 
-    fn unexpected(self) -> Error {
+    pub(super) fn unexpected(self) -> Error {
         Error::Server(format!("unexpected reply {self:?}"))
     }
 
@@ -540,6 +673,15 @@ impl ReplyFrame {
                 frame.u8(Reply::COUNT);
                 frame.u64(*count);
             }
+            Ok(Reply::InBuffer { start, len }) => {
+                frame.u8(Reply::IN_BUFFER);
+                frame.u32(*start);
+                frame.u32(*len);
+            }
+            Ok(Reply::TooSmall { needed }) => {
+                frame.u8(Reply::TOO_SMALL);
+                frame.u32(*needed);
+            }
             Err(err) => {
                 frame.u8(Reply::FAILED);
                 WireError(err).encode(&mut frame);
@@ -556,6 +698,13 @@ impl ReplyFrame {
             Reply::BYTES => Ok(Reply::Bytes(fields.bytes()?.to_vec())),
             Reply::REMOVED => Ok(Reply::Removed(fields.bool()?)),
             Reply::COUNT => Ok(Reply::Count(fields.u64()?)),
+            Reply::IN_BUFFER => Ok(Reply::InBuffer {
+                start: fields.u32()?,
+                len: fields.u32()?,
+            }),
+            Reply::TOO_SMALL => Ok(Reply::TooSmall {
+                needed: fields.u32()?,
+            }),
             Reply::FAILED => Err(WireError::decode(&mut fields)?),
             _ => return Err(FrameFields::malformed("reply")),
         };
@@ -664,12 +813,33 @@ mod tests {
         let requests = [
             Request::Put {
                 key: key(b"k"),
-                value: T4Value::try_from_vec(vec![7; 5000]).unwrap(),
+                value: ValueIn::Inline(T4Value::try_from_vec(vec![7; 5000]).unwrap()),
             },
-            Request::Get { key: key(b"") },
+            Request::Put {
+                key: key(b"k"),
+                value: ValueIn::Shared {
+                    buffer: WireBuffer::Region {
+                        offset: 8192,
+                        capacity: 4096,
+                    },
+                    len: 5,
+                },
+            },
+            Request::Get {
+                key: key(b""),
+                into: None,
+            },
+            Request::Get {
+                key: key(b"k"),
+                into: Some(WireBuffer::Region {
+                    offset: 0,
+                    capacity: 65536,
+                }),
+            },
             Request::GetRange {
                 key: key(&[1; 255]),
                 range: RangeRequestU32::from_u32(3, 9).unwrap(),
+                into: None,
             },
             Request::Remove { key: key(b"gone") },
             Request::Len,
@@ -697,10 +867,41 @@ mod tests {
     }
 
     #[test]
+    fn a_buffer_of_its_own_carries_its_memfd() {
+        let mut memfd = tempfile::tempfile().unwrap();
+        memfd.write_all(b"marker").unwrap();
+        let request = Request::Get {
+            key: key(b"k"),
+            into: Some(WireBuffer::Own {
+                memfd: memfd.into(),
+                capacity: 4096,
+            }),
+        };
+        let (body, mut fds) = through_socket(request.into_frame(3));
+        let Ok((
+            3,
+            Request::Get {
+                into: Some(WireBuffer::Own { memfd, capacity }),
+                ..
+            },
+        )) = Request::decode(&body, &mut fds)
+        else {
+            panic!("decoded as another request");
+        };
+        assert_eq!(capacity, 4096);
+        assert_eq!(
+            File::from(memfd).metadata().unwrap().len(),
+            b"marker".len() as u64
+        );
+    }
+
+    #[test]
     fn handshake_carries_the_store_and_checks_the_version() {
         let store = tempfile::tempfile().unwrap();
-        let (body, mut fds) = through_socket(Handshake::frame(store.into()));
-        assert!(Handshake::decode(&body, &mut fds).is_ok());
+        let region = tempfile::tempfile().unwrap();
+        let (body, mut fds) = through_socket(Handshake::frame(store.into(), Some(region.into())));
+        let (_, region) = Handshake::decode(&body, &mut fds).unwrap();
+        assert!(region.is_some());
 
         let mut wrong_version = body.clone();
         wrong_version[4] ^= 1;
@@ -725,6 +926,8 @@ mod tests {
             Ok(Reply::Bytes(vec![1, 2, 3])),
             Ok(Reply::Removed(true)),
             Ok(Reply::Count(u64::MAX)),
+            Ok(Reply::InBuffer { start: 7, len: 9 }),
+            Ok(Reply::TooSmall { needed: 8192 }),
             Err(Error::NotFound),
             Err(Error::RangeOutOfBounds),
             Err(Error::Busy),

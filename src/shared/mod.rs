@@ -6,6 +6,7 @@
 mod address;
 mod client;
 mod launch;
+mod memory;
 mod server;
 mod wire;
 

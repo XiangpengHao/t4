@@ -5,20 +5,26 @@ use std::fs::File;
 use std::future::poll_fn;
 use std::io::BufReader;
 use std::net::Shutdown;
+use std::num::NonZeroU32;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
 use crossbeam_channel::{Receiver, Sender};
 
+use crate::disk::{PaddedValue, ValueWindow};
 use crate::input_kv::{T4Key, T4Value};
 use crate::io::error::{Error, Result};
 use crate::io::io_task::TaskCompletion;
 use crate::range::RangeRequestU32;
 use crate::shared::address::{ServerAddress, StoreIdentity};
 use crate::shared::launch::ServerLauncher;
-use crate::shared::wire::{FrameReader, OutgoingFrame, Reply, ReplyFrame, Request};
+use crate::shared::memory::{ValueBuffer, ValueMemory};
+use crate::shared::wire::{
+    FrameReader, OutgoingFrame, Reply, ReplyFrame, Request, ValueIn, WireBuffer,
+};
 use crate::store::{MountOptions, ServerOptions};
 
 /// What a client needs to reach its store's server, and to reach it again
@@ -105,40 +111,49 @@ impl SharedStore {
     }
 
     pub(crate) async fn put(&self, key: T4Key, value: T4Value) -> Result<()> {
-        self.call(Request::Put { key, value }).await?.into_done()
+        self.connection().await?.put(key, value).await
     }
 
     pub(crate) async fn get(&self, key: T4Key) -> Result<Vec<u8>> {
-        self.call(Request::Get { key }).await?.into_bytes()
+        self.connection().await?.get(key).await
     }
 
     pub(crate) async fn get_range(&self, key: T4Key, range: RangeRequestU32) -> Result<Vec<u8>> {
-        self.call(Request::GetRange { key, range })
-            .await?
-            .into_bytes()
+        self.connection().await?.get_range(key, range).await
     }
 
     pub(crate) async fn remove(&self, key: T4Key) -> Result<bool> {
-        self.call(Request::Remove { key }).await?.into_removed()
+        let connection = self.connection().await?;
+        connection
+            .call(Request::Remove { key }, None)
+            .await?
+            .reply
+            .into_removed()
     }
 
     /// Snapshots into `target`, an empty store file this client created.
     pub(crate) async fn snapshot(&self, target: File) -> Result<()> {
-        self.call(Request::Snapshot { target }).await?.into_done()
+        let connection = self.connection().await?;
+        connection
+            .call(Request::Snapshot { target }, None)
+            .await?
+            .reply
+            .into_done()
     }
 
     pub(crate) async fn len(&self) -> Result<usize> {
-        let count = self.call(Request::Len).await?.into_count()?;
+        let connection = self.connection().await?;
+        let count = connection
+            .call(Request::Len, None)
+            .await?
+            .reply
+            .into_count()?;
         usize::try_from(count).map_err(|_| Error::Server(format!("entry count {count}")))
     }
 
     /// The process id of the server this store is connected to.
     pub(crate) fn server_pid(&self) -> u32 {
         self.lock_connection().server_pid
-    }
-
-    async fn call(&self, request: Request) -> Result<Reply> {
-        self.connection().await?.call(request).await
     }
 
     /// The connection to use: the current one, unless its server went away.
@@ -167,7 +182,8 @@ impl SharedStore {
 /// One connection to the store's server. Callers hand their requests to
 /// its writer thread; its reader thread completes their calls by request
 /// id as the replies arrive: `IoWorker`'s pattern, so the API stays
-/// runtime-agnostic.
+/// runtime-agnostic. Where the client shares memory with the server, value
+/// bytes go through buffers in it instead of the frames.
 struct ServerConnection {
     requests: Sender<OutgoingFrame>,
     calls: Arc<PendingCalls>,
@@ -175,9 +191,15 @@ struct ServerConnection {
     /// server sees this client leave.
     socket: UnixStream,
     server_pid: u32,
+    memory: Option<Arc<ValueMemory>>,
+    /// The buffer a get first lends: the size the last get needed.
+    get_capacity: AtomicU32,
 }
 
 impl ServerConnection {
+    /// What a get lends before it has seen a value.
+    const FIRST_GET_CAPACITY: u32 = 64 << 10;
+
     /// Connects, starting a server if none is running. The blocking part
     /// runs on a thread of its own, which then reads the replies.
     async fn open(endpoint: Arc<ServerEndpoint>) -> Result<Arc<Self>> {
@@ -186,13 +208,18 @@ impl ServerConnection {
         thread::Builder::new()
             .name("t4-client-replies".into())
             .spawn(move || {
-                let connected = match ServerLauncher::new(&endpoint).connect() {
+                let memory = match ValueMemory::for_connection() {
+                    Ok(memory) => memory,
+                    Err(err) => return report.complete(Err(err.into())),
+                };
+                let region = memory.as_ref().map(|memory| memory.region_fd());
+                let connected = match ServerLauncher::new(&endpoint, region).connect() {
                     Ok(connected) => connected,
                     Err(err) => return report.complete(Err(err)),
                 };
                 let (socket, replies, server_pid) = connected.into_parts();
                 let calls = Arc::new(PendingCalls::default());
-                match Self::start(socket, Arc::clone(&calls), server_pid) {
+                match Self::start(socket, Arc::clone(&calls), server_pid, memory) {
                     Ok(connection) => report.complete(Ok(Arc::new(connection))),
                     Err(err) => return report.complete(Err(err)),
                 }
@@ -206,7 +233,12 @@ impl ServerConnection {
     }
 
     /// Starts the writer thread on `socket`.
-    fn start(socket: UnixStream, calls: Arc<PendingCalls>, server_pid: u32) -> Result<Self> {
+    fn start(
+        socket: UnixStream,
+        calls: Arc<PendingCalls>,
+        server_pid: u32,
+        memory: Option<Arc<ValueMemory>>,
+    ) -> Result<Self> {
         let (requests, outgoing) = crossbeam_channel::unbounded();
         let writer_socket = socket.try_clone()?;
         thread::Builder::new()
@@ -217,6 +249,8 @@ impl ServerConnection {
             calls,
             socket,
             server_pid,
+            memory,
+            get_capacity: AtomicU32::new(Self::FIRST_GET_CAPACITY),
         })
     }
 
@@ -230,13 +264,96 @@ impl ServerConnection {
         }
     }
 
-    async fn call(&self, request: Request) -> Result<Reply> {
-        let (id, reply) = self.calls.register()?;
+    async fn put(&self, key: T4Key, value: T4Value) -> Result<()> {
+        let len = value.len_u32();
+        let (Some(memory), Some(buffer_len)) = (&self.memory, PaddedValue::buffer_len(len)?) else {
+            let value = ValueIn::Inline(value);
+            return self
+                .call(Request::Put { key, value }, None)
+                .await?
+                .reply
+                .into_done();
+        };
+        let mut buffer = memory.allocate(buffer_len)?;
+        buffer.write(value.as_bytes())?;
+        let value = ValueIn::Shared {
+            buffer: buffer.to_wire()?,
+            len,
+        };
+        self.call(Request::Put { key, value }, Some(buffer))
+            .await?
+            .reply
+            .into_done()
+    }
+
+    async fn get(&self, key: T4Key) -> Result<Vec<u8>> {
+        let capacity = self.get_capacity.load(Ordering::Relaxed);
+        self.read(capacity, true, |into| Request::Get {
+            key: key.clone(),
+            into,
+        })
+        .await
+    }
+
+    async fn get_range(&self, key: T4Key, range: RangeRequestU32) -> Result<Vec<u8>> {
+        // The server reads the same window, so it fits the first time.
+        let capacity = ValueWindow::of_any_value(range)?.buffer_len();
+        self.read(capacity, false, |into| Request::GetRange {
+            key: key.clone(),
+            range,
+            into,
+        })
+        .await
+    }
+
+    /// Sends the read `request` makes, lending the server a buffer of
+    /// `capacity` bytes where there is shared memory, and asking again with
+    /// a larger one if the bytes don't fit. A get `learns` the size it
+    /// needed, for the next get's first try.
+    async fn read(
+        &self,
+        capacity: u32,
+        learns: bool,
+        request: impl Fn(Option<WireBuffer>) -> Request,
+    ) -> Result<Vec<u8>> {
+        let (Some(memory), Some(mut capacity)) = (&self.memory, NonZeroU32::new(capacity)) else {
+            return self.call(request(None), None).await?.reply.into_bytes();
+        };
+        loop {
+            let buffer = memory.allocate(capacity)?;
+            let into = Some(buffer.to_wire()?);
+            let answer = self.call(request(into), Some(buffer)).await?;
+            match answer.reply {
+                Reply::InBuffer { start, len } => {
+                    if learns && let Some(needed) = PaddedValue::buffer_len(len)? {
+                        self.get_capacity.store(needed.get(), Ordering::Relaxed);
+                    }
+                    let buffer = answer.buffer.expect("the call keeps its buffer");
+                    return Ok(buffer.read(start, len)?);
+                }
+                Reply::TooSmall { needed } => {
+                    capacity = NonZeroU32::new(needed)
+                        .filter(|needed| *needed > capacity)
+                        .ok_or_else(|| Error::Server(format!("too small for {needed} bytes")))?;
+                    if learns {
+                        self.get_capacity.store(needed, Ordering::Relaxed);
+                    }
+                }
+                other => return Err(other.unexpected()),
+            }
+        }
+    }
+
+    /// Sends `request`, and waits for its reply. `buffer`, the one the
+    /// request lends the server, stays with the call until the reply comes,
+    /// even if the caller stops waiting: the server may use it until then.
+    async fn call(&self, request: Request, buffer: Option<ValueBuffer>) -> Result<Answer> {
+        let (id, answer) = self.calls.register(buffer)?;
         if self.requests.send(request.into_frame(id)).is_err() {
             self.calls.forget(id);
             return Err(Error::ServerGone);
         }
-        poll_fn(|cx| reply.poll_result(cx)).await
+        poll_fn(|cx| answer.poll_result(cx)).await
     }
 }
 
@@ -244,6 +361,12 @@ impl Drop for ServerConnection {
     fn drop(&mut self) {
         let _ = self.socket.shutdown(Shutdown::Both);
     }
+}
+
+/// A reply, and the buffer its request lent the server.
+struct Answer {
+    reply: Reply,
+    buffer: Option<ValueBuffer>,
 }
 
 /// The calls on one connection waiting for their replies, by request id.
@@ -255,9 +378,14 @@ struct PendingCalls {
 #[derive(Default)]
 struct PendingState {
     next_id: u64,
-    waiting: HashMap<u64, Arc<TaskCompletion<Reply>>>,
+    waiting: HashMap<u64, PendingCall>,
     /// The server went away: no reply will come.
     gone: bool,
+}
+
+struct PendingCall {
+    answer: Arc<TaskCompletion<Answer>>,
+    buffer: Option<ValueBuffer>,
 }
 
 impl PendingCalls {
@@ -270,16 +398,20 @@ impl PendingCalls {
         self.lock().gone
     }
 
-    fn register(&self) -> Result<(u64, Arc<TaskCompletion<Reply>>)> {
+    fn register(&self, buffer: Option<ValueBuffer>) -> Result<(u64, Arc<TaskCompletion<Answer>>)> {
         let mut state = self.lock();
         if state.gone {
             return Err(Error::ServerGone);
         }
         let id = state.next_id;
         state.next_id += 1;
-        let reply = Arc::new(TaskCompletion::new());
-        state.waiting.insert(id, Arc::clone(&reply));
-        Ok((id, reply))
+        let answer = Arc::new(TaskCompletion::new());
+        let call = PendingCall {
+            answer: Arc::clone(&answer),
+            buffer,
+        };
+        state.waiting.insert(id, call);
+        Ok((id, answer))
     }
 
     fn forget(&self, id: u64) {
@@ -295,10 +427,10 @@ impl PendingCalls {
             };
             let (id, result) = frame.into_parts();
             // A call whose caller stopped waiting is still here: its
-            // completion just goes unread.
+            // completion just goes unread, and frees its buffer as it drops.
             let waiting = self.lock().waiting.remove(&id);
-            if let Some(reply) = waiting {
-                reply.complete(result);
+            if let Some(PendingCall { answer, buffer }) = waiting {
+                answer.complete(result.map(|reply| Answer { reply, buffer }));
             }
         }
         let waiting = {
@@ -306,8 +438,8 @@ impl PendingCalls {
             state.gone = true;
             std::mem::take(&mut state.waiting)
         };
-        for reply in waiting.into_values() {
-            reply.complete(Err(Error::ServerGone));
+        for call in waiting.into_values() {
+            call.answer.complete(Err(Error::ServerGone));
         }
     }
 }

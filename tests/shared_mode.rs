@@ -74,6 +74,62 @@ fn clients_share_one_store() {
 }
 
 #[test]
+fn values_of_every_size_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sizes.t4");
+    let client = mount_shared(&path).unwrap();
+    // Past a page, past a get's first buffer, and past what the connection's
+    // shared region holds: a value that gets a memfd of its own.
+    let sizes = [0, 1, 4095, 4096, 4097, 200 << 10, 20 << 20];
+    let values: Vec<Vec<u8>> = sizes
+        .iter()
+        .map(|size| (0..*size).map(|i| (i % 251) as u8).collect())
+        .collect();
+    for (key, value) in values.iter().enumerate() {
+        let key = [key as u8];
+        block_on(client.put(key, value.clone())).unwrap();
+        // Twice: the first get of a size may lend too small a buffer.
+        for _ in 0..2 {
+            assert_eq!(block_on(client.get(&key)).unwrap(), *value);
+        }
+        let (start, len) = (value.len() / 3, value.len() / 2);
+        let range = block_on(client.get_range(&key, start as u64, len as u64)).unwrap();
+        assert_eq!(range, value[start..start + len]);
+    }
+
+    // The server wrote the bytes to the file.
+    drop(client);
+    let owner = mount_in_process_once_free(&path);
+    for (key, value) in values.iter().enumerate() {
+        assert_eq!(block_on(owner.get(&[key as u8])).unwrap(), *value);
+    }
+}
+
+#[test]
+fn concurrent_calls_share_one_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("concurrent.t4");
+    let client = mount_shared(&path).unwrap();
+    let threads: Vec<_> = (0..8_u8)
+        .map(|thread| {
+            let client = client.clone();
+            thread::spawn(move || {
+                for i in 0..40_u8 {
+                    let size = (usize::from(thread) * 40 + usize::from(i)) * 7919 % (300 << 10);
+                    let value = vec![thread ^ i; size];
+                    block_on(client.put([thread, i], value.clone())).unwrap();
+                    assert_eq!(block_on(client.get(&[thread, i])).unwrap(), value);
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    assert_eq!(block_on(client.len()).unwrap(), 8 * 40);
+}
+
+#[test]
 fn in_process_and_shared_mounts_exclude_each_other() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("exclusive.t4");

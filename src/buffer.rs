@@ -1,6 +1,8 @@
 use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::any::Any;
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
+use std::sync::Arc;
 
 use vstd::prelude::*;
 
@@ -177,15 +179,27 @@ pub fn align_up_u32(value: NonZeroU32, alignment: NonZeroU32) -> Result<NonZeroU
     NonZeroU32::new(aligned).ok_or(Error::InvalidArgument("aligned value unexpectedly zero"))
 }
 
+/// A page-aligned buffer: what direct I/O reads into and writes from.
 #[derive(Debug)]
 pub struct AlignedBuf {
     ptr: NonNull<u8>,
     len_u32: NonZeroU32,
-    layout: Layout,
+    memory: BufMemory,
 }
 
-// `AlignedBuf` owns its allocation and exposes mutation only through `&mut self`,
-// so moving it across threads preserves Rust's aliasing guarantees.
+/// Where an [`AlignedBuf`]'s bytes live.
+#[derive(Debug)]
+enum BufMemory {
+    /// Allocated by the buffer with this layout, and freed when it drops.
+    Owned(Layout),
+    /// Lent by a mapping the guard keeps mapped until the buffer drops:
+    /// memory shared with another process (`doc/02-multi-process.md`).
+    Lent { _guard: Arc<dyn Any + Send + Sync> },
+}
+
+// An owned buffer is mutated only through `&mut self`, so moving it across
+// threads preserves Rust's aliasing guarantees. A lent one adds a guard that
+// is itself `Send`.
 unsafe impl Send for AlignedBuf {}
 
 impl AlignedBuf {
@@ -203,8 +217,32 @@ impl AlignedBuf {
         Ok(Self {
             ptr,
             len_u32,
-            layout,
+            memory: BufMemory::Owned(layout),
         })
+    }
+
+    /// A buffer over `len_u32` bytes at `ptr`, lent by a mapping `guard`
+    /// keeps mapped.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` is page-aligned, and valid for reads and writes of `len_u32`
+    /// bytes for as long as `guard` lives. Nothing else in this process uses
+    /// those bytes while the buffer lives. Another process may write them at
+    /// any time: the buffer is for direct I/O, which the kernel does, so
+    /// [`Self::as_slice`] and [`Self::as_mut_slice`] on it see whatever is
+    /// there.
+    pub(crate) unsafe fn lent(
+        ptr: NonNull<u8>,
+        len_u32: NonZeroU32,
+        guard: Arc<dyn Any + Send + Sync>,
+    ) -> Self {
+        debug_assert!((ptr.as_ptr() as usize).is_multiple_of(PAGE_SIZE));
+        Self {
+            ptr,
+            len_u32,
+            memory: BufMemory::Lent { _guard: guard },
+        }
     }
 
     pub fn from_padded_slice(src: &[u8]) -> Result<Self> {
@@ -244,18 +282,36 @@ impl AlignedBuf {
     }
 
     pub fn as_slice(&self) -> &[u8] {
+        debug_assert!(self.is_owned(), "a lent buffer is only touched by raw pointers");
         unsafe { std::slice::from_raw_parts(self.as_ptr(), self.len()) }
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        debug_assert!(self.is_owned(), "a lent buffer is only touched by raw pointers");
         unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), self.len()) }
+    }
+
+    fn is_owned(&self) -> bool {
+        matches!(self.memory, BufMemory::Owned(_))
+    }
+
+    /// Zeroes the buffer from `start` to its end. Through a raw pointer, so
+    /// no reference covers memory another process may share.
+    pub(crate) fn zero_from(&mut self, start: usize) {
+        let tail = self.len().saturating_sub(start);
+        // SAFETY: `start + tail` is at most the buffer's length, and the
+        // buffer's memory is valid for writes (`new_zeroed`, `lent`).
+        unsafe { std::ptr::write_bytes(self.as_mut_ptr().add(start.min(self.len())), 0, tail) };
     }
 
     pub fn try_into_boxed_array(self) -> Result<Box<[u8; PAGE_SIZE]>> {
         if self.len() != PAGE_SIZE {
             return Err(Error::InvalidArgument("invalid aligned buffer layout"));
         }
-        if self.layout.align() != PAGE_SIZE {
+        let BufMemory::Owned(layout) = &self.memory else {
+            return Err(Error::InvalidArgument("invalid aligned buffer layout"));
+        };
+        if layout.align() != PAGE_SIZE {
             return Err(Error::InvalidArgument("invalid aligned buffer layout"));
         }
         let ptr = self.ptr.as_ptr();
@@ -267,6 +323,9 @@ impl AlignedBuf {
 
 impl Drop for AlignedBuf {
     fn drop(&mut self) {
-        unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
+        // A lent buffer's guard drops with it.
+        if let BufMemory::Owned(layout) = self.memory {
+            unsafe { dealloc(self.ptr.as_ptr(), layout) };
+        }
     }
 }

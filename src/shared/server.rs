@@ -5,6 +5,8 @@
 use std::fs::File;
 use std::future::Future;
 use std::io::{self, BufReader, Read, Write};
+use std::num::NonZeroU32;
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -16,12 +18,16 @@ use futures_executor::ThreadPool;
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::OFlags;
 
+use crate::buffer::AlignedBuf;
+use crate::disk::{Extent, PaddedValue, ValueWindow};
 use crate::input_kv::T4KeyRef;
 use crate::io::error::{Error, Result};
 use crate::shared::address::{ServerAddress, ServerClaim, StoreIdentity};
 use crate::shared::launch::{ServerArgs, ServerStatus};
+use crate::shared::memory::SharedMapping;
 use crate::shared::wire::{
-    FdReceiver, FrameReader, Handshake, HandshakeReply, Reply, ReplyFrame, Request,
+    FdReceiver, FrameReader, Handshake, HandshakeReply, Reply, ReplyFrame, Request, ValueIn,
+    WireBuffer,
 };
 use crate::store::{FileCreation, MountOptions, T4Store};
 
@@ -263,9 +269,7 @@ impl Drop for ConnectionClosed {
     }
 }
 
-/// One client's connection, on the server. Its thread reads the requests
-/// and runs each as a task on the pool; a writer thread sends the replies
-/// as they finish.
+/// One client's connection, on the server, before its handshake.
 struct ClientConnection {
     socket: UnixStream,
     store: Arc<T4Store>,
@@ -275,6 +279,8 @@ struct ClientConnection {
 }
 
 impl ClientConnection {
+    /// Its thread reads the requests and runs each as a task on the pool;
+    /// a writer thread sends the replies as they finish.
     fn serve(self, closed: ConnectionClosed) {
         // Accepted sockets inherit the listener's non-blocking mode on macOS.
         if self.socket.set_nonblocking(false).is_err() {
@@ -284,9 +290,9 @@ impl ClientConnection {
             return;
         };
         let mut requests = FrameReader::new(BufReader::new(FdReceiver::new(receiver)));
-        if !self.accept_handshake(&mut requests) {
+        let Some(region) = self.accept_handshake(&mut requests) else {
             return;
-        }
+        };
         let (replies, outgoing) = crossbeam_channel::unbounded();
         let Ok(writer_socket) = self.socket.try_clone() else {
             return;
@@ -298,100 +304,63 @@ impl ClientConnection {
         {
             return;
         }
+        let session = Session {
+            store: self.store,
+            pool: self.pool,
+            region,
+            replies,
+        };
         while let Ok(Some(body)) = requests.read_frame() {
             let Ok((id, request)) = Request::decode(&body, requests.source().get_mut()) else {
                 // A client that breaks the protocol is done.
                 break;
             };
-            self.dispatch(id, request, &replies);
+            session.dispatch(id, request);
         }
         // The writer ends once the requests in flight have replied.
     }
 
-    /// Reads the client's handshake, and answers it. Whether the client may
-    /// go on.
-    fn accept_handshake(&self, requests: &mut FrameReader<BufReader<FdReceiver>>) -> bool {
+    /// Reads the client's handshake, and answers it. `None` if the client
+    /// may not go on; else the shared region it sent, if any.
+    fn accept_handshake(
+        &self,
+        requests: &mut FrameReader<BufReader<FdReceiver>>,
+    ) -> Option<Option<Arc<SharedMapping>>> {
         let Ok(Some(body)) = requests.read_frame() else {
-            return false;
+            return None;
         };
-        let reply = match Handshake::decode(&body, requests.source().get_mut()) {
-            Ok(store) => self.check_store(File::from(store)),
-            Err(reason) => HandshakeReply::Refused(reason),
+        let checked = Handshake::decode(&body, requests.source().get_mut())
+            .and_then(|(store, region)| self.check_handshake(File::from(store), region));
+        let reply = match &checked {
+            Ok(_) => HandshakeReply::Accepted {
+                server_pid: std::process::id(),
+                direct_io: self.direct_io,
+            },
+            Err(reason) => HandshakeReply::Refused(reason.clone()),
         };
-        let accepted = matches!(reply, HandshakeReply::Accepted { .. });
-        (&self.socket).write_all(&reply.encode()).is_ok() && accepted
+        (&self.socket).write_all(&reply.encode()).ok()?;
+        checked.ok()
     }
 
-    /// Accepts a client that showed this store's file, open read-write.
-    fn check_store(&self, store: File) -> HandshakeReply {
+    /// Accepts a client that showed this store's file, open read-write, and
+    /// maps the shared region it sent.
+    fn check_handshake(
+        &self,
+        store: File,
+        region: Option<OwnedFd>,
+    ) -> std::result::Result<Option<Arc<SharedMapping>>, String> {
         match StoreIdentity::of(&store) {
             Ok(identity) if identity == self.identity => {}
-            _ => return HandshakeReply::Refused("not this server's store".into()),
+            _ => return Err("not this server's store".into()),
         }
         match rustix::fs::fcntl_getfl(&store) {
             Ok(flags) if flags & OFlags::ACCMODE == OFlags::RDWR => {}
-            _ => return HandshakeReply::Refused("store descriptor is not open read-write".into()),
+            _ => return Err("store descriptor is not open read-write".into()),
         }
-        HandshakeReply::Accepted {
-            server_pid: std::process::id(),
-            direct_io: self.direct_io,
-        }
-    }
-
-    /// Runs `request`, and queues its reply.
-    fn dispatch(&self, id: u64, request: Request, replies: &Sender<Vec<u8>>) {
-        let store = Arc::clone(&self.store);
-        match request {
-            Request::Put { key, value } => self.run(id, replies, async move {
-                store.put(key, value).await.map(|()| Reply::Done)
-            }),
-            Request::Get { key } => self.run(id, replies, async move {
-                let key = T4KeyRef::try_from_slice(key.as_bytes())?;
-                store.get(key).await.map(Reply::Bytes)
-            }),
-            Request::GetRange { key, range } => self.run(id, replies, async move {
-                let key = T4KeyRef::try_from_slice(key.as_bytes())?;
-                store.get_range(key, range).await.map(Reply::Bytes)
-            }),
-            Request::Remove { key } => self.run(id, replies, async move {
-                store.remove(key).await.map(Reply::Removed)
-            }),
-            Request::Len => self.run(
-                id,
-                replies,
-                async move { Ok(Reply::Count(store.len() as u64)) },
-            ),
-            Request::Snapshot { target } => {
-                // A snapshot holds the store's write lock across its awaits,
-                // which no pool task may: it gets a thread of its own.
-                let snapshot_replies = replies.clone();
-                let snapshot = move || {
-                    let result = futures_executor::block_on(
-                        store.snapshot(target, &MountOptions::default()),
-                    );
-                    let reply = ReplyFrame::new(id, result.map(|()| Reply::Done));
-                    let _ = snapshot_replies.send(reply.encode());
-                };
-                if let Err(err) = thread::Builder::new()
-                    .name("t4-server-snapshot".into())
-                    .spawn(snapshot)
-                {
-                    let _ = replies.send(ReplyFrame::new(id, Err(Error::Io(err))).encode());
-                }
-            }
-        }
-    }
-
-    fn run(
-        &self,
-        id: u64,
-        replies: &Sender<Vec<u8>>,
-        request: impl Future<Output = Result<Reply>> + Send + 'static,
-    ) {
-        let replies = replies.clone();
-        self.pool.spawn_ok(async move {
-            let _ = replies.send(ReplyFrame::new(id, request.await).encode());
-        });
+        region
+            .map(|region| SharedMapping::open(region).map(Arc::new))
+            .transpose()
+            .map_err(|err| format!("shared region: {err}"))
     }
 
     /// Sends the replies in the order they finish. A client that has gone
@@ -404,6 +373,166 @@ impl ClientConnection {
             {
                 client = None;
             }
+        }
+    }
+}
+
+/// A connection past its handshake: what its requests run with.
+struct Session {
+    store: Arc<T4Store>,
+    pool: ThreadPool,
+    /// The shared region the client sent, if any.
+    region: Option<Arc<SharedMapping>>,
+    replies: Sender<Vec<u8>>,
+}
+
+impl Session {
+    /// Runs `request`, and queues its reply.
+    fn dispatch(&self, id: u64, request: Request) {
+        let store = Arc::clone(&self.store);
+        match request {
+            Request::Put {
+                key,
+                value: ValueIn::Inline(value),
+            } => self.run(id, async move {
+                store.put(key, value).await.map(|()| Reply::Done)
+            }),
+            Request::Put {
+                key,
+                value: ValueIn::Shared { buffer, len },
+            } => {
+                let buffer = self.resolve(buffer);
+                self.run(id, async move {
+                    let value = buffer?.padded_value(len)?;
+                    store.put_padded(key, value).await.map(|()| Reply::Done)
+                })
+            }
+            Request::Get { key, into } => {
+                let into = into.map(|buffer| self.resolve(buffer)).transpose();
+                self.run(id, async move {
+                    let extent = store.lookup(T4KeyRef::try_from_slice(key.as_bytes())?)?;
+                    let window = extent.whole_window()?;
+                    Self::read(&store, &extent, &window, into?).await
+                })
+            }
+            Request::GetRange { key, range, into } => {
+                let into = into.map(|buffer| self.resolve(buffer)).transpose();
+                self.run(id, async move {
+                    let extent = store.lookup(T4KeyRef::try_from_slice(key.as_bytes())?)?;
+                    let window = extent.range_window(range)?;
+                    Self::read(&store, &extent, &window, into?).await
+                })
+            }
+            Request::Remove { key } => {
+                self.run(
+                    id,
+                    async move { store.remove(key).await.map(Reply::Removed) },
+                )
+            }
+            Request::Len => self.run(id, async move { Ok(Reply::Count(store.len() as u64)) }),
+            Request::Snapshot { target } => {
+                // A snapshot holds the store's write lock across its awaits,
+                // which no pool task may: it gets a thread of its own.
+                let replies = self.replies.clone();
+                let snapshot = move || {
+                    let result = futures_executor::block_on(
+                        store.snapshot(target, &MountOptions::default()),
+                    );
+                    let reply = ReplyFrame::new(id, result.map(|()| Reply::Done));
+                    let _ = replies.send(reply.encode());
+                };
+                if let Err(err) = thread::Builder::new()
+                    .name("t4-server-snapshot".into())
+                    .spawn(snapshot)
+                {
+                    let reply = ReplyFrame::new(id, Err(Error::Io(err)));
+                    let _ = self.replies.send(reply.encode());
+                }
+            }
+        }
+    }
+
+    fn run(&self, id: u64, request: impl Future<Output = Result<Reply>> + Send + 'static) {
+        let replies = self.replies.clone();
+        self.pool.spawn_ok(async move {
+            let _ = replies.send(ReplyFrame::new(id, request.await).encode());
+        });
+    }
+
+    /// The memory a request's buffer names: in the client's region, or a
+    /// memfd of its own the request carried, mapped here.
+    fn resolve(&self, buffer: WireBuffer) -> Result<ClientBuffer> {
+        match buffer {
+            WireBuffer::Region { offset, capacity } => {
+                let region = self
+                    .region
+                    .as_ref()
+                    .ok_or_else(|| Error::Server("the client sent no shared region".into()))?;
+                Ok(ClientBuffer {
+                    mapping: Arc::clone(region),
+                    offset,
+                    capacity,
+                })
+            }
+            WireBuffer::Own { memfd, capacity } => Ok(ClientBuffer {
+                mapping: Arc::new(SharedMapping::open(memfd)?),
+                offset: 0,
+                capacity,
+            }),
+        }
+    }
+
+    /// Reads `window` of the value in `extent` into the client's buffer, or
+    /// into the reply's frame if it lent none.
+    async fn read(
+        store: &T4Store,
+        extent: &Extent,
+        window: &ValueWindow,
+        into: Option<ClientBuffer>,
+    ) -> Result<Reply> {
+        let Some(into) = into else {
+            return store.read(extent, window).await.map(Reply::Bytes);
+        };
+        let Some(needed) = NonZeroU32::new(window.buffer_len()) else {
+            return Ok(Reply::InBuffer { start: 0, len: 0 });
+        };
+        if needed.get() > into.capacity {
+            return Ok(Reply::TooSmall {
+                needed: needed.get(),
+            });
+        }
+        store.read_into(extent, window, into.lend(needed)?).await?;
+        Ok(Reply::InBuffer {
+            start: window.start(),
+            len: window.len(),
+        })
+    }
+}
+
+/// A buffer a client lent the server: `capacity` bytes at `offset` in
+/// memory the two share. The server reads a request's fields from its
+/// frame, never from here, so a client changing this memory can't change
+/// what the server checked; it can only garble its own value.
+struct ClientBuffer {
+    mapping: Arc<SharedMapping>,
+    offset: u64,
+    capacity: u32,
+}
+
+impl ClientBuffer {
+    /// The buffer's first `len` bytes, for direct I/O.
+    fn lend(&self, len: NonZeroU32) -> Result<AlignedBuf> {
+        if len.get() > self.capacity {
+            return Err(Error::Server("a value larger than its buffer".into()));
+        }
+        Ok(self.mapping.lend(self.offset, len)?)
+    }
+
+    /// The `len`-byte value a put left at the buffer's start.
+    fn padded_value(&self, len: u32) -> Result<PaddedValue> {
+        match PaddedValue::buffer_len(len)? {
+            None => Ok(PaddedValue::empty()),
+            Some(buffer_len) => PaddedValue::in_buffer(self.lend(buffer_len)?, len),
         }
     }
 }

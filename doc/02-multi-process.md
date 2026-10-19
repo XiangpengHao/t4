@@ -1,8 +1,8 @@
 # 02 — Multiple processes
 
-Status: build steps 1 and 2 built (2026-10-19): the mount lock, and
-`t4-server` with values in the frames (`src/shared/`, `src/bin/t4-server.rs`,
-`tests/shared_mode.rs`). Steps 3 and 4 not built.
+Status: build steps 1 to 3 built (2026-10-19): the mount lock, `t4-server`,
+and values in shared memory on Linux (`src/shared/`, `src/bin/t4-server.rs`,
+`tests/shared_mode.rs`). Step 4 not built.
 
 A store is used in one of two modes:
 
@@ -220,6 +220,8 @@ Every frame is a little-endian `u64` body length, then the body
   permissions when it opened the file, so whoever can open the store
   read-write may use its server. This stands in for the file permissions
   abstract names lack.
+- **The connection's shared region**, a memfd, by `SCM_RIGHTS` after the
+  store, where the client has one (Value bytes, below).
 
 The server accepts, telling the client its process id and its `direct_io`,
 which the client checks against its own; or refuses, saying why.
@@ -230,9 +232,9 @@ the request id and come back in any order.
 
 | request     | payload                         | reply          |
 |-------------|---------------------------------|----------------|
-| `put`       | key, value                      | ok             |
-| `get`       | key                             | value          |
-| `get_range` | key, start, length              | bytes          |
+| `put`       | key, value or its buffer        | ok             |
+| `get`       | key, a buffer to read into      | value, or where in the buffer, or too small |
+| `get_range` | key, start, length, a buffer    | bytes, or where in the buffer |
 | `remove`    | key                             | removed: bool  |
 | `len`       | —                               | entry count    |
 | `snapshot`  | target file, by `SCM_RIGHTS`    | ok             |
@@ -261,40 +263,53 @@ which no pool task may.
 
 ## Value bytes
 
-**In the frames** (built). Values are copied through the socket, into the
-kernel and out again, on top of the engine's own copy into an `AlignedBuf`.
+**On Linux, in shared memory** (`src/shared/memory.rs`). Direct I/O goes
+straight between the disk and memory the client shares, with no copy on
+the server:
 
-**In shared memory**, on Linux (build step 3, not built). No copies:
+- **One region per connection.** The client creates a 64 MiB memfd
+  (`MFD_ALLOW_SEALING`), seals it at that size (`F_SEAL_SHRINK`,
+  `F_SEAL_GROW`, `F_SEAL_SEAL`), and sends it in the handshake after the
+  store's descriptor; both sides map it. Pages take memory only once
+  touched. The server refuses a memfd not sealed against shrinking: a
+  client that shrank it would crash the server with `SIGBUS` on its next
+  access.
+- **A buffer per request.** The client carves page-aligned buffers out of
+  the region, first fit, and frames name them by `{offset, capacity}`
+  instead of carrying bytes. A put writes from its buffer, a get reads into
+  one.
+- **A memfd of its own** for a buffer over 16 MiB, or one the region has no
+  room for, sealed the same way and sent with its request; the server maps
+  it for that request alone.
+- **A get doesn't know the value's length ahead.** It lends a buffer the
+  size the last get needed (64 KiB at first). A value that doesn't fit comes
+  back as `too-small(needed)`, unread, and the client asks again with a
+  buffer that size: the lookup repeats, the disk read happens once. A
+  `get_range` knows its window, and lends exactly that.
+- **The client holds a buffer until its reply.** The pending call keeps it,
+  even if the caller stopped waiting, so no other request reuses memory the
+  server may still be reading or writing.
+- **The server zeroes a put's padding** before the write, so the file holds
+  zeros past every value whatever the client left there.
+- **The server reads a request's fields from its frame**, never from shared
+  memory, so a client changing that memory can't change what the server
+  checked; it can only garble its own value. Two requests whose buffers
+  overlap garble only that client's values too: the server touches shared
+  memory only through raw pointers, by direct I/O and zeroing.
+- **The server keeps a mapping until every I/O on it completes**, even
+  after the client has gone: the buffer it lends the I/O holds the mapping.
 
-- **One region per connection.** The client creates a memfd
-  (`MFD_ALLOW_SEALING`), sizes it, seals it with `F_SEAL_SHRINK`, and sends
-  it in the handshake; both sides map it. The server refuses an unsealed
-  memfd: a client that shrank it would crash the server with `SIGBUS` on
-  its next access.
-- **Frames carry `{offset, len}`** into the region instead of bytes.
-  Offsets are page-aligned, so the server's O_DIRECT I/O goes straight
-  between disk and the region: a put writes from it, a get reads into it.
-- **The client allocates for both directions.** A get doesn't know the
-  value's length ahead: it names a buffer, and a value that doesn't fit
-  comes back as `too-small(len)`, unread. The client asks again with room:
-  the lookup repeats, the disk read happens once.
-- **A value larger than the region** travels in a memfd of its own, sent
-  with its request.
-- **The server zeroes a put's padding** in the region before the write, so
-  the file holds zeros there whatever the client left.
-- **The server reads a request once.** It copies the fields out of shared
-  memory, then checks the copy, and never reads them again (a client that
-  changes them between the check and the use is the "double fetch" bug). A
-  client that changes a value while the server writes it gets that value
-  stored garbled: its own data, nothing else.
-- **The server keeps its mapping** until every I/O on it completes, even
-  after the client has gone.
+The engine reads and writes through the same calls in both modes. A put
+takes a `PaddedValue`, a value already padded to whole pages in a buffer
+direct I/O can write from: a copy into a heap buffer in-process, the
+client's buffer on the server. A read covers a `ValueWindow`, the whole
+pages around the bytes asked for, into a buffer of exactly that size: a
+heap buffer in-process, the client's on the server. An `AlignedBuf`'s
+memory is either its own or lent by a shared mapping it keeps alive.
 
-The engine gains a put from, and a get into, a caller's page-aligned
-buffer, in place of its copy into an `AlignedBuf`. In-process mode gets the
-same calls.
-
-**macOS keeps values in the frames.** It has neither memfd nor seals.
+**Elsewhere, in the frames.** Values are copied through the socket, into
+the kernel and out again, on top of the engine's own copy into an
+`AlignedBuf`. macOS has neither memfd nor seals.
 
 ## Failures
 
@@ -333,7 +348,11 @@ a syscall and the scheduler's wake-up: a few µs, more on busy CPUs.
 - **Engine tests stay as they are**: the server runs the same engine. A
   second mount is `Busy` until the first drops.
 - **Protocol tests in one process.** Frames round-trip through a socket
-  pair, descriptors included; one claim on an address at a time.
+  pair, descriptors included; one claim on an address at a time. Shared
+  buffers round-trip between two mappings of one memfd; large ones get a
+  memfd of their own; an unsealed memfd is refused; the region's free list
+  takes first fit and merges what comes back. Value windows and padding
+  are checked against their arithmetic.
 - **Process tests, real processes** (`tests/shared_mode.rs`), in CI on
   Linux and macOS:
   - two clients sharing one store;
@@ -345,7 +364,10 @@ a syscall and the scheduler's wake-up: a few µs, more on busy CPUs.
     reconnects;
   - a client whose `direct_io` differs from the server's;
   - a snapshot through the server;
-  - a missing `t4-server` binary.
+  - a missing `t4-server` binary;
+  - values from empty to 20 MiB, put, read whole and by range: through the
+    region, after a too-small first try, and in a memfd of their own;
+  - eight threads' calls sharing one connection's region.
 - **Not covered yet:** the client's request table under shuttle, and an
   idle shutdown racing a new client.
 
@@ -355,6 +377,6 @@ a syscall and the scheduler's wake-up: a few µs, more on busy CPUs.
 2. **`t4-server`** and the socket protocol, on Linux and macOS, values in
    the frames. `len` and `is_empty` return `Result`. Built.
 3. **Values in shared memory**, on Linux, with the engine's put-from and
-   get-into calls.
+   get-into calls. Built.
 4. **Polling, and sockets on the server's I/O loop**, only if measurements
    call for them.

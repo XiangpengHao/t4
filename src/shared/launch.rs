@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use std::os::fd::BorrowedFd;
 use std::os::unix::net::UnixStream;
 
 use crate::io::error::{Error, Result};
@@ -180,6 +181,8 @@ impl Connected {
 /// running (`doc/02-multi-process.md`, "Finding the server").
 pub(super) struct ServerLauncher<'a> {
     endpoint: &'a ServerEndpoint,
+    /// The connection's shared region, shown to the server with the store.
+    region: Option<BorrowedFd<'a>>,
 }
 
 impl<'a> ServerLauncher<'a> {
@@ -189,8 +192,8 @@ impl<'a> ServerLauncher<'a> {
     const DEADLINE: Duration = Duration::from_secs(10);
     const MAX_BACKOFF: Duration = Duration::from_millis(100);
 
-    pub(super) fn new(endpoint: &'a ServerEndpoint) -> Self {
-        Self { endpoint }
+    pub(super) fn new(endpoint: &'a ServerEndpoint, region: Option<BorrowedFd<'a>>) -> Self {
+        Self { endpoint, region }
     }
 
     /// Blocks until connected; a client calls it on a thread of its own.
@@ -233,7 +236,11 @@ impl<'a> ServerLauncher<'a> {
                     | io::ErrorKind::UnexpectedEof
             )
         };
-        let frame = Handshake::frame(self.endpoint.store_file().try_clone()?.into());
+        let region = self
+            .region
+            .map(|region| region.try_clone_to_owned())
+            .transpose()?;
+        let frame = Handshake::frame(self.endpoint.store_file().try_clone()?.into(), region);
         match frame.write_to(&socket) {
             Err(err) if gone(&err) => return Ok(None),
             result => result?,
