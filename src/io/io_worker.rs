@@ -3,8 +3,9 @@ use crate::io::common::{BackendLoop, IoDriver};
 use crate::io::io_task::{
     FileReadTask, FileWriteTask, PageWrite, WorkerRequest, worker_disconnected_error,
 };
+use crate::io::sync::Arc;
 use crate::io::sync::mpsc;
-use crate::io::sync::thread::spawn;
+use crate::io::sync::thread::{JoinHandle, spawn};
 use crate::{Error, Result};
 use core::fmt;
 use std::fs::File;
@@ -16,11 +17,29 @@ use crate::io::simulated::{self, SimDisk};
 
 /// Handle to the I/O worker thread.
 ///
-/// Cloning shares the same underlying worker. The worker thread exits
-/// automatically once every clone is dropped (channel disconnects).
+/// Cloning shares the same underlying worker. Dropping the last clone
+/// disconnects the worker's channel and waits for the thread to exit, so
+/// the file it owns, and the store's mount lock on it, are released by the
+/// time the drop returns.
 #[derive(Clone)]
 pub struct IoWorker {
+    // Declared before `_thread`, so it drops first: the worker sees its
+    // channel disconnect before the last handle joins it.
     tx: mpsc::Sender<WorkerRequest>,
+    _thread: Arc<WorkerThread>,
+}
+
+/// The worker thread, joined when the last [`IoWorker`] drops. The thread
+/// holds no `IoWorker` itself, so the join never waits on itself.
+struct WorkerThread(Option<JoinHandle<()>>);
+
+impl Drop for WorkerThread {
+    fn drop(&mut self) {
+        if let Some(thread) = self.0.take() {
+            // A panic on the worker thread was reported where it happened.
+            let _ = thread.join();
+        }
+    }
 }
 
 impl fmt::Debug for IoWorker {
@@ -48,7 +67,7 @@ impl IoWorker {
         let (tx, rx) = mpsc::channel::<WorkerRequest>();
         let (init_tx, init_rx) = mpsc::channel::<Result<()>>();
 
-        spawn(move || {
+        let thread = spawn(move || {
             let backend = match backend(rx) {
                 Ok(backend) => {
                     let _ = init_tx.send(Ok(()));
@@ -63,7 +82,10 @@ impl IoWorker {
         });
 
         match init_rx.recv() {
-            Ok(Ok(())) => Ok(Self { tx }),
+            Ok(Ok(())) => Ok(Self {
+                tx,
+                _thread: Arc::new(WorkerThread(Some(thread))),
+            }),
             Ok(Err(err)) => Err(err),
             Err(_) => Err(worker_disconnected_error()),
         }

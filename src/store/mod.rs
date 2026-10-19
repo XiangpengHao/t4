@@ -1,6 +1,7 @@
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::num::NonZeroU32;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use futures_util::{StreamExt, TryStreamExt, stream};
 
@@ -21,10 +22,12 @@ use crate::range::RangeRequestU32;
 /// How a store opens its file. Writes always go to it with `O_DSYNC`
 /// (`FILE_FLAG_WRITE_THROUGH` on Windows): every crash-safety rule of the
 /// store needs a write durable once it completes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct MountOptions {
     pub queue_depth: u32,
     pub direct_io: bool,
+    /// Which process owns the store (`doc/02-multi-process.md`).
+    pub mode: MountMode,
 }
 
 impl MountOptions {
@@ -38,8 +41,52 @@ impl Default for MountOptions {
         Self {
             queue_depth: 256,
             direct_io: true,
+            mode: MountMode::InProcess,
         }
     }
+}
+
+/// Which process owns a mounted store.
+#[derive(Debug, Clone, Default)]
+pub enum MountMode {
+    /// This process owns the store. No other process can mount it until
+    /// the store drops: theirs fails with [`Error::Busy`].
+    #[default]
+    InProcess,
+    /// The store's server process owns it, and this process is one of its
+    /// clients. If no server is running, one is started with these options.
+    /// Linux and macOS only.
+    Shared(ServerOptions),
+}
+
+/// How a client starts the store's server when none is running. A running
+/// server keeps the options it was started with.
+#[derive(Debug, Clone)]
+pub struct ServerOptions {
+    /// How long the server stays up after its last client disconnects.
+    pub idle_timeout: Duration,
+    /// The `t4-server` binary. `None` means `$T4_SERVER`, else `t4-server`
+    /// on `PATH`.
+    pub program: Option<PathBuf>,
+}
+
+impl Default for ServerOptions {
+    fn default() -> Self {
+        Self {
+            // io_uring's default `sq_thread_idle`.
+            idle_timeout: Duration::from_secs(1),
+            program: None,
+        }
+    }
+}
+
+/// Whether [`T4Store::open_file`] may open a file that already exists.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FileCreation {
+    /// Open the file, creating it if it is missing.
+    IfMissing,
+    /// Create the file; fail if it exists.
+    New,
 }
 
 #[derive(Debug)]
@@ -50,13 +97,24 @@ pub(crate) struct T4Store {
 
 impl T4Store {
     pub async fn mount_with_options(path: impl AsRef<Path>, options: MountOptions) -> Result<Self> {
+        let file = Self::open_file(path.as_ref(), options.direct_io, FileCreation::IfMissing)?;
+        Self::mount_file(file, &options).await
+    }
+
+    /// Opens a store file as the store writes it: with `O_DSYNC`, and direct
+    /// I/O if `direct_io` asks for it.
+    pub(crate) fn open_file(path: &Path, direct_io: bool, creation: FileCreation) -> Result<File> {
         let mut open = OpenOptions::new();
-        open.read(true).write(true).create(true);
+        open.read(true).write(true);
+        match creation {
+            FileCreation::IfMissing => open.create(true),
+            FileCreation::New => open.create_new(true),
+        };
 
         #[cfg(target_os = "linux")]
         {
             let mut custom_flags = libc::O_DSYNC;
-            if options.direct_io {
+            if direct_io {
                 custom_flags |= libc::O_DIRECT;
             }
             open.custom_flags(custom_flags);
@@ -69,7 +127,7 @@ impl T4Store {
 
         #[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
         {
-            if options.direct_io {
+            if direct_io {
                 return Err(Error::InvalidArgument(
                     "direct_io not supported on target_os",
                 ));
@@ -79,7 +137,7 @@ impl T4Store {
 
         #[cfg(windows)]
         {
-            if options.direct_io {
+            if direct_io {
                 return Err(Error::InvalidArgument(
                     "direct_io not supported on target_os",
                 ));
@@ -88,13 +146,12 @@ impl T4Store {
             open.custom_flags(0x8000_0000);
         }
 
-        let path = path.as_ref();
         let file = open.open(path)?;
         #[cfg(unix)]
         Self::sync_parent_dir(path)?;
 
         #[cfg(target_os = "macos")]
-        if options.direct_io {
+        if direct_io {
             use std::os::fd::AsRawFd;
             // SAFETY: `file` was just opened, so its fd is valid.
             if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) } == -1 {
@@ -102,9 +159,43 @@ impl T4Store {
             }
         }
 
+        Ok(file)
+    }
+
+    /// Creates the file a snapshot goes into, as [`Self::open_file`] does:
+    /// `path` must not exist yet.
+    pub(crate) fn create_snapshot_target(path: &Path, direct_io: bool) -> Result<File> {
+        Self::open_file(path, direct_io, FileCreation::New).map_err(|err| match err {
+            Error::Io(io) if io.kind() == std::io::ErrorKind::AlreadyExists => {
+                Error::InvalidArgument("compact target path already exists")
+            }
+            other => other,
+        })
+    }
+
+    /// Mounts the store in `file`, which [`Self::open_file`] opened: takes
+    /// its mount lock, then replays it.
+    pub(crate) async fn mount_file(file: File, options: &MountOptions) -> Result<Self> {
+        Self::lock_file(&file)?;
         let len = file.metadata()?.len();
         let io = IoWorker::new(options.queue_depth()?, file)?;
         Self::mount_on(io, len).await
+    }
+
+    /// Takes `file`'s mount lock, an exclusive `flock` that lasts as long
+    /// as the open file: the I/O worker owns it, and closes it when the
+    /// store drops. Another process holding it, in-process or a server,
+    /// makes this [`Error::Busy`]. Taking it again on the same open file
+    /// succeeds.
+    ///
+    /// `flock`, not `fcntl` record locks: those don't conflict within one
+    /// process, and closing any descriptor of the file drops them.
+    pub(crate) fn lock_file(file: &File) -> Result<()> {
+        match file.try_lock() {
+            Ok(()) => Ok(()),
+            Err(TryLockError::WouldBlock) => Err(Error::Busy),
+            Err(TryLockError::Error(err)) => Err(err.into()),
+        }
     }
 
     /// Makes the store file's name durable, which `O_DSYNC` writes to the
@@ -159,22 +250,18 @@ impl T4Store {
         Ok(self.index.apply_remove(key, commit))
     }
 
-    /// Stop-the-world snapshot: build a fresh store at `path` containing
+    /// Stop-the-world snapshot: build a fresh store in `target` containing
     /// only the current live entries. Puts/removes not yet in the WAL
     /// block until snapshot finishes; ones already logged overlap it, and
-    /// may or may not be in it. Gets continue to work. `path` must not
-    /// already exist (otherwise the freshly mounted store would replay
-    /// stale data before we write into it).
-    pub async fn snapshot(&self, path: impl AsRef<Path>, options: MountOptions) -> Result<()> {
+    /// may or may not be in it. Gets continue to work. `target` comes from
+    /// [`Self::create_snapshot_target`], so it is empty (a file with data
+    /// in it would be replayed first).
+    pub async fn snapshot(&self, target: File, options: &MountOptions) -> Result<()> {
         const PARALLELISM: usize = 8;
 
-        let path = path.as_ref();
-        if path.exists() {
-            return Err(Error::InvalidArgument("compact target path already exists"));
-        }
         // Writers not yet in the WAL wait until the copy is done.
         let _paused = self.disk_data.pause_writes()?;
-        let new_store = T4Store::mount_with_options(path, options).await?;
+        let new_store = T4Store::mount_file(target, options).await?;
 
         let disk = &self.disk_data;
         let new_store_ref = &new_store;
@@ -212,7 +299,32 @@ mod tests {
         MountOptions {
             queue_depth: 8,
             direct_io: false,
+            ..MountOptions::default()
         }
+    }
+
+    async fn snapshot_to(store: &T4Store, path: &Path) -> Result<()> {
+        let target = T4Store::create_snapshot_target(path, false)?;
+        store.snapshot(target, &test_options()).await
+    }
+
+    #[test]
+    fn second_mount_is_busy_until_the_first_drops() {
+        pollster::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("busy.t4");
+            let store = T4Store::mount_with_options(&path, test_options())
+                .await
+                .unwrap();
+            assert!(matches!(
+                T4Store::mount_with_options(&path, test_options()).await,
+                Err(Error::Busy)
+            ));
+            drop(store);
+            T4Store::mount_with_options(&path, test_options())
+                .await
+                .unwrap();
+        });
     }
 
     #[test]
@@ -505,7 +617,7 @@ mod tests {
                     .unwrap();
 
                 let src_len = std::fs::metadata(&src).unwrap().len();
-                store.snapshot(&dst, test_options()).await.unwrap();
+                snapshot_to(&store, &dst).await.unwrap();
                 let dst_len = std::fs::metadata(&dst).unwrap().len();
                 assert!(
                     dst_len < src_len,
@@ -564,7 +676,7 @@ mod tests {
                     .unwrap();
                 expected.push((key, value));
             }
-            store.snapshot(&dst, test_options()).await.unwrap();
+            snapshot_to(&store, &dst).await.unwrap();
 
             let compacted = T4Store::mount_with_options(&dst, test_options())
                 .await
@@ -591,7 +703,7 @@ mod tests {
             let store = T4Store::mount_with_options(&src, test_options())
                 .await
                 .unwrap();
-            let err = store.snapshot(&dst, test_options()).await.unwrap_err();
+            let err = snapshot_to(&store, &dst).await.unwrap_err();
             assert!(matches!(err, Error::InvalidArgument(_)));
         });
     }

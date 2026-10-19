@@ -14,6 +14,7 @@ fn options() -> MountOptions {
     MountOptions {
         queue_depth: 4,
         direct_io: false,
+        ..MountOptions::default()
     }
 }
 

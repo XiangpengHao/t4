@@ -1,6 +1,8 @@
 # 02 — Multiple processes
 
-Status: design, not built (2026-10-19).
+Status: build steps 1 and 2 built (2026-10-19): the mount lock, and
+`t4-server` with values in the frames (`src/shared/`, `src/bin/t4-server.rs`,
+`tests/shared_mode.rs`). Steps 3 and 4 not built.
 
 A store is used in one of two modes:
 
@@ -48,8 +50,8 @@ tests check them. Only a lock, a socket and value bytes cross processes.
 ## The mount lock
 
 Every mount takes `flock(LOCK_EX | LOCK_NB)` on the store file before
-replay and holds it until the store closes. In-process mounts and the
-server take the same lock.
+replay (`File::try_lock`, `T4Store::lock_file`) and holds it until the store
+closes. In-process mounts and the server take the same lock.
 
 - **Lost: `Error::Busy`.** An in-process mount fails while a server or
   another mount owns the store; a server fails while an in-process mount
@@ -60,12 +62,14 @@ server take the same lock.
   one process, so two mounts in one process would both get one, and closing
   any descriptor of the file drops them.
 - **Advisory.** A tool that writes the file without t4 isn't stopped.
+- **Free once the drop returns.** The lock lives on the open file the I/O
+  worker owns, and dropping a store joins the worker thread, which closes
+  it. A remount right after a drop doesn't see `Busy`.
 
-The lock ships first, on its own. Today a second process that mounts the
-same file corrupts it silently: both rewrite the WAL tail page from their
-own copy (losing acknowledged puts), fork the WAL chain, and allocate the
-same space twice (a value can land on a WAL page, and the store no longer
-mounts).
+Without the lock, a second process that mounted the same file corrupted it
+silently: both rewrote the WAL tail page from their own copy (losing
+acknowledged puts), forked the WAL chain, and allocated the same space
+twice (a value could land on a WAL page, and the store no longer mounted).
 
 ## API
 
@@ -74,7 +78,10 @@ mounts).
 let store = t4::mount("data.t4").await?;
 
 // Shared: use the store's server, starting one if none is running.
-let options = MountOptions { mode: MountMode::Shared, ..MountOptions::default() };
+let options = MountOptions {
+    mode: MountMode::Shared(ServerOptions::default()),
+    ..MountOptions::default()
+};
 let store = t4::mount_with_options("data.t4", options).await?;
 ```
 
@@ -82,13 +89,17 @@ let store = t4::mount_with_options("data.t4", options).await?;
   holds either the engine or a server connection; clones share it.
 - **`len` and `is_empty` return `Result`** in both modes: in shared mode
   they make a round trip, which can fail.
+- **`ServerOptions`**: `idle_timeout` (1 s by default, below) and
+  `program`, the `t4-server` binary (`None`: `$T4_SERVER`, else `t4-server`
+  on `PATH`). `MountOptions` holds them, so it is `Clone`, not `Copy`.
 - **New errors**: `Busy` (the store has another owner), `ServerGone` (the
   server died with the call in flight), `Server(String)` (no server could
-  be started or reached: the message says why).
+  be started or reached, or it failed in a way no other variant carries:
+  the message says why).
 - **Server options are set by the client that starts the server.** A later
-  client whose `direct_io` or `dsync` differ gets `InvalidArgument`: they
-  decide durability, which a client must not lose silently. `queue_depth`
-  and `idle_timeout` are the server's alone.
+  client whose `direct_io` differs from the running server's gets
+  `InvalidArgument`, rather than silently the server's. `queue_depth` and
+  `idle_timeout` are the server's alone.
 - **Linux and macOS.** macOS uses fallbacks where Linux's mechanisms don't
   exist (below): it has to build and work, not perform (00-meta).
 
@@ -137,31 +148,39 @@ until the deadline:
                 error: <message>       → Error::Server
 ```
 
+The deadline, 10 s, covers servers starting and stopping. A long replay
+doesn't count against it: the client that started the server waits on its
+status line, and the others in their handshake.
+
 ## Starting and stopping the server
 
-The server starts in these steps:
+The server starts in these steps (`Server::main`):
 
-1. **Bind the name** (macOS: take the server lock). Taken: print
+1. **Fork once**, first thing, while the process has one thread. The
+   parent exits at once, and the spawning client reaps it, so the server
+   never lingers as the client's zombie. The child calls `setsid`, so the
+   client's terminal, Ctrl-C and exit don't reach it.
+2. **Open the store.** Its identity names the address.
+3. **Claim the address**: bind and listen (macOS: take the server lock,
+   unlink any stale socket file, then bind and listen). Taken: print
    `already-running`, exit.
-2. **Open the store and take the mount lock**, waiting up to a few seconds:
-   a server that is shutting down holds the lock until its last sync. Still
-   held: an in-process mount owns the store; print `busy`, exit.
-3. **Listen** (macOS: unlink any stale socket file, bind, then listen).
-4. **Fork once**, before any thread exists. The parent exits, and the
-   spawning client reaps it at once, so the server never lingers as the
-   client's zombie. The child calls `setsid`, so the client's terminal,
-   Ctrl-C and exit don't reach it. The socket and the lock pass to the child:
-   a `flock` belongs to the open file, which the child still holds.
-5. **Print `ready`** on stdout, the spawning client's pipe, then point
-   stdout at `/dev/null`.
-6. **Mount** (replay), then answer handshakes. Clients that connect during
-   replay wait in the handshake rather than time out and start more
-   servers.
+4. **Take the mount lock**, waiting up to 1 s: a server that is shutting
+   down holds it until its store closes, a moment after it frees the
+   address. Still held: an in-process mount owns the store; print `busy`,
+   exit.
+5. **Mount** (replay). A failure prints `error: <message>`, so the client
+   learns why rather than timing out.
+6. **Print `ready`** on stdout, the spawning client's pipe, then point
+   stdout and stderr at `/dev/null`. Until then stderr is the client's, so a
+   server that crashes starting up shows there.
+7. **Serve.** Clients that connected during replay waited in the listen
+   backlog, and get their handshakes answered now.
 
 Spawning:
 
 - **A binary of its own**, `t4-server`, built from this crate, so it speaks
-  the library's protocol. Found at `$T4_SERVER`, else on `PATH`.
+  the library's protocol. Found at `ServerOptions::program`, else
+  `$T4_SERVER`, else on `PATH`.
 - **Never `fork()` without `exec` in the client.** The client has other
   threads (the I/O worker, the caller's runtime). A child gets only the
   calling thread, and any lock another thread held stays locked in it
@@ -182,30 +201,32 @@ After `idle_timeout` with no connection, the server stops:
 
 1. **Close the listener** (macOS: unlink the socket file and release the
    server lock). The name frees. A new client starts a new server, which
-   waits on the mount lock (step 2 above).
-2. **Sync and close the store.** The lock frees. Exit.
+   waits on the mount lock (step 4 above).
+2. **Close the store.** Dropping it joins the I/O worker, which closes the
+   file: the lock frees. Exit.
 
 A client that connected just before step 1 sees its handshake reset, and
 loops.
 
 ## Connection
 
-The handshake, client to server:
+Every frame is a little-endian `u64` body length, then the body
+(`src/shared/wire.rs`). The handshake, client to server:
 
-- **The protocol version.**
+- **A magic and the protocol version.**
 - **The client's own read-write descriptor of the store**, by `SCM_RIGHTS`.
   The server checks that it names the same file (`fstat`: dev and ino) and
   is open read-write (`F_GETFL`). The kernel checked the client's
   permissions when it opened the file, so whoever can open the store
   read-write may use its server. This stands in for the file permissions
   abstract names lack.
-- **The client's `direct_io` and `dsync`.**
 
-The server replies ok, or with what didn't match.
+The server accepts, telling the client its process id and its `direct_io`,
+which the client checks against its own; or refuses, saying why.
 
-After the handshake, frames go over `SOCK_STREAM`: length, request id,
-operation, payload. The client may send many requests without waiting;
-replies carry the request id and come back in any order.
+After the handshake, frames go over `SOCK_STREAM`: request id, operation,
+payload. The client may send many requests without waiting; replies carry
+the request id and come back in any order.
 
 | request     | payload                         | reply          |
 |-------------|---------------------------------|----------------|
@@ -213,27 +234,37 @@ replies carry the request id and come back in any order.
 | `get`       | key                             | value          |
 | `get_range` | key, start, length              | bytes          |
 | `remove`    | key                             | removed: bool  |
-| `sync`      | —                               | ok             |
 | `len`       | —                               | entry count    |
 | `snapshot`  | target file, by `SCM_RIGHTS`    | ok             |
 
-Any reply can be an error instead.
+Any reply can be an error instead. `NotFound`, `RangeOutOfBounds`, `Busy`,
+`LockPoisoned`, `Format` and input errors come through as they are; I/O
+errors keep their OS error code; anything else arrives as `Error::Server`,
+with its message.
 
 **Snapshot targets are descriptors, not paths.** The client creates the
 target (`O_CREAT | O_EXCL`) and sends it. Given a path, the server would
 resolve it against its own working directory, and create it with the
 permissions of whichever client started the server.
 
-**The client mirrors `IoWorker`.** One thread per connection owns the
-socket. Callers hand it requests, and it completes their futures by request
-id as replies arrive, so the API stays runtime-agnostic.
+**The client mirrors `IoWorker`.** Each connection has a writer thread,
+which sends the requests callers hand it, and a reader thread, which
+completes their futures by request id as replies arrive (`TaskCompletion`),
+so the API stays runtime-agnostic. Connecting, which blocks, runs on the
+reader thread before it starts reading.
+
+**The server runs requests on a thread pool.** Each connection has a
+reader thread, which decodes requests and runs each as a task on the pool,
+and a writer thread, which sends replies as they finish. A snapshot runs on
+a thread of its own: it holds the store's write lock across its awaits,
+which no pool task may.
 
 ## Value bytes
 
-**Stage 1: in the frames.** Values are copied through the socket, into the
+**In the frames** (built). Values are copied through the socket, into the
 kernel and out again, on top of the engine's own copy into an `AlignedBuf`.
 
-**Stage 2: shared memory**, on Linux. No copies:
+**In shared memory**, on Linux (build step 3, not built). No copies:
 
 - **One region per connection.** The client creates a memfd
   (`MFD_ALLOW_SEALING`), sizes it, seals it with `F_SEAL_SHRINK`, and sends
@@ -263,8 +294,7 @@ The engine gains a put from, and a get into, a caller's page-aligned
 buffer, in place of its copy into an `AlignedBuf`. In-process mode gets the
 same calls.
 
-**macOS stays on stage 1.** It has neither memfd nor seals, and values in
-frames work there unchanged.
+**macOS keeps values in the frames.** It has neither memfd nor seals.
 
 ## Failures
 
@@ -300,22 +330,30 @@ a syscall and the scheduler's wake-up: a few µs, more on busy CPUs.
 
 ## Testing
 
-- **Engine tests stay as they are**: the server runs the same engine.
-- **Protocol tests in one process.** Server and client run over a
-  `socketpair`, without spawning; the client's request table runs under
-  shuttle, as `IoWorker`'s does.
-- **Process tests, real processes**, in CI on Linux and macOS:
-  - two clients racing to start one server;
-  - `kill -9` of the server mid-put: acknowledged puts survive, and the
-    next call reconnects;
+- **Engine tests stay as they are**: the server runs the same engine. A
+  second mount is `Busy` until the first drops.
+- **Protocol tests in one process.** Frames round-trip through a socket
+  pair, descriptors included; one claim on an address at a time.
+- **Process tests, real processes** (`tests/shared_mode.rs`), in CI on
+  Linux and macOS:
+  - two clients sharing one store;
   - an in-process mount against a running server, and the reverse: `Busy`;
-  - an idle shutdown racing a new client.
+  - eight clients racing to start one server;
+  - an idle server exits and frees the store;
+  - a mount cancelled while connecting doesn't keep the server up;
+  - `kill -9` of the server: acknowledged puts survive, and the next call
+    reconnects;
+  - a client whose `direct_io` differs from the server's;
+  - a snapshot through the server;
+  - a missing `t4-server` binary.
+- **Not covered yet:** the client's request table under shuttle, and an
+  idle shutdown racing a new client.
 
 ## Build order
 
-1. **The mount lock** and `Error::Busy`, in-process mode only.
+1. **The mount lock** and `Error::Busy`, in-process mode only. Built.
 2. **`t4-server`** and the socket protocol, on Linux and macOS, values in
-   the frames. `len` and `is_empty` return `Result`.
+   the frames. `len` and `is_empty` return `Result`. Built.
 3. **Values in shared memory**, on Linux, with the engine's put-from and
    get-into calls.
 4. **Polling, and sockets on the server's I/O loop**, only if measurements

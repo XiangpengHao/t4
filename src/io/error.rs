@@ -11,6 +11,14 @@ pub enum Error {
     NotFound,
     LockPoisoned,
     InvalidArgument(&'static str),
+    /// Another process owns the store: an in-process mount, or a server.
+    Busy,
+    /// The store's server went away while the call was in flight. The call
+    /// may or may not have taken effect; the next call reconnects.
+    ServerGone,
+    /// The store's server could not be started or reached, or failed in a
+    /// way no other variant describes.
+    Server(String),
 }
 
 impl fmt::Display for Error {
@@ -23,6 +31,9 @@ impl fmt::Display for Error {
             Self::NotFound => write!(f, "key not found"),
             Self::LockPoisoned => write!(f, "internal lock poisoned"),
             Self::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
+            Self::Busy => write!(f, "store is owned by another process"),
+            Self::ServerGone => write!(f, "store server went away"),
+            Self::Server(msg) => write!(f, "store server: {msg}"),
         }
     }
 }
