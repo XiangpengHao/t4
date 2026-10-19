@@ -1,6 +1,4 @@
 #![allow(clippy::while_let_loop)] // verus doesn't support while let loop
-use std::collections::HashMap;
-
 use vstd::prelude::*;
 
 use crate::input_kv::{FileHoles, T4Key, ValueRef};
@@ -22,12 +20,22 @@ pub enum ReplayError {
     InvalidValueRef,
 }
 
+/// Where replay puts each key's latest live value. The proofs say nothing
+/// about its contents, so the store can replay straight into its own index.
+pub trait ReplayIndex {
+    /// Record `key`'s live value, written by the entry at `lsn`; returns the
+    /// value it replaces.
+    fn insert(&mut self, key: T4Key, lsn: u64, value: ValueRef) -> Option<ValueRef>;
+
+    /// Forget `key`; returns the value it had.
+    fn remove(&mut self, key: &[u8]) -> Option<ValueRef>;
+}
+
 #[derive(Debug)]
 pub struct ReplayState {
     pub max_data_end: u64,
     pub max_wal_end: u64,
     pub previous_lsn: Option<u64>,
-    pub index: HashMap<T4Key, ValueRef>,
     pub holes: FileHoles,
 }
 
@@ -49,14 +57,16 @@ impl ReplayState {
             max_data_end: PAGE_SIZE as u64,
             max_wal_end: PAGE_SIZE as u64,
             previous_lsn: None,
-            index: HashMap::new(),
             holes: FileHoles::empty(),
         }
     }
 
     /// Process a single WAL entry: verify LSN monotonicity, update data-end
-    /// tracking, and apply key effects into the hash index.
-    fn process_entry(self, entry: &WalEntryRef) -> (result: Result<Self, ReplayError>)
+    /// tracking, and apply key effects into `index`.
+    fn process_entry<I: ReplayIndex>(self, entry: &WalEntryRef, index: &mut I) -> (result: Result<
+        Self,
+        ReplayError,
+    >)
         requires
             self.wf(),
         ensures
@@ -70,7 +80,6 @@ impl ReplayState {
         let prev_max_data_end = self.max_data_end;
         let max_wal_end = self.max_wal_end;
         let previous_lsn = self.previous_lsn;
-        let mut index = self.index;
         let mut holes = self.holes;
 
         match previous_lsn {
@@ -99,7 +108,7 @@ impl ReplayState {
                         return Err(ReplayError::InvalidValueRef);
                     },
                 };
-                let old = index.insert(key, value);
+                let old = index.insert(key, entry.lsn, value);
                 match old {
                     Some(value) => holes.release_value(value),
                     None => {},
@@ -120,7 +129,7 @@ impl ReplayState {
             },
         };
 
-        Ok(ReplayState { max_data_end, max_wal_end, previous_lsn: Some(entry.lsn), index, holes })
+        Ok(ReplayState { max_data_end, max_wal_end, previous_lsn: Some(entry.lsn), holes })
     }
 
     /// Record that a WAL page at `page_offset` was read.
@@ -136,7 +145,6 @@ impl ReplayState {
         let prev_max_wal_end = self.max_wal_end;
         let max_data_end = self.max_data_end;
         let previous_lsn = self.previous_lsn;
-        let index = self.index;
         let holes = self.holes;
         let wal_end = match page_offset.checked_add(PAGE_SIZE as u64) {
             Some(v) => v,
@@ -149,10 +157,13 @@ impl ReplayState {
         } else {
             prev_max_wal_end
         };
-        Ok(ReplayState { max_data_end, max_wal_end, previous_lsn, index, holes })
+        Ok(ReplayState { max_data_end, max_wal_end, previous_lsn, holes })
     }
 
-    pub fn process_page(self, page: &WalPage) -> (result: Result<(Self, Option<u64>), ReplayError>)
+    pub fn process_page<I: ReplayIndex>(self, page: &WalPage, index: &mut I) -> (result: Result<
+        (Self, Option<u64>),
+        ReplayError,
+    >)
         requires
             page.wf(),
             self.wf(),
@@ -172,7 +183,7 @@ impl ReplayState {
                     break;
                 },
             };
-            state = state.process_entry(&entry)?;
+            state = state.process_entry(&entry, index)?;
         }
         if page.next_page() != 0 {
             state = state.advance_wal_end(page.next_page())?;
@@ -183,10 +194,7 @@ impl ReplayState {
     }
 
     /// Compute final file_tail and next_lsn from the accumulated replay state.
-    pub fn finalize(self, file_len: u64) -> (result: Result<
-        (u64, u64, HashMap<T4Key, ValueRef>, FileHoles),
-        ReplayError,
-    >)
+    pub fn finalize(self, file_len: u64) -> (result: Result<(u64, u64, FileHoles), ReplayError>)
         requires
             self.wf(),
         ensures
@@ -194,7 +202,7 @@ impl ReplayState {
             result.is_ok() ==> result.unwrap().0 >= self.max_wal_end,
             result.is_ok() ==> result.unwrap().0 >= file_len,
             result.is_ok() ==> result.unwrap().0 & sub(PAGE_SIZE as u64, 1) == 0,
-            result.is_ok() ==> result.unwrap().3.wf(),
+            result.is_ok() ==> result.unwrap().2.wf(),
     {
         let a = if file_len > self.max_data_end {
             file_len
@@ -226,7 +234,7 @@ impl ReplayState {
             },
             None => 0u64,
         };
-        Ok((file_tail, next_lsn, self.index, self.holes))
+        Ok((file_tail, next_lsn, self.holes))
     }
 }
 

@@ -1,9 +1,8 @@
-use std::collections::HashMap;
 use std::num::NonZeroU32;
 
 use verified::input_kv::{FileHoles, T4Key, T4Value, ValueRef};
 use verified::wal::AppendEntry;
-use verified::wal_replay::ReplayState;
+use verified::wal_replay::{ReplayIndex, ReplayState};
 use verified::{CheckedRangeU32, RangeRequestU32, allocate_next_lsn, reserve_space};
 
 use crate::buffer::{AlignedBuf, align_down_u64, align_up_u32, align_up_u64};
@@ -118,17 +117,17 @@ impl std::fmt::Debug for DiskData {
 
 impl DiskData {
     /// Mount the store. `file_len == 0` means create a fresh file;
-    /// otherwise replay the existing WAL. Returns the disk handle and
-    /// the replay map (empty for a fresh file).
+    /// otherwise replay the existing WAL into `index`, which a fresh file
+    /// leaves untouched.
     pub(crate) async fn mount(
         io: IoWorker,
         file_len: u64,
-    ) -> Result<(Self, HashMap<T4Key, ValueRef>)> {
+        index: &mut impl ReplayIndex,
+    ) -> Result<Self> {
         if file_len == 0 {
-            let disk = Self::create(io).await?;
-            Ok((disk, HashMap::new()))
+            Self::create(io).await
         } else {
-            Self::replay(io, file_len).await
+            Self::replay(io, file_len, index).await
         }
     }
 
@@ -148,7 +147,7 @@ impl DiskData {
         })
     }
 
-    async fn replay(io: IoWorker, file_len: u64) -> Result<(Self, HashMap<T4Key, ValueRef>)> {
+    async fn replay(io: IoWorker, file_len: u64, index: &mut impl ReplayIndex) -> Result<Self> {
         if file_len < PAGE_SIZE_U64 {
             return Err(Error::Format(
                 "store file shorter than first WAL page".into(),
@@ -159,7 +158,7 @@ impl DiskData {
         let mut offset = 0_u64;
         let (last_offset, last_page) = loop {
             let page = read_page(&io, offset).await?;
-            let (new_replay_state, next_page) = replay_state.process_page(&page)?;
+            let (new_replay_state, next_page) = replay_state.process_page(&page, index)?;
             replay_state = new_replay_state;
             if let Some(next_page) = next_page {
                 offset = next_page;
@@ -168,11 +167,11 @@ impl DiskData {
             }
         };
 
-        let (file_tail, next_lsn, replay_index, holes) = replay_state
+        let (file_tail, next_lsn, holes) = replay_state
             .finalize(file_len)
             .map_err(|_| Error::Format("replay finalize overflow".into()))?;
 
-        let disk = Self {
+        Ok(Self {
             io,
             state: Mutex::new(DiskState {
                 alloc: FileAllocator { file_tail, holes },
@@ -182,8 +181,7 @@ impl DiskData {
                     next_lsn,
                 },
             }),
-        };
-        Ok((disk, replay_index))
+        })
     }
 
     /// Write value bytes into a freshly-allocated slot, then append a
@@ -236,6 +234,15 @@ impl DiskData {
     pub(crate) fn release_value_space(&self, value: ValueRef) -> Result<()> {
         self.lock_state()?.alloc.release_value(value);
         Ok(())
+    }
+
+    /// Hold off every WAL append and every release or reservation of file
+    /// space until the guard drops, so a value slot read from the index
+    /// stays intact meanwhile. Reads go on.
+    pub(crate) fn pause_writes(&self) -> Result<WritesPaused<'_>> {
+        Ok(WritesPaused {
+            _state: self.lock_state()?,
+        })
     }
 
     /// Read the full value referred to by `value` from disk.
@@ -322,6 +329,11 @@ impl DiskData {
         write.await?;
         Ok(lsn)
     }
+}
+
+/// Writes paused by [`DiskData::pause_writes`], until dropped.
+pub(crate) struct WritesPaused<'a> {
+    _state: MutexGuard<'a, DiskState>,
 }
 
 // ---------------------------------------------------------------------------

@@ -94,8 +94,8 @@ fn mount_or_skip(path: &Path) -> Option<Store> {
 }
 
 fn assert_model_matches_store(store: &Store, model: &HashMap<Vec<u8>, Vec<u8>>) {
-    assert_eq!(block_on(store.len()).unwrap(), model.len());
-    assert_eq!(block_on(store.is_empty()).unwrap(), model.is_empty());
+    assert_eq!(block_on(store.len()), model.len());
+    assert_eq!(block_on(store.is_empty()), model.is_empty());
     for (key, expected) in model {
         let value = block_on(store.get(key)).unwrap();
         assert_eq!(&value, expected);

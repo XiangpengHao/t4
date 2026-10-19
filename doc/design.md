@@ -13,7 +13,7 @@ Core design goals:
 
 ## File Layout (Single File)
 
-The store is one file. On disk, there is no separate index — only a write-ahead log (WAL) and data blocks. The WAL is a linked list of 4 KB pages that record every mutation (puts and deletes). On startup, the WAL is replayed to build an in-memory `HashMap` for point lookups.
+The store is one file. On disk, there is no separate index — only a write-ahead log (WAL) and data blocks. The WAL is a linked list of 4 KB pages that record every mutation (puts and deletes). On startup, the WAL is replayed to build an in-memory [bbtree](https://github.com/XiangpengHao/bbtree) index for point lookups.
 
 ```text
 offset 0
@@ -64,7 +64,7 @@ The WAL is a durable append log for metadata.
 
 On mount, `t4` replays all WAL pages and rebuilds:
 
-- `HashMap<Vec<u8>, ValueRef>` for point lookups
+- a concurrent `bbtree::BBTreeMap<Box<[u8]>, IndexEntry>` for point lookups, each entry carrying the LSN of the record that produced it
 - WAL manager state: file tail (next free page-aligned offset), current WAL tail page, and latest seen LSN
 
 Tombstones remove keys from the in-memory map during replay.
@@ -92,7 +92,7 @@ Why this matters:
 
 1. WAL manager allocates value space from file tail and appends value bytes (4 KB padded)
 2. WAL manager appends a live WAL entry `(key, offset, length, lsn)`
-3. Update in-memory `HashMap`
+3. Update the in-memory index, unless a record with a higher LSN for the key got there first
 
 If the current WAL page is full:
 
@@ -113,7 +113,7 @@ If the current WAL page is full:
 ### `remove(key)`
 
 - WAL manager appends a tombstone WAL entry for the key
-- Remove key from in-memory `HashMap`
+- Mark the key removed in the in-memory index (a tombstone entry, so an older concurrent put can't resurrect it)
 - Old value bytes remain on disk (no reclaim in v1)
 
 ## Important Constraints / Tradeoffs
@@ -121,7 +121,7 @@ If the current WAL page is full:
 - **Append-only growth**: file size only increases in v1
 - **Mount cost grows with WAL history**: full WAL replay is required
 - **Deletes do not reclaim space**: tombstones only affect visibility
-- **Point lookups are fast** after mount because they hit the in-memory `HashMap`
+- **Point lookups are fast** after mount because they hit the in-memory index
 - **Range reads must honor alignment** because of direct I/O constraints
 
 ## Concurrency Model (Target Direction)

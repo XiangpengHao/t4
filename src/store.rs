@@ -113,15 +113,15 @@ impl T4Store {
             .ok_or(Error::InvalidArgument("queue_depth must be > 0"))?;
         let io = IoWorker::new(queue_depth, file)?;
 
-        let (disk_data, replay_map) = DiskData::mount(io, len).await?;
-        let index = Index::from_replay(replay_map);
+        let mut index = Index::new();
+        let disk_data = DiskData::mount(io, len, &mut index).await?;
 
         Ok(Self { index, disk_data })
     }
 
     pub async fn put(&self, key: T4Key, value: T4Value) -> Result<()> {
         let commit = self.disk_data.append_put(key.clone(), &value).await?;
-        match self.index.apply_put(key, commit)? {
+        match self.index.apply_put(key, commit) {
             ApplyPutOutcome::Inserted {
                 displaced: Some(old),
             } => self.disk_data.release_value_space(old)?,
@@ -138,18 +138,18 @@ impl T4Store {
     }
 
     pub async fn get(&self, key: T4KeyRef<'_>) -> Result<Vec<u8>> {
-        let value = self.index.get(key.as_bytes())?.ok_or(Error::NotFound)?;
+        let value = self.index.get(key.as_bytes()).ok_or(Error::NotFound)?;
         self.disk_data.read_value(value).await
     }
 
     pub async fn get_range(&self, key: T4KeyRef<'_>, range: RangeRequestU32) -> Result<Vec<u8>> {
-        let value = self.index.get(key.as_bytes())?.ok_or(Error::NotFound)?;
+        let value = self.index.get(key.as_bytes()).ok_or(Error::NotFound)?;
         self.disk_data.read_value_range(value, range).await
     }
 
     pub async fn remove(&self, key: T4Key) -> Result<bool> {
         let commit = self.disk_data.append_tombstone(key.clone()).await?;
-        match self.index.apply_remove(key, commit)? {
+        match self.index.apply_remove(key, commit) {
             ApplyRemoveOutcome::Removed { displaced } => {
                 self.disk_data.release_value_space(displaced)?;
                 Ok(true)
@@ -164,10 +164,11 @@ impl T4Store {
     }
 
     /// Stop-the-world snapshot: build a fresh store at `path` containing
-    /// only the current live entries. Concurrent puts/removes block until
-    /// snapshot finishes; gets continue to work. `path` must not already
-    /// exist (otherwise the freshly mounted store would replay stale data
-    /// before we write into it).
+    /// only the current live entries. Puts/removes not yet in the WAL
+    /// block until snapshot finishes; ones already logged overlap it, and
+    /// may or may not be in it. Gets continue to work. `path` must not
+    /// already exist (otherwise the freshly mounted store would replay
+    /// stale data before we write into it).
     pub async fn snapshot(&self, path: impl AsRef<Path>, options: MountOptions) -> Result<()> {
         const PARALLELISM: usize = 8;
 
@@ -175,13 +176,15 @@ impl T4Store {
         if path.exists() {
             return Err(Error::InvalidArgument("compact target path already exists"));
         }
-        let view = self.index.read_locked()?;
+        // No value slot is released, so none is reused, while we read them.
+        let _paused = self.disk_data.pause_writes()?;
         let new_store = T4Store::mount_with_options(path, options).await?;
 
         let disk = &self.disk_data;
         let new_store_ref = &new_store;
-        stream::iter(view.iter_live().map(|(k, v)| (k.clone(), v)))
+        stream::iter(self.index.iter_live())
             .map(|(key, vref)| async move {
+                let key = T4Key::try_from_vec(key.into_vec())?;
                 let value_bytes = disk.read_value(vref).await?;
                 let value = T4Value::try_from_vec(value_bytes)?;
                 new_store_ref.put(key, value).await
@@ -194,11 +197,11 @@ impl T4Store {
         Ok(())
     }
 
-    pub fn len(&self) -> Result<usize> {
+    pub fn len(&self) -> usize {
         self.index.len()
     }
 
-    pub fn is_empty(&self) -> Result<bool> {
+    pub fn is_empty(&self) -> bool {
         self.index.is_empty()
     }
 }
@@ -526,7 +529,7 @@ mod tests {
             let compacted = T4Store::mount_with_options(&dst, test_options())
                 .await
                 .unwrap();
-            assert_eq!(compacted.len().unwrap(), 2);
+            assert_eq!(compacted.len(), 2);
             assert_eq!(
                 compacted
                     .get(T4KeyRef::try_from_slice(b"a").unwrap())
@@ -579,7 +582,7 @@ mod tests {
             let compacted = T4Store::mount_with_options(&dst, test_options())
                 .await
                 .unwrap();
-            assert_eq!(compacted.len().unwrap(), expected.len());
+            assert_eq!(compacted.len(), expected.len());
             for (key, value) in &expected {
                 let got = compacted
                     .get(T4KeyRef::try_from_slice(key.as_bytes()).unwrap())
@@ -622,68 +625,69 @@ mod tests {
             }
         }
 
-        shuttle::check_random(
-            || {
-                let dir = tempfile::tempdir().unwrap();
-                let path = dir.path().join("shuttle-put-race.t4");
+        // Shuttle's default 60 KiB stack is too small for a debug build of
+        // a put, whose index insert runs bbtree's descent; release fits.
+        let mut config = shuttle::Config::new();
+        config.stack_size = 256 * 1024;
+        shuttle::Runner::new(shuttle::scheduler::RandomScheduler::new(500), config).run(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("shuttle-put-race.t4");
 
-                shuttle::future::block_on(async move {
-                    let store = Arc::new(
-                        T4Store::mount_with_options(&path, test_options())
-                            .await
-                            .unwrap(),
-                    );
-
-                    let value_a = vec![b'a'; 16];
-                    let value_b = vec![b'b'; 16];
-
-                    let s_a = store.clone();
-                    let s_b = store.clone();
-                    let t_a = shuttle::future::spawn(async move {
-                        s_a.put(
-                            T4Key::try_from_slice(b"k").unwrap(),
-                            T4Value::try_from_vec(value_a).unwrap(),
-                        )
+            shuttle::future::block_on(async move {
+                let store = Arc::new(
+                    T4Store::mount_with_options(&path, test_options())
                         .await
-                        .unwrap();
-                    });
-                    let t_b = shuttle::future::spawn(async move {
-                        s_b.put(
-                            T4Key::try_from_slice(b"k").unwrap(),
-                            T4Value::try_from_vec(value_b).unwrap(),
-                        )
-                        .await
-                        .unwrap();
-                    });
-                    t_a.await.unwrap();
-                    t_b.await.unwrap();
+                        .unwrap(),
+                );
 
-                    let live = store
-                        .get(T4KeyRef::try_from_slice(b"k").unwrap())
-                        .await
-                        .unwrap();
+                let value_a = vec![b'a'; 16];
+                let value_b = vec![b'b'; 16];
 
-                    // Drop the live store (flushes IoWorker, closes file),
-                    // remount, and re-read. With the bug, replay picks the
-                    // *highest LSN* WAL record, which can disagree with the
-                    // value-ref the in-memory index ended up holding.
-                    drop(store);
-
-                    let store2 = T4Store::mount_with_options(&path, test_options())
-                        .await
-                        .unwrap();
-                    let replayed = store2
-                        .get(T4KeyRef::try_from_slice(b"k").unwrap())
-                        .await
-                        .unwrap();
-
-                    assert_eq!(
-                        live, replayed,
-                        "live in-memory view disagrees with what replay reconstructs",
-                    );
+                let s_a = store.clone();
+                let s_b = store.clone();
+                let t_a = shuttle::future::spawn(async move {
+                    s_a.put(
+                        T4Key::try_from_slice(b"k").unwrap(),
+                        T4Value::try_from_vec(value_a).unwrap(),
+                    )
+                    .await
+                    .unwrap();
                 });
-            },
-            500,
-        );
+                let t_b = shuttle::future::spawn(async move {
+                    s_b.put(
+                        T4Key::try_from_slice(b"k").unwrap(),
+                        T4Value::try_from_vec(value_b).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                });
+                t_a.await.unwrap();
+                t_b.await.unwrap();
+
+                let live = store
+                    .get(T4KeyRef::try_from_slice(b"k").unwrap())
+                    .await
+                    .unwrap();
+
+                // Drop the live store (flushes IoWorker, closes file),
+                // remount, and re-read. With the bug, replay picks the
+                // *highest LSN* WAL record, which can disagree with the
+                // value-ref the in-memory index ended up holding.
+                drop(store);
+
+                let store2 = T4Store::mount_with_options(&path, test_options())
+                    .await
+                    .unwrap();
+                let replayed = store2
+                    .get(T4KeyRef::try_from_slice(b"k").unwrap())
+                    .await
+                    .unwrap();
+
+                assert_eq!(
+                    live, replayed,
+                    "live in-memory view disagrees with what replay reconstructs",
+                );
+            });
+        });
     }
 }

@@ -12,7 +12,6 @@
 
 - Prefer explicit props and function arguments so ownership and data flow remain visible. Use context only when a dependency must cross at least two component layers and the intermediate parent does not use it. Keep state owned by the component that creates it.
 
-
 - use descriptive, intention-revealing names for variables and functions, don't use generic names like `Built`, `Common`, `View`.
 
 - do not use free form functions, functions should have a clear owner, e.g., struct, enum; unless it is fully justified stateless function.

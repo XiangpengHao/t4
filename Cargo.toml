@@ -18,6 +18,7 @@ io-uring = ["dep:io-uring"]
 __bench = []
 
 [dependencies]
+bbtree = { git = "https://github.com/XiangpengHao/bbtree", branch = "dev" }
 cfg-if = "1.0.4"
 shuttle = { version = "0.9.1", optional = true }
 verified = { package = "t4-verified", version = "0.1.9", path = "verified" }

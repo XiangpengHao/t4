@@ -122,8 +122,9 @@ impl Store {
 
     /// Stop-the-world snapshot. Creates a new store at `path` containing
     /// only the currently-live entries — no holes, WAL has only inserts.
-    /// `path` must not already exist. Concurrent puts/removes on `self`
-    /// block until snapshot finishes.
+    /// `path` must not already exist. Puts/removes on `self` that haven't
+    /// reached the WAL block until snapshot finishes; ones already logged
+    /// overlap it, and may or may not be in it.
     pub fn snapshot(
         &self,
         path: impl AsRef<Path>,
@@ -133,12 +134,12 @@ impl Store {
         async move { this.inner.snapshot(path, MountOptions::default()).await }
     }
 
-    pub fn len(&self) -> impl std::future::Future<Output = Result<usize>> {
+    pub fn len(&self) -> impl std::future::Future<Output = usize> {
         let this = self.clone();
         async move { this.inner.len() }
     }
 
-    pub fn is_empty(&self) -> impl std::future::Future<Output = Result<bool>> {
+    pub fn is_empty(&self) -> impl std::future::Future<Output = bool> {
         let this = self.clone();
         async move { this.inner.is_empty() }
     }
