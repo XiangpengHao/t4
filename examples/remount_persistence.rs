@@ -10,7 +10,6 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         store.put(b"user:1".to_vec(), b"Alice".to_vec()).await?;
         store.put(b"user:2".to_vec(), b"Bob".to_vec()).await?;
         store.remove(b"user:2").await?;
-        store.sync().await?;
     }
 
     {

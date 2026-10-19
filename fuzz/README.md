@@ -9,7 +9,7 @@ The main target (`model_equivalence`) runs random operation sequences against:
 
 and asserts both produce the same behavior.
 
-It also forces periodic `sync` + remount checks to ensure values are durable and no data is lost across remount.
+It also remounts periodically to check that no data is lost across a remount.
 
 ## Prerequisites
 
@@ -26,15 +26,19 @@ cargo install cargo-fuzz
 From repository root:
 
 ```bash
-RUSTFLAGS="-C force-frame-pointers=yes" cargo fuzz run model_equivalence
+TMPDIR=/dev/shm RUSTFLAGS="-C force-frame-pointers=yes" cargo fuzz run model_equivalence
 ```
+
+The store always writes with `O_DSYNC`, so each write waits for the disk.
+`TMPDIR=/dev/shm` puts the target's store files on tmpfs, where that's
+free: about 240 runs a second there, against 40 on an NVMe drive.
 
 Useful options:
 
 ```bash
 # run longer
-RUSTFLAGS="-C force-frame-pointers=yes" cargo fuzz run model_equivalence --release -- -max_total_time=600
+TMPDIR=/dev/shm RUSTFLAGS="-C force-frame-pointers=yes" cargo fuzz run model_equivalence --release -- -max_total_time=600
 
 # run with multiple jobs
-RUSTFLAGS="-C force-frame-pointers=yes" cargo fuzz run model_equivalence --release -- -jobs=4 -workers=4
+TMPDIR=/dev/shm RUSTFLAGS="-C force-frame-pointers=yes" cargo fuzz run model_equivalence --release -- -jobs=4 -workers=4
 ```

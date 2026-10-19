@@ -1,6 +1,7 @@
 use crate::buffer::AlignedBuf;
+use crate::io::common::{BackendLoop, IoDriver};
 use crate::io::io_task::{
-    FileFsyncTask, FileReadTask, FileWriteTask, PageWrite, WorkerRequest, worker_disconnected_error,
+    FileReadTask, FileWriteTask, PageWrite, WorkerRequest, worker_disconnected_error,
 };
 use crate::io::sync::mpsc;
 use crate::io::sync::thread::spawn;
@@ -10,6 +11,8 @@ use std::fs::File;
 use std::num::NonZeroU32;
 
 use crate::io::new_backend;
+#[cfg(all(feature = "shuttle", test))]
+use crate::io::simulated::{self, SimDisk};
 
 /// Handle to the I/O worker thread.
 ///
@@ -28,13 +31,25 @@ impl fmt::Debug for IoWorker {
 
 impl IoWorker {
     pub fn new(queue_depth: NonZeroU32, file: File) -> Result<Self> {
-        let queue_depth = queue_depth.get();
+        Self::start(move |rx| new_backend(file, queue_depth.get(), rx))
+    }
 
+    /// A worker on a simulated disk, for shuttle tests.
+    #[cfg(all(feature = "shuttle", test))]
+    pub(crate) fn simulated(queue_depth: NonZeroU32, disk: SimDisk) -> Result<Self> {
+        Self::start(move |rx| Ok(simulated::new_backend_on(disk, queue_depth.get(), rx)))
+    }
+
+    /// Spawns the worker thread, which builds its backend with `backend`
+    /// and runs it.
+    fn start<D: IoDriver>(
+        backend: impl FnOnce(mpsc::Receiver<WorkerRequest>) -> Result<BackendLoop<D>> + Send + 'static,
+    ) -> Result<Self> {
         let (tx, rx) = mpsc::channel::<WorkerRequest>();
         let (init_tx, init_rx) = mpsc::channel::<Result<()>>();
 
         spawn(move || {
-            let backend = match new_backend(file, queue_depth, rx) {
+            let backend = match backend(rx) {
                 Ok(backend) => {
                     let _ = init_tx.send(Ok(()));
                     backend
@@ -65,10 +80,6 @@ impl IoWorker {
     /// Submit a write that must complete before the next ordered write starts.
     pub(crate) fn write_ordered(&self, writes: Vec<PageWrite>) -> Result<FileWriteTask> {
         FileWriteTask::new(self.tx.clone(), writes, true)
-    }
-
-    pub fn fsync(&self) -> Result<FileFsyncTask> {
-        FileFsyncTask::new(self.tx.clone())
     }
 
     pub async fn read_exact_at(&self, buf: AlignedBuf, offset: u64) -> Result<AlignedBuf> {
@@ -164,7 +175,5 @@ mod test {
         for h in handles {
             h.join().unwrap();
         }
-
-        block_on(io_worker.fsync().unwrap()).unwrap();
     }
 }

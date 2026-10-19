@@ -10,7 +10,6 @@ use crate::io::sync::{Arc, Mutex};
 
 pub(crate) type ReadCompletion = Arc<TaskCompletion<(AlignedBuf, usize)>>;
 pub(crate) type WriteCompletion = Arc<TaskCompletion<()>>;
-pub(crate) type FsyncCompletion = Arc<TaskCompletion<()>>;
 
 #[derive(Debug)]
 pub struct PageWrite {
@@ -109,9 +108,6 @@ pub(crate) enum WorkerRequest {
         /// Ordered writes never overlap one another in the backend.
         ordered: bool,
         completion: WriteCompletion,
-    },
-    Fsync {
-        completion: FsyncCompletion,
     },
 }
 
@@ -214,46 +210,6 @@ impl Future for FileWriteTask {
                 poll
             }
             FileWriteTaskState::Done => panic!("FileWriteTask polled after completion"),
-        }
-    }
-}
-
-enum FileFsyncTaskState {
-    Waiting(FsyncCompletion),
-    Done,
-}
-
-pub struct FileFsyncTask {
-    state: FileFsyncTaskState,
-}
-
-impl FileFsyncTask {
-    pub(crate) fn new(tx: mpsc::Sender<WorkerRequest>) -> Result<Self> {
-        let completion = Arc::new(TaskCompletion::new());
-        let request = WorkerRequest::Fsync {
-            completion: Arc::clone(&completion),
-        };
-        tx.send(request).map_err(|_| worker_disconnected_error())?;
-        Ok(Self {
-            state: FileFsyncTaskState::Waiting(completion),
-        })
-    }
-}
-
-impl Future for FileFsyncTask {
-    type Output = Result<()>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        match &mut this.state {
-            FileFsyncTaskState::Waiting(completion) => {
-                let poll = completion.poll_result(cx);
-                if poll.is_ready() {
-                    this.state = FileFsyncTaskState::Done;
-                }
-                poll
-            }
-            FileFsyncTaskState::Done => panic!("FileFsyncTask polled after completion"),
         }
     }
 }

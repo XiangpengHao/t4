@@ -71,7 +71,7 @@ Tombstones remove keys from the in-memory map during replay.
 
 ## I/O Model (`io_uring` First)
 
-All disk I/O goes through raw `io_uring` operations (`Read`, `Write`, `Fsync`).
+All disk I/O goes through raw `io_uring` operations (`Read`, `Write`).
 
 Why this matters:
 
@@ -84,7 +84,7 @@ Why this matters:
 
 ### `mount`
 
-- Open/create store file (targeting `O_DIRECT` + `O_DSYNC` in production)
+- Open/create store file with `O_DSYNC`, and `O_DIRECT` unless `direct_io` is off
 - If empty: write an empty WAL page at offset `0`
 - If existing: replay WAL pages and rebuild the in-memory map
 

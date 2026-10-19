@@ -51,9 +51,6 @@ impl UringDriver {
                     .flags(flags)
                     .user_data(user_data)
             }
-            SubmissionEntry::Fsync { user_data } => {
-                opcode::Fsync::new(fd).build().user_data(user_data)
-            }
         }
     }
 }

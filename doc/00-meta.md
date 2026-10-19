@@ -12,9 +12,9 @@ that working. On macOS:
 - I/O goes through the fallback backend (a thread pool doing `pread` and
   `pwrite`), not io_uring, so its performance says nothing about Linux's.
 - Direct I/O is `F_NOCACHE`, not `O_DIRECT`.
-- `O_DSYNC` writes don't flush the drive's cache, so a put isn't durable
-  against power loss until `Store::sync()` (`F_FULLFSYNC`). The crash
-  guarantees in these docs hold on Linux only.
+- `O_DSYNC` writes don't flush the drive's cache, so no put is durable
+  against power loss: that would take an `F_FULLFSYNC` after every write.
+  The crash guarantees in these docs hold on Linux only.
 
 Don't design, tune or benchmark for macOS, and don't let it constrain a Linux
 design: a macOS fallback only has to work.

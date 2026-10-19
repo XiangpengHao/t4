@@ -14,13 +14,23 @@ use crate::index::Index;
 use crate::input_kv::{T4Key, T4KeyRef, T4Value};
 use crate::io::error::{Error, Result};
 use crate::io::io_worker::IoWorker;
+#[cfg(all(feature = "shuttle", test))]
+use crate::io::simulated::SimDisk;
 use crate::range::RangeRequestU32;
 
+/// How a store opens its file. Writes always go to it with `O_DSYNC`
+/// (`FILE_FLAG_WRITE_THROUGH` on Windows): every crash-safety rule of the
+/// store needs a write durable once it completes.
 #[derive(Debug, Clone, Copy)]
 pub struct MountOptions {
     pub queue_depth: u32,
     pub direct_io: bool,
-    pub dsync: bool,
+}
+
+impl MountOptions {
+    fn queue_depth(&self) -> Result<NonZeroU32> {
+        NonZeroU32::new(self.queue_depth).ok_or(Error::InvalidArgument("queue_depth must be > 0"))
+    }
 }
 
 impl Default for MountOptions {
@@ -28,7 +38,6 @@ impl Default for MountOptions {
         Self {
             queue_depth: 256,
             direct_io: true,
-            dsync: true,
         }
     }
 }
@@ -46,12 +55,9 @@ impl T4Store {
 
         #[cfg(target_os = "linux")]
         {
-            let mut custom_flags: i32 = 0;
+            let mut custom_flags = libc::O_DSYNC;
             if options.direct_io {
                 custom_flags |= libc::O_DIRECT;
-            }
-            if options.dsync {
-                custom_flags |= libc::O_DSYNC;
             }
             open.custom_flags(custom_flags);
         }
@@ -59,13 +65,7 @@ impl T4Store {
         // macOS has no O_DIRECT; page-cache bypass is requested per-fd via
         // F_NOCACHE after open (see below), which has no alignment requirements.
         #[cfg(target_os = "macos")]
-        {
-            let mut custom_flags: i32 = 0;
-            if options.dsync {
-                custom_flags |= libc::O_DSYNC;
-            }
-            open.custom_flags(custom_flags);
-        }
+        open.custom_flags(libc::O_DSYNC);
 
         #[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
         {
@@ -74,11 +74,7 @@ impl T4Store {
                     "direct_io not supported on target_os",
                 ));
             }
-            let mut custom_flags: i32 = 0;
-            if options.dsync {
-                custom_flags |= libc::O_DSYNC;
-            }
-            open.custom_flags(custom_flags);
+            open.custom_flags(libc::O_DSYNC);
         }
 
         #[cfg(windows)]
@@ -88,15 +84,14 @@ impl T4Store {
                     "direct_io not supported on target_os",
                 ));
             }
-            let mut custom_flags: u32 = 0;
-            if options.dsync {
-                // FILE_FLAG_WRITE_THROUGH — Windows analogue of O_DSYNC.
-                custom_flags |= 0x8000_0000;
-            }
-            open.custom_flags(custom_flags);
+            // FILE_FLAG_WRITE_THROUGH — Windows analogue of O_DSYNC.
+            open.custom_flags(0x8000_0000);
         }
 
+        let path = path.as_ref();
         let file = open.open(path)?;
+        #[cfg(unix)]
+        Self::sync_parent_dir(path)?;
 
         #[cfg(target_os = "macos")]
         if options.direct_io {
@@ -108,10 +103,34 @@ impl T4Store {
         }
 
         let len = file.metadata()?.len();
-        let queue_depth = NonZeroU32::new(options.queue_depth)
-            .ok_or(Error::InvalidArgument("queue_depth must be > 0"))?;
-        let io = IoWorker::new(queue_depth, file)?;
+        let io = IoWorker::new(options.queue_depth()?, file)?;
+        Self::mount_on(io, len).await
+    }
 
+    /// Makes the store file's name durable, which `O_DSYNC` writes to the
+    /// file itself don't: a power cut soon after creating a store could
+    /// otherwise lose the whole file. Windows has no fsync for a directory;
+    /// NTFS journals directory changes.
+    #[cfg(unix)]
+    fn sync_parent_dir(path: &Path) -> Result<()> {
+        // A bare file name's parent is the empty path: the working directory.
+        let dir = match path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir,
+            _ => Path::new("."),
+        };
+        std::fs::File::open(dir)?.sync_all()?;
+        Ok(())
+    }
+
+    /// Mounts on a simulated disk, for shuttle tests.
+    #[cfg(all(feature = "shuttle", test))]
+    pub(crate) async fn mount_simulated(disk: &SimDisk, options: MountOptions) -> Result<Self> {
+        let io = IoWorker::simulated(options.queue_depth()?, disk.clone())?;
+        Self::mount_on(io, disk.len()).await
+    }
+
+    /// Mounts on the file behind `io`, `len` bytes long.
+    async fn mount_on(io: IoWorker, len: u64) -> Result<Self> {
         let freed = FreedExtents::new();
         let index = Index::new();
         let disk_data = DiskData::mount(io, len, freed.clone(), &mut index.replay(&freed)).await?;
@@ -138,10 +157,6 @@ impl T4Store {
     pub async fn remove(&self, key: T4Key) -> Result<bool> {
         let commit = self.disk_data.append_tombstone(key.clone()).await?;
         Ok(self.index.apply_remove(key, commit))
-    }
-
-    pub async fn sync(&self) -> Result<()> {
-        self.disk_data.sync().await
     }
 
     /// Stop-the-world snapshot: build a fresh store at `path` containing
@@ -174,7 +189,6 @@ impl T4Store {
             .try_collect::<()>()
             .await?;
 
-        new_store.sync().await?;
         Ok(())
     }
 
@@ -187,6 +201,9 @@ impl T4Store {
     }
 }
 
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,7 +212,6 @@ mod tests {
         MountOptions {
             queue_depth: 8,
             direct_io: false,
-            dsync: true,
         }
     }
 
@@ -246,7 +262,6 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                store.sync().await.unwrap();
                 let len_after_first_put = std::fs::metadata(&path).unwrap().len();
                 assert!(
                     store
@@ -261,7 +276,6 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                store.sync().await.unwrap();
                 assert_eq!(std::fs::metadata(&path).unwrap().len(), len_after_first_put);
             }
 
@@ -278,7 +292,6 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                store.sync().await.unwrap();
                 assert_eq!(
                     store
                         .get(T4KeyRef::try_from_slice(b"b").unwrap())
@@ -321,7 +334,6 @@ mod tests {
                         .await
                         .unwrap()
                 );
-                store.sync().await.unwrap();
             }
 
             let len_after_free = std::fs::metadata(&path).unwrap().len();
@@ -337,7 +349,6 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                store.sync().await.unwrap();
             }
 
             // b split a's 8192 hole into a used 4096 slot and a freed 4096
@@ -359,7 +370,6 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                store.sync().await.unwrap();
                 assert_eq!(
                     store
                         .get(T4KeyRef::try_from_slice(b"b").unwrap())
@@ -412,7 +422,6 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                store.sync().await.unwrap();
             }
 
             let len_after_overwrite = std::fs::metadata(&path).unwrap().len();
@@ -428,7 +437,6 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                store.sync().await.unwrap();
                 assert_eq!(
                     store
                         .get(T4KeyRef::try_from_slice(b"a").unwrap())
@@ -495,7 +503,6 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                store.sync().await.unwrap();
 
                 let src_len = std::fs::metadata(&src).unwrap().len();
                 store.snapshot(&dst, test_options()).await.unwrap();
@@ -557,7 +564,6 @@ mod tests {
                     .unwrap();
                 expected.push((key, value));
             }
-            store.sync().await.unwrap();
             store.snapshot(&dst, test_options()).await.unwrap();
 
             let compacted = T4Store::mount_with_options(&dst, test_options())
@@ -590,88 +596,6 @@ mod tests {
         });
     }
 
-    // bug from: https://github.com/XiangpengHao/t4/issues/10
-    #[cfg(feature = "shuttle")]
-    #[test]
-    fn shuttle_concurrent_put_same_key_index_matches_replay() {
-        use super::*;
-        use crate::input_kv::{T4Key, T4KeyRef, T4Value};
-        use crate::io::sync::Arc;
-
-        fn test_options() -> MountOptions {
-            MountOptions {
-                queue_depth: 4,
-                direct_io: false,
-                dsync: false,
-            }
-        }
-
-        // Shuttle's default 60 KiB stack is too small for a debug build of
-        // a put, whose index insert runs bbtree's descent; release fits.
-        let mut config = shuttle::Config::new();
-        config.stack_size = 256 * 1024;
-        shuttle::Runner::new(shuttle::scheduler::RandomScheduler::new(500), config).run(|| {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("shuttle-put-race.t4");
-
-            shuttle::future::block_on(async move {
-                let store = Arc::new(
-                    T4Store::mount_with_options(&path, test_options())
-                        .await
-                        .unwrap(),
-                );
-
-                let value_a = vec![b'a'; 16];
-                let value_b = vec![b'b'; 16];
-
-                let s_a = store.clone();
-                let s_b = store.clone();
-                let t_a = shuttle::future::spawn(async move {
-                    s_a.put(
-                        T4Key::try_from_slice(b"k").unwrap(),
-                        T4Value::try_from_vec(value_a).unwrap(),
-                    )
-                    .await
-                    .unwrap();
-                });
-                let t_b = shuttle::future::spawn(async move {
-                    s_b.put(
-                        T4Key::try_from_slice(b"k").unwrap(),
-                        T4Value::try_from_vec(value_b).unwrap(),
-                    )
-                    .await
-                    .unwrap();
-                });
-                t_a.await.unwrap();
-                t_b.await.unwrap();
-
-                let live = store
-                    .get(T4KeyRef::try_from_slice(b"k").unwrap())
-                    .await
-                    .unwrap();
-
-                // Drop the live store (flushes IoWorker, closes file),
-                // remount, and re-read. With the bug, replay picks the
-                // *highest LSN* WAL record, which can disagree with the
-                // value-ref the in-memory index ended up holding.
-                drop(store);
-
-                let store2 = T4Store::mount_with_options(&path, test_options())
-                    .await
-                    .unwrap();
-                let replayed = store2
-                    .get(T4KeyRef::try_from_slice(b"k").unwrap())
-                    .await
-                    .unwrap();
-
-                assert_eq!(
-                    live, replayed,
-                    "live in-memory view disagrees with what replay reconstructs",
-                );
-            });
-        });
-    }
-
     /// What a get holds while its read is in flight: overwriting the key
     /// meanwhile can't hand the extent to another put.
     #[test]
@@ -697,59 +621,6 @@ mod tests {
                 store.disk_data.read_value(&extent).await.unwrap(),
                 vec![b'a'; 16]
             );
-        });
-    }
-
-    /// A get racing an overwrite of its key, and a put that could reuse the
-    /// overwritten value's slot, returns a value the key held.
-    #[cfg(feature = "shuttle")]
-    #[test]
-    fn shuttle_get_never_reads_a_reused_extent() {
-        use super::*;
-        use crate::input_kv::{T4Key, T4KeyRef, T4Value};
-        use crate::io::sync::Arc;
-
-        let options = MountOptions {
-            queue_depth: 4,
-            direct_io: false,
-            dsync: false,
-        };
-        let mut config = shuttle::Config::new();
-        config.stack_size = 256 * 1024;
-        // PCT finds this race reliably; random schedules mostly miss it.
-        let scheduler = shuttle::scheduler::PctScheduler::new(3, 2000);
-        shuttle::Runner::new(scheduler, config).run(move || {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("get-reuse.t4");
-            shuttle::future::block_on(async move {
-                let store = Arc::new(T4Store::mount_with_options(&path, options).await.unwrap());
-                let put = |store: Arc<T4Store>, key: &'static [u8], byte: u8| async move {
-                    let key = T4Key::try_from_slice(key).unwrap();
-                    let value = T4Value::try_from_vec(vec![byte; 16]).unwrap();
-                    store.put(key, value).await.unwrap();
-                };
-                put(store.clone(), b"k", b'a').await;
-
-                let reader = store.clone();
-                let get = shuttle::future::spawn(async move {
-                    reader
-                        .get(T4KeyRef::try_from_slice(b"k").unwrap())
-                        .await
-                        .unwrap()
-                });
-                let writer = store.clone();
-                let write = shuttle::future::spawn(async move {
-                    put(writer.clone(), b"k", b'b').await;
-                    put(writer, b"other", b'c').await;
-                });
-                let got = get.await.unwrap();
-                write.await.unwrap();
-                assert!(
-                    got == vec![b'a'; 16] || got == vec![b'b'; 16],
-                    "get(k) returned {:?}, which k never held",
-                    got[0] as char
-                );
-            });
         });
     }
 }

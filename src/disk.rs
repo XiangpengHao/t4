@@ -151,8 +151,9 @@ struct DiskState {
 
 impl DiskState {
     /// Allocate an LSN and append `entry` to the WAL. Returns the LSN
-    /// plus the page writes that must be issued (in order) to make the
-    /// append durable.
+    /// plus the page writes that make the append durable, in the order they
+    /// must land: a new page before the link to it, so that no crash
+    /// leaves the WAL pointing at a page never written.
     ///
     /// On failure the LSN counter is left untouched (the caller's LSN
     /// is dropped, which is fine — LSN space is u64).
@@ -178,7 +179,7 @@ impl DiskState {
             self.wal.tail_offset = new_page_offset;
             self.wal.tail = new_page;
 
-            vec![old_tail_write, new_page_write]
+            vec![new_page_write, old_tail_write]
         };
 
         self.wal.next_lsn = next_lsn;
@@ -394,10 +395,6 @@ impl DiskData {
         Ok(buf.as_slice()[slice_start..slice_end].to_vec())
     }
 
-    pub(crate) async fn sync(&self) -> Result<()> {
-        self.io.fsync()?.await
-    }
-
     // -- private -------------------------------------------------------------
 
     fn lock_state(&self) -> Result<MutexGuard<'_, DiskState>> {
@@ -409,12 +406,22 @@ impl DiskData {
     }
 
     async fn append_entry(&self, entry: AppendEntry) -> Result<u64> {
-        let (write, lsn) = {
+        let (writes, lsn) = {
             let mut state = self.lock_state()?;
             let (lsn, writes) = state.prepare_append(entry)?;
-            (self.io.write_ordered(writes)?, lsn)
+            // One ordered write each: the worker starts one only once the
+            // one before has completed, which `O_DSYNC` makes durable. A
+            // single request's pages would land in any order on all but
+            // io_uring.
+            let writes = writes
+                .into_iter()
+                .map(|write| self.io.write_ordered(vec![write]))
+                .collect::<Result<Vec<_>>>()?;
+            (writes, lsn)
         };
-        write.await?;
+        for write in writes {
+            write.await?;
+        }
         Ok(lsn)
     }
 }

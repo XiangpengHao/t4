@@ -8,8 +8,7 @@ pub(crate) mod sync;
 // io_uring on Linux, a thread pool elsewhere.
 cfg_if::cfg_if! {
     if #[cfg(all(feature = "shuttle", test))] {
-        mod blocking;
-        mod simulated;
+        pub(crate) mod simulated;
         pub(crate) use simulated::new_backend;
     } else if #[cfg(all(feature = "io-uring", target_os = "linux"))] {
         mod io_uring;

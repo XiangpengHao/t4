@@ -30,14 +30,13 @@ enum Operation {
     Get { key: Vec<u8> },
     GetRange { key: Vec<u8>, start: u16, len: u16 },
     Remove { key: Vec<u8> },
-    Sync,
     Remount,
 }
 
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let key = limited_bytes(u, 64)?;
-        match u8::arbitrary(u)? % 6 {
+        match u8::arbitrary(u)? % 5 {
             0 => Ok(Self::Put {
                 key,
                 value: limited_bytes(u, 2048)?,
@@ -49,7 +48,6 @@ impl<'a> Arbitrary<'a> for Operation {
                 len: u16::arbitrary(u)?,
             }),
             3 => Ok(Self::Remove { key }),
-            4 => Ok(Self::Sync),
             _ => Ok(Self::Remount),
         }
     }
@@ -74,7 +72,6 @@ fn test_options() -> MountOptions {
     MountOptions {
         queue_depth: 32,
         direct_io: false,
-        dsync: false,
     }
 }
 
@@ -161,12 +158,7 @@ fuzz_target!(|input: FuzzInput| {
                 let expected = model.remove(&key).is_some();
                 assert_eq!(actual, expected);
             }
-            Operation::Sync => {
-                block_on(store.sync()).unwrap();
-                assert_model_matches_store(&store, &model);
-            }
             Operation::Remount => {
-                block_on(store.sync()).unwrap();
                 drop(store);
                 store = mount_or_skip(&path).expect("mount failed after remount");
                 assert_model_matches_store(&store, &model);
@@ -174,7 +166,6 @@ fuzz_target!(|input: FuzzInput| {
         }
     }
 
-    block_on(store.sync()).unwrap();
     drop(store);
     store = mount_or_skip(&path).expect("mount failed during final verification");
     assert_model_matches_store(&store, &model);

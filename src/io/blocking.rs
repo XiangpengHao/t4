@@ -32,7 +32,6 @@ impl SubmissionEntry {
                 let buf = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len as usize) };
                 (user_data, write_at(file, buf, offset))
             }
-            Self::Fsync { user_data } => (user_data, file.sync_all().map(|()| 0)),
         };
         let result = match result {
             Ok(n) => n as i32,

@@ -126,11 +126,6 @@ impl Store {
         }
     }
 
-    pub fn sync(&self) -> impl std::future::Future<Output = Result<()>> {
-        let this = self.clone();
-        async move { this.inner.sync().await }
-    }
-
     /// Stop-the-world snapshot. Creates a new store at `path` containing
     /// only the currently-live entries — no holes, WAL has only inserts.
     /// `path` must not already exist. Puts/removes on `self` that haven't

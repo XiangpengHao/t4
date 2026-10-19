@@ -4,7 +4,7 @@ use crate::buffer::AlignedBuf;
 use crate::io::error::{Error, Result};
 use crate::io::sync::mpsc;
 
-use super::io_task::{FsyncCompletion, PageWrite, ReadCompletion, WorkerRequest, WriteCompletion};
+use super::io_task::{PageWrite, ReadCompletion, WorkerRequest, WriteCompletion};
 
 fn worker_failed_error(message: impl Into<String>) -> Error {
     Error::Io(std::io::Error::other(message.into()))
@@ -14,7 +14,6 @@ fn complete_request_with_error(request: WorkerRequest, err: Error) {
     match request {
         WorkerRequest::Read { completion, .. } => completion.complete(Err(err)),
         WorkerRequest::Write { completion, .. } => completion.complete(Err(err)),
-        WorkerRequest::Fsync { completion, .. } => completion.complete(Err(err)),
     }
 }
 
@@ -49,9 +48,6 @@ enum InflightRequestKind {
         pages: Vec<PageWrite>,
         completion: WriteCompletion,
     },
-    Fsync {
-        completion: FsyncCompletion,
-    },
 }
 
 impl InflightRequest {
@@ -72,10 +68,6 @@ impl InflightRequest {
                 Some(err) => completion.complete(Err(err)),
                 None => completion.complete(Ok(())),
             },
-            InflightRequestKind::Fsync { completion } => match self.error {
-                Some(err) => completion.complete(Err(err)),
-                None => completion.complete(Ok(())),
-            },
         }
     }
 
@@ -83,7 +75,6 @@ impl InflightRequest {
         match self.kind {
             InflightRequestKind::Read { completion, .. } => completion.complete(Err(err)),
             InflightRequestKind::Write { completion, .. } => completion.complete(Err(err)),
-            InflightRequestKind::Fsync { completion } => completion.complete(Err(err)),
         }
     }
 }
@@ -98,7 +89,7 @@ fn decode_user_data(user_data: u64) -> (RequestId, usize) {
 
 fn request_op_count(request: &WorkerRequest) -> usize {
     match request {
-        WorkerRequest::Read { .. } | WorkerRequest::Fsync { .. } => 1,
+        WorkerRequest::Read { .. } => 1,
         WorkerRequest::Write { writes, .. } => writes.len(),
     }
 }
@@ -124,9 +115,6 @@ pub(crate) enum SubmissionEntry {
         /// is_last_in_batch only required for io_uring backend
         #[allow(dead_code)]
         is_last_in_batch: bool,
-    },
-    Fsync {
-        user_data: u64,
     },
 }
 
@@ -280,21 +268,6 @@ impl<D: IoDriver> BackendLoop<D> {
                 };
                 self.finish_single_submit(request_id, push_result)
             }
-            WorkerRequest::Fsync { completion } => {
-                self.inflight_requests.insert(
-                    request_id,
-                    InflightRequest {
-                        remaining: 1,
-                        error: None,
-                        kind: InflightRequestKind::Fsync { completion },
-                    },
-                );
-
-                let push_result = self.driver.push(SubmissionEntry::Fsync {
-                    user_data: encode_user_data(request_id, 0),
-                });
-                self.finish_single_submit(request_id, push_result)
-            }
             WorkerRequest::Write {
                 writes,
                 ordered,
@@ -389,14 +362,6 @@ impl<D: IoDriver> BackendLoop<D> {
                         }
                     });
                     if let Err(err) = result
-                        && request.error.is_none()
-                    {
-                        request.error = Some(err);
-                    }
-                }
-                InflightRequestKind::Fsync { .. } => {
-                    debug_assert_eq!(op_index, 0, "fsync request should only have op 0");
-                    if let Err(err) = decode_cqe_result(cqe.result).map(|_| ())
                         && request.error.is_none()
                     {
                         request.error = Some(err);

@@ -46,7 +46,6 @@ fn write(bencher: divan::Bencher, batch: usize) {
 fn read(bencher: divan::Bencher, batch: usize) {
     let worker = new_worker();
     block_on(worker.write(page_writes(batch, 0)).unwrap()).unwrap();
-    block_on(worker.fsync().unwrap()).unwrap();
 
     bencher
         .counter(BytesCount::new(batch * PAGE_SIZE_U64 as usize))
@@ -57,13 +56,4 @@ fn read(bencher: divan::Bencher, batch: usize) {
                 divan::black_box(out);
             }
         });
-}
-
-#[divan::bench]
-fn fsync(bencher: divan::Bencher) {
-    let worker = new_worker();
-    block_on(worker.write(page_writes(1, 0)).unwrap()).unwrap();
-    bencher.bench(|| {
-        block_on(worker.fsync().unwrap()).unwrap();
-    });
 }
