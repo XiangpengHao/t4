@@ -1,16 +1,17 @@
 use std::num::NonZeroU32;
 
-use verified::input_kv::{FileHoles, T4Key, T4Value, ValueRef};
-use verified::wal::AppendEntry;
-use verified::wal_replay::{ReplayIndex, ReplayState};
-use verified::{CheckedRangeU32, RangeRequestU32, allocate_next_lsn, reserve_space};
+use vstd::prelude::*;
 
 use crate::buffer::{AlignedBuf, align_down_u64, align_up_u32, align_up_u64};
+use crate::input_kv::{FileHoles, T4Key, T4Value, ValueRef};
 use crate::io::error::{Error, Result};
 use crate::io::io_task::PageWrite;
 use crate::io::io_worker::IoWorker;
 use crate::io::sync::{Mutex, MutexGuard};
-use crate::wal::{INITIAL_FILE_TAIL, WalState, encode_page_write, read_page};
+use crate::range::{CheckedRangeU32, RangeRequestU32};
+use crate::wal::page::{AppendEntry, WalPage};
+use crate::wal::replay::{ReplayIndex, ReplayState};
+use crate::wal::{INITIAL_FILE_TAIL, WalState, allocate_next_lsn, encode_page_write, read_page};
 use crate::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U32, PAGE_SIZE_U64};
 
 // ---------------------------------------------------------------------------
@@ -26,6 +27,27 @@ use crate::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U32, PAGE_SIZE_U64};
 // The critical section is CPU-only: I/O `await`s always happen *after*
 // the lock is released.
 // ---------------------------------------------------------------------------
+
+verus! {
+
+#[derive(Clone, Copy)]
+pub struct SpaceReservation {
+    pub offset: u64,
+    pub next_tail: u64,
+}
+
+/// Bump `file_tail` by `len`: the arithmetic of [`FileAllocator::reserve_tail`].
+pub fn reserve_space(file_tail: u64, len: u32) -> (result: Option<SpaceReservation>)
+    ensures
+        result.is_some() ==> result.unwrap().offset == file_tail,
+        result.is_some() ==> result.unwrap().next_tail >= file_tail,
+        result.is_some() ==> result.unwrap().next_tail - file_tail == len as u64,
+{
+    let next_tail = file_tail.checked_add(len as u64)?;
+    Some(SpaceReservation { offset: file_tail, next_tail })
+}
+
+} // verus!
 
 /// File-space allocator. `file_tail` is a bump pointer for the end of the
 /// file; `holes` is a free list of value-record slots that can be reused.
@@ -88,7 +110,7 @@ impl DiskState {
             self.wal.tail.set_next_page(new_page_offset);
             let old_tail_write = encode_page_write(old_tail_offset, &self.wal.tail)?;
 
-            let mut new_page = verified::wal::WalPage::empty();
+            let mut new_page = WalPage::empty();
             new_page.append(&entry, lsn)?;
             let new_page_write = encode_page_write(new_page_offset, &new_page)?;
 

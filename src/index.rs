@@ -1,12 +1,11 @@
 use std::mem;
 use std::ops::ControlFlow;
 
+use crate::disk::{WalCommit, WalTombstoneCommit};
+use crate::input_kv::{T4Key, ValueRef};
+use crate::wal::replay::ReplayIndex;
 use bbtree::BBTreeMap;
 use bbtree::bbtree_map::InsertError;
-use verified::input_kv::{T4Key, ValueRef};
-use verified::wal_replay::ReplayIndex;
-
-use crate::disk::{WalCommit, WalTombstoneCommit};
 
 // ---------------------------------------------------------------------------
 // Index

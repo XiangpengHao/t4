@@ -1,14 +1,15 @@
+#![allow(clippy::assign_op_pattern)] // verus doesn't support assign op pattern
 use vstd::prelude::*;
 use vstd::slice::slice_subrange;
 
-use crate::input_kv::{T4Key, T4KeyRef};
 #[cfg(verus_only)]
-use crate::le_bytes::u32_from_4;
-use crate::le_bytes::{
+use super::le_bytes::u32_from_4;
+use super::le_bytes::{
     u16_from_le_bytes, u32_from_le_bytes, u64_from_le_bytes, write_u16_le, write_u32_le,
     write_u64_le,
 };
-use crate::{PAGE_SIZE, copy_into_page};
+use crate::PAGE_SIZE;
+use crate::input_kv::{T4Key, T4KeyRef};
 
 const _: [(); WAL_PAGE_HEADER_SIZE] = [(); std::mem::size_of::<WalPageHeader>()];
 
@@ -68,31 +69,6 @@ impl<'a> WalEntryRef<'a> {
             Self::encoded_entry_wf(bytes, cursor, used),
     {
         ENTRY_HEADER_SIZE as int + Self::key_len_of(bytes.subrange(cursor, used)) as int
-    }
-
-    pub fn try_decode_from(src: &'a [u8]) -> (result: Result<(Self, usize), WalError>)
-        ensures
-            result.is_ok() ==> {
-                let consumed = result.unwrap().1;
-                consumed >= ENTRY_HEADER_SIZE && consumed <= src.len() && result.unwrap().0.wf()
-            },
-    {
-        if src.len() < ENTRY_HEADER_SIZE {
-            return Err(WalError::Truncated);
-        }
-        let key_len = u16_from_le_bytes(slice_subrange(src, 0, 2)) as usize;
-        let total = ENTRY_HEADER_SIZE + key_len;
-        if src.len() < total {
-            return Err(WalError::KeyTruncated);
-        }
-        if key_len > u8::MAX as usize {
-            return Err(WalError::KeyTooLarge);
-        }
-        let flags = src[2];
-        if flags != FLAG_LIVE && flags != FLAG_TOMBSTONE {
-            return Err(WalError::InvalidFlags);
-        }
-        Ok(Self::decode_from(src))
     }
 
     #[verifier::type_invariant]
@@ -576,6 +552,23 @@ impl<'a> Iterator for WalIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         WalIter::next_impl(self)
+    }
+}
+
+fn copy_into_page(bytes: &mut [u8; PAGE_SIZE], off: usize, src: &[u8])
+    requires
+        off + src.len() <= PAGE_SIZE,
+{
+    let mut i = 0;
+
+    while i < src.len()
+        invariant
+            off + src.len() <= PAGE_SIZE,
+            i <= src.len(),
+        decreases src.len() - i,
+    {
+        bytes[off + i] = src[i];
+        i = i + 1;
     }
 }
 

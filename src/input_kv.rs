@@ -1,9 +1,13 @@
+#![allow(clippy::assign_op_pattern)] // verus doesn't support assign op pattern
+#![allow(clippy::single_match)] // verus doesn't support single match
+#![allow(clippy::manual_unwrap_or_default)] // verus doesn't spec unwrap_or_default
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
 
 use vstd::{prelude::*, slice::slice_to_vec};
 
-use crate::{PAGE_SIZE, align_up_u64};
+use crate::PAGE_SIZE;
+use crate::buffer::align_up_u64;
 
 verus! {
 
@@ -34,14 +38,6 @@ impl T4Key {
 
     pub fn into_bytes(self) -> Vec<u8> {
         self.0
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
     }
 
     #[allow(clippy::should_implement_trait)]
@@ -101,14 +97,6 @@ impl<'a> T4KeyRef<'a> {
         self.0
     }
 
-    pub fn len(self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(self) -> bool {
-        self.0.is_empty()
-    }
-
     #[verifier::type_invariant]
     pub closed spec fn wf(self) -> bool {
         self.0.len() <= u8::MAX as usize
@@ -152,22 +140,8 @@ impl T4Value {
         &self.bytes
     }
 
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.bytes
-    }
-
     pub fn len_u32(&self) -> u32 {
         self.len_u32
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len_u32 == 0
-    }
-
-    #[allow(clippy::should_implement_trait)]
-    // verus doesn't allow inherit clone
-    pub fn clone(&self) -> Self {
-        Self { bytes: self.bytes.clone(), len_u32: self.len_u32 }
     }
 
     pub fn try_from_vec(value: Vec<u8>) -> (result: Result<Self, InputError>)
@@ -179,16 +153,6 @@ impl T4Value {
         }
         let len_u32: u32 = value.len() as u32;
         Ok(Self { bytes: value, len_u32 })
-    }
-
-    pub fn try_from_slice(value: &[u8]) -> (result: Result<Self, InputError>)
-        ensures
-            result.is_ok() <==> value.len() <= u32::MAX as usize,
-    {
-        if value.len() > u32::MAX as usize {
-            return Err(InputError::ValueTooLarge(value.len()));
-        }
-        Ok(Self { bytes: slice_to_vec(value), len_u32: value.len() as u32 })
     }
 }
 

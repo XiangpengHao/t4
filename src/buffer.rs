@@ -2,16 +2,177 @@ use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
 
+use vstd::prelude::*;
+
 use crate::io::error::{Error, Result};
 use crate::{PAGE_SIZE, PAGE_SIZE_NZ_U32};
 
-pub use verified::{align_down_u64, align_up_u64};
+verus! {
+
+/// Rounds `value` down to the nearest multiple of `alignment`.
+/// `alignment` must be a power of two.
+pub fn align_down_u64(value: u64, alignment: u64) -> (result: u64)
+    requires
+        alignment > 0,
+        alignment & sub(alignment, 1) == 0,  // power of two
+
+    ensures
+        result <= value,
+        result & sub(alignment, 1) == 0,
+        value - result < alignment,
+        // idempotent on aligned values
+        value & sub(alignment, 1) == 0 ==> result == value,
+{
+    let mask = alignment - 1;
+    let result = value & !mask;
+
+    proof {
+        assert(result <= value) by (bit_vector)
+            requires
+                alignment > 0,
+                alignment & sub(alignment, 1) == 0,
+                result == value & !sub(alignment, 1),
+        ;
+        assert(result & sub(alignment, 1) == 0u64) by (bit_vector)
+            requires
+                alignment > 0,
+                alignment & sub(alignment, 1) == 0,
+                result == value & !sub(alignment, 1),
+        ;
+        assert(value - result < alignment) by (bit_vector)
+            requires
+                alignment > 0,
+                alignment & sub(alignment, 1) == 0,
+                result == value & !sub(alignment, 1),
+                result <= value,
+        ;
+        assert(value & sub(alignment, 1) == 0 ==> result == value) by (bit_vector)
+            requires
+                alignment > 0,
+                alignment & sub(alignment, 1) == 0,
+                result == value & !sub(alignment, 1),
+        ;
+    }
+
+    result
+}
+
+/// Rounds `value` up to the nearest multiple of `alignment`.
+/// Returns `None` on overflow.
+/// `alignment` must be a power of two.
+pub fn align_up_u64(value: u64, alignment: u64) -> (result: Option<u64>)
+    requires
+        alignment > 0,
+        alignment & sub(alignment, 1) == 0,
+    ensures
+        result.is_some() ==> result.unwrap() >= value,
+        result.is_some() ==> result.unwrap() & sub(alignment, 1) == 0,
+        result.is_some() ==> result.unwrap() - value < alignment,
+        result.is_some() ==> (value & sub(alignment, 1) == 0 ==> result.unwrap() == value),
+        result.is_none() ==> value + alignment > u64::MAX,
+{
+    let mask = alignment - 1;
+    let sum = value.checked_add(mask)?;
+    let result = sum & !mask;
+
+    proof {
+        assert(result >= value) by (bit_vector)
+            requires
+                alignment > 0,
+                alignment & sub(alignment, 1) == 0,
+                sum == add(value, sub(alignment, 1)),
+                sum >= value,
+                result == sum & !sub(alignment, 1),
+        ;
+        assert(result & sub(alignment, 1) == 0u64) by (bit_vector)
+            requires
+                alignment > 0,
+                alignment & sub(alignment, 1) == 0,
+                result == sum & !sub(alignment, 1),
+        ;
+        assert(result - value < alignment) by (bit_vector)
+            requires
+                alignment > 0,
+                alignment & sub(alignment, 1) == 0,
+                sum == add(value, sub(alignment, 1)),
+                sum >= value,
+                result == sum & !sub(alignment, 1),
+                result >= value,
+        ;
+        assert(value & sub(alignment, 1) == 0 ==> result == value) by (bit_vector)
+            requires
+                alignment > 0,
+                alignment & sub(alignment, 1) == 0,
+                sum == add(value, sub(alignment, 1)),
+                sum >= value,
+                result == sum & !sub(alignment, 1),
+        ;
+    }
+
+    Some(result)
+}
+
+/// Rounds `value` up to the nearest multiple of `alignment`.
+/// Returns `None` on overflow.
+/// `alignment` must be a power of two.
+fn checked_align_up_u32(value: u32, alignment: u32) -> (result: Option<u32>)
+    requires
+        alignment > 0,
+        alignment & sub(alignment, 1) == 0,
+    ensures
+        result.is_some() ==> result.unwrap() >= value,
+        result.is_some() ==> result.unwrap() & sub(alignment, 1) == 0,
+        result.is_some() ==> result.unwrap() - value < alignment,
+        result.is_some() ==> (value & sub(alignment, 1) == 0 ==> result.unwrap() == value),
+{
+    let mask = alignment - 1;
+    let sum = value.checked_add(mask)?;
+    let result = sum & !mask;
+
+    proof {
+        assert(result >= value) by (bit_vector)
+            requires
+                alignment > 0,
+                alignment & sub(alignment, 1) == 0,
+                sum == add(value, sub(alignment, 1)),
+                sum >= value,
+                result == sum & !sub(alignment, 1),
+        ;
+        assert(result & sub(alignment, 1) == 0u32) by (bit_vector)
+            requires
+                alignment > 0,
+                alignment & sub(alignment, 1) == 0,
+                result == sum & !sub(alignment, 1),
+        ;
+        assert(result - value < alignment) by (bit_vector)
+            requires
+                alignment > 0,
+                alignment & sub(alignment, 1) == 0,
+                sum == add(value, sub(alignment, 1)),
+                sum >= value,
+                result == sum & !sub(alignment, 1),
+                result >= value,
+        ;
+        assert(value & sub(alignment, 1) == 0 ==> result == value) by (bit_vector)
+            requires
+                alignment > 0,
+                alignment & sub(alignment, 1) == 0,
+                sum == add(value, sub(alignment, 1)),
+                sum >= value,
+                result == sum & !sub(alignment, 1),
+        ;
+    }
+
+    Some(result)
+}
+
+} // verus!
 
 pub fn align_up_u32(value: NonZeroU32, alignment: NonZeroU32) -> Result<NonZeroU32> {
     let value = value.get();
     let alignment = alignment.get();
     debug_assert!(alignment.is_power_of_two());
-    let aligned = verified::align_up_u32(value, alignment)
+    let aligned = checked_align_up_u32(value, alignment)
         .ok_or(Error::InvalidArgument("value overflow while aligning"))?;
     NonZeroU32::new(aligned).ok_or(Error::InvalidArgument("aligned value unexpectedly zero"))
 }

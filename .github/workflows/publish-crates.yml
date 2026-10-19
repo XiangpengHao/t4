@@ -32,9 +32,9 @@ jobs:
         uses: DeterminateSystems/magic-nix-cache-action@v14
 
       - name: Verify proofs
-        run: nix develop -c cargo verus verify -p t4-verified
+        run: nix develop -c cargo verus focus
 
       - name: Publish crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked --no-verify -p t4-verified -p t4
+        run: cargo publish --locked --no-verify -p t4

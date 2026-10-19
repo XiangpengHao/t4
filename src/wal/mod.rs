@@ -1,10 +1,31 @@
+mod le_bytes;
+pub(crate) mod page;
+pub(crate) mod replay;
+
+use vstd::prelude::*;
+
 use crate::buffer::AlignedBuf;
 use crate::io::error::Result;
 use crate::io::io_task::PageWrite;
 use crate::io::io_worker::IoWorker;
 use crate::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U64};
 
-use verified::wal::WalPage;
+use page::WalPage;
+
+verus! {
+
+/// Arithmetic model for advancing `next_lsn`.
+pub fn allocate_next_lsn(next_lsn: u64) -> (result: Option<u64>)
+    ensures
+        result.is_some() ==> result.unwrap() > next_lsn,
+        result.is_some() ==> result.unwrap() - next_lsn == 1u64,
+        result.is_none() ==> next_lsn == u64::MAX,
+{
+    let next = next_lsn.checked_add(1)?;
+    Some(next)
+}
+
+} // verus!
 
 /// In-memory state of the WAL log: where the tail page lives, what its
 /// contents are, and the next LSN to hand out.
@@ -58,9 +79,9 @@ pub(crate) const INITIAL_FILE_TAIL: u64 = PAGE_SIZE_U64;
 
 #[cfg(test)]
 mod tests {
-    use verified::PAGE_SIZE;
-    use verified::input_kv::T4Key;
-    use verified::wal::AppendEntry;
+    use crate::PAGE_SIZE;
+    use crate::input_kv::T4Key;
+    use crate::wal::page::AppendEntry;
 
     use super::*;
 

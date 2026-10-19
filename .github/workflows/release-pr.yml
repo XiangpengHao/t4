@@ -48,8 +48,6 @@ jobs:
           new_version="${major}.${minor}.${patch}"
 
           sed -i -E 's/^version = "[0-9]+\.[0-9]+\.[0-9]+"$/version = "'"${new_version}"'"/' Cargo.toml
-          sed -i -E 's/^version = "[0-9]+\.[0-9]+\.[0-9]+"$/version = "'"${new_version}"'"/' verified/Cargo.toml
-          sed -i -E 's#^verified = \{ package = "t4-verified", version = "[0-9]+\.[0-9]+\.[0-9]+", path = "verified" \}$#verified = { package = "t4-verified", version = "'"${new_version}"'", path = "verified" }#' Cargo.toml
 
           echo "new_version=${new_version}" >> "$GITHUB_OUTPUT"
 
@@ -67,8 +65,7 @@ jobs:
           body: |
             ## Release Automation
 
-            - Bumps `t4` and `t4-verified` to `${{ steps.bump.outputs.new_version }}`.
-            - Updates `t4` dependency pin for `t4-verified`.
+            - Bumps `t4` to `${{ steps.bump.outputs.new_version }}`.
             - Refreshes `Cargo.lock`.
             - After this PR merges into `main`, `.github/workflows/publish-crates.yml` publishes to crates.io.
 

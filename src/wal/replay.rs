@@ -1,15 +1,14 @@
 #![allow(clippy::while_let_loop)] // verus doesn't support while let loop
+#![allow(clippy::single_match)] // verus doesn't support single match
 use vstd::prelude::*;
 
+use super::allocate_next_lsn;
+use super::page::{WalEntryRef, WalEntryState, WalPage};
+use crate::PAGE_SIZE;
+use crate::buffer::align_up_u64;
 use crate::input_kv::{FileHoles, T4Key, ValueRef};
-use crate::wal::{WalEntryRef, WalEntryState, WalPage};
-use crate::{PAGE_SIZE, align_up_u64, allocate_next_lsn};
 
 verus! {
-
-pub const FLAG_LIVE: u8 = 0;
-
-pub const FLAG_TOMBSTONE: u8 = 1;
 
 #[derive(Debug)]
 pub enum ReplayError {

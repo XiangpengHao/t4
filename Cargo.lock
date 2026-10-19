@@ -587,8 +587,8 @@ dependencies = [
  "libc",
  "pollster 1.0.1",
  "shuttle",
- "t4-verified",
  "tempfile",
+ "vstd",
 ]
 
 [[package]]
@@ -601,13 +601,6 @@ dependencies = [
  "pollster 0.4.0",
  "t4",
  "tempfile",
-]
-
-[[package]]
-name = "t4-verified"
-version = "0.1.9"
-dependencies = [
- "vstd",
 ]
 
 [[package]]

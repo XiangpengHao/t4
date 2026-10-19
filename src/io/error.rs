@@ -6,7 +6,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     Io(std::io::Error),
     Format(String),
-    InputError(verified::input_kv::InputError),
+    InputError(crate::input_kv::InputError),
     RangeOutOfBounds,
     NotFound,
     LockPoisoned,
@@ -35,20 +35,20 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl From<verified::wal::WalError> for Error {
-    fn from(value: verified::wal::WalError) -> Self {
+impl From<crate::wal::page::WalError> for Error {
+    fn from(value: crate::wal::page::WalError) -> Self {
         Self::Format(format!("wal entry error: {:?}", value))
     }
 }
 
-impl From<verified::input_kv::InputError> for Error {
-    fn from(value: verified::input_kv::InputError) -> Self {
+impl From<crate::input_kv::InputError> for Error {
+    fn from(value: crate::input_kv::InputError) -> Self {
         Self::InputError(value)
     }
 }
 
-impl From<verified::wal_replay::ReplayError> for Error {
-    fn from(value: verified::wal_replay::ReplayError) -> Self {
+impl From<crate::wal::replay::ReplayError> for Error {
+    fn from(value: crate::wal::replay::ReplayError) -> Self {
         Self::Format(format!("replay error: {:?}", value))
     }
 }

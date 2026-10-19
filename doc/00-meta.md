@@ -18,3 +18,20 @@ that working. On macOS:
 
 Don't design, tune or benchmark for macOS, and don't let it constrain a Linux
 design: a macOS fallback only has to work.
+
+## Verification
+
+Parts of the main crate are written inside `verus!` and proven with
+[Verus](https://github.com/verus-lang/verus): the WAL page format and replay
+(`src/wal/page.rs`, `src/wal/replay.rs`), keys, values and holes
+(`src/input_kv.rs`), alignment (`src/buffer.rs`), range requests
+(`src/range.rs`) and file-tail reservation (`src/disk.rs`). The proofs cover
+those models only, not the OS, filesystem or hardware. Outside `verus!`, Verus
+compiles the code but checks nothing.
+
+```bash
+cargo verus focus    # this crate's proofs only, as CI runs them
+```
+
+`cargo verus verify` also verifies every dependency that carries Verus
+metadata, bbtree included; `focus` leaves those to their own CI.

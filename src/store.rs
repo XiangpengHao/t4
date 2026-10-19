@@ -9,13 +9,12 @@ use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 
-use verified::RangeRequestU32;
-use verified::input_kv::{T4Key, T4KeyRef, T4Value};
-
 use crate::disk::DiskData;
 use crate::index::{ApplyPutOutcome, ApplyRemoveOutcome, Index};
+use crate::input_kv::{T4Key, T4KeyRef, T4Value};
 use crate::io::error::{Error, Result};
 use crate::io::io_worker::IoWorker;
+use crate::range::RangeRequestU32;
 
 #[derive(Debug, Clone, Copy)]
 pub struct MountOptions {
@@ -614,8 +613,8 @@ mod tests {
     #[test]
     fn shuttle_concurrent_put_same_key_index_matches_replay() {
         use super::*;
+        use crate::input_kv::{T4Key, T4KeyRef, T4Value};
         use crate::io::sync::Arc;
-        use verified::input_kv::{T4Key, T4KeyRef, T4Value};
 
         fn test_options() -> MountOptions {
             MountOptions {

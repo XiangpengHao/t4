@@ -1,18 +1,24 @@
 mod buffer;
 mod disk;
 mod index;
+mod input_kv;
 mod io;
+mod range;
 mod store;
 mod wal;
 
 use std::{num::NonZeroU32, path::Path};
 
+use vstd::prelude::*;
+
+use crate::input_kv::{T4Key, T4KeyRef, T4Value};
 use crate::io::sync::Arc;
+use crate::range::RangeRequestU32;
 use crate::store::T4Store;
 
+pub use input_kv::InputError;
 pub use io::error::{Error, Result};
 pub use store::MountOptions;
-use verified::input_kv::{T4Key, T4KeyRef, T4Value};
 
 #[cfg(feature = "__bench")]
 #[doc(hidden)]
@@ -22,7 +28,12 @@ pub mod __bench {
     pub use crate::io::io_worker::IoWorker;
 }
 
+verus! {
+
 pub const PAGE_SIZE: usize = 4096;
+
+} // verus!
+
 pub const PAGE_SIZE_U32: u32 = PAGE_SIZE as u32;
 pub const PAGE_SIZE_NZ_U32: NonZeroU32 = match NonZeroU32::new(PAGE_SIZE_U32) {
     Some(value) => value,
@@ -98,8 +109,8 @@ impl Store {
         let this = self.clone();
         async move {
             let key = T4KeyRef::try_from_slice(key)?;
-            let range = verified::RangeRequestU32::from_u64(range_start, range_len)
-                .ok_or(Error::RangeOutOfBounds)?;
+            let range =
+                RangeRequestU32::from_u64(range_start, range_len).ok_or(Error::RangeOutOfBounds)?;
             this.inner.get_range(key, range).await
         }
     }
