@@ -1,5 +1,17 @@
 # 00 — Meta
 
+## What It Is
+
+`t4` is a single-file local object store with a key/value API optimized for larger values (roughly `>4 KB`).
+
+Core design goals:
+
+- Use `io_uring` for all reads/writes from day one
+- Keep the on-disk format simple and easy to rebuild
+- Optimize for append-heavy workloads and point lookups
+
+
+
 ## Platforms
 
 **Linux is the only intended platform.** Design decisions, performance work
