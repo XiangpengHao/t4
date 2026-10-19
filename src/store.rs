@@ -9,8 +9,8 @@ use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 
-use crate::disk::DiskData;
-use crate::index::{ApplyPutOutcome, ApplyRemoveOutcome, Index};
+use crate::disk::{DiskData, FreedExtents};
+use crate::index::Index;
 use crate::input_kv::{T4Key, T4KeyRef, T4Value};
 use crate::io::error::{Error, Result};
 use crate::io::io_worker::IoWorker;
@@ -112,50 +112,32 @@ impl T4Store {
             .ok_or(Error::InvalidArgument("queue_depth must be > 0"))?;
         let io = IoWorker::new(queue_depth, file)?;
 
-        let mut index = Index::new();
-        let disk_data = DiskData::mount(io, len, &mut index).await?;
+        let freed = FreedExtents::new();
+        let index = Index::new();
+        let disk_data = DiskData::mount(io, len, freed.clone(), &mut index.replay(&freed)).await?;
 
         Ok(Self { index, disk_data })
     }
 
     pub async fn put(&self, key: T4Key, value: T4Value) -> Result<()> {
         let commit = self.disk_data.append_put(key.clone(), &value).await?;
-        match self.index.apply_put(key, commit) {
-            ApplyPutOutcome::Inserted {
-                displaced: Some(old),
-            } => self.disk_data.release_value_space(old)?,
-            ApplyPutOutcome::Inserted { displaced: None } => {}
-            ApplyPutOutcome::Rejected { our_vref } => {
-                // A concurrent put or remove with a later LSN beat us
-                // to the index. Our WAL record still exists but will be
-                // shadowed on replay; free its space so the in-memory
-                // hole list stays consistent with what replay derives.
-                self.disk_data.release_value_space(our_vref)?;
-            }
-        }
+        self.index.apply_put(key, commit);
         Ok(())
     }
 
     pub async fn get(&self, key: T4KeyRef<'_>) -> Result<Vec<u8>> {
-        let value = self.index.get(key.as_bytes()).ok_or(Error::NotFound)?;
-        self.disk_data.read_value(value).await
+        let extent = self.index.get(key.as_bytes()).ok_or(Error::NotFound)?;
+        self.disk_data.read_value(&extent).await
     }
 
     pub async fn get_range(&self, key: T4KeyRef<'_>, range: RangeRequestU32) -> Result<Vec<u8>> {
-        let value = self.index.get(key.as_bytes()).ok_or(Error::NotFound)?;
-        self.disk_data.read_value_range(value, range).await
+        let extent = self.index.get(key.as_bytes()).ok_or(Error::NotFound)?;
+        self.disk_data.read_value_range(&extent, range).await
     }
 
     pub async fn remove(&self, key: T4Key) -> Result<bool> {
         let commit = self.disk_data.append_tombstone(key.clone()).await?;
-        match self.index.apply_remove(key, commit) {
-            ApplyRemoveOutcome::Removed { displaced } => {
-                self.disk_data.release_value_space(displaced)?;
-                Ok(true)
-            }
-            ApplyRemoveOutcome::MarkedAbsent => Ok(false),
-            ApplyRemoveOutcome::Rejected => Ok(false),
-        }
+        Ok(self.index.apply_remove(key, commit))
     }
 
     pub async fn sync(&self) -> Result<()> {
@@ -175,16 +157,16 @@ impl T4Store {
         if path.exists() {
             return Err(Error::InvalidArgument("compact target path already exists"));
         }
-        // No value slot is released, so none is reused, while we read them.
+        // Writers not yet in the WAL wait until the copy is done.
         let _paused = self.disk_data.pause_writes()?;
         let new_store = T4Store::mount_with_options(path, options).await?;
 
         let disk = &self.disk_data;
         let new_store_ref = &new_store;
         stream::iter(self.index.iter_live())
-            .map(|(key, vref)| async move {
+            .map(|(key, extent)| async move {
                 let key = T4Key::try_from_vec(key.into_vec())?;
-                let value_bytes = disk.read_value(vref).await?;
+                let value_bytes = disk.read_value(&extent).await?;
                 let value = T4Value::try_from_vec(value_bytes)?;
                 new_store_ref.put(key, value).await
             })
@@ -685,6 +667,87 @@ mod tests {
                 assert_eq!(
                     live, replayed,
                     "live in-memory view disagrees with what replay reconstructs",
+                );
+            });
+        });
+    }
+
+    /// What a get holds while its read is in flight: overwriting the key
+    /// meanwhile can't hand the extent to another put.
+    #[test]
+    fn held_extent_is_not_reused() {
+        pollster::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let store = T4Store::mount_with_options(dir.path().join("held.t4"), test_options())
+                .await
+                .unwrap();
+            let put = |key: &'static [u8], byte: u8| {
+                store.put(
+                    T4Key::try_from_slice(key).unwrap(),
+                    T4Value::try_from_vec(vec![byte; 16]).unwrap(),
+                )
+            };
+            put(b"k", b'a').await.unwrap();
+
+            let extent = store.index.get(b"k").unwrap();
+            put(b"k", b'b').await.unwrap(); // releases the index's handle
+            put(b"other", b'c').await.unwrap(); // same size: would take a's slot
+
+            assert_eq!(
+                store.disk_data.read_value(&extent).await.unwrap(),
+                vec![b'a'; 16]
+            );
+        });
+    }
+
+    /// A get racing an overwrite of its key, and a put that could reuse the
+    /// overwritten value's slot, returns a value the key held.
+    #[cfg(feature = "shuttle")]
+    #[test]
+    fn shuttle_get_never_reads_a_reused_extent() {
+        use super::*;
+        use crate::input_kv::{T4Key, T4KeyRef, T4Value};
+        use crate::io::sync::Arc;
+
+        let options = MountOptions {
+            queue_depth: 4,
+            direct_io: false,
+            dsync: false,
+        };
+        let mut config = shuttle::Config::new();
+        config.stack_size = 256 * 1024;
+        // PCT finds this race reliably; random schedules mostly miss it.
+        let scheduler = shuttle::scheduler::PctScheduler::new(3, 2000);
+        shuttle::Runner::new(scheduler, config).run(move || {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("get-reuse.t4");
+            shuttle::future::block_on(async move {
+                let store = Arc::new(T4Store::mount_with_options(&path, options).await.unwrap());
+                let put = |store: Arc<T4Store>, key: &'static [u8], byte: u8| async move {
+                    let key = T4Key::try_from_slice(key).unwrap();
+                    let value = T4Value::try_from_vec(vec![byte; 16]).unwrap();
+                    store.put(key, value).await.unwrap();
+                };
+                put(store.clone(), b"k", b'a').await;
+
+                let reader = store.clone();
+                let get = shuttle::future::spawn(async move {
+                    reader
+                        .get(T4KeyRef::try_from_slice(b"k").unwrap())
+                        .await
+                        .unwrap()
+                });
+                let writer = store.clone();
+                let write = shuttle::future::spawn(async move {
+                    put(writer.clone(), b"k", b'b').await;
+                    put(writer, b"other", b'c').await;
+                });
+                let got = get.await.unwrap();
+                write.await.unwrap();
+                assert!(
+                    got == vec![b'a'; 16] || got == vec![b'b'; 16],
+                    "get(k) returned {:?}, which k never held",
+                    got[0] as char
                 );
             });
         });

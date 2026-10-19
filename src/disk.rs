@@ -1,4 +1,5 @@
 use std::num::NonZeroU32;
+use std::sync::PoisonError;
 
 use vstd::prelude::*;
 
@@ -7,7 +8,7 @@ use crate::input_kv::{FileHoles, T4Key, T4Value, ValueRef};
 use crate::io::error::{Error, Result};
 use crate::io::io_task::PageWrite;
 use crate::io::io_worker::IoWorker;
-use crate::io::sync::{Mutex, MutexGuard};
+use crate::io::sync::{Arc, Mutex, MutexGuard};
 use crate::range::{CheckedRangeU32, RangeRequestU32};
 use crate::wal::page::{AppendEntry, WalPage};
 use crate::wal::replay::{ReplayIndex, ReplayState};
@@ -50,19 +51,23 @@ pub fn reserve_space(file_tail: u64, len: u32) -> (result: Option<SpaceReservati
 } // verus!
 
 /// File-space allocator. `file_tail` is a bump pointer for the end of the
-/// file; `holes` is a free list of value-record slots that can be reused.
-/// Both WAL pages and value records allocate from `file_tail` when no
-/// hole satisfies the request.
+/// file; `holes` is a free list of value-record slots that can be reused,
+/// fed by `freed`. Both WAL pages and value records allocate from
+/// `file_tail` when no hole satisfies the request.
 #[derive(Debug)]
 pub(crate) struct FileAllocator {
     file_tail: u64,
     holes: FileHoles,
+    freed: FreedExtents,
 }
 
 impl FileAllocator {
     /// Allocate `padded_len` bytes for a value record. Tries holes first,
     /// then bumps `file_tail`.
     fn reserve_value(&mut self, padded_len: u32) -> Result<u64> {
+        for value in self.freed.take() {
+            self.holes.release_value(value);
+        }
         if let Some(offset) = self.holes.reserve(padded_len) {
             return Ok(offset);
         }
@@ -76,9 +81,65 @@ impl FileAllocator {
         self.file_tail = reservation.next_tail;
         Ok(reservation.offset)
     }
+}
 
-    fn release_value(&mut self, value: ValueRef) {
-        self.holes.release_value(value);
+/// Extents whose last handle dropped, waiting for the allocator to take
+/// them back on its next reservation. A queue, because an [`Extent`] may
+/// drop where the allocator's lock is held.
+#[derive(Clone, Debug)]
+pub(crate) struct FreedExtents(Arc<Mutex<Vec<ValueRef>>>);
+
+impl FreedExtents {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(Mutex::new(Vec::new())))
+    }
+
+    fn push(&self, value: ValueRef) {
+        // A push can't leave the list half-changed: a poisoned lock is safe.
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(value);
+    }
+
+    fn take(&self) -> Vec<ValueRef> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+}
+
+/// Where a value's bytes are, and the right to read them there: the space
+/// goes back to the allocator only when the last handle drops. The index
+/// holds one; a read holds another until it is done, so no write can
+/// reuse the space under it.
+#[derive(Debug)]
+pub(crate) struct Extent {
+    value: ValueRef,
+    /// Where the space goes on drop; `None` once replay has freed it.
+    freed: Option<FreedExtents>,
+}
+
+impl Extent {
+    pub(crate) fn new(value: ValueRef, freed: &FreedExtents) -> Arc<Self> {
+        Arc::new(Self {
+            value,
+            freed: Some(freed.clone()),
+        })
+    }
+
+    /// The location of an extent replay replaced, which replay frees itself:
+    /// its space doesn't go back to the allocator a second time.
+    pub(crate) fn into_replaced(this: Arc<Self>) -> ValueRef {
+        let mut extent = Arc::into_inner(this).expect("replay holds the only handle");
+        extent.freed = None;
+        extent.value
+    }
+}
+
+impl Drop for Extent {
+    fn drop(&mut self) {
+        if let Some(freed) = &self.freed {
+            freed.push(self.value);
+        }
     }
 }
 
@@ -128,6 +189,7 @@ impl DiskState {
 /// All on-disk state of the store.
 pub(crate) struct DiskData {
     io: IoWorker,
+    freed: FreedExtents,
     state: Mutex<DiskState>,
 }
 
@@ -140,36 +202,45 @@ impl std::fmt::Debug for DiskData {
 impl DiskData {
     /// Mount the store. `file_len == 0` means create a fresh file;
     /// otherwise replay the existing WAL into `index`, which a fresh file
-    /// leaves untouched.
+    /// leaves untouched. Extents dropped go back to the allocator through
+    /// `freed`.
     pub(crate) async fn mount(
         io: IoWorker,
         file_len: u64,
+        freed: FreedExtents,
         index: &mut impl ReplayIndex,
     ) -> Result<Self> {
         if file_len == 0 {
-            Self::create(io).await
+            Self::create(io, freed).await
         } else {
-            Self::replay(io, file_len, index).await
+            Self::replay(io, file_len, freed, index).await
         }
     }
 
-    async fn create(io: IoWorker) -> Result<Self> {
+    async fn create(io: IoWorker, freed: FreedExtents) -> Result<Self> {
         let wal = WalState::fresh();
         let initial_write = encode_page_write(wal.tail_offset, &wal.tail)?;
         io.write(vec![initial_write])?.await?;
         Ok(Self {
             io,
+            freed: freed.clone(),
             state: Mutex::new(DiskState {
                 alloc: FileAllocator {
                     file_tail: INITIAL_FILE_TAIL,
                     holes: FileHoles::empty(),
+                    freed,
                 },
                 wal,
             }),
         })
     }
 
-    async fn replay(io: IoWorker, file_len: u64, index: &mut impl ReplayIndex) -> Result<Self> {
+    async fn replay(
+        io: IoWorker,
+        file_len: u64,
+        freed: FreedExtents,
+        index: &mut impl ReplayIndex,
+    ) -> Result<Self> {
         if file_len < PAGE_SIZE_U64 {
             return Err(Error::Format(
                 "store file shorter than first WAL page".into(),
@@ -195,8 +266,13 @@ impl DiskData {
 
         Ok(Self {
             io,
+            freed: freed.clone(),
             state: Mutex::new(DiskState {
-                alloc: FileAllocator { file_tail, holes },
+                alloc: FileAllocator {
+                    file_tail,
+                    holes,
+                    freed,
+                },
                 wal: WalState {
                     tail: last_page,
                     tail_offset: last_offset,
@@ -209,11 +285,7 @@ impl DiskData {
     /// Write value bytes into a freshly-allocated slot, then append a
     /// live WAL entry. Returns a [`WalCommit`] carrying the LSN — apply
     /// it via `Index::apply_put` so the index's ordering matches the WAL's.
-    pub(crate) async fn append_put<'a>(
-        &'a self,
-        key: T4Key,
-        value: &T4Value,
-    ) -> Result<WalCommit<'a>> {
+    pub(crate) async fn append_put(&self, key: T4Key, value: &T4Value) -> Result<WalCommit> {
         let value_len = value.len_u32();
         let value_offset = if value_len == 0 {
             0
@@ -241,8 +313,7 @@ impl DiskData {
             .ok_or_else(|| Error::Format("invalid value reference allocated".into()))?;
         Ok(WalCommit {
             lsn,
-            vref,
-            disk: self,
+            extent: Extent::new(vref, &self.freed),
         })
     }
 
@@ -252,23 +323,17 @@ impl DiskData {
         Ok(WalTombstoneCommit { lsn })
     }
 
-    /// Release a value slot back to the freelist for reuse.
-    pub(crate) fn release_value_space(&self, value: ValueRef) -> Result<()> {
-        self.lock_state()?.alloc.release_value(value);
-        Ok(())
-    }
-
-    /// Hold off every WAL append and every release or reservation of file
-    /// space until the guard drops, so a value slot read from the index
-    /// stays intact meanwhile. Reads go on.
+    /// Hold off every WAL append, and every reservation of file space, until
+    /// the guard drops. Reads go on.
     pub(crate) fn pause_writes(&self) -> Result<WritesPaused<'_>> {
         Ok(WritesPaused {
             _state: self.lock_state()?,
         })
     }
 
-    /// Read the full value referred to by `value` from disk.
-    pub(crate) async fn read_value(&self, value: ValueRef) -> Result<Vec<u8>> {
+    /// Read the full value in `extent` from disk.
+    pub(crate) async fn read_value(&self, extent: &Extent) -> Result<Vec<u8>> {
+        let value = extent.value;
         let Some(value_len_u32) = NonZeroU32::new(value.length()) else {
             return Ok(Vec::new());
         };
@@ -280,12 +345,13 @@ impl DiskData {
         Ok(buf.as_slice()[..value_len].to_vec())
     }
 
-    /// Read a byte range within `value` from disk.
+    /// Read a byte range within the value in `extent` from disk.
     pub(crate) async fn read_value_range(
         &self,
-        value: ValueRef,
+        extent: &Extent,
         range: RangeRequestU32,
     ) -> Result<Vec<u8>> {
+        let value = extent.value;
         let range: CheckedRangeU32 = range
             .checked_against(value.length())
             .ok_or(Error::RangeOutOfBounds)?;
@@ -363,36 +429,19 @@ pub(crate) struct WritesPaused<'a> {
 // ---------------------------------------------------------------------------
 
 /// Durable WAL receipt for a put. Carries the LSN that decides ordering
-/// when the put is applied to the index and the on-disk location of the
-/// value bytes. Construct only via [`DiskData::append_put`]; consume via
-/// `Index::apply_put`.
-///
-/// If the receipt is dropped without being applied, the reserved value
-/// space is released back to the freelist so it doesn't leak. (The
-/// on-disk WAL record stays — replay will see it dominated by any later
-/// record for the same key, exactly as it would for any in-flight crash.)
-#[must_use = "WalCommit must be applied to the index via Index::apply_put \
-              (Rejected outcomes hand back the vref to release explicitly)"]
-pub(crate) struct WalCommit<'a> {
+/// when the put is applied to the index and the extent holding the value
+/// bytes. Construct only via [`DiskData::append_put`]; consume via
+/// `Index::apply_put`. Dropped unapplied, its extent goes back to the
+/// allocator.
+#[must_use = "WalCommit must be applied to the index via Index::apply_put"]
+pub(crate) struct WalCommit {
     lsn: u64,
-    vref: ValueRef,
-    disk: &'a DiskData,
+    extent: Arc<Extent>,
 }
 
-impl WalCommit<'_> {
-    /// Extract the (lsn, vref) and *suppress* the Drop-time release.
-    /// Used by the index after a successful apply to take ownership of
-    /// the vref without freeing its space.
-    pub(crate) fn into_parts(self) -> (u64, ValueRef) {
-        let parts = (self.lsn, self.vref);
-        std::mem::forget(self);
-        parts
-    }
-}
-
-impl Drop for WalCommit<'_> {
-    fn drop(&mut self) {
-        let _ = self.disk.release_value_space(self.vref);
+impl WalCommit {
+    pub(crate) fn into_parts(self) -> (u64, Arc<Extent>) {
+        (self.lsn, self.extent)
     }
 }
 

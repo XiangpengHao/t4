@@ -1,8 +1,9 @@
 use std::mem;
 use std::ops::ControlFlow;
 
-use crate::disk::{WalCommit, WalTombstoneCommit};
+use crate::disk::{Extent, FreedExtents, WalCommit, WalTombstoneCommit};
 use crate::input_kv::{T4Key, ValueRef};
+use crate::io::sync::Arc;
 use crate::wal::replay::ReplayIndex;
 use bbtree::BBTreeMap;
 use bbtree::bbtree_map::InsertError;
@@ -20,9 +21,13 @@ use bbtree::bbtree_map::InsertError;
 // The WAL's LSN order is authoritative. If writers reach the index in a
 // different order than LSNs were assigned, the LSN check — made under the
 // key's leaf latch, in one step with the change — rejects the out-of-order
-// writer; the "loser" releases its own value space. Both orderings
-// converge to the same final state, matching what `Wal::replay` would
-// reconstruct after a remount.
+// writer, whose entry leaves at once. Both orderings converge to the same
+// final state, matching what `Wal::replay` would reconstruct after a
+// remount.
+//
+// A live entry holds its value's extent. An entry that leaves the index
+// drops its handle, and the extent's space goes back to the allocator once
+// no read holds it either.
 //
 // Tombstones live in the index (not just on disk) so that a put whose
 // LSN is older than a concurrent remove's LSN can be rejected even when
@@ -31,9 +36,9 @@ use bbtree::bbtree_map::InsertError;
 // live entries.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone)]
 enum IndexEntry {
-    Live { lsn: u64, vref: ValueRef },
+    Live { lsn: u64, extent: Arc<Extent> },
     Tomb { lsn: u64 },
 }
 
@@ -44,32 +49,30 @@ impl IndexEntry {
         }
     }
 
-    fn live_vref(&self) -> Option<ValueRef> {
+    fn live_extent(&self) -> Option<&Arc<Extent>> {
         match self {
-            Self::Live { vref, .. } => Some(*vref),
+            Self::Live { extent, .. } => Some(extent),
             Self::Tomb { .. } => None,
         }
     }
-}
 
-pub(crate) enum ApplyPutOutcome {
-    /// Our LSN was the newest; the index now points at our vref.
-    /// `displaced` is the previous vref if the key was Live before.
-    Inserted { displaced: Option<ValueRef> },
-    /// A newer LSN already won the race. Our vref is shadowed by the
-    /// newer WAL record — release it so the hole list stays consistent
-    /// with what replay would derive.
-    Rejected { our_vref: ValueRef },
-}
+    /// Keeps whichever of `self` and `other` comes from the newer record,
+    /// and returns the one that loses.
+    fn keep_newer(&mut self, other: Self) -> Self {
+        if self.lsn() >= other.lsn() {
+            other
+        } else {
+            mem::replace(self, other)
+        }
+    }
 
-pub(crate) enum ApplyRemoveOutcome {
-    /// Our tombstone won and the key was Live; release the old vref.
-    Removed { displaced: ValueRef },
-    /// Our tombstone won but the key wasn't Live (absent, or already a
-    /// tombstone with a smaller LSN).
-    MarkedAbsent,
-    /// A newer LSN already won the race; nothing to release.
-    Rejected,
+    /// The location of an entry replay replaced, which replay frees itself.
+    fn into_replaced(self) -> Option<ValueRef> {
+        match self {
+            Self::Live { extent, .. } => Some(Extent::into_replaced(extent)),
+            Self::Tomb { .. } => None,
+        }
+    }
 }
 
 /// Keys are boxed byte strings: bbtree's default strategy gives them inline
@@ -93,51 +96,37 @@ impl Index {
         }
     }
 
-    pub(crate) fn get(&self, key: &[u8]) -> Option<ValueRef> {
-        self.map.get_copied(key).and_then(|e| e.live_vref())
+    /// The extent of `key`'s live value: a handle that keeps its space from
+    /// being reused while the caller reads it.
+    pub(crate) fn get(&self, key: &[u8]) -> Option<Arc<Extent>> {
+        self.map
+            .read(key, |_, entry| entry.live_extent().cloned())
+            .flatten()
     }
 
-    pub(crate) fn apply_put(&self, key: T4Key, commit: WalCommit<'_>) -> ApplyPutOutcome {
-        let (lsn, vref) = commit.into_parts();
-        let ours = IndexEntry::Live { lsn, vref };
-        let outcome = self
-            .map
-            .update_or_insert(Self::map_key(key), ours, |_, stored, ours| {
-                if stored.lsn() >= lsn {
-                    return ApplyPutOutcome::Rejected { our_vref: vref };
-                }
-                ApplyPutOutcome::Inserted {
-                    displaced: mem::replace(stored, ours).live_vref(),
-                }
-            });
-        match outcome {
-            Ok(Some(outcome)) => outcome,
-            Ok(None) => ApplyPutOutcome::Inserted { displaced: None },
-            Err(error) => Self::insert_failed(error),
-        }
+    pub(crate) fn apply_put(&self, key: T4Key, commit: WalCommit) {
+        let (lsn, extent) = commit.into_parts();
+        self.apply(key, IndexEntry::Live { lsn, extent });
     }
 
-    pub(crate) fn apply_remove(
-        &self,
-        key: T4Key,
-        commit: WalTombstoneCommit,
-    ) -> ApplyRemoveOutcome {
+    /// Whether the tombstone took a live value's place.
+    pub(crate) fn apply_remove(&self, key: T4Key, commit: WalTombstoneCommit) -> bool {
         let lsn = commit.lsn();
-        let ours = IndexEntry::Tomb { lsn };
-        let outcome = self
+        let left = self.apply(key, IndexEntry::Tomb { lsn });
+        matches!(left, Some(IndexEntry::Live { .. }))
+    }
+
+    /// Puts `ours` in `key`'s place unless the entry there is newer, and
+    /// returns the entry that left the index: the one replaced, or ours.
+    /// It drops in the caller, out of the leaf's latch.
+    fn apply(&self, key: T4Key, ours: IndexEntry) -> Option<IndexEntry> {
+        let left = self
             .map
             .update_or_insert(Self::map_key(key), ours, |_, stored, ours| {
-                if stored.lsn() >= lsn {
-                    return ApplyRemoveOutcome::Rejected;
-                }
-                match mem::replace(stored, ours).live_vref() {
-                    Some(displaced) => ApplyRemoveOutcome::Removed { displaced },
-                    None => ApplyRemoveOutcome::MarkedAbsent,
-                }
+                stored.keep_newer(ours)
             });
-        match outcome {
-            Ok(Some(outcome)) => outcome,
-            Ok(None) => ApplyRemoveOutcome::MarkedAbsent,
+        match left {
+            Ok(left) => left,
             Err(error) => Self::insert_failed(error),
         }
     }
@@ -165,10 +154,18 @@ impl Index {
     /// The live entries, in key order. It holds nothing between items, so
     /// it is no snapshot by itself: the caller pauses writes for one
     /// (`DiskData::pause_writes`).
-    pub(crate) fn iter_live(&self) -> impl Iterator<Item = (Box<[u8]>, ValueRef)> + '_ {
+    pub(crate) fn iter_live(&self) -> impl Iterator<Item = (Box<[u8]>, Arc<Extent>)> + '_ {
         self.map
             .range_cloned::<[u8], _>(..)
-            .filter_map(|(key, entry)| entry.live_vref().map(|vref| (key, vref)))
+            .filter_map(|(key, entry)| match entry {
+                IndexEntry::Live { extent, .. } => Some((key, extent)),
+                IndexEntry::Tomb { .. } => None,
+            })
+    }
+
+    /// The index as replay fills it, its extents going back through `freed`.
+    pub(crate) fn replay<'a>(&'a self, freed: &'a FreedExtents) -> IndexReplay<'a> {
+        IndexReplay { index: self, freed }
     }
 
     fn map_key(key: T4Key) -> Box<[u8]> {
@@ -184,18 +181,32 @@ impl Index {
     }
 }
 
+/// An index being replayed into: replay hands it value locations, which
+/// it keeps as extents.
+pub(crate) struct IndexReplay<'a> {
+    index: &'a Index,
+    freed: &'a FreedExtents,
+}
+
 /// Replay reads the WAL alone, in LSN order: each record replaces what came
-/// before it, and a tombstone forgets its key.
-impl ReplayIndex for Index {
+/// before it, and a tombstone forgets its key. Replay frees what it
+/// replaces itself, so those extents leave without freeing it again.
+impl ReplayIndex for IndexReplay<'_> {
     fn insert(&mut self, key: T4Key, lsn: u64, value: ValueRef) -> Option<ValueRef> {
-        let entry = IndexEntry::Live { lsn, vref: value };
-        match self.map.insert(Self::map_key(key), entry) {
-            Ok(old) => old.and_then(|e| e.live_vref()),
-            Err(error) => Self::insert_failed(error),
+        let entry = IndexEntry::Live {
+            lsn,
+            extent: Extent::new(value, self.freed),
+        };
+        match self.index.map.insert(Index::map_key(key), entry) {
+            Ok(old) => old.and_then(IndexEntry::into_replaced),
+            Err(error) => Index::insert_failed(error),
         }
     }
 
     fn remove(&mut self, key: &[u8]) -> Option<ValueRef> {
-        self.map.remove(key).and_then(|e| e.live_vref())
+        self.index
+            .map
+            .remove(key)
+            .and_then(IndexEntry::into_replaced)
     }
 }
