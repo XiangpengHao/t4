@@ -282,12 +282,18 @@ impl AlignedBuf {
     }
 
     pub fn as_slice(&self) -> &[u8] {
-        debug_assert!(self.is_owned(), "a lent buffer is only touched by raw pointers");
+        debug_assert!(
+            self.is_owned(),
+            "a lent buffer is only touched by raw pointers"
+        );
         unsafe { std::slice::from_raw_parts(self.as_ptr(), self.len()) }
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        debug_assert!(self.is_owned(), "a lent buffer is only touched by raw pointers");
+        debug_assert!(
+            self.is_owned(),
+            "a lent buffer is only touched by raw pointers"
+        );
         unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), self.len()) }
     }
 
