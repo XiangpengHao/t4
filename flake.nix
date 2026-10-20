@@ -148,6 +148,9 @@
               pkgs.cargo-binutils
               verus
               verusfmt
+              # benches/read_throughput.rs's baseline, and its plot.
+              pkgs.fio
+              (pkgs.python3.withPackages (ps: [ ps.matplotlib ]))
             ];
             ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
           };

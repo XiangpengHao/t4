@@ -13,7 +13,7 @@ members = [".", "fuzz"]
 default = ["io-uring"]
 shuttle = ["dep:shuttle"]
 io-uring = ["dep:io-uring"]
-# Exposes internal types (IoWorker, AlignedBuf, PageWrite) for benchmarking.
+# Exposes internal types (IoWorker, AlignedBuf, PageWrite, the WAL page) for benchmarking.
 # Not part of the public API; the leading underscores signal "do not depend on this".
 __bench = []
 
@@ -22,6 +22,8 @@ bbtree = "0.1.4"
 cfg-if = "1.0.4"
 shuttle = { version = "0.9.1", optional = true }
 crossbeam-channel = "0.5"
+# Each WAL entry's checksum, in hardware on x86-64 and aarch64.
+crc32c = "0.6.8"
 # Verus's specs and proofs; ghost code, erased when compiled normally.
 vstd = "=0.0.0-2026-08-30-0159"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
@@ -42,6 +44,7 @@ futures-executor = { version = "0.3", features = ["thread-pool"] }
 pollster = "1.0"
 tempfile = "3"
 divan = "0.1.21"
+serde_json = "1"
 
 [package.metadata.verus]
 verify = true
@@ -52,5 +55,11 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }
 
 [[bench]]
 name = "io_worker_throughput"
+harness = false
+required-features = ["__bench"]
+
+# Reads a drive through t4 and through fio; see the file for the workload.
+[[bench]]
+name = "read_throughput"
 harness = false
 required-features = ["__bench"]

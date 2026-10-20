@@ -60,14 +60,14 @@ pub(crate) fn encode_page_write(offset: u64, page: &WalPage) -> Result<PageWrite
     Ok(PageWrite { buf, offset })
 }
 
-/// Read a single WAL page from disk at `offset`.
+/// Read a single WAL page from disk at `offset`, up to its first torn entry.
 pub(crate) async fn read_page(io: &IoWorker, offset: u64) -> Result<WalPage> {
     let buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32)?;
     let buf = io.read_exact_at(buf, offset).await?;
     let boxed = buf
         .try_into_boxed_array()
         .expect("invalid aligned buffer layout");
-    Ok(WalPage::from_bytes(boxed)?)
+    Ok(WalPage::recover(boxed)?)
 }
 
 /// Initial size of a newly-created file: one WAL page.
@@ -107,8 +107,57 @@ mod tests {
         .unwrap();
 
         let boxed: Box<[u8; PAGE_SIZE]> = Box::new(page.as_slice().try_into().unwrap());
-        let decoded = WalPage::from_bytes(boxed).unwrap();
+        let decoded = WalPage::recover(boxed).unwrap();
         assert_eq!(decoded.as_slice(), page.as_slice());
+    }
+
+    /// A page of live entries, one per key, at LSNs from 0.
+    fn page_of(keys: &[Vec<u8>]) -> WalPage {
+        let mut page = WalPage::empty();
+        for (lsn, key) in keys.iter().enumerate() {
+            let entry = AppendEntry::Live {
+                key: T4Key::try_from_slice(key).unwrap(),
+                offset: 4096,
+                length: 1,
+            };
+            page.append(&entry, lsn as u64).unwrap();
+        }
+        page
+    }
+
+    /// However a power cut mixes the 512-byte sectors of an append's page
+    /// write, the page recovers to the page before the append or after it.
+    #[test]
+    fn recover_after_torn_append() {
+        const SECTOR: usize = 512;
+        // Two 228-byte entries end at 472, so the third crosses a sector.
+        let keys: Vec<Vec<u8>> = (0..3).map(|index| vec![b'a' + index; 200]).collect();
+        let before = page_of(&keys[..2]);
+        let after = page_of(&keys);
+        for landed in 0..1_u32 << (PAGE_SIZE / SECTOR) {
+            let mut torn = Box::new([0_u8; PAGE_SIZE]);
+            for (index, sector) in torn.chunks_mut(SECTOR).enumerate() {
+                let source = if landed & (1 << index) != 0 {
+                    &after
+                } else {
+                    &before
+                };
+                sector.copy_from_slice(&source.as_slice()[index * SECTOR..][..SECTOR]);
+            }
+            let recovered = WalPage::recover(torn).unwrap();
+            assert!(
+                recovered.as_slice() == before.as_slice()
+                    || recovered.as_slice() == after.as_slice(),
+                "sectors landed: {landed:08b}",
+            );
+        }
+    }
+
+    #[test]
+    fn recover_needs_the_header() {
+        let mut bytes: Box<[u8; PAGE_SIZE]> = Box::new(page_of(&[]).as_slice().try_into().unwrap());
+        bytes[0] = 0;
+        assert!(WalPage::recover(bytes).is_err());
     }
 
     #[test]

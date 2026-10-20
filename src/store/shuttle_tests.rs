@@ -113,7 +113,7 @@ fn get_never_reads_a_reused_extent() {
 const WRITERS: u8 = 2;
 const KEYS_PER_WRITER: u8 = 2;
 const OPS_PER_WRITER: usize = 12;
-/// Long keys fill a WAL page in 18 entries, so most runs start new pages.
+/// Long keys fill a WAL page in 17 entries, so most runs start new pages.
 const KEY_LEN: usize = 200;
 /// Empty, within a page, and across pages.
 const VALUE_LENS: [usize; 3] = [0, 100, 5000];
@@ -244,7 +244,6 @@ fn power_cut_keeps_acknowledged_writes_on(sector_len: usize) {
 /// Every acknowledged put and remove survives a power cut, on a drive that
 /// persists only 512-byte sectors atomically.
 #[test]
-#[ignore = "fails: a power cut can tear a WAL page"]
 fn power_cut_keeps_acknowledged_writes() {
     power_cut_keeps_acknowledged_writes_on(512);
 }

@@ -43,8 +43,10 @@ pub mod __server {
 #[doc(hidden)]
 pub mod __bench {
     pub use crate::buffer::AlignedBuf;
+    pub use crate::input_kv::T4Key;
     pub use crate::io::io_task::PageWrite;
     pub use crate::io::io_worker::IoWorker;
+    pub use crate::wal::page::{AppendEntry, WalPage};
 }
 
 verus! {

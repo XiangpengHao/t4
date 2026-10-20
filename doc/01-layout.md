@@ -29,30 +29,29 @@ offset  0K       4K       8K       12K      16K      20K      24K
 ## WAL page
 
 ```text
- 0       4     6     8               16        20        24             32
- +-------+-----+-----+---------------+---------+---------+--------------+
- | magic | ver | 0 0 | next_page     | count   | used    | lsn          |
- | BTF4  | u16 |     | u64           | u32     | u32     | u64, unused  |
- +-------+-----+-----+---------------+---------+---------+--------------+
+ 0       4     6     8               16
+ +-------+-----+-----+---------------+
+ | magic | ver | 0 0 | next_page     |
+ | BTF4  | u16 |     | u64           |
+ +-------+-----+-----+---------------+
 
- 32                                                     used         4096
- +-------------+-------------+-----+-------------+------+--------------+
- | entry 0     | entry 1     | ... | entry n-1   |       zeros         |
- +-------------+-------------+-----+-------------+------+--------------+
+ 16                                                                 4096
+ +-------------+-------------+-----+-------------+--------------------+
+ | entry 0     | entry 1     | ... | entry n-1   |       zeros        |
+ +-------------+-------------+-----+-------------+--------------------+
 ```
 
-| bytes  | field       | meaning                                              |
-|--------|-------------|------------------------------------------------------|
-| 0..4   | `magic`     | `BTF4` (`42 54 46 34`)                               |
-| 4..6   | `version`   | format version, currently 3                          |
-| 6..8   | —           | zero                                                 |
-| 8..16  | `next_page` | offset of the next WAL page; 0 ends the chain        |
-| 16..20 | `count`     | number of entries in the page                        |
-| 20..24 | `used`      | bytes used, header included: 32 + the entries' bytes |
-| 24..32 | `lsn`       | written as 0 and never read                          |
+| bytes  | field       | meaning                                       |
+|--------|-------------|-----------------------------------------------|
+| 0..4   | `magic`     | `BTF4` (`42 54 46 34`)                        |
+| 4..6   | `version`   | format version, currently 4                   |
+| 6..8   | —           | zero                                          |
+| 8..16  | `next_page` | offset of the next WAL page; 0 ends the chain |
 
-Entries are packed back to back from byte 32, with no alignment. The bytes
-after `used` are zero.
+Entries are packed back to back from byte 16, with no alignment, and zeros
+fill the rest of the page. The header holds no count: a page's entries end
+at the first one that doesn't decode or fails its checksum. The zeros
+always fail, since an all-zero entry's checksum isn't zero.
 
 ## WAL entry
 
@@ -62,10 +61,11 @@ after `used` are zero.
  | key_len | flags |   0   | offset         | length    | lsn           |
  | u16     | u8    |       | u64            | u32       | u64           |
  +---------+-------+-------+----------------+-----------+---------------+
- 24                     24 + key_len
- +----------------------+
- | key bytes            |
- +----------------------+
+ 24                     24 + key_len   28 + key_len
+ +----------------------+--------------+
+ | key bytes            | checksum     |
+ |                      | u32          |
+ +----------------------+--------------+
 ```
 
 | bytes   | field     | live entry                     | tombstone       |
@@ -77,9 +77,12 @@ after `used` are zero.
 | 12..16  | `length`  | value length in bytes          | 0               |
 | 16..24  | `lsn`     | log sequence number            | same            |
 | 24..    | key       | `key_len` bytes                | same            |
+| then 4  | `checksum`| CRC-32C of the header and key  | same            |
 
-- An entry takes 24 + `key_len` bytes, so 24 to 279: a page holds 169
+- An entry takes 28 + `key_len` bytes, so 28 to 283: a page holds 145
   entries of empty keys, or 14 of 255-byte keys.
+- The checksum is CRC-32C (Castagnoli) as iSCSI uses it, whose check value
+  for `123456789` is `e3069283`.
 - LSNs strictly increase along the whole chain, across pages. Replay
   refuses a log where they don't.
 
@@ -117,9 +120,18 @@ When the entry doesn't fit:
                                                             from the file's end
 ```
 
-The old tail (with its new `next_page`) and page P go out as one write
-request. With io_uring, the two writes are linked: the old tail first, then
-P. The fallback backend runs them in parallel.
+Page P goes out first, then the old tail with its new `next_page`: two
+writes, the second started once the first completes, which `O_DSYNC` makes
+durable. So no crash leaves the chain pointing at a page never written.
+
+A power cut during a page write can land some of its 512-byte sectors and
+not the others; each sector lands whole or not at all. The entries already
+in the page hold the same bytes before and after an append, so they survive
+whichever sectors land. The new entry lands whole, or it fails its checksum
+and ends the page, and its writer was never acknowledged. The header changes
+only when `next_page` is set, so it reads as before the link or after.
+Replay keeps the page up to its first failing entry and zeroes the rest in
+memory, so the next write of the page clears what the tear left there.
 
 ## In memory only
 
@@ -128,7 +140,7 @@ P. The fallback backend runs them in parallel.
 | index         | `bbtree::BBTreeMap`: key → LSN and extent, or tombstone | the latest entry per key                     |
 | holes         | free extents, by padded size                            | extents that later entries overwrote or removed |
 | file tail     | the next free page at the end of the file               | page-aligned max of file length, highest value end, highest WAL page end |
-| WAL tail page | a copy of the last WAL page                             | the last page on the chain                   |
+| WAL tail page | a copy of the last WAL page                             | the last page on the chain, up to its first failing entry |
 | next LSN      | the LSN the next entry gets                             | the last entry's LSN + 1                     |
 
 Tombstones stay in the live index (so an older concurrent put can't bring a
@@ -169,9 +181,12 @@ Result: index `{b, c}`, holes `{[8K, 12K)}`, file tail 16K, next LSN 4.
 
 ## What the format leaves out
 
-- **No checksums**, on WAL pages or values. Replay checks only that each
-  page is well formed (magic, version, sizes, entries that decode) and that
-  LSNs increase. Any page that fails stops the mount with an error.
+- **No checksums on values or page headers.** Only WAL entries carry one,
+  and it is there to find where each page ends. A page whose header fails
+  (magic, version) stops the mount with an error, and so do LSNs that don't
+  increase. An entry corrupted after it was written just ends its page
+  early: with no count in the header, replay can't tell it from a torn
+  write.
 - **No record of the free space.** Holes come from the log: an extent is
   free once a later entry overwrites or removes the key that pointed at it.
   Space a put took from the end of the file, but never logged (a crash
