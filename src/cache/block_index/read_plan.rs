@@ -5,13 +5,10 @@
 use std::ops::Range;
 
 use super::blocks::Location;
-use super::paths::ResolvedFile;
-use crate::cache::{BLOCK_SIZE, BlockKey};
+use super::paths::FileVersion;
+use crate::cache::{BLOCK_SIZE_U64, BlockKey};
 use crate::disk::ValueWindow;
 use crate::range::RangeRequestU32;
-
-/// [`BLOCK_SIZE`], for offsets in an object.
-const BLOCK_BYTES: u64 = BLOCK_SIZE as u64;
 
 /// How to read a byte range of an object: the blocks it covers, in order,
 /// each where it was when planned, with the part of it the read needs.
@@ -71,7 +68,7 @@ impl PlannedBlock {
 
     /// The block's bytes in the object: what fetching it takes.
     pub(in crate::cache) fn object_range(&self) -> Range<u64> {
-        let start = u64::from(self.key.index()) * BLOCK_BYTES;
+        let start = u64::from(self.key.index()) * BLOCK_SIZE_U64;
         start..start + u64::from(self.len)
     }
 
@@ -149,7 +146,7 @@ impl BlockWindow {
 /// A plan being made. Told a read's cached blocks in order, it takes the
 /// blocks between them as missing.
 pub(super) struct ReadPlanner {
-    file: ResolvedFile,
+    version: FileVersion,
     /// The bytes the read takes: the range asked for, clamped to the object.
     bytes: Range<u64>,
     /// The blocks the read covers that the plan has yet to take.
@@ -158,19 +155,19 @@ pub(super) struct ReadPlanner {
 }
 
 impl ReadPlanner {
-    /// A plan for `range` of `file`, with no block taken yet.
-    pub(super) fn new(file: ResolvedFile, range: Range<u64>) -> Self {
-        let end = range.end.min(file.size());
+    /// A plan for `range` of `version`, with no block taken yet.
+    pub(super) fn new(version: FileVersion, range: Range<u64>) -> Self {
+        let end = range.end.min(version.size());
         let start = range.start.min(end);
-        let first_block = start / BLOCK_BYTES;
+        let first_block = start / BLOCK_SIZE_U64;
         let end_block = if start == end {
             first_block
         } else {
-            end.div_ceil(BLOCK_BYTES)
+            end.div_ceil(BLOCK_SIZE_U64)
         };
         let unplanned = Self::narrow(first_block)..Self::narrow(end_block);
         Self {
-            file,
+            version,
             bytes: start..end,
             planned: Vec::with_capacity(unplanned.len()),
             unplanned,
@@ -180,8 +177,8 @@ impl ReadPlanner {
     /// The keys of the blocks the read covers: what the scan that finds the
     /// cached ones goes over.
     pub(super) fn keys(&self) -> Range<BlockKey> {
-        BlockKey::new(self.file.id(), self.unplanned.start)
-            ..BlockKey::new(self.file.id(), self.unplanned.end)
+        BlockKey::new(self.version.id(), self.unplanned.start)
+            ..BlockKey::new(self.version.id(), self.unplanned.end)
     }
 
     /// Takes `key`'s block, found at `location`, and the blocks before it
@@ -189,7 +186,7 @@ impl ReadPlanner {
     /// [`Self::keys`].
     pub(super) fn found(&mut self, key: BlockKey, location: Location) {
         let index = key.index();
-        debug_assert!(key.file() == self.file.id() && self.unplanned.contains(&index));
+        debug_assert!(key.file_version() == self.version.id() && self.unplanned.contains(&index));
         for missing in self.unplanned.start..index {
             self.plan(missing, None);
         }
@@ -210,20 +207,22 @@ impl ReadPlanner {
     }
 
     fn plan(&mut self, index: u32, location: Option<Location>) {
-        let block_start = u64::from(index) * BLOCK_BYTES;
-        let block_end = (block_start + BLOCK_BYTES).min(self.file.size());
+        let Range {
+            start: block_start,
+            end: block_end,
+        } = self.version.block_range(index);
         let needed_start = self.bytes.start.max(block_start) - block_start;
         let needed_end = self.bytes.end.min(block_end) - block_start;
         let len = Self::narrow(block_end - block_start);
         self.planned.push(PlannedBlock {
-            key: BlockKey::new(self.file.id(), index),
+            key: BlockKey::new(self.version.id(), index),
             len,
             location,
             window: BlockWindow::new(Self::narrow(needed_start)..Self::narrow(needed_end), len),
         });
     }
 
-    /// A block number or an offset in a block, as a `u32`: `ResolvedFile`
+    /// A block number or an offset in a block, as a `u32`: `FileVersion`
     /// keeps an object's block numbers below the last a `BlockKey` holds, so
     /// the number past its last fits too.
     fn narrow(value: u64) -> u32 {
@@ -231,17 +230,18 @@ impl ReadPlanner {
     }
 }
 
-#[cfg(test)]
+// Outside shuttle, whose atomics `PathTable` uses.
+#[cfg(all(test, not(feature = "shuttle")))]
 mod tests {
     use super::*;
     use crate::cache::ChunkId;
     use crate::cache::block_index::{BlockTable, PathTable};
 
-    const MIB: u64 = BLOCK_BYTES;
-    const MIB_U32: u32 = BLOCK_SIZE as u32;
+    const MIB: u64 = BLOCK_SIZE_U64;
+    const MIB_U32: u32 = crate::cache::BLOCK_SIZE as u32;
     const PAGE: u32 = crate::PAGE_SIZE_U32;
 
-    fn file(size: u64) -> ResolvedFile {
+    fn file(size: u64) -> FileVersion {
         PathTable::new().resolve(b"p", Some("v1"), size).unwrap()
     }
 
@@ -459,7 +459,7 @@ mod tests {
         assert!(
             plan.blocks()
                 .iter()
-                .all(|block| block.key().file() == file.id())
+                .all(|block| block.key().file_version() == file.id())
         );
     }
 }

@@ -11,12 +11,9 @@ mod blocks;
 mod paths;
 mod read_plan;
 
-// The surface the cache's glue uses, once it is built (after build steps 1
-// and 2); unused until then.
-#[allow(unused_imports)]
 pub(super) use blocks::{BlockTable, Location};
-#[allow(unused_imports)]
-pub(super) use paths::{PathTable, ResolvedFile, UncacheableObject};
+pub(super) use paths::{FileVersion, PathTable, UncacheableObject};
+// What a plan holds, which `ObjectCache` reads without naming the types.
 #[allow(unused_imports)]
 pub(super) use read_plan::{BlockWindow, MissingRun, PlannedBlock, ReadPlan};
 

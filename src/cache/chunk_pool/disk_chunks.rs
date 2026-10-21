@@ -1,9 +1,9 @@
 use super::chunk_table::{ChunkLease, ChunkPin, ChunkTable};
 use crate::PAGE_SIZE_U64;
-use crate::cache::{BLOCK_SIZE, BlockKey, ChunkId};
+use crate::cache::{BLOCK_SIZE_U64, BlockKey, ChunkId};
 use crate::io::error::{Error, Result};
 
-/// The disk tier (`doc/03-cache.md`, decision 2): the t4 file's data
+/// The disk tier (`doc/03-cache.md`, decision 2): the cache file's data
 /// chunks, chunk `i` the `BLOCK_SIZE` bytes at `data_start + i *
 /// BLOCK_SIZE`. The rest of the file, and its size, are its owner's.
 ///
@@ -16,8 +16,6 @@ pub(in crate::cache) struct DiskChunks {
 }
 
 impl DiskChunks {
-    const BLOCK_SIZE_U64: u64 = BLOCK_SIZE as u64;
-
     /// `chunk_count` chunks from `data_start` on, all free. `data_start` is
     /// a page boundary, as `O_DIRECT` needs.
     pub(in crate::cache) fn new(data_start: u64, chunk_count: u32) -> Result<Self> {
@@ -27,7 +25,7 @@ impl DiskChunks {
             ));
         }
         // At most 2^32 chunks of 2^20 bytes: no overflow.
-        let data_len = u64::from(chunk_count) * Self::BLOCK_SIZE_U64;
+        let data_len = u64::from(chunk_count) * BLOCK_SIZE_U64;
         if data_start.checked_add(data_len).is_none() {
             return Err(Error::InvalidArgument(
                 "disk chunks end past the largest file offset",
@@ -54,12 +52,6 @@ impl DiskChunks {
             offset: self.offset(lease.chunk()),
             lease,
         })
-    }
-
-    /// Takes free `chunk` as holding `block`: loading the snapshot a clean
-    /// shutdown wrote. Whether it was free; if it wasn't, nothing changes.
-    pub(in crate::cache) fn mark_used(&self, chunk: ChunkId, block: BlockKey) -> bool {
-        self.table.mark_used(chunk, block)
     }
 
     /// Holds `chunk` to read `block` from it, and marks it accessed. `None`
@@ -94,7 +86,7 @@ impl DiskChunks {
     /// Where `chunk` starts in the file. Only for a chunk the table has
     /// checked, by leasing or pinning it.
     fn offset(&self, chunk: ChunkId) -> u64 {
-        self.data_start + u64::from(chunk.index()) * Self::BLOCK_SIZE_U64
+        self.data_start + u64::from(chunk.index()) * BLOCK_SIZE_U64
     }
 }
 
@@ -158,7 +150,7 @@ impl DiskChunkReader<'_> {
 #[cfg(all(test, not(feature = "shuttle")))]
 mod tests {
     use super::*;
-    use crate::cache::FileId;
+    use crate::cache::FileVersionId;
 
     const DATA_START: u64 = 3 * PAGE_SIZE_U64;
 
@@ -169,7 +161,7 @@ mod tests {
         let writers: Vec<_> = std::iter::from_fn(|| chunks.allocate()).collect();
         let mut offsets: Vec<u64> = writers.iter().map(DiskChunkWriter::offset).collect();
         offsets.sort_unstable();
-        let block = DiskChunks::BLOCK_SIZE_U64;
+        let block = BLOCK_SIZE_U64;
         assert_eq!(
             offsets,
             [DATA_START, DATA_START + block, DATA_START + 2 * block]
@@ -185,7 +177,7 @@ mod tests {
     #[test]
     fn a_read_in_flight_keeps_its_chunk_from_reuse() {
         let chunks = DiskChunks::new(DATA_START, 1).unwrap();
-        let block = BlockKey::new(FileId::new(1), 0);
+        let block = BlockKey::new(FileVersionId::new(1), 0);
         let chunk = chunks.allocate().unwrap().publish(block).chunk();
         let reader = chunks.read(chunk, block).unwrap();
         assert_eq!(reader.offset(), DATA_START);
@@ -195,15 +187,5 @@ mod tests {
         assert!(chunks.allocate().is_none(), "the read is still in flight");
         drop(reader);
         assert_eq!(chunks.allocate().unwrap().chunk(), chunk);
-    }
-
-    #[test]
-    fn a_loaded_chunk_reads_back() {
-        let chunks = DiskChunks::new(DATA_START, 2).unwrap();
-        let block = BlockKey::new(FileId::new(1), 5);
-        assert!(chunks.mark_used(ChunkId::new(1), block));
-        assert_eq!(chunks.free_count(), 1);
-        let reader = chunks.read(ChunkId::new(1), block).unwrap();
-        assert_eq!(reader.offset(), DATA_START + DiskChunks::BLOCK_SIZE_U64);
     }
 }

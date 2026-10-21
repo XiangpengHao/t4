@@ -56,17 +56,6 @@ impl ChunkTable {
         Some(ChunkLease { table: self, chunk })
     }
 
-    /// Takes free `chunk` as holding `block`, published: loading the
-    /// snapshot a clean shutdown wrote. Whether it was free; if it wasn't,
-    /// nothing changes.
-    pub(super) fn mark_used(&self, chunk: ChunkId, block: BlockKey) -> bool {
-        if !self.free_chunks().mark_used(chunk) {
-            return false;
-        }
-        self.publish(chunk, block, 0);
-        true
-    }
-
     /// Pins `chunk` to read `block` from it, and marks it accessed. `None`
     /// if the chunk doesn't hold `block`: the index entry that named it is
     /// stale, and the caller looks again.
@@ -121,9 +110,9 @@ impl ChunkTable {
         state & Self::ACCESSED != 0
     }
 
-    /// Publishes `block` in free or leased `chunk`, with `readers` pins.
-    /// The chunk starts unaccessed.
-    fn publish(&self, chunk: ChunkId, block: BlockKey, readers: u32) {
+    /// Publishes `block` in leased `chunk`, its writer holding it as a
+    /// reader. The chunk starts unaccessed.
+    fn publish(&self, chunk: ChunkId, block: BlockKey) {
         let slot = self.slot(chunk);
         let state = slot.state.load(Ordering::Relaxed);
         assert_eq!(
@@ -134,8 +123,7 @@ impl ChunkTable {
         slot.set_owner(block);
         // Release: the owner, and the bytes the writer wrote, come before
         // any pin that sees `PUBLISHED`.
-        slot.state
-            .store(Self::PUBLISHED | readers, Ordering::Release);
+        slot.state.store(Self::PUBLISHED | 1, Ordering::Release);
     }
 
     /// Whether this call unpublished `chunk`: of two evictions of one
@@ -232,7 +220,7 @@ impl<'table> ChunkLease<'table> {
         let (table, chunk) = (self.table, self.chunk);
         // From here the pin frees the chunk, not the lease.
         std::mem::forget(self);
-        table.publish(chunk, block, 1);
+        table.publish(chunk, block);
         ChunkPin {
             table,
             chunk,
@@ -281,10 +269,10 @@ impl Drop for ChunkPin<'_> {
 #[cfg(all(test, not(feature = "shuttle")))]
 mod tests {
     use super::*;
-    use crate::cache::FileId;
+    use crate::cache::FileVersionId;
 
     fn block(file: u64) -> BlockKey {
-        BlockKey::new(FileId::new(file), 0)
+        BlockKey::new(FileVersionId::new(file), 0)
     }
 
     #[test]
@@ -327,23 +315,6 @@ mod tests {
         let reused = table.allocate().unwrap().publish(block(2));
         assert_eq!(reused.chunk(), chunk);
         assert!(table.pin_block(chunk, block(1)).is_none());
-    }
-
-    #[test]
-    fn marked_chunks_are_published() {
-        let table = ChunkTable::new(2);
-        let chunk = ChunkId::new(1);
-        assert!(table.mark_used(chunk, block(1)));
-        assert!(!table.mark_used(chunk, block(2)), "already used");
-        assert_eq!(table.free_count(), 1);
-        let other = table.allocate().unwrap();
-        assert_eq!(other.chunk(), ChunkId::new(0));
-        assert!(!table.take_accessed(chunk), "loaded unaccessed");
-
-        assert_eq!(table.pin_block(chunk, block(1)).unwrap().block(), block(1));
-        table.pin(chunk).unwrap().unpublish();
-        assert_eq!(table.free_count(), 1);
-        assert_eq!(table.allocate().unwrap().chunk(), chunk);
     }
 
     #[test]

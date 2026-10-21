@@ -220,7 +220,7 @@ impl Drop for PoolMemory {
 #[cfg(all(test, not(feature = "shuttle")))]
 mod tests {
     use super::*;
-    use crate::cache::FileId;
+    use crate::cache::FileVersionId;
     use crate::io::sync::Mutex;
 
     fn pool(chunk_count: u32) -> MemoryPool {
@@ -228,11 +228,11 @@ mod tests {
     }
 
     /// Writes `block`'s bytes into a chunk, as a fetch would: its key, then
-    /// a byte of its file id throughout.
+    /// a byte of its file version id throughout.
     fn fill(writer: &mut MemoryChunkWriter<'_>, block: BlockKey) {
         let bytes = writer.bytes_mut();
-        bytes.fill(block.file().get() as u8);
-        bytes[..8].copy_from_slice(&block.file().get().to_le_bytes());
+        bytes.fill(block.file_version().get() as u8);
+        bytes[..8].copy_from_slice(&block.file_version().get().to_le_bytes());
         bytes[8..12].copy_from_slice(&block.index().to_le_bytes());
     }
 
@@ -240,8 +240,8 @@ mod tests {
     /// the fill byte at the end of every page.
     fn holds_its_block(reader: &MemoryChunkReader<'_>) -> bool {
         let (block, bytes) = (reader.block(), reader.bytes());
-        let tag = block.file().get() as u8;
-        bytes[..8] == block.file().get().to_le_bytes()
+        let tag = block.file_version().get() as u8;
+        bytes[..8] == block.file_version().get().to_le_bytes()
             && bytes[8..12] == block.index().to_le_bytes()
             && bytes
                 .chunks(PAGE_SIZE)
@@ -275,18 +275,21 @@ mod tests {
     #[test]
     fn a_published_chunk_reads_back_its_block() {
         let pool = pool(2);
-        let block = BlockKey::new(FileId::new(7), 3);
+        let block = BlockKey::new(FileVersionId::new(7), 3);
         let chunk = publish(&pool, block);
         let reader = pool.read(chunk, block).unwrap();
         assert_eq!(reader.bytes().len(), BLOCK_SIZE);
         assert!(holds_its_block(&reader));
-        assert!(pool.read(chunk, BlockKey::new(FileId::new(7), 4)).is_none());
+        assert!(
+            pool.read(chunk, BlockKey::new(FileVersionId::new(7), 4))
+                .is_none()
+        );
     }
 
     #[test]
     fn an_evicted_chunk_is_freed_after_its_last_reader() {
         let pool = pool(1);
-        let block = BlockKey::new(FileId::new(1), 0);
+        let block = BlockKey::new(FileVersionId::new(1), 0);
         let chunk = publish(&pool, block);
         let reader = pool.read(chunk, block).unwrap();
         assert!(pool.pin_for_eviction(chunk).unwrap().unpublish());
@@ -310,7 +313,7 @@ mod tests {
                 let (pool, published) = (&pool, &published);
                 scope.spawn(move || {
                     for round in 0..ROUNDS {
-                        let block = BlockKey::new(FileId::new(thread), round);
+                        let block = BlockKey::new(FileVersionId::new(thread), round);
                         if let Some(mut writer) = pool.allocate() {
                             fill(&mut writer, block);
                             let reader = writer.publish(block);

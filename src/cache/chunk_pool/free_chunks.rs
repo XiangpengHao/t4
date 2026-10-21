@@ -63,18 +63,6 @@ impl FreeChunks {
         self.cursor = word_index;
     }
 
-    /// Takes `chunk` itself, as loading the snapshot a clean shutdown wrote
-    /// does for each chunk it names. Whether it was free.
-    pub(super) fn mark_used(&mut self, chunk: ChunkId) -> bool {
-        let (word_index, mask) = self.bit_of(chunk);
-        let was_free = self.taken[word_index] & mask == 0;
-        if was_free {
-            self.taken[word_index] |= mask;
-            self.free_count -= 1;
-        }
-        was_free
-    }
-
     pub(super) fn free_count(&self) -> u32 {
         self.free_count
     }
@@ -128,22 +116,6 @@ mod tests {
         }
         assert_eq!(free.free_count(), 3);
         assert_eq!(allocate_all(&mut free), BTreeSet::from([3, 64, CHUNKS - 1]));
-    }
-
-    #[test]
-    fn marked_chunks_are_not_allocated() {
-        let mut free = FreeChunks::new(CHUNKS);
-        assert!(free.mark_used(ChunkId::new(0)));
-        assert!(free.mark_used(ChunkId::new(70)));
-        assert!(!free.mark_used(ChunkId::new(70)), "already used");
-        assert_eq!(free.free_count(), CHUNKS - 2);
-
-        let allocated = allocate_all(&mut free);
-        assert_eq!(allocated.len(), CHUNKS as usize - 2);
-        assert!(!allocated.contains(&0) && !allocated.contains(&70));
-
-        free.free(ChunkId::new(70));
-        assert_eq!(free.allocate(), Some(ChunkId::new(70)));
     }
 
     #[test]

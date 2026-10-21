@@ -1,18 +1,19 @@
 //! The memory pool under shuttle: readers racing the eviction and reuse of
-//! the chunk they read.
+//! the chunk they read, and the replacement policy's sweep, on one chunk's
+//! state word.
 
 use std::num::NonZeroU32;
 
 use super::memory_pool::MemoryPool;
-use crate::cache::{BlockKey, ChunkId, FileId};
+use crate::cache::{BlockKey, ChunkId, FileVersionId};
 use crate::io::sync::{Arc, thread};
 
 fn block(file: u64) -> BlockKey {
-    BlockKey::new(FileId::new(file), 0)
+    BlockKey::new(FileVersionId::new(file), 0)
 }
 
 /// A one-chunk pool, the chunk holding `block` published, every byte its
-/// file id's.
+/// file version id's.
 fn pool_holding(block: BlockKey) -> (Arc<MemoryPool>, ChunkId) {
     let pool = Arc::new(MemoryPool::new(NonZeroU32::MIN).unwrap());
     let chunk = publish(&pool, block).unwrap();
@@ -21,7 +22,7 @@ fn pool_holding(block: BlockKey) -> (Arc<MemoryPool>, ChunkId) {
 
 fn publish(pool: &MemoryPool, block: BlockKey) -> Option<ChunkId> {
     let mut writer = pool.allocate()?;
-    writer.bytes_mut().fill(block.file().get() as u8);
+    writer.bytes_mut().fill(block.file_version().get() as u8);
     Some(writer.publish(block).chunk())
 }
 
@@ -30,7 +31,7 @@ fn publish(pool: &MemoryPool, block: BlockKey) -> Option<ChunkId> {
 fn read(pool: &MemoryPool, chunk: ChunkId, block: BlockKey) {
     if let Some(reader) = pool.read(chunk, block) {
         let bytes = reader.bytes();
-        let tag = block.file().get() as u8;
+        let tag = block.file_version().get() as u8;
         assert!(bytes[0] == tag && bytes[bytes.len() - 1] == tag);
     }
 }
@@ -60,6 +61,46 @@ fn a_reader_racing_reuse_reads_its_block_or_nothing() {
             let reused = evictor.join().unwrap();
             assert!(pool.read(chunk, block(1)).is_none());
             assert_eq!(pool.free_count(), u32::from(reused.is_none()));
+        },
+        1000,
+        3,
+    );
+}
+
+/// The access bit shares the state word with the open bit and the reader
+/// count: setting and taking it, between pins and unpins and the close,
+/// changes neither.
+#[test]
+fn access_bits_never_disturb_the_readers() {
+    shuttle::check_pct(
+        || {
+            let (pool, chunk) = pool_holding(block(1));
+            let mut handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let pool = Arc::clone(&pool);
+                    thread::spawn(move || read(&pool, chunk, block(1)))
+                })
+                .collect();
+            handles.push({
+                let pool = Arc::clone(&pool);
+                thread::spawn(move || {
+                    pool.take_accessed(chunk);
+                    pool.take_accessed(chunk);
+                })
+            });
+            handles.push({
+                let pool = Arc::clone(&pool);
+                thread::spawn(move || {
+                    assert!(pool.pin_for_eviction(chunk).unwrap().unpublish());
+                })
+            });
+            for handle in handles {
+                handle.join().unwrap();
+            }
+            // Freed once every reader left: the count came back to zero, and
+            // the close held.
+            assert_eq!(pool.free_count(), 1);
+            assert!(pool.read(chunk, block(1)).is_none());
         },
         1000,
         3,

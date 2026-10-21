@@ -6,7 +6,7 @@ use std::ops::{ControlFlow, Range};
 use bbtree::BBTreeMap;
 
 use super::InsertOrAbort;
-use super::paths::ResolvedFile;
+use super::paths::FileVersion;
 use super::read_plan::{ReadPlan, ReadPlanner};
 use crate::cache::{BlockKey, ChunkId};
 
@@ -15,7 +15,7 @@ use crate::cache::{BlockKey, ChunkId};
 pub(in crate::cache) enum Location {
     /// In this chunk of the memory pool.
     Memory(ChunkId),
-    /// In this data chunk of the file.
+    /// In this data chunk of the cache file.
     Disk(ChunkId),
     /// On its way from the object store.
     Fetching,
@@ -50,6 +50,17 @@ impl BlockTable {
         self.blocks.insert(key.packed(), location).or_abort()
     }
 
+    /// Puts `key`'s block at `location` if no tier holds it, and says
+    /// whether it did: of two fetches of one block, the first to finish
+    /// caches it.
+    pub(in crate::cache) fn insert_if_absent(&self, key: BlockKey, location: Location) -> bool {
+        // `None`: no entry was there, and `location` went in.
+        self.blocks
+            .update_or_insert(key.packed(), location, |_, _, _| ())
+            .or_abort()
+            .is_none()
+    }
+
     /// Moves `key`'s block to `new` if it is at `expected`, and says whether
     /// it did: eviction moves a block only from the chunk it evicts
     /// (decision 8).
@@ -77,13 +88,13 @@ impl BlockTable {
             .is_some()
     }
 
-    /// How to read `range` of `file`: the blocks it covers, in order, each
-    /// where it is, found by one scan over the file's adjacent keys.
+    /// How to read `range` of `version`: the blocks it covers, in order, each
+    /// where it is, found by one scan over the version's adjacent keys.
     ///
     /// The plan is neither a snapshot nor a hold: a block may move or leave
     /// while it is made, or after, as eviction goes on.
-    pub(in crate::cache) fn plan_read(&self, file: ResolvedFile, range: Range<u64>) -> ReadPlan {
-        let mut planner = ReadPlanner::new(file, range);
+    pub(in crate::cache) fn plan_read(&self, version: FileVersion, range: Range<u64>) -> ReadPlan {
+        let mut planner = ReadPlanner::new(version, range);
         let keys = planner.keys();
         if !keys.is_empty() {
             let scanned = keys.start.packed()..keys.end.packed();
@@ -99,10 +110,10 @@ impl BlockTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::FileId;
+    use crate::cache::FileVersionId;
 
     fn key(file: u64, index: u32) -> BlockKey {
-        BlockKey::new(FileId::new(file), index)
+        BlockKey::new(FileVersionId::new(file), index)
     }
 
     fn memory(chunk: u32) -> Location {
@@ -122,6 +133,15 @@ mod tests {
         assert_eq!(table.get(key(1, 0)), Some(memory(3)));
         assert_eq!(table.get(key(1, 1)), None);
         assert_eq!(table.get(key(2, 0)), None);
+    }
+
+    #[test]
+    fn insert_if_absent_keeps_the_first() {
+        let table = BlockTable::new();
+        assert!(table.insert_if_absent(key(1, 0), memory(3)));
+        assert!(!table.insert_if_absent(key(1, 0), memory(4)));
+        assert_eq!(table.get(key(1, 0)), Some(memory(3)));
+        assert!(table.insert_if_absent(key(1, 1), memory(4)));
     }
 
     #[test]

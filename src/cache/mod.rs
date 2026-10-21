@@ -5,17 +5,21 @@
 //!   each holds (build step 1).
 //! - `block_index`: which blocks of which objects are cached, and where
 //!   (build step 2).
+//! - `object_cache`: reads and fills over the two: blocks copied from memory
+//!   chunks, and fetched blocks cached in them.
 
 mod block_index;
 mod chunk_pool;
+mod object_cache;
 
 use std::fmt;
 
 /// The bytes of a block, and of the chunk that holds it.
 const BLOCK_SIZE: usize = 1 << 20;
+const BLOCK_SIZE_U64: u64 = BLOCK_SIZE as u64;
 
 /// A chunk, by its number in its tier: the memory pool's chunks, or the
-/// file's data chunks. Which tier it is in is its holder's to say.
+/// cache file's data chunks. Which tier it is in is its holder's to say.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct ChunkId(u32);
 
@@ -29,18 +33,18 @@ impl ChunkId {
     }
 }
 
-/// A version of an object: the id the cache gave its path and e_tag
+/// A file version: the id the cache gave a file's path and e_tag
 /// (`doc/03-cache.md`, decision 5). Never reused, and below 2^40, as a
 /// [`BlockKey`] keeps it in 40 bits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct FileId(u64);
+struct FileVersionId(u64);
 
-impl FileId {
-    /// File ids are below this: 2^40, about 1.1 trillion versions.
+impl FileVersionId {
+    /// File version ids are below this: 2^40, about 1.1 trillion versions.
     const LIMIT: u64 = 1 << (u64::BITS - BlockKey::INDEX_BITS);
 
     fn new(id: u64) -> Self {
-        assert!(id < Self::LIMIT, "file ids ran out: 2^40 of them");
+        assert!(id < Self::LIMIT, "file version ids ran out: 2^40 of them");
         Self(id)
     }
 
@@ -49,12 +53,12 @@ impl FileId {
     }
 }
 
-/// Block `index` of a file: its bytes `[index * BLOCK_SIZE, (index + 1) *
-/// BLOCK_SIZE)`, fewer for an object's last block.
+/// Block `index` of a file version: its bytes `[index * BLOCK_SIZE, (index
+/// + 1) * BLOCK_SIZE)`, fewer for a file's last block.
 ///
-/// One `u64`: the file id in the high 40 bits, the block number in the low
-/// 24 (decision 4). So it orders by file, then block, as the index keeps
-/// its keys, and a chunk's owner is one atomic word.
+/// One `u64`: the file version id in the high 40 bits, the block number in
+/// the low 24 (decision 4). So it orders by file version, then block, as
+/// the index keeps its keys, and a chunk's owner is one atomic word.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct BlockKey(u64);
 
@@ -64,9 +68,9 @@ impl BlockKey {
     /// Block numbers are below this: 2^24, so a file is under 16 TiB.
     const INDEX_LIMIT: u32 = 1 << Self::INDEX_BITS;
 
-    fn new(file: FileId, index: u32) -> Self {
+    fn new(version: FileVersionId, index: u32) -> Self {
         assert!(index < Self::INDEX_LIMIT, "block numbers stop below 2^24");
-        Self((file.0 << Self::INDEX_BITS) | u64::from(index))
+        Self((version.0 << Self::INDEX_BITS) | u64::from(index))
     }
 
     /// The key [`Self::packed`] gave: every `u64` is one.
@@ -78,8 +82,8 @@ impl BlockKey {
         self.0
     }
 
-    fn file(self) -> FileId {
-        FileId(self.0 >> Self::INDEX_BITS)
+    fn file_version(self) -> FileVersionId {
+        FileVersionId(self.0 >> Self::INDEX_BITS)
     }
 
     fn index(self) -> u32 {
@@ -91,7 +95,7 @@ impl BlockKey {
 impl fmt::Debug for BlockKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BlockKey")
-            .field("file", &self.file().get())
+            .field("file_version", &self.file_version().get())
             .field("index", &self.index())
             .finish()
     }
@@ -103,7 +107,7 @@ mod tests {
 
     #[test]
     fn block_keys_order_by_file_then_block_and_unpack() {
-        let last_file = FileId::LIMIT - 1;
+        let last_file = FileVersionId::LIMIT - 1;
         let last_index = BlockKey::INDEX_LIMIT - 1;
         let keys = [
             (0, 0),
@@ -114,7 +118,7 @@ mod tests {
             (last_file, 0),
             (last_file, last_index),
         ]
-        .map(|(file, index)| BlockKey::new(FileId::new(file), index));
+        .map(|(file, index)| BlockKey::new(FileVersionId::new(file), index));
         for pair in keys.windows(2) {
             assert!(pair[0] < pair[1]);
             assert!(pair[0].packed() < pair[1].packed());
@@ -123,18 +127,21 @@ mod tests {
             assert_eq!(BlockKey::from_packed(key.packed()), key);
         }
         let key = keys[6];
-        assert_eq!((key.file().get(), key.index()), (last_file, last_index));
+        assert_eq!(
+            (key.file_version().get(), key.index()),
+            (last_file, last_index)
+        );
     }
 
     #[test]
-    #[should_panic(expected = "file ids ran out")]
+    #[should_panic(expected = "file version ids ran out")]
     fn file_ids_stop_below_their_limit() {
-        FileId::new(FileId::LIMIT);
+        FileVersionId::new(FileVersionId::LIMIT);
     }
 
     #[test]
     #[should_panic(expected = "block numbers stop")]
     fn block_numbers_stop_below_their_limit() {
-        BlockKey::new(FileId::new(0), BlockKey::INDEX_LIMIT);
+        BlockKey::new(FileVersionId::new(0), BlockKey::INDEX_LIMIT);
     }
 }
