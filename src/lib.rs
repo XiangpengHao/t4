@@ -1,4 +1,7 @@
 mod buffer;
+// Not wired into the store yet (`doc/03-cache.md`, build steps 1 and 2).
+#[allow(dead_code)]
+mod cache;
 mod disk;
 mod index;
 mod input_kv;

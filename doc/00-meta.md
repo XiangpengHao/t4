@@ -1,5 +1,13 @@
 # 00 — Meta
 
+## Pivot Oct-20
+
+I want to pivot `t4` into a object store cache that holistically optimize two goals: 1. saturate NIC bandwidth when there's a cache miss, 2. saturate disk bandwidth when there's a cache hit. Or, use minimal threads to saturate bandwidth.
+
+The interface of this caching will be very similar to object_store, but internally it handles: 1. cache replacement, 2. request coalescing and splits, 3. io_uring and multi-device read, 4. racing read for latency critical request (like metadata).
+
+But so far, we only focus on the second part.
+
 ## What It Is
 
 `t4` is a single-file local object store with a key/value API optimized for larger values (roughly `>4 KB`).

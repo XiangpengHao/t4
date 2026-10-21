@@ -57,9 +57,3 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }
 name = "io_worker_throughput"
 harness = false
 required-features = ["__bench"]
-
-# Reads a drive through t4 and through fio; see the file for the workload.
-[[bench]]
-name = "read_throughput"
-harness = false
-required-features = ["__bench"]
