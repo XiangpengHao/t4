@@ -1,12 +1,15 @@
+use std::any::Any;
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
 
 use rustix::mm::{MapFlags, ProtFlags};
 
-use super::chunk_table::{ChunkLease, ChunkPin, ChunkTable};
+use super::chunk_table::{ChunkLease, ChunkPin, ChunkTable, ChunkTier};
 use crate::PAGE_SIZE;
+use crate::buffer::AlignedBuf;
 use crate::cache::{BLOCK_SIZE, BlockKey, ChunkId};
 use crate::io::error::{Error, Result};
+use crate::io::sync::Arc;
 
 /// The memory tier (`doc/03-cache.md`, decision 2): chunks in one mapping,
 /// taken when the pool is built and given back when it drops.
@@ -79,6 +82,12 @@ impl MemoryPool {
     }
 }
 
+impl ChunkTier for MemoryPool {
+    fn chunk_table(&self) -> &ChunkTable {
+        &self.table
+    }
+}
+
 /// A free chunk, its one writer's to fill until [`Self::publish`]. Dropped
 /// unpublished, it frees the chunk.
 pub(in crate::cache) struct MemoryChunkWriter<'pool> {
@@ -121,12 +130,33 @@ pub(in crate::cache) struct MemoryChunkReader<'pool> {
 }
 
 impl MemoryChunkReader<'_> {
+    const CHUNK_LEN: NonZeroU32 = NonZeroU32::new(BLOCK_SIZE as u32).expect("a chunk has bytes");
+
     pub(in crate::cache) fn chunk(&self) -> ChunkId {
         self.pin.chunk()
     }
 
     pub(in crate::cache) fn block(&self) -> BlockKey {
         self.pin.block()
+    }
+
+    /// The whole chunk, as a buffer a direct I/O writes to disk from. The
+    /// buffer holds the chunk, and `with`, until it drops, after the write
+    /// is done, whatever becomes of this reader. `pool` is the pool the chunk
+    /// is in.
+    pub(in crate::cache) fn lend_for_write(
+        &self,
+        pool: &Arc<MemoryPool>,
+        with: impl Any + Send + Sync,
+    ) -> AlignedBuf {
+        let hold = self.pin.hold_owned(pool);
+        let start = self.memory.chunk_start(self.pin.chunk());
+        // SAFETY: the chunk starts on a page boundary, and is `BLOCK_SIZE`
+        // bytes, whole pages. `hold` keeps it from being freed, so no writer
+        // gets it, and `pool`, so the mapping stays: both live in the guard,
+        // as long as the buffer. The I/O only reads the bytes, as readers
+        // copying from the chunk meanwhile do; nothing writes them.
+        unsafe { AlignedBuf::lent(start, Self::CHUNK_LEN, Arc::new((hold, with))) }
     }
 
     /// The chunk's `BLOCK_SIZE` bytes: `block`'s, within the block's length.

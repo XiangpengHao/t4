@@ -5,10 +5,12 @@
 //!   each holds (build step 1).
 //! - `block_index`: which blocks of which objects are cached, and where
 //!   (build step 2).
-//! - `object_cache`: reads and fills over the two: blocks copied from memory
-//!   chunks, and fetched blocks cached in them.
+//! - `cache_file`: the disk tier, its chunks in one file read and written
+//!   by direct I/O.
+//! - `object_cache`: reads, fills and evictions over them all.
 
 mod block_index;
+mod cache_file;
 mod chunk_pool;
 mod object_cache;
 

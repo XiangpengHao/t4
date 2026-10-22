@@ -10,10 +10,22 @@ fn worker_failed_error(message: impl Into<String>) -> Error {
     Error::Io(std::io::Error::other(message.into()))
 }
 
+/// Fails a request never submitted. Its buffers drop first, as a completed
+/// request's do ([`InflightRequest::complete`]).
 fn complete_request_with_error(request: WorkerRequest, err: Error) {
     match request {
-        WorkerRequest::Read { completion, .. } => completion.complete(Err(err)),
-        WorkerRequest::Write { completion, .. } => completion.complete(Err(err)),
+        WorkerRequest::Read {
+            buf, completion, ..
+        } => {
+            drop(buf);
+            completion.complete(Err(err));
+        }
+        WorkerRequest::Write {
+            writes, completion, ..
+        } => {
+            drop(writes);
+            completion.complete(Err(err));
+        }
     }
 }
 
@@ -51,6 +63,10 @@ enum InflightRequestKind {
 }
 
 impl InflightRequest {
+    /// Tells the request's caller how it went. The buffers it doesn't hand
+    /// back drop first: a write's, a failed read's. So once the caller's
+    /// future is ready, they are gone, and with them whatever a lent buffer
+    /// held for the I/O: the cache frees the chunks a write held then.
     fn complete(self) {
         match self.kind {
             InflightRequestKind::Read {
@@ -58,23 +74,38 @@ impl InflightRequest {
                 completion,
                 result,
             } => match self.error {
-                Some(err) => completion.complete(Err(err)),
+                Some(err) => {
+                    drop(buf);
+                    completion.complete(Err(err));
+                }
                 None => completion.complete(Ok((
                     buf.expect("read buffer missing at completion"),
                     result.expect("read result missing at completion"),
                 ))),
             },
-            InflightRequestKind::Write { completion, .. } => match self.error {
-                Some(err) => completion.complete(Err(err)),
-                None => completion.complete(Ok(())),
-            },
+            InflightRequestKind::Write { pages, completion } => {
+                drop(pages);
+                match self.error {
+                    Some(err) => completion.complete(Err(err)),
+                    None => completion.complete(Ok(())),
+                }
+            }
         }
     }
 
+    /// [`Self::complete`] with `err`.
     fn complete_with_error(self, err: Error) {
         match self.kind {
-            InflightRequestKind::Read { completion, .. } => completion.complete(Err(err)),
-            InflightRequestKind::Write { completion, .. } => completion.complete(Err(err)),
+            InflightRequestKind::Read {
+                buf, completion, ..
+            } => {
+                drop(buf);
+                completion.complete(Err(err));
+            }
+            InflightRequestKind::Write { pages, completion } => {
+                drop(pages);
+                completion.complete(Err(err));
+            }
         }
     }
 }

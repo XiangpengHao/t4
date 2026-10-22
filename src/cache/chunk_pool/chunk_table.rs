@@ -3,23 +3,25 @@ use std::sync::PoisonError;
 use super::free_chunks::FreeChunks;
 use crate::cache::{BlockKey, ChunkId};
 use crate::io::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use crate::io::sync::{Mutex, MutexGuard};
+use crate::io::sync::{Arc, Mutex, MutexGuard};
 
 /// A tier's chunks (`doc/03-cache.md`, decisions 2 and 8): which are free,
 /// and for each, the block it holds, an access bit for the replacement
-/// policy, and the count of readers holding it.
+/// policy, and the count of its holders.
 ///
 /// A chunk goes round:
 /// 1. free: [`Self::allocate`] leases it to one writer, a [`ChunkLease`];
 /// 2. published: [`ChunkLease::publish`] names the block it holds, and any
 ///    number of readers pin it ([`Self::pin_block`]), each a [`ChunkPin`];
 /// 3. unpublished: [`ChunkPin::unpublish`] stops new pins, and the chunk is
-///    free again when its last pin drops. A lease dropped unpublished frees
-///    its chunk at once.
+///    free again when its last holder drops.
 ///
-/// So a chunk is freed once no block is published in it and no reader holds
-/// it, and exactly once: by whichever drop leaves it so. Its owner changes
-/// only while it is free or leased, so it holds still under a pin.
+/// A holder is the lease, a pin, or a hold a direct I/O in flight keeps
+/// ([`OwnedChunkHold`]), which a lease or a pin takes. So a chunk is freed
+/// once no block is published in it and nothing holds it, and exactly once:
+/// by whichever drop leaves it so. A lease dropped unpublished frees its
+/// chunk once the I/O it started is done. The owner changes only while the
+/// chunk is free or leased, so it holds still under a pin.
 pub(super) struct ChunkTable {
     free: Mutex<FreeChunks>,
     slots: Box<[ChunkSlot]>,
@@ -30,7 +32,7 @@ impl ChunkTable {
     const PUBLISHED: u32 = 1 << 31;
     /// Set by reads, cleared by the replacement policy's sweep.
     const ACCESSED: u32 = 1 << 30;
-    /// The bits counting the chunk's pins.
+    /// The bits counting the chunk's holders.
     const READERS: u32 = Self::ACCESSED - 1;
 
     /// `chunk_count` chunks, all free.
@@ -53,6 +55,10 @@ impl ChunkTable {
     /// A free chunk, leased to one writer; `None` when every chunk is taken.
     pub(super) fn allocate(&self) -> Option<ChunkLease<'_>> {
         let chunk = self.free_chunks().allocate()?;
+        // The lease is the chunk's one holder, and it is unpublished: no pin
+        // gets in. The free bitmap's lock orders this after the last holder
+        // of the chunk's previous round.
+        self.slot(chunk).state.store(1, Ordering::Relaxed);
         Some(ChunkLease { table: self, chunk })
     }
 
@@ -110,20 +116,32 @@ impl ChunkTable {
         state & Self::ACCESSED != 0
     }
 
-    /// Publishes `block` in leased `chunk`, its writer holding it as a
-    /// reader. The chunk starts unaccessed.
+    /// Publishes `block` in leased `chunk`: its holders stay, the lease
+    /// going on as a reader. The chunk starts unaccessed, as `allocate` left
+    /// it.
     fn publish(&self, chunk: ChunkId, block: BlockKey) {
         let slot = self.slot(chunk);
-        let state = slot.state.load(Ordering::Relaxed);
-        assert_eq!(
-            state & (Self::PUBLISHED | Self::READERS),
-            0,
-            "{chunk:?} published while it holds a block"
-        );
         slot.set_owner(block);
         // Release: the owner, and the bytes the writer wrote, come before
         // any pin that sees `PUBLISHED`.
-        slot.state.store(Self::PUBLISHED | 1, Ordering::Release);
+        let state = slot.state.fetch_or(Self::PUBLISHED, Ordering::Release);
+        assert_eq!(
+            state & Self::PUBLISHED,
+            0,
+            "{chunk:?} published while it holds a block"
+        );
+    }
+
+    /// Counts one more holder of `chunk`, which the caller holds already,
+    /// by a lease or a pin: so the chunk can't be freed under the count.
+    fn add_holder(&self, chunk: ChunkId) {
+        // Relaxed: the caller's hold already orders the chunk for it.
+        let state = self.slot(chunk).state.fetch_add(1, Ordering::Relaxed);
+        assert_ne!(
+            state & Self::READERS,
+            Self::READERS,
+            "{chunk:?} has too many holders"
+        );
     }
 
     /// Whether this call unpublished `chunk`: of two evictions of one
@@ -137,16 +155,16 @@ impl ChunkTable {
         state & Self::PUBLISHED != 0
     }
 
-    /// Drops a pin, and frees the chunk if that leaves it unpublished with
-    /// no reader.
+    /// Drops a holder, and frees the chunk if that leaves it unpublished
+    /// with none.
     fn unpin(&self, chunk: ChunkId) {
-        // Release: this reader is done with the chunk before it is freed.
-        // Acquire: if this call frees it, so is every other reader.
+        // Release: this holder is done with the chunk before it is freed.
+        // Acquire: if this call frees it, so is every other holder.
         let state = self.slot(chunk).state.fetch_sub(1, Ordering::AcqRel);
         debug_assert_ne!(
             state & Self::READERS,
             0,
-            "{chunk:?} unpinned more than pinned"
+            "{chunk:?} released more than held"
         );
         if state & (Self::PUBLISHED | Self::READERS) == 1 {
             self.free_chunks().free(chunk);
@@ -176,7 +194,7 @@ impl ChunkTable {
 /// One chunk's entry in a [`ChunkTable`].
 struct ChunkSlot {
     /// [`ChunkTable::PUBLISHED`], [`ChunkTable::ACCESSED`], and the count of
-    /// pins.
+    /// holders.
     state: AtomicU32,
     /// The block the chunk holds, as [`BlockKey::packed`] gives it: set
     /// before it is published and read under a pin, so never both at once.
@@ -202,7 +220,8 @@ impl ChunkSlot {
 }
 
 /// A chunk leased to its one writer, until [`Self::publish`] hands it to
-/// readers. Dropped unpublished, it frees the chunk.
+/// readers. Dropped unpublished, it frees the chunk, once the holds it took
+/// for I/O are gone too.
 pub(super) struct ChunkLease<'table> {
     table: &'table ChunkTable,
     chunk: ChunkId,
@@ -213,12 +232,18 @@ impl<'table> ChunkLease<'table> {
         self.chunk
     }
 
+    /// A hold on the chunk for a direct I/O that writes it: until the hold
+    /// drops, the chunk isn't freed, whatever becomes of the lease.
+    pub(super) fn hold_owned<T: ChunkTier>(&self, tier: &Arc<T>) -> OwnedChunkHold<T> {
+        OwnedChunkHold::new(self.table, self.chunk, tier)
+    }
+
     /// Publishes the chunk as holding `block`, which the writer has written:
     /// readers may pin it from now on, and the writer goes on as one of
     /// them.
     pub(super) fn publish(self, block: BlockKey) -> ChunkPin<'table> {
         let (table, chunk) = (self.table, self.chunk);
-        // From here the pin frees the chunk, not the lease.
+        // The lease's count goes on as the pin's.
         std::mem::forget(self);
         table.publish(chunk, block);
         ChunkPin {
@@ -231,7 +256,7 @@ impl<'table> ChunkLease<'table> {
 
 impl Drop for ChunkLease<'_> {
     fn drop(&mut self) {
-        self.table.free_chunks().free(self.chunk);
+        self.table.unpin(self.chunk);
     }
 }
 
@@ -252,6 +277,12 @@ impl ChunkPin<'_> {
         self.block
     }
 
+    /// A hold on the chunk for a direct I/O that reads it: until the hold
+    /// drops, the chunk isn't freed, whatever becomes of the pin.
+    pub(super) fn hold_owned<T: ChunkTier>(&self, tier: &Arc<T>) -> OwnedChunkHold<T> {
+        OwnedChunkHold::new(self.table, self.chunk, tier)
+    }
+
     /// Unpublishes the chunk, for eviction: no new reader pins it, and it is
     /// freed when its last pin drops, this one included. Whether this call
     /// did it: of two evictions of one chunk, one goes on.
@@ -266,10 +297,54 @@ impl Drop for ChunkPin<'_> {
     }
 }
 
+/// A tier: what owns a chunk table, and hands it to the holds that keep the
+/// tier alive.
+pub(super) trait ChunkTier: Send + Sync + 'static {
+    fn chunk_table(&self) -> &ChunkTable;
+}
+
+/// A hold on a chunk that keeps its tier alive, for a direct I/O in flight:
+/// its buffer, handed to the I/O worker, outlives any borrow of the tier,
+/// and the future that started it may be dropped before it is done. Until
+/// the hold drops, the chunk isn't freed.
+pub(super) struct OwnedChunkHold<T: ChunkTier> {
+    tier: Arc<T>,
+    chunk: ChunkId,
+}
+
+impl<T: ChunkTier> OwnedChunkHold<T> {
+    /// One more holder of `chunk` of `table`, which the caller holds, by a
+    /// lease or a pin, and which `tier` owns.
+    fn new(table: &ChunkTable, chunk: ChunkId, tier: &Arc<T>) -> Self {
+        assert!(
+            std::ptr::eq(table, tier.chunk_table()),
+            "a hold names the tier its chunk is in"
+        );
+        table.add_holder(chunk);
+        Self {
+            tier: Arc::clone(tier),
+            chunk,
+        }
+    }
+}
+
+impl<T: ChunkTier> Drop for OwnedChunkHold<T> {
+    fn drop(&mut self) {
+        self.tier.chunk_table().unpin(self.chunk);
+    }
+}
+
 #[cfg(all(test, not(feature = "shuttle")))]
 mod tests {
     use super::*;
     use crate::cache::FileVersionId;
+
+    /// A tier of one table, for owned holds.
+    impl ChunkTier for ChunkTable {
+        fn chunk_table(&self) -> &ChunkTable {
+            self
+        }
+    }
 
     fn block(file: u64) -> BlockKey {
         BlockKey::new(FileVersionId::new(file), 0)
@@ -329,5 +404,51 @@ mod tests {
         drop(table.pin_block(chunk, block(1)));
         assert!(table.take_accessed(chunk));
         assert!(!table.take_accessed(chunk), "taking clears it");
+    }
+
+    #[test]
+    fn a_hold_for_io_outlives_its_lease() {
+        let table = Arc::new(ChunkTable::new(1));
+        let lease = table.allocate().unwrap();
+        let hold = lease.hold_owned(&table);
+        drop(lease);
+        assert_eq!(table.free_count(), 0, "the write is still in flight");
+        assert!(table.pin(ChunkId::new(0)).is_none(), "never published");
+        drop(hold);
+        assert_eq!(table.free_count(), 1);
+    }
+
+    #[test]
+    fn a_hold_for_io_outlives_the_close_and_the_pin() {
+        let table = Arc::new(ChunkTable::new(1));
+        let chunk = table.allocate().unwrap().publish(block(1)).chunk();
+        let pin = table.pin(chunk).unwrap();
+        let hold = pin.hold_owned(&table);
+        assert!(pin.unpublish());
+        drop(pin);
+        assert_eq!(table.free_count(), 0, "the read is still in flight");
+        drop(hold);
+        assert_eq!(table.free_count(), 1);
+    }
+
+    #[test]
+    fn a_lease_published_keeps_its_holds() {
+        let table = Arc::new(ChunkTable::new(1));
+        let lease = table.allocate().unwrap();
+        let hold = lease.hold_owned(&table);
+        let pin = lease.publish(block(1));
+        assert!(pin.unpublish());
+        drop(pin);
+        assert_eq!(table.free_count(), 0);
+        drop(hold);
+        assert_eq!(table.free_count(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "names the tier")]
+    fn a_hold_on_another_tiers_chunk_panics() {
+        let (table, other) = (ChunkTable::new(1), Arc::new(ChunkTable::new(1)));
+        let lease = table.allocate().unwrap();
+        let _hold = lease.hold_owned(&other);
     }
 }

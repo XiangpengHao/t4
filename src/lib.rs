@@ -1,5 +1,7 @@
 mod buffer;
-// Not wired into the store yet (`doc/03-cache.md`, build steps 1 and 2).
+// Not wired into a front end yet (`doc/03-cache.md`). Linux and macOS:
+// its memory pool is an anonymous mapping.
+#[cfg(unix)]
 #[allow(dead_code)]
 mod cache;
 mod disk;

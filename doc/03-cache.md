@@ -1,9 +1,10 @@
 # 03 — Object store cache
 
 Status: design (2026-10-21). Built: the chunk pool
-(`src/cache/chunk_pool/`), the block index (`src/cache/block_index/`), and
-reads and fills over the memory tier (`src/cache/object_cache.rs`). Not
-yet: the disk tier, eviction, request coalescing, the front end.
+(`src/cache/chunk_pool/`), the block index (`src/cache/block_index/`), the
+disk tier (`src/cache/cache_file.rs`), and reads, fills, moves to disk and
+evictions over them (`src/cache/object_cache.rs`). Not yet: the eviction
+policy, request coalescing, the front end.
 The decisions behind the pivot in `00-meta.md`, worked out from the notes
 in `99-brainstorm.md`.
 
@@ -60,7 +61,8 @@ chunk table the frame table.
    block, so nothing fragments and nothing merges. The memory pool is taken
    once, at startup, and never given back; the cache file is preallocated to
    the disk budget. The block is the smallest unit: an object's last
-   block, and an object smaller than a block, still take a whole chunk.
+   block, and an object smaller than a block, still take a whole chunk,
+   and a block moves to disk as its whole chunk.
 3. **Reads can be partial.** A read inside a block takes only the 4 KB
    pages it needs: a copy from a memory chunk, an `O_DIRECT` read from a
    disk chunk.
@@ -150,6 +152,10 @@ chunk table the frame table.
 - **32-bit file ids, so that a block key is a `u32` pair.** 4.3 billion
   ids, never reused, run out in 50 days at 1,000 new versions a second;
   24 bits of block number are enough.
+- **Recording each chunk's block length, so that a move to disk writes only
+  the pages a short block uses.** Only a file's last block is short: for
+  files of 100 MB and more it saves a fraction of a percent of the writes.
+  It would save more on many objects under a block.
 - **A WAL, so that the disk tier survives a crash.** Every eviction batch
   logs its blocks, with `O_DSYNC`. A freed disk chunk can't be reused until
   a tombstone naming its old block is durable, else replay maps the old

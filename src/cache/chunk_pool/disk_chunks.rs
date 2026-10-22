@@ -1,7 +1,10 @@
-use super::chunk_table::{ChunkLease, ChunkPin, ChunkTable};
+use std::any::Any;
+
+use super::chunk_table::{ChunkLease, ChunkPin, ChunkTable, ChunkTier};
 use crate::PAGE_SIZE_U64;
 use crate::cache::{BLOCK_SIZE_U64, BlockKey, ChunkId};
 use crate::io::error::{Error, Result};
+use crate::io::sync::Arc;
 
 /// The disk tier (`doc/03-cache.md`, decision 2): the cache file's data
 /// chunks, chunk `i` the `BLOCK_SIZE` bytes at `data_start + i *
@@ -90,8 +93,14 @@ impl DiskChunks {
     }
 }
 
+impl ChunkTier for DiskChunks {
+    fn chunk_table(&self) -> &ChunkTable {
+        &self.table
+    }
+}
+
 /// A free chunk, its one writer's to fill until [`Self::publish`]. Dropped
-/// unpublished, it frees the chunk.
+/// unpublished, it frees the chunk, once the writes it started are done.
 pub(in crate::cache) struct DiskChunkWriter<'chunks> {
     lease: ChunkLease<'chunks>,
     offset: u64,
@@ -105,6 +114,16 @@ impl<'chunks> DiskChunkWriter<'chunks> {
     /// Where the chunk starts in the file: a page boundary.
     pub(in crate::cache) fn offset(&self) -> u64 {
         self.offset
+    }
+
+    /// A hold on the chunk for the direct I/O that writes it, to pass along
+    /// with the write: until it drops, the chunk isn't freed, whatever
+    /// becomes of this writer. `chunks` is the tier the chunk is in.
+    pub(in crate::cache) fn hold_for_write(
+        &self,
+        chunks: &Arc<DiskChunks>,
+    ) -> impl Any + Send + Sync + use<> {
+        self.lease.hold_owned(chunks)
     }
 
     /// Publishes the chunk as holding `block`, once its write is done:
