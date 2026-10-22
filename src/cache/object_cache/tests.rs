@@ -85,7 +85,9 @@ fn the_default_policy_streams_blocks_through_both_tiers() {
         true,
     )
     .unwrap();
-    let cache = ObjectCache::with_default_policy(NonZeroU32::new(2).unwrap(), disk).unwrap();
+    let (memory, disk_chunks) = (NonZeroU32::new(2).unwrap(), NonZeroU32::new(3).unwrap());
+    let policy = Arc::new(crate::cache::policy::ClockPolicy::new(memory, disk_chunks));
+    let cache = ObjectCache::new(memory, disk, policy).unwrap();
     let size = 10 * MIB;
     let data = file_bytes(size);
     let file = cache.resolve(b"a", Some("v1"), size).unwrap();

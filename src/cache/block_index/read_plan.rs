@@ -7,8 +7,7 @@ use std::ops::Range;
 use super::blocks::Location;
 use super::paths::FileVersion;
 use crate::cache::{BLOCK_SIZE_U64, BlockKey};
-use crate::disk::ValueWindow;
-use crate::range::RangeRequestU32;
+use crate::range::{PageWindow, RangeRequestU32};
 
 /// How to read a byte range of an object: the blocks it covers, in order,
 /// each where it was when planned, with the part of it the read needs.
@@ -28,15 +27,6 @@ impl ReadPlan {
     /// The blocks the read covers, in order.
     pub(in crate::cache) fn blocks(&self) -> &[PlannedBlock] {
         &self.blocks
-    }
-
-    /// The runs of consecutive blocks that no tier held, in order: each is
-    /// one GET from the object store.
-    pub(in crate::cache) fn missing_runs(&self) -> impl Iterator<Item = MissingRun<'_>> {
-        self.blocks
-            .chunk_by(|block, next| block.is_missing() == next.is_missing())
-            .filter(|run| run.first().is_some_and(PlannedBlock::is_missing))
-            .map(|blocks| MissingRun { blocks })
     }
 }
 
@@ -71,31 +61,6 @@ impl PlannedBlock {
         let start = u64::from(self.key.index()) * BLOCK_SIZE_U64;
         start..start + u64::from(self.len)
     }
-
-    fn is_missing(&self) -> bool {
-        self.location.is_none()
-    }
-}
-
-/// Consecutive blocks of a plan that no tier held: one GET from the object
-/// store fetches them all.
-#[derive(Clone, Copy, Debug)]
-pub(in crate::cache) struct MissingRun<'p> {
-    /// Never empty.
-    blocks: &'p [PlannedBlock],
-}
-
-impl<'p> MissingRun<'p> {
-    pub(in crate::cache) fn blocks(&self) -> &'p [PlannedBlock] {
-        self.blocks
-    }
-
-    /// The bytes of the object the GET fetches: its blocks, whole.
-    pub(in crate::cache) fn object_range(&self) -> Range<u64> {
-        let first = self.blocks.first().expect("a run has a block");
-        let last = self.blocks.last().expect("a run has a block");
-        first.object_range().start..last.object_range().end
-    }
 }
 
 /// The part of a block a read needs, as offsets in the block: the bytes
@@ -106,9 +71,8 @@ impl<'p> MissingRun<'p> {
 pub(in crate::cache) struct BlockWindow {
     /// Where the bytes asked for start in the block.
     start: u32,
-    /// The pages around them, as a value's are laid out: a chunk, like a
-    /// value, starts on a page boundary.
-    pages: ValueWindow,
+    /// The pages around them: a chunk starts on a page boundary.
+    pages: PageWindow,
 }
 
 impl BlockWindow {
@@ -117,7 +81,7 @@ impl BlockWindow {
         let range = RangeRequestU32::from_u32(bytes.start, bytes.end - bytes.start)
             .and_then(|range| range.checked_against(block_len))
             .expect("a read's bytes in a block lie in the block");
-        let pages = ValueWindow::of(range).expect("a block's pages end within u32");
+        let pages = PageWindow::of(range).expect("a block's pages end within u32");
         Self {
             start: bytes.start,
             pages,
@@ -131,9 +95,7 @@ impl BlockWindow {
 
     /// The whole pages around them: what a read from a disk chunk takes.
     pub(in crate::cache) fn pages(&self) -> Range<u32> {
-        // `ValueWindow` keeps where its pages start to itself: where the
-        // bytes start, less their offset in the pages.
-        let first = self.start - self.pages.start();
+        let first = self.pages.first_byte();
         first..first + self.pages.buffer_len()
     }
 
@@ -231,6 +193,8 @@ impl ReadPlanner {
 }
 
 // Outside shuttle, whose atomics `PathTable` uses.
+// `[MIB..2 * MIB]` is a list of one block's bytes, not the range's offsets.
+#[allow(clippy::single_range_in_vec_init)]
 #[cfg(all(test, not(feature = "shuttle")))]
 mod tests {
     use super::*;
@@ -259,15 +223,13 @@ mod tests {
             .collect()
     }
 
-    fn run_ranges(plan: &ReadPlan) -> Vec<Range<u64>> {
-        plan.missing_runs().map(|run| run.object_range()).collect()
-    }
-
-    /// The bytes the plan's one missing run fetches.
-    fn only_run(plan: &ReadPlan) -> Range<u64> {
-        let runs = run_ranges(plan);
-        assert_eq!(runs.len(), 1, "{runs:?}");
-        runs[0].clone()
+    /// The bytes of each block no tier held: what fetching it takes.
+    fn missing(plan: &ReadPlan) -> Vec<Range<u64>> {
+        plan.blocks()
+            .iter()
+            .filter(|block| block.location().is_none())
+            .map(PlannedBlock::object_range)
+            .collect()
     }
 
     fn memory(chunk: u32) -> Location {
@@ -284,8 +246,7 @@ mod tests {
         let plan = blocks.plan_read(file(3 * MIB), MIB + 100..MIB + 200);
         assert_eq!(plan.bytes(), MIB + 100..MIB + 200);
         assert_eq!(summary(&plan), [(1, None, 100..200)]);
-        assert_eq!(plan.blocks()[0].object_range(), MIB..2 * MIB);
-        assert_eq!(only_run(&plan), MIB..2 * MIB);
+        assert_eq!(missing(&plan), [MIB..2 * MIB]);
     }
 
     #[test]
@@ -301,7 +262,10 @@ mod tests {
                 (3, None, 0..5),
             ]
         );
-        assert_eq!(only_run(&plan), 0..4 * MIB);
+        assert_eq!(
+            missing(&plan),
+            [0..MIB, MIB..2 * MIB, 2 * MIB..3 * MIB, 3 * MIB..4 * MIB]
+        );
     }
 
     #[test]
@@ -320,12 +284,11 @@ mod tests {
         let last = plan.blocks()[2];
         assert_eq!(last.object_range(), 2 * MIB..2 * MIB + 1000);
         assert_eq!(last.window().pages(), 0..PAGE);
-        assert_eq!(only_run(&plan), 0..2 * MIB + 1000);
 
         // An object smaller than a block is one short block.
         let plan = blocks.plan_read(file(10), 0..10);
         assert_eq!(summary(&plan), [(0, None, 0..10)]);
-        assert_eq!(only_run(&plan), 0..10);
+        assert_eq!(missing(&plan), [0..10]);
     }
 
     #[test]
@@ -339,7 +302,6 @@ mod tests {
             let plan = blocks.plan_read(file(1000), past_the_end);
             assert!(plan.bytes().is_empty());
             assert!(plan.blocks().is_empty());
-            assert_eq!(plan.missing_runs().count(), 0);
         }
     }
 
@@ -353,7 +315,6 @@ mod tests {
             let plan = blocks.plan_read(file(size), range);
             assert!(plan.bytes().is_empty());
             assert!(plan.blocks().is_empty());
-            assert_eq!(plan.missing_runs().count(), 0);
         }
     }
 
@@ -385,44 +346,23 @@ mod tests {
     }
 
     #[test]
-    fn missing_runs_lie_between_hits() {
+    fn a_plan_finds_each_block_where_it_is() {
         let blocks = BlockTable::new();
-        let file = file(8 * MIB);
+        let file = file(6 * MIB);
         let key = |index| BlockKey::new(file.id(), index);
         blocks.insert(key(2), memory(7));
         blocks.insert(key(4), disk(9));
-        blocks.insert(key(5), Location::Fetching);
 
-        let plan = blocks.plan_read(file, 0..8 * MIB);
+        let plan = blocks.plan_read(file, 0..6 * MIB);
         let locations: Vec<_> = plan.blocks().iter().map(PlannedBlock::location).collect();
         assert_eq!(
             locations,
-            [
-                None,
-                None,
-                Some(memory(7)),
-                None,
-                Some(disk(9)),
-                Some(Location::Fetching),
-                None,
-                None,
-            ]
+            [None, None, Some(memory(7)), None, Some(disk(9)), None]
         );
-        // A block on its way is no one's to fetch again.
         assert_eq!(
-            run_ranges(&plan),
-            [0..2 * MIB, 3 * MIB..4 * MIB, 6 * MIB..8 * MIB]
+            missing(&plan),
+            [0..MIB, MIB..2 * MIB, 3 * MIB..4 * MIB, 5 * MIB..6 * MIB]
         );
-        let run_blocks: Vec<Vec<u32>> = plan
-            .missing_runs()
-            .map(|run| {
-                run.blocks()
-                    .iter()
-                    .map(|block| block.key().index())
-                    .collect()
-            })
-            .collect();
-        assert_eq!(run_blocks, [vec![0, 1], vec![3], vec![6, 7]]);
 
         // A read from the middle sees only its own blocks.
         let plan = blocks.plan_read(file, 2 * MIB + 1..5 * MIB);
@@ -434,7 +374,7 @@ mod tests {
                 (4, Some(disk(9)), 0..MIB_U32),
             ]
         );
-        assert_eq!(only_run(&plan), 3 * MIB..4 * MIB);
+        assert_eq!(missing(&plan), [3 * MIB..4 * MIB]);
     }
 
     #[test]

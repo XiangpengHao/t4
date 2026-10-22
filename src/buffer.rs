@@ -195,8 +195,8 @@ pub struct AlignedBuf {
 enum BufMemory {
     /// Allocated by the buffer with this layout, and freed when it drops.
     Owned(Layout),
-    /// Lent by a mapping the guard keeps mapped until the buffer drops:
-    /// memory shared with another process (`doc/02-multi-process.md`).
+    /// Lent by a mapping the guard keeps mapped until the buffer drops: a
+    /// chunk of the cache's memory pool.
     Lent { _guard: Arc<dyn Any + Send + Sync> },
 }
 
@@ -231,11 +231,11 @@ impl AlignedBuf {
     /// # Safety
     ///
     /// `ptr` is page-aligned, and valid for reads and writes of `len_u32`
-    /// bytes for as long as `guard` lives. Nothing else in this process uses
-    /// those bytes while the buffer lives. Another process may write them at
-    /// any time: the buffer is for direct I/O, which the kernel does, so
-    /// [`Self::as_slice`] and [`Self::as_mut_slice`] on it see whatever is
-    /// there.
+    /// bytes for as long as `guard` lives. While the buffer lives, nothing
+    /// but the I/O it goes to writes those bytes, and nothing reads them
+    /// while that I/O writes them. Others may read them while an I/O reads
+    /// them too, so the buffer is for direct I/O, through raw pointers, and
+    /// never for [`Self::as_slice`] or [`Self::as_mut_slice`].
     pub(crate) unsafe fn lent(
         ptr: NonNull<u8>,
         len_u32: NonZeroU32,
@@ -312,32 +312,6 @@ impl AlignedBuf {
 
     fn is_owned(&self) -> bool {
         matches!(self.memory, BufMemory::Owned(_))
-    }
-
-    /// Zeroes the buffer from `start` to its end. Through a raw pointer, so
-    /// no reference covers memory another process may share.
-    pub(crate) fn zero_from(&mut self, start: usize) {
-        let tail = self.len().saturating_sub(start);
-        // SAFETY: `start + tail` is at most the buffer's length, and the
-        // buffer's memory is valid for writes (`new_zeroed`, `lent`).
-        unsafe { std::ptr::write_bytes(self.as_mut_ptr().add(start.min(self.len())), 0, tail) };
-    }
-
-    pub fn try_into_boxed_array(self) -> Result<Box<[u8; PAGE_SIZE]>> {
-        // The conversion forgets the buffer, and would leak what it holds.
-        if self.len() != PAGE_SIZE || self.held.is_some() {
-            return Err(Error::InvalidArgument("invalid aligned buffer layout"));
-        }
-        let BufMemory::Owned(layout) = &self.memory else {
-            return Err(Error::InvalidArgument("invalid aligned buffer layout"));
-        };
-        if layout.align() != PAGE_SIZE {
-            return Err(Error::InvalidArgument("invalid aligned buffer layout"));
-        }
-        let ptr = self.ptr.as_ptr();
-        let boxed = unsafe { Box::from_raw(ptr as *mut [u8; PAGE_SIZE]) };
-        std::mem::forget(self);
-        Ok(boxed)
     }
 }
 

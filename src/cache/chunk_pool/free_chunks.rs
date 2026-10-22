@@ -63,6 +63,7 @@ impl FreeChunks {
         self.cursor = word_index;
     }
 
+    #[cfg(test)]
     pub(super) fn free_count(&self) -> u32 {
         self.free_count
     }

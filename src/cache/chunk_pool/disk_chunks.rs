@@ -44,6 +44,7 @@ impl DiskChunks {
         self.table.chunk_count()
     }
 
+    #[cfg(test)]
     pub(in crate::cache) fn free_count(&self) -> u32 {
         self.table.free_count()
     }
@@ -101,6 +102,7 @@ pub(in crate::cache) struct DiskChunkWriter<'chunks> {
 }
 
 impl<'chunks> DiskChunkWriter<'chunks> {
+    #[cfg(all(test, not(feature = "shuttle")))]
     pub(in crate::cache) fn chunk(&self) -> ChunkId {
         self.lease.chunk()
     }

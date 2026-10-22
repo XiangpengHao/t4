@@ -46,7 +46,7 @@ enum SimOp {
 }
 
 impl SimOp {
-    fn complete(&self, disk: &SimDisk) -> i32 {
+    fn complete(&self, disk: &mut SimDisk) -> i32 {
         let completion = match *self {
             Self::Read {
                 buf_ptr,
@@ -120,7 +120,7 @@ impl IoDriver for SimulatedDriver {
     /// by one.
     fn wait_for_progress(&mut self, _request_rx: &mpsc::Receiver<WorkerRequest>) {
         shuttle::thread::yield_now();
-        let disk = &self.disk;
+        let disk = &mut self.disk;
         let completions = &mut self.completions;
         self.inflight.retain_mut(|inflight| {
             if inflight.waits_left > 0 {
@@ -152,14 +152,14 @@ pub(crate) fn new_backend_on(
     BackendLoop::new(queue_depth, rx, driver)
 }
 
-/// Shuttle tests run on a [`SimDisk`] (`T4Store::mount_simulated`), never on
-/// a real file.
+/// Shuttle tests run on a [`SimDisk`] (`IoWorker::simulated`), never on a
+/// real file.
 pub(crate) fn new_backend(
     _file: File,
     _queue_depth: u32,
     _rx: mpsc::Receiver<WorkerRequest>,
 ) -> Result<BackendLoop<SimulatedDriver>> {
     Err(Error::InvalidArgument(
-        "shuttle tests mount on a SimDisk: T4Store::mount_simulated",
+        "shuttle tests run on a SimDisk: IoWorker::simulated",
     ))
 }

@@ -5,7 +5,7 @@ use std::ops::Range;
 
 use bbtree::BBTreeMap;
 
-use super::InsertOrAbort;
+use crate::cache::InsertOrAbort;
 use crate::cache::{BLOCK_SIZE_U64, BlockKey, FileVersionId};
 use crate::io::sync::atomic::{AtomicU64, Ordering};
 

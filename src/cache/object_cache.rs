@@ -24,9 +24,7 @@ use super::block_index::{
 use super::cache_file::CacheFile;
 use super::chunk_pool::disk_chunks::{DiskChunkReader, DiskChunkWriter};
 use super::chunk_pool::memory_pool::{MemoryChunkReader, MemoryChunkWriter, MemoryPool};
-use super::policy::{
-    Admit, BlockRead, CachePolicy, ClockPolicy, DiskHit, MemoryVictim, Tier, VictimAction,
-};
+use super::policy::{Admit, BlockRead, CachePolicy, DiskHit, MemoryVictim, Tier, VictimAction};
 use super::{BLOCK_SIZE, BLOCK_SIZE_U64, BlockKey, ChunkId};
 use crate::PAGE_SIZE_U32;
 use crate::buffer::AlignedBuf;
@@ -69,14 +67,6 @@ impl ObjectCache {
             disk,
             policy,
         })
-    }
-
-    /// [`Self::new`] run by the default policy, a CLOCK for each tier.
-    pub(super) fn with_default_policy(memory_chunks: NonZeroU32, disk: CacheFile) -> Result<Self> {
-        let disk_chunks =
-            NonZeroU32::new(disk.chunks().chunk_count()).expect("a cache file has a chunk");
-        let policy = Arc::new(ClockPolicy::new(memory_chunks, disk_chunks));
-        Self::new(memory_chunks, disk, policy)
     }
 
     /// The file at `path`, the version of it with `e_tag` and `size`, as
@@ -445,8 +435,7 @@ impl ObjectCache {
                 Some(Location::Disk(chunk)) => {
                     self.disk.chunks().read(chunk, key).map(HeldBlock::Disk)
                 }
-                // A block being fetched is missing until it lands.
-                Some(Location::Fetching) | None => return HeldBlock::Missing,
+                None => return HeldBlock::Missing,
             };
             if let Some(held) = held {
                 return held;
@@ -468,6 +457,7 @@ pub(super) struct CacheableFile<'p> {
 }
 
 impl CacheableFile<'_> {
+    #[cfg(test)]
     pub(super) fn version(&self) -> FileVersion {
         self.version
     }
@@ -526,6 +516,7 @@ impl PartialRead {
     }
 
     /// The file's bytes the read takes, which `out` holds.
+    #[cfg(all(test, not(feature = "shuttle")))]
     pub(super) fn bytes(&self) -> Range<u64> {
         self.bytes.clone()
     }

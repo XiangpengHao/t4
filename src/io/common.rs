@@ -125,10 +125,6 @@ fn request_op_count(request: &WorkerRequest) -> usize {
     }
 }
 
-fn is_ordered_write(request: &WorkerRequest) -> bool {
-    matches!(request, WorkerRequest::Write { ordered: true, .. })
-}
-
 /// Backend-agnostic submission record handed to a driver, which owns the
 /// file it goes to.
 pub(crate) enum SubmissionEntry {
@@ -170,7 +166,6 @@ pub(crate) struct BackendLoop<D: IoDriver> {
     driver: D,
     queue_depth: usize,
     inflight_requests: HashMap<RequestId, InflightRequest>,
-    ordered_write_inflight: Option<RequestId>,
     next_request_id: RequestId,
 }
 
@@ -181,7 +176,6 @@ impl<D: IoDriver> BackendLoop<D> {
             driver,
             queue_depth,
             inflight_requests: HashMap::new(),
-            ordered_write_inflight: None,
             next_request_id: 0,
         }
     }
@@ -225,10 +219,6 @@ impl<D: IoDriver> BackendLoop<D> {
                     Err(mpsc::TryRecvError::Disconnected) => return Ok(true),
                 },
             };
-            if is_ordered_write(&request) && self.ordered_write_inflight.is_some() {
-                *pending_request = Some(request);
-                break;
-            }
             let op_count = request_op_count(&request);
             assert!(op_count > 0, "request has no operations");
             if op_count > self.queue_depth {
@@ -299,16 +289,8 @@ impl<D: IoDriver> BackendLoop<D> {
                 };
                 self.finish_single_submit(request_id, push_result)
             }
-            WorkerRequest::Write {
-                writes,
-                ordered,
-                completion,
-            } => {
+            WorkerRequest::Write { writes, completion } => {
                 let page_count = writes.len();
-                if ordered {
-                    debug_assert!(self.ordered_write_inflight.is_none());
-                    self.ordered_write_inflight = Some(request_id);
-                }
                 self.inflight_requests.insert(
                     request_id,
                     InflightRequest {
@@ -408,9 +390,6 @@ impl<D: IoDriver> BackendLoop<D> {
                     .inflight_requests
                     .remove(&request_id)
                     .expect("inflight request missing at completion");
-                if self.ordered_write_inflight == Some(request_id) {
-                    self.ordered_write_inflight = None;
-                }
                 request.complete();
             }
         }
@@ -461,9 +440,6 @@ impl<D: IoDriver> BackendLoop<D> {
                 .inflight_requests
                 .remove(&request_id)
                 .expect("write request missing after failed first submit");
-            if self.ordered_write_inflight == Some(request_id) {
-                self.ordered_write_inflight = None;
-            }
             request.complete_with_error(err);
             return;
         }
@@ -485,89 +461,5 @@ impl<D: IoDriver> BackendLoop<D> {
                 return self.next_request_id;
             }
         }
-    }
-}
-
-#[cfg(all(test, not(feature = "shuttle")))]
-mod tests {
-    use std::collections::VecDeque;
-
-    use crate::PAGE_SIZE_NZ_U32;
-    use crate::buffer::AlignedBuf;
-    use crate::io::io_task::TaskCompletion;
-    use crate::io::sync::Arc;
-
-    use super::*;
-
-    #[derive(Default)]
-    struct ControlledDriver {
-        submitted: Vec<(u64, u32)>,
-        completions: VecDeque<CompletionEvent>,
-    }
-
-    impl IoDriver for ControlledDriver {
-        fn available_submission_slots(&mut self) -> usize {
-            8
-        }
-
-        fn push(&mut self, entry: SubmissionEntry) -> Result<()> {
-            let SubmissionEntry::Write {
-                user_data, buf_len, ..
-            } = entry
-            else {
-                panic!("test only submits writes");
-            };
-            self.submitted.push((user_data, buf_len));
-            Ok(())
-        }
-
-        fn submit(&mut self) -> Result<()> {
-            Ok(())
-        }
-
-        fn pop_completion(&mut self) -> Option<CompletionEvent> {
-            self.completions.pop_front()
-        }
-
-        fn wait_for_progress(&mut self, _request_rx: &mpsc::Receiver<WorkerRequest>) {
-            unreachable!("test drives completions directly");
-        }
-    }
-
-    fn ordered_write(offset: u64) -> WorkerRequest {
-        WorkerRequest::Write {
-            writes: vec![PageWrite {
-                buf: AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap(),
-                offset,
-            }],
-            ordered: true,
-            completion: Arc::new(TaskCompletion::new()),
-        }
-    }
-
-    #[test]
-    fn ordered_writes_wait_for_prior_completion() {
-        let (tx, rx) = mpsc::channel();
-        tx.send(ordered_write(0)).unwrap();
-        tx.send(ordered_write(0)).unwrap();
-
-        let mut backend = BackendLoop::new(2, rx, ControlledDriver::default());
-        let mut pending = None;
-        assert!(!backend.submit_requests(&mut pending).unwrap());
-
-        assert_eq!(backend.driver.submitted.len(), 1);
-        assert!(is_ordered_write(pending.as_ref().unwrap()));
-
-        let (user_data, result) = backend.driver.submitted[0];
-        backend.driver.completions.push_back(CompletionEvent {
-            user_data,
-            result: result as i32,
-        });
-        backend.poll_completions();
-        assert!(backend.ordered_write_inflight.is_none());
-
-        assert!(!backend.submit_requests(&mut pending).unwrap());
-        assert_eq!(backend.driver.submitted.len(), 2);
-        assert!(pending.is_none());
     }
 }

@@ -105,8 +105,6 @@ pub(crate) enum WorkerRequest {
     },
     Write {
         writes: Vec<PageWrite>,
-        /// Ordered writes never overlap one another in the backend.
-        ordered: bool,
         completion: WriteCompletion,
     },
 }
@@ -173,20 +171,13 @@ pub struct FileWriteTask {
 
 impl FileWriteTask {
     /// Submit the write to the worker eagerly. The request enters the
-    /// IoWorker channel at construction time — *not* on first poll —
-    /// so that callers can fix the channel order by calling `new` from
-    /// within a critical section. Deferring the send to `poll` would
-    /// expose the channel to the async scheduler's choice of poll order
-    /// (see the comment in `DiskData::append_entry`).
-    pub(crate) fn new(
-        tx: mpsc::Sender<WorkerRequest>,
-        writes: Vec<PageWrite>,
-        ordered: bool,
-    ) -> Result<Self> {
+    /// IoWorker channel at construction time, *not* on first poll, so the
+    /// channel's order is the order callers make requests in, not the
+    /// async scheduler's choice of poll order.
+    pub(crate) fn new(tx: mpsc::Sender<WorkerRequest>, writes: Vec<PageWrite>) -> Result<Self> {
         let completion = Arc::new(TaskCompletion::new());
         let request = WorkerRequest::Write {
             writes,
-            ordered,
             completion: Arc::clone(&completion),
         };
         tx.send(request).map_err(|_| worker_disconnected_error())?;

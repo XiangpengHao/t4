@@ -37,6 +37,7 @@ impl MemoryPool {
         self.table.chunk_count()
     }
 
+    #[cfg(test)]
     pub(in crate::cache) fn free_count(&self) -> u32 {
         self.table.free_count()
     }
@@ -90,10 +91,6 @@ pub(in crate::cache) struct MemoryChunkWriter<'pool> {
 }
 
 impl<'pool> MemoryChunkWriter<'pool> {
-    pub(in crate::cache) fn chunk(&self) -> ChunkId {
-        self.lease.chunk()
-    }
-
     /// The chunk's `BLOCK_SIZE` bytes, as its last block left them: the
     /// writer writes what the new block needs, and readers read only within
     /// the block's length.

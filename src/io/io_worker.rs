@@ -96,12 +96,7 @@ impl IoWorker {
     }
 
     pub fn write(&self, writes: Vec<PageWrite>) -> Result<FileWriteTask> {
-        FileWriteTask::new(self.tx.clone(), writes, false)
-    }
-
-    /// Submit a write that must complete before the next ordered write starts.
-    pub(crate) fn write_ordered(&self, writes: Vec<PageWrite>) -> Result<FileWriteTask> {
-        FileWriteTask::new(self.tx.clone(), writes, true)
+        FileWriteTask::new(self.tx.clone(), writes)
     }
 
     pub async fn read_exact_at(&self, buf: AlignedBuf, offset: u64) -> Result<AlignedBuf> {

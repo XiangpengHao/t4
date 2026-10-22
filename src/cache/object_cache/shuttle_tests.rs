@@ -116,7 +116,7 @@ fn in_step(cache: &ObjectCache, files: &[CacheableFile<'_>]) -> bool {
                 on_disk += 1;
                 cache.disk.chunks().read(chunk, block).is_some()
             }
-            Some(Location::Fetching) | None => true,
+            None => true,
         };
         if !holds_its_block {
             return false;

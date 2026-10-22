@@ -6,18 +6,19 @@ use super::{Admit, BlockRead, CachePolicy, DiskHit, MemoryVictim, Tier, VictimAc
 use crate::cache::{BlockKey, ChunkId};
 use crate::io::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-/// The default policy: a [`Clock`] for each tier.
+/// The default policy: a CLOCK for each tier.
 ///
 /// A fetched block goes to memory, and memory's victims to disk. A block
 /// read from disk moves to memory on its second hit since the disk's hand
 /// last passed it: one read of a cold block pushes nothing out of memory.
-pub(in crate::cache) struct ClockPolicy {
+pub struct ClockPolicy {
     memory: Clock,
     disk: Clock,
 }
 
 impl ClockPolicy {
-    pub(in crate::cache) fn new(memory_chunks: NonZeroU32, disk_chunks: NonZeroU32) -> Self {
+    /// A CLOCK for each tier, of `memory_chunks` and `disk_chunks` chunks.
+    pub fn new(memory_chunks: NonZeroU32, disk_chunks: NonZeroU32) -> Self {
         Self {
             memory: Clock::new(memory_chunks),
             disk: Clock::new(disk_chunks),

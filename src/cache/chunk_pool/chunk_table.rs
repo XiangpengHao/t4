@@ -46,6 +46,7 @@ impl ChunkTable {
         self.slots.len() as u32
     }
 
+    #[cfg(test)]
     pub(super) fn free_count(&self) -> u32 {
         self.free_chunks().free_count()
     }

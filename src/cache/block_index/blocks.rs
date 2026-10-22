@@ -5,9 +5,9 @@ use std::ops::{ControlFlow, Range};
 
 use bbtree::BBTreeMap;
 
-use super::InsertOrAbort;
 use super::paths::FileVersion;
 use super::read_plan::{ReadPlan, ReadPlanner};
+use crate::cache::InsertOrAbort;
 use crate::cache::{BlockKey, ChunkId};
 
 /// Where a cached block is.
@@ -17,8 +17,6 @@ pub(in crate::cache) enum Location {
     Memory(ChunkId),
     /// In this data chunk of the cache file.
     Disk(ChunkId),
-    /// On its way from the object store.
-    Fetching,
 }
 
 /// Each cached block's location, in order of file, then block.
@@ -46,6 +44,7 @@ impl BlockTable {
     }
 
     /// Puts `key`'s block at `location`, and returns where it was.
+    #[cfg(test)]
     pub(in crate::cache) fn insert(&self, key: BlockKey, location: Location) -> Option<Location> {
         self.blocks.insert(key.packed(), location).or_abort()
     }
@@ -128,8 +127,8 @@ mod tests {
     fn insert_replaces_and_returns_the_old_location() {
         let table = BlockTable::new();
         assert_eq!(table.get(key(1, 0)), None);
-        assert_eq!(table.insert(key(1, 0), Location::Fetching), None);
-        assert_eq!(table.insert(key(1, 0), memory(3)), Some(Location::Fetching));
+        assert_eq!(table.insert(key(1, 0), disk(5)), None);
+        assert_eq!(table.insert(key(1, 0), memory(3)), Some(disk(5)));
         assert_eq!(table.get(key(1, 0)), Some(memory(3)));
         assert_eq!(table.get(key(1, 1)), None);
         assert_eq!(table.get(key(2, 0)), None);

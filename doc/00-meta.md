@@ -8,22 +8,34 @@ The interface of this caching will be very similar to object_store, but internal
 
 But so far, we only focus on the second part.
 
+Built so far (2026-10-21, `03-cache.md`): `t4::T4Caching`, an
+`object_store::ObjectStore` that caches another in memory and on a local
+drive, with cache replacement (a pluggable policy, a lock-free CLOCK by
+default) and io_uring reads and writes on one drive. Not yet: request
+coalescing and splits, several drives, racing reads.
+
 ## What It Is
 
-`t4` is a single-file local object store with a key/value API optimized for larger values (roughly `>4 KB`).
+`t4` is a cache for object stores. `T4Caching` wraps an
+`object_store::ObjectStore` (S3, GCS, Azure, or any other) and keeps what is
+read in two tiers of fixed size: memory, and one file on a local NVMe
+drive, read and written with `O_DIRECT` through io_uring. It fetches what
+it misses itself. The design: `03-cache.md`.
 
-Core design goals:
+## The docs
 
-- Use `io_uring` for all reads/writes from day one
-- Keep the on-disk format simple and easy to rebuild
-- Optimize for append-heavy workloads and point lookups
-
-
+- `00-meta.md`: this.
+- `03-cache.md`: the cache: its design, the decisions behind it, what's
+  built, and what comes later.
+- `98-cachefs-vs-fs.md`: how a cache's storage differs from a file
+  system's.
+- `99-brainstorm.md`: open notes.
 
 ## Platforms
 
-**Linux is the only intended platform.** Design decisions, performance work
-and durability guarantees target Linux: io_uring, `O_DIRECT` and `O_DSYNC`.
+**Linux is the only intended platform.** Design decisions and performance
+work target Linux: io_uring and `O_DIRECT`. The cache makes no durability
+guarantee: a restart starts it cold.
 
 **macOS is for development only**: to build t4 and test that it works on a
 developer's machine, never to run it for real. CI's macOS job exists to keep
@@ -32,22 +44,17 @@ that working. On macOS:
 - I/O goes through the fallback backend (a thread pool doing `pread` and
   `pwrite`), not io_uring, so its performance says nothing about Linux's.
 - Direct I/O is `F_NOCACHE`, not `O_DIRECT`.
-- `O_DSYNC` writes don't flush the drive's cache, so no put is durable
-  against power loss: that would take an `F_FULLFSYNC` after every write.
-  The crash guarantees in these docs hold on Linux only.
 
 Don't design, tune or benchmark for macOS, and don't let it constrain a Linux
 design: a macOS fallback only has to work.
 
 ## Verification
 
-Parts of the main crate are written inside `verus!` and proven with
-[Verus](https://github.com/verus-lang/verus): the WAL page format and replay
-(`src/wal/page.rs`, `src/wal/replay.rs`), keys, values and holes
-(`src/input_kv.rs`), alignment (`src/buffer.rs`), range requests
-(`src/range.rs`) and file-tail reservation (`src/disk.rs`). The proofs cover
-those models only, not the OS, filesystem or hardware. Outside `verus!`, Verus
-compiles the code but checks nothing.
+Parts of the crate are written inside `verus!` and proven with
+[Verus](https://github.com/verus-lang/verus): alignment (`src/buffer.rs`)
+and range requests (`src/range.rs`). The proofs cover that arithmetic only,
+not the OS, filesystem or hardware. Outside `verus!`, Verus compiles the
+code but checks nothing.
 
 ```bash
 cargo verus focus    # this crate's proofs only, as CI runs them
@@ -55,3 +62,15 @@ cargo verus focus    # this crate's proofs only, as CI runs them
 
 `cargo verus verify` also verifies every dependency that carries Verus
 metadata, bbtree included; `focus` leaves those to their own CI.
+
+The cache's logic has no proofs: its concurrency, in the chunk table's
+atomics, the CLOCK's, and reads, fills and evictions racing on a simulated
+disk whose I/O completes in any order, is tested under
+[shuttle](https://github.com/awslabs/shuttle), which runs each test's
+threads through a thousand schedules. Shuttle runs threads one at a time,
+so it finds interleavings, not memory orderings too weak: those rest on the
+`Acquire` and `Release` pairs `src/cache/chunk_pool/chunk_table.rs` explains.
+
+```bash
+cargo test --features shuttle shuttle    # the shuttle tests, as CI runs them
+```

@@ -1,29 +1,25 @@
 # 03 — Object store cache
 
-Status: design (2026-10-21). Built: the chunk pool
-(`src/cache/chunk_pool/`), the block index (`src/cache/block_index/`), the
-disk tier (`src/cache/cache_file.rs`), the policy and its default
-(`src/cache/policy/`), and reads, fills, promotions and evictions over them
-(`src/cache/object_cache.rs`). Not yet: request coalescing, the front
-end.
-The decisions behind the pivot in `00-meta.md`, worked out from the notes
-in `99-brainstorm.md`.
+Status: built (2026-10-21), as `t4::T4Caching`: every decision below
+but those under "Later", the first of which is request coalescing. Where
+each part is: "Code map". The decisions behind the pivot in `00-meta.md`,
+worked out from the notes in `99-brainstorm.md`.
 
 t4 caches the bytes of files from an object store in two tiers, memory and
 disk, each of a fixed size it never exceeds. The object store holds the true
-data, so the cache may lose anything, but never returns wrong bytes. A crash
-loses all of it.
+data, so the cache may lose anything, but never returns wrong bytes. A
+restart loses all of it.
 
 ```text
- read(path, range)
+ T4Caching::get_range(path, range)                 an object_store::ObjectStore
       |
       v
- paths:   path -> (file_version_id, e_tag, size)                        bbtree
- blocks:  (file_version_id, block) -> Memory(chunk) | Disk(chunk) | Fetching
+ paths:   path -> (file_version_id, e_tag, size)                 bbtree
+ blocks:  (file_version_id, block) -> Memory(chunk) | Disk(chunk)  bbtree
       |                    |                   |
       v                    v                   v
- memory pool           cache file          object store
- 1 MB chunks           1 MB chunks         GET, then cache
+ memory pool           cache file          inner object store
+ 1 MiB chunks          1 MiB chunks        GET with If-Match, then cache
 ```
 
 ## Terms
@@ -72,8 +68,9 @@ chunk table the frame table.
 
 4. **bbtree is the page table:** two stock `BBTreeMap`s, not bbtree-store.
    - `paths`: path → `file_version_id`, e_tag, size.
-   - `blocks`: (`file_version_id`, block) → a memory chunk, a disk chunk, or
-     `Fetching`.
+   - `blocks`: (`file_version_id`, block) → a memory chunk or a disk
+     chunk. A third state, a block being fetched, comes with request
+     coalescing ("Later").
 
    A read looks up its path, then scans its blocks in order. Keys and
    values are fixed size, inline in the leaves: a sparse file and a fully
@@ -153,12 +150,25 @@ chunk table the frame table.
 
 ### Front end
 
-10. **t4 fetches from the object store itself.** It wraps an
-    `object_store::ObjectStore`, and its API is that store's: a read names
-    a path and a range, and t4 turns the blocks it misses into GETs. So t4
-    decides how misses are split and merged into requests, and can keep the
-    NIC busy (`00-meta.md`). A file with no e_tag is read from the store
-    each time, never cached (decision 5).
+10. **t4 fetches from the object store itself.** `T4Caching`
+    (`src/cache/t4_caching.rs`) is an `object_store::ObjectStore` (0.13, as
+    DataFusion 55 uses) over another, made by a builder: the memory and disk
+    capacities and the cache file's path are required; the queue depth,
+    direct I/O and the policy, built for the tiers' chunk counts, are not.
+    A read names a path and a range, and t4 turns the blocks it misses into
+    GETs, all in flight at once. So t4 decides how misses are split and
+    merged into requests, and can keep the NIC busy (`00-meta.md`). Writes, copies, renames, deletes and lists
+    go to the inner store, and the cache forgets the paths they change. A
+    file with no e_tag is read from the store each time, never cached
+    (decision 5); so are conditional reads, and reads of a named version.
+11. **The cache trusts the store's first answer for a path.** A path's
+    first read asks the inner store for its e_tag and size (a HEAD), and
+    the cache keeps them: a hit asks the store nothing. A miss fetches with
+    `If-Match` on that e_tag, so a file changed since is caught there: the
+    cache forgets the path, the read goes to the inner store, and the next
+    read asks again. Until a miss, a file changed behind the cache reads as
+    it was: right for files that don't change in place, as a data lake's
+    Parquet files don't.
 
 ## Rejected
 
@@ -203,8 +213,16 @@ chunk table the frame table.
 
 ## Later
 
-- **Two readers missing one block:** the second waits on the first's GET
-  through `Fetching` (request coalescing, `00-meta.md`).
+- **Two readers missing one block:** the second waits on the first's GET,
+  through a third state of a block's entry, being fetched (request
+  coalescing, `00-meta.md`). Today both fetch it, and one copy goes back.
+- **A long miss split into parallel GETs,** to keep the NIC busy on one
+  large read (request splits, `00-meta.md`).
+- **Fewer copies on the I/O path:** register the memory pool with io_uring
+  once, and read a disk hit straight into the caller's buffer, not a page
+  buffer copied out (`99-brainstorm.md`). Measure first: hit and miss
+  throughput on the target drive, which also settles the block size
+  (decision 1).
 - **Eviction off the insertion path:** a background thread keeping free
   chunks between two watermarks, if evicting at insertion costs too much.
 - **The drive's own garbage collection:** a file kept full leaves the SSD
@@ -228,16 +246,24 @@ chunk table the frame table.
   blocks written since, for about 150 MB written a minute at 4 TB and a
   reserve of the chunks freed meanwhile.
 
-## What changes in today's code
+## Code map
 
-- **Free space:** `FileHoles` (`src/input_kv.rs`), holes by size, becomes a
-  bitmap of chunks, all free at startup.
-- **Index:** `Index` (`src/index.rs`) becomes `paths` and `blocks`.
-- **The WAL** (`src/wal/`) goes, with replay. A later snapshot may reuse
-  its page and entry code, a checksum on each entry.
-- **Writes:** no `O_DSYNC`. A put no longer goes to disk as it arrives;
-  only evictions write.
-- **Verus:** proofs of the WAL format, replay and `FileHoles` go with that
-  code, and come back once the design settles.
-- **Partial reads:** the windows of `src/disk.rs` keep reading 4 KB pages,
-  now inside a chunk.
+| Module | What it is | Decisions |
+|---|---|---|
+| `src/cache/t4_caching.rs` | `T4Caching` and its builder: the `ObjectStore` front end | 10, 11 |
+| `src/cache/object_cache.rs` | reads, fills, promotions and evictions over the index and the tiers | 3, 7, 8 |
+| `src/cache/policy/` | the `CachePolicy` trait, and `ClockPolicy`, the default | 7 |
+| `src/cache/block_index/` | `paths` and `blocks` on bbtree, and planning a read's blocks | 1, 4, 5, 6 |
+| `src/cache/chunk_pool/` | each tier's chunks: the free bitmap, the chunk table, the memory pool, the disk chunks | 2, 8 |
+| `src/cache/cache_file.rs` | the cache file and the I/O worker that reads and writes it | 2, 9 |
+| `src/io/` | the I/O worker: io_uring on Linux, a thread pool elsewhere, and a simulated drive for shuttle tests | 2 |
+| `src/buffer.rs` | page-aligned buffers for direct I/O, and alignment arithmetic | |
+| `src/range.rs` | byte ranges, and the whole pages around one | 1 |
+
+Tests sit beside each module. Shuttle tests (`cargo test --features
+shuttle shuttle`) drive the chunk table, the CLOCK, and the cache on a
+simulated disk whose I/O completes in any order.
+
+t4 began as a single-file key-value store, with a WAL, its own index and
+a shared mode for several processes. The cache replaced it, and it was
+removed on 2026-10-21; the history before that holds it.

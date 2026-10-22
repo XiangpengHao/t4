@@ -2,18 +2,15 @@
 name = "t4"
 version = "0.2.0"
 edition = "2024"
-description = "Local embedded high-performance object store."
+description = "A cache for object stores, in memory and on a local NVMe drive, over io_uring."
 license = "Apache-2.0"
 repository = "https://github.com/XiangpengHao/t4"
-
-[workspace]
-members = [".", "fuzz"]
 
 [features]
 default = ["io-uring"]
 shuttle = ["dep:shuttle"]
 io-uring = ["dep:io-uring"]
-# Exposes internal types (IoWorker, AlignedBuf, PageWrite, the WAL page) for benchmarking.
+# Exposes internal types (IoWorker, AlignedBuf, PageWrite) for benchmarking.
 # Not part of the public API; the leading underscores signal "do not depend on this".
 __bench = []
 
@@ -22,29 +19,28 @@ bbtree = "0.1.4"
 cfg-if = "1.0.4"
 shuttle = { version = "0.9.1", optional = true }
 crossbeam-channel = "0.5"
-# Each WAL entry's checksum, in hardware on x86-64 and aarch64.
-crc32c = "0.6.8"
 # Verus's specs and proofs; ghost code, erased when compiled normally.
 vstd = "=0.0.0-2026-08-30-0159"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# The cache's front end is an `ObjectStore` over another (`doc/03-cache.md`,
+# decision 10): 0.13, as DataFusion 55 uses.
+object_store = { version = "0.13.2", default-features = false }
+async-trait = "0.1"
+bytes = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-# Shared mode (`doc/02-multi-process.md`): sockets with descriptors attached,
-# poll, memfds mapped in both processes, and the server's detaching from its
-# starter.
-rustix = { version = "1.1", features = ["event", "fs", "mm", "net", "process", "stdio"] }
-# The server runs each client request as a task on a thread pool.
-futures-executor = { version = "0.3", features = ["thread-pool"] }
+# The cache's memory pool, an anonymous mapping, and the cache file's
+# preallocation.
+rustix = { version = "1.1", features = ["fs", "mm"] }
 
 [dev-dependencies]
 pollster = "1.0"
 tempfile = "3"
 divan = "0.1.21"
-serde_json = "1"
 
 [package.metadata.verus]
 verify = true

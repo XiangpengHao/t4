@@ -5,35 +5,17 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]
 pub enum Error {
     Io(std::io::Error),
-    Format(String),
-    InputError(crate::input_kv::InputError),
+    /// A range past what it reads from: a window of pages past `u32`.
     RangeOutOfBounds,
-    NotFound,
-    LockPoisoned,
     InvalidArgument(&'static str),
-    /// Another process owns the store: an in-process mount, or a server.
-    Busy,
-    /// The store's server went away while the call was in flight. The call
-    /// may or may not have taken effect; the next call reconnects.
-    ServerGone,
-    /// The store's server could not be started or reached, or failed in a
-    /// way no other variant describes.
-    Server(String),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(err) => write!(f, "io error: {err}"),
-            Self::Format(msg) => write!(f, "format error: {msg}"),
-            Self::InputError(err) => write!(f, "input error: {:?}", err),
             Self::RangeOutOfBounds => write!(f, "requested range is out of bounds"),
-            Self::NotFound => write!(f, "key not found"),
-            Self::LockPoisoned => write!(f, "internal lock poisoned"),
             Self::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
-            Self::Busy => write!(f, "store is owned by another process"),
-            Self::ServerGone => write!(f, "store server went away"),
-            Self::Server(msg) => write!(f, "store server: {msg}"),
         }
     }
 }
@@ -43,23 +25,5 @@ impl std::error::Error for Error {}
 impl From<std::io::Error> for Error {
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)
-    }
-}
-
-impl From<crate::wal::page::WalError> for Error {
-    fn from(value: crate::wal::page::WalError) -> Self {
-        Self::Format(format!("wal entry error: {:?}", value))
-    }
-}
-
-impl From<crate::input_kv::InputError> for Error {
-    fn from(value: crate::input_kv::InputError) -> Self {
-        Self::InputError(value)
-    }
-}
-
-impl From<crate::wal::replay::ReplayError> for Error {
-    fn from(value: crate::wal::replay::ReplayError) -> Self {
-        Self::Format(format!("replay error: {:?}", value))
     }
 }

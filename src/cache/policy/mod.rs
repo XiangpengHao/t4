@@ -11,11 +11,11 @@
 
 mod clock;
 
-pub(in crate::cache) use clock::ClockPolicy;
+pub use super::{BlockKey, ChunkId, FileVersionId};
+pub use clock::ClockPolicy;
 
+use std::num::NonZeroU32;
 use std::ops::Range;
-
-use super::{BlockKey, ChunkId};
 
 /// The cache's policy. One serves both tiers, built for their chunk counts:
 /// every chunk it hears of or picks is below its tier's count.
@@ -24,7 +24,7 @@ use super::{BlockKey, ChunkId};
 /// with [`Self::on_admit`]: so a policy that forgets a chunk when it picks it
 /// never loses one that still holds a block. A chunk it picks may hold no
 /// block by then; the cache skips it.
-pub(in crate::cache) trait CachePolicy: Send + Sync {
+pub trait CachePolicy: Send + Sync {
     /// A read found its block in memory chunk `chunk`. On the hit path:
     /// keep it cheap.
     fn on_memory_hit(&self, chunk: ChunkId, read: &BlockRead<'_>);
@@ -50,10 +50,35 @@ pub(in crate::cache) trait CachePolicy: Send + Sync {
     fn pick_disk_victims(&self, count: usize) -> Vec<ChunkId>;
 }
 
+/// The chunks of each tier, which a policy is built for: every chunk it
+/// hears of or picks is below its tier's count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TierSizes {
+    memory_chunks: NonZeroU32,
+    disk_chunks: NonZeroU32,
+}
+
+impl TierSizes {
+    pub(in crate::cache) fn new(memory_chunks: NonZeroU32, disk_chunks: NonZeroU32) -> Self {
+        Self {
+            memory_chunks,
+            disk_chunks,
+        }
+    }
+
+    pub fn memory_chunks(&self) -> NonZeroU32 {
+        self.memory_chunks
+    }
+
+    pub fn disk_chunks(&self) -> NonZeroU32 {
+        self.disk_chunks
+    }
+}
+
 /// A block a read takes bytes of, and the read around it: what a policy
 /// decides by.
 #[derive(Clone, Debug)]
-pub(in crate::cache) struct BlockRead<'a> {
+pub struct BlockRead<'a> {
     block: BlockKey,
     file_size: u64,
     read: Range<u64>,
@@ -76,36 +101,36 @@ impl<'a> BlockRead<'a> {
     }
 
     /// The block: its file version and its number.
-    pub(in crate::cache) fn block(&self) -> BlockKey {
+    pub fn block(&self) -> BlockKey {
         self.block
     }
 
     /// The file's size: which block is its last, how large it is.
-    pub(in crate::cache) fn file_size(&self) -> u64 {
+    pub fn file_size(&self) -> u64 {
         self.file_size
     }
 
     /// The bytes of the file the read asked for: a point read, or a scan.
-    pub(in crate::cache) fn read(&self) -> Range<u64> {
+    pub fn read(&self) -> Range<u64> {
         self.read.clone()
     }
 
     /// The file's path.
-    pub(in crate::cache) fn path(&self) -> &'a [u8] {
+    pub fn path(&self) -> &'a [u8] {
         self.path
     }
 }
 
 /// One of the cache's tiers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::cache) enum Tier {
+pub enum Tier {
     Memory,
     Disk,
 }
 
 /// Where a block read from disk goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::cache) enum DiskHit {
+pub enum DiskHit {
     /// It stays on disk; the read takes the pages it needs.
     Stay,
     /// It moves to memory, the disk chunk going free; the read takes it
@@ -115,7 +140,7 @@ pub(in crate::cache) enum DiskHit {
 
 /// Where a block fetched from the object store goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::cache) enum Admit {
+pub enum Admit {
     Memory,
     Disk,
     /// Nowhere: the read takes its bytes, and the cache keeps none.
@@ -124,28 +149,28 @@ pub(in crate::cache) enum Admit {
 
 /// A memory chunk to free, and what becomes of its block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::cache) struct MemoryVictim {
+pub struct MemoryVictim {
     chunk: ChunkId,
     action: VictimAction,
 }
 
 impl MemoryVictim {
-    pub(in crate::cache) fn new(chunk: ChunkId, action: VictimAction) -> Self {
+    pub fn new(chunk: ChunkId, action: VictimAction) -> Self {
         Self { chunk, action }
     }
 
-    pub(in crate::cache) fn chunk(&self) -> ChunkId {
+    pub fn chunk(&self) -> ChunkId {
         self.chunk
     }
 
-    pub(in crate::cache) fn action(&self) -> VictimAction {
+    pub fn action(&self) -> VictimAction {
         self.action
     }
 }
 
 /// What becomes of a memory victim's block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::cache) enum VictimAction {
+pub enum VictimAction {
     /// It moves to a disk chunk, which the disk frees one for if full.
     ToDisk,
     /// It leaves the cache.

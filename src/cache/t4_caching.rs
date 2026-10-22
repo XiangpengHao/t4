@@ -1,0 +1,489 @@
+//! [`T4Caching`]: the cache's front end (`doc/03-cache.md`, decision 10),
+//! an [`ObjectStore`] over another, whose reads the cache serves, and which
+//! fetches what the cache misses itself. [`T4CachingBuilder`] makes one.
+//!
+//! - **What a file is,** the inner store says once: its first answer for the
+//!   path, a HEAD, which the cache trusts (decision 11). A hit asks the store
+//!   nothing. A miss fetches with `If-Match` on that answer's e_tag, so a file
+//!   changed since is caught there: the cache forgets the path, and the read
+//!   goes to the inner store.
+//! - **Writes,** puts, copies, renames and deletes, go to the inner store,
+//!   and the cache forgets the paths they change: the next read asks again.
+//! - **Reads the cache can't serve** go to the inner store as they are:
+//!   conditional ones but `If-Match` on the file's e_tag, reads of a named
+//!   version, of a file with no e_tag, and those a read of the cache file
+//!   fails.
+
+use std::fmt;
+use std::num::NonZeroU32;
+use std::ops::Range;
+use std::path::PathBuf;
+
+use async_trait::async_trait;
+use bbtree::BBTreeMap;
+use bytes::Bytes;
+use futures_util::future::{join_all, ready};
+use futures_util::stream::{self, BoxStream, StreamExt};
+use object_store::path::Path;
+use object_store::{
+    Attributes, CopyOptions, Extensions, GetOptions, GetRange, GetResult, GetResultPayload,
+    ListResult, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt, PutMultipartOptions,
+    PutOptions, PutPayload, PutResult, RenameOptions, UploadPart,
+};
+
+use super::cache_file::CacheFile;
+use super::object_cache::{CacheableFile, ObjectCache};
+use super::policy::{CachePolicy, ClockPolicy, TierSizes};
+use super::{BLOCK_SIZE_U64, InsertOrAbort};
+use crate::io::sync::Arc;
+
+/// The name errors give this store.
+const STORE: &str = "t4";
+
+/// What makes a policy, once the tiers' chunk counts are known.
+type PolicyMaker = Box<dyn FnOnce(TierSizes) -> Arc<dyn CachePolicy>>;
+
+/// An [`ObjectStore`] that caches the reads of another, in memory and on
+/// disk. [`Self::builder`] makes one.
+pub struct T4Caching {
+    inner: Arc<dyn ObjectStore>,
+    cache: ObjectCache,
+    /// Shared with the uploads in flight, which forget their path once done.
+    known: Arc<KnownFiles>,
+}
+
+/// Makes a [`T4Caching`]: where it caches, how much, and by what policy.
+///
+/// ```no_run
+/// # fn example(s3: std::sync::Arc<dyn object_store::ObjectStore>) -> t4::Result<()> {
+/// let store = t4::T4Caching::builder(s3)
+///     .with_memory_capacity(64 << 30)
+///     .with_disk_path("/mnt/nvme/t4.cache")
+///     .with_disk_capacity(4 << 40)
+///     .build()?;
+/// # Ok(())
+/// # }
+/// ```
+pub struct T4CachingBuilder {
+    inner: Arc<dyn ObjectStore>,
+    memory_capacity: Option<u64>,
+    disk_path: Option<PathBuf>,
+    disk_capacity: Option<u64>,
+    queue_depth: u32,
+    direct_io: bool,
+    policy: Option<PolicyMaker>,
+}
+
+impl T4CachingBuilder {
+    /// Memory for cached bytes, in whole 1 MiB blocks, one at least.
+    /// Required.
+    pub fn with_memory_capacity(mut self, bytes: u64) -> Self {
+        self.memory_capacity = Some(bytes);
+        self
+    }
+
+    /// The cache file, made if missing. Whatever it held is nothing to the
+    /// cache, which starts cold every time (decision 9). Required.
+    pub fn with_disk_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.disk_path = Some(path.into());
+        self
+    }
+
+    /// Disk for cached bytes, in whole 1 MiB blocks, one at least: the cache
+    /// file's size. Required.
+    pub fn with_disk_capacity(mut self, bytes: u64) -> Self {
+        self.disk_capacity = Some(bytes);
+        self
+    }
+
+    /// The I/Os to the cache file in flight at most; 64 unless set.
+    pub fn with_queue_depth(mut self, queue_depth: u32) -> Self {
+        self.queue_depth = queue_depth;
+        self
+    }
+
+    /// Whether the cache file is read and written past the page cache; so
+    /// unless set.
+    pub fn with_direct_io(mut self, direct_io: bool) -> Self {
+        self.direct_io = direct_io;
+        self
+    }
+
+    /// The policy, which `build` makes for the tiers' chunk counts, once it
+    /// knows them; a CLOCK for each tier ([`ClockPolicy`]) unless set.
+    pub fn with_policy<P: CachePolicy + 'static>(
+        mut self,
+        build: impl FnOnce(TierSizes) -> P + 'static,
+    ) -> Self {
+        self.policy = Some(Box::new(move |sizes| Arc::new(build(sizes))));
+        self
+    }
+
+    /// The store: its cache file made and sized, its memory mapped, its
+    /// policy built.
+    ///
+    /// # Errors
+    ///
+    /// If a capacity or the disk path wasn't given, the queue depth is 0, or
+    /// the cache file can't be made, sized and opened, or the memory mapped.
+    pub fn build(self) -> crate::Result<T4Caching> {
+        let memory_chunks =
+            Self::chunks(self.memory_capacity, "T4Caching needs a memory capacity")?;
+        let disk_chunks = Self::chunks(self.disk_capacity, "T4Caching needs a disk capacity")?;
+        let disk_path = self
+            .disk_path
+            .ok_or(crate::Error::InvalidArgument("T4Caching needs a disk path"))?;
+        let queue_depth = NonZeroU32::new(self.queue_depth)
+            .ok_or(crate::Error::InvalidArgument("queue depth must be > 0"))?;
+        let disk = CacheFile::open(&disk_path, disk_chunks, queue_depth, self.direct_io)?;
+        let sizes = TierSizes::new(memory_chunks, disk_chunks);
+        let policy = match self.policy {
+            Some(build) => build(sizes),
+            None => Arc::new(ClockPolicy::new(memory_chunks, disk_chunks)),
+        };
+        Ok(T4Caching {
+            inner: self.inner,
+            cache: ObjectCache::new(memory_chunks, disk, policy)?,
+            known: Arc::new(KnownFiles::new()),
+        })
+    }
+
+    /// The whole blocks `capacity` holds, one at least; `missing` if it
+    /// wasn't given.
+    fn chunks(capacity: Option<u64>, missing: &'static str) -> crate::Result<NonZeroU32> {
+        let capacity = capacity.ok_or(crate::Error::InvalidArgument(missing))?;
+        let chunks = (capacity / BLOCK_SIZE_U64).clamp(1, u64::from(u32::MAX));
+        Ok(NonZeroU32::new(chunks as u32).expect("clamped to one at least"))
+    }
+}
+
+impl fmt::Debug for T4CachingBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("T4CachingBuilder")
+            .field("inner", &self.inner)
+            .field("memory_capacity", &self.memory_capacity)
+            .field("disk_path", &self.disk_path)
+            .field("disk_capacity", &self.disk_capacity)
+            .field("queue_depth", &self.queue_depth)
+            .field("direct_io", &self.direct_io)
+            .finish_non_exhaustive()
+    }
+}
+
+impl T4Caching {
+    /// A builder of a cache over `inner`.
+    pub fn builder(inner: Arc<dyn ObjectStore>) -> T4CachingBuilder {
+        T4CachingBuilder {
+            inner,
+            memory_capacity: None,
+            disk_path: None,
+            disk_capacity: None,
+            queue_depth: 64,
+            direct_io: true,
+            policy: None,
+        }
+    }
+
+    /// What the inner store says of the file at `location`: what it said
+    /// first, unless the cache forgot it since.
+    async fn meta_of(&self, location: &Path) -> object_store::Result<Arc<ObjectMeta>> {
+        if let Some(meta) = self.known.get(location) {
+            return Ok(meta);
+        }
+        let meta = Arc::new(self.inner.head(location).await?);
+        Ok(self.known.remember(location, meta))
+    }
+
+    /// `range` of `file`, from the cache and fetches of what it misses, each
+    /// cached as the policy says. `None` if the cache can't serve it: a read
+    /// of the cache file failed, or a fetch found the file changed, which
+    /// the cache forgets then.
+    async fn read_through(
+        &self,
+        location: &Path,
+        file: &CacheableFile<'_>,
+        e_tag: &str,
+        range: Range<u64>,
+        extensions: &Extensions,
+    ) -> object_store::Result<Option<Bytes>> {
+        let mut out = Vec::new();
+        let Ok(read) = self.cache.read(file, range, &mut out).await else {
+            return Ok(None);
+        };
+        // Every fetch is in flight at once: a read's misses keep the NIC busy.
+        let fetches = read
+            .fetches()
+            .iter()
+            .map(|fetch| self.fetch(location, e_tag, fetch.clone(), extensions));
+        for (fetch, fetched) in read.fetches().iter().zip(join_all(fetches).await) {
+            let bytes = match fetched {
+                Ok(bytes) => bytes,
+                Err(object_store::Error::Precondition { .. }) => {
+                    self.known.forget(location);
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
+            read.fill(&mut out, fetch.start, &bytes);
+            // A block the cache fails to keep is fetched again next time: this
+            // read has its bytes either way.
+            let _ = self.cache.cache_fetched(&read, fetch.start, &bytes).await;
+        }
+        Ok(Some(Bytes::from(out)))
+    }
+
+    /// `range` of the file at `location` from the inner store, if it is still
+    /// the version with `e_tag`.
+    async fn fetch(
+        &self,
+        location: &Path,
+        e_tag: &str,
+        range: Range<u64>,
+        extensions: &Extensions,
+    ) -> object_store::Result<Bytes> {
+        let options = GetOptions {
+            range: Some(GetRange::Bounded(range.clone())),
+            if_match: Some(e_tag.to_owned()),
+            extensions: extensions.clone(),
+            ..GetOptions::default()
+        };
+        let bytes = self
+            .inner
+            .get_opts(location, options)
+            .await?
+            .bytes()
+            .await?;
+        if bytes.len() as u64 != range.end - range.start {
+            return Err(object_store::Error::Generic {
+                store: STORE,
+                source: format!("{location}: fetched {} bytes of {range:?}", bytes.len()).into(),
+            });
+        }
+        Ok(bytes)
+    }
+
+    /// Whether the cache may serve a read with `options`: no condition on
+    /// the file but `If-Match`, which it checks, and no version named.
+    fn serves(options: &GetOptions) -> bool {
+        options.if_none_match.is_none()
+            && options.if_modified_since.is_none()
+            && options.if_unmodified_since.is_none()
+            && options.version.is_none()
+    }
+
+    /// A get's answer: `bytes`, the file's `range`.
+    fn answer(meta: &ObjectMeta, range: Range<u64>, bytes: Bytes) -> GetResult {
+        GetResult {
+            payload: GetResultPayload::Stream(stream::once(ready(Ok(bytes))).boxed()),
+            meta: meta.clone(),
+            range,
+            attributes: Attributes::default(),
+        }
+    }
+}
+
+#[async_trait]
+impl ObjectStore for T4Caching {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        let put = self.inner.put_opts(location, payload, opts).await;
+        self.known.forget(location);
+        put
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        opts: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        let upload = self.inner.put_multipart_opts(location, opts).await?;
+        Ok(Box::new(ForgettingUpload {
+            upload,
+            known: Arc::clone(&self.known),
+            location: location.clone(),
+        }))
+    }
+
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        if !Self::serves(&options) {
+            return self.inner.get_opts(location, options).await;
+        }
+        let meta = self.meta_of(location).await?;
+        if options.head {
+            return Ok(Self::answer(&meta, 0..0, Bytes::new()));
+        }
+        let (Some(e_tag), true) = (
+            meta.e_tag.as_deref(),
+            options.if_match.is_none() || options.if_match == meta.e_tag,
+        ) else {
+            return self.inner.get_opts(location, options).await;
+        };
+        let range = match &options.range {
+            Some(range) => {
+                range
+                    .as_range(meta.size)
+                    .map_err(|source| object_store::Error::Generic {
+                        store: STORE,
+                        source: Box::new(source),
+                    })?
+            }
+            None => 0..meta.size,
+        };
+        let path = location.as_ref().as_bytes();
+        let Ok(file) = self.cache.resolve(path, Some(e_tag), meta.size) else {
+            return self.inner.get_opts(location, options).await;
+        };
+        let read = self
+            .read_through(location, &file, e_tag, range.clone(), &options.extensions)
+            .await?;
+        match read {
+            Some(bytes) => Ok(Self::answer(&meta, range, bytes)),
+            None => self.inner.get_opts(location, options).await,
+        }
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        let known = Arc::clone(&self.known);
+        self.inner
+            .delete_stream(locations)
+            .map(move |deleted| {
+                if let Ok(location) = &deleted {
+                    known.forget(location);
+                }
+                deleted
+            })
+            .boxed()
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    fn list_with_offset(
+        &self,
+        prefix: Option<&Path>,
+        offset: &Path,
+    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list_with_offset(prefix, offset)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        let copied = self.inner.copy_opts(from, to, options).await;
+        self.known.forget(to);
+        copied
+    }
+
+    async fn rename_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: RenameOptions,
+    ) -> object_store::Result<()> {
+        let renamed = self.inner.rename_opts(from, to, options).await;
+        self.known.forget(from);
+        self.known.forget(to);
+        renamed
+    }
+}
+
+impl fmt::Display for T4Caching {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "t4 cache over {}", self.inner)
+    }
+}
+
+impl fmt::Debug for T4Caching {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("T4Caching")
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What the inner store said of each file the cache has read, by path.
+struct KnownFiles {
+    metas: BBTreeMap<Box<[u8]>, Arc<ObjectMeta>>,
+}
+
+impl KnownFiles {
+    fn new() -> Self {
+        Self {
+            metas: BBTreeMap::new(),
+        }
+    }
+
+    fn get(&self, location: &Path) -> Option<Arc<ObjectMeta>> {
+        self.metas
+            .read(Self::key(location), |_, meta| Arc::clone(meta))
+    }
+
+    /// Keeps `meta` for `location`, unless another read kept an answer
+    /// first; returns the one kept.
+    fn remember(&self, location: &Path, meta: Arc<ObjectMeta>) -> Arc<ObjectMeta> {
+        self.metas
+            .get_or_insert(Self::key(location).into(), meta, |_, kept| Arc::clone(kept))
+            .or_abort()
+    }
+
+    fn forget(&self, location: &Path) {
+        self.metas.remove(Self::key(location));
+    }
+
+    fn key(location: &Path) -> &[u8] {
+        location.as_ref().as_bytes()
+    }
+}
+
+/// An upload through the cache, which forgets its path once done.
+#[derive(Debug)]
+struct ForgettingUpload {
+    upload: Box<dyn MultipartUpload>,
+    known: Arc<KnownFiles>,
+    location: Path,
+}
+
+impl fmt::Debug for KnownFiles {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KnownFiles").finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl MultipartUpload for ForgettingUpload {
+    fn put_part(&mut self, data: PutPayload) -> UploadPart {
+        self.upload.put_part(data)
+    }
+
+    async fn complete(&mut self) -> object_store::Result<PutResult> {
+        let completed = self.upload.complete().await;
+        self.known.forget(&self.location);
+        completed
+    }
+
+    async fn abort(&mut self) -> object_store::Result<()> {
+        self.upload.abort().await
+    }
+}
+
+#[cfg(all(test, not(feature = "shuttle")))]
+mod tests;
