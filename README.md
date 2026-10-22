@@ -1,9 +1,6 @@
 # `t4`
 
-`t4` is a cache for object stores. `T4Caching` is an
-[`object_store`](https://docs.rs/object_store) `ObjectStore` over another
-(S3, GCS, Azure, or any other): it keeps what you read in memory and on a
-local NVMe drive, and fetches what it misses itself.
+`t4` is a fast object store cache. 
 
 ## Features
 
@@ -83,7 +80,6 @@ The design and every decision behind it: [doc/03-cache.md](doc/03-cache.md).
 - **The cache trusts the store's first answer for a path.** A file changed
   behind it reads as it was until a miss notices. That's right for files
   that don't change in place, like a data lake's Parquet files.
-- **Linux.** macOS builds and runs, for development only.
 - **Not yet:**
   - request coalescing: two readers missing one block both fetch it;
   - splitting a long miss into parallel GETs.

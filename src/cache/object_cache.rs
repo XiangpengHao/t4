@@ -347,8 +347,8 @@ impl ObjectCache {
     /// bytes), then points the block's entry at the disk chunk, and closes
     /// the memory chunk, which goes free when its last reader leaves.
     /// Readers find the block in memory until the entry moves. A block that
-    /// stays, for want of room on disk or a failed write, goes back to the
-    /// policy.
+    /// stays, for want of room on disk, a failed write, or a caller who gave
+    /// up on the move, goes back to the policy.
     ///
     /// The write lends the memory chunk's pages, not a copy, and holds both
     /// chunks until it is done, even if this future is dropped first.
@@ -357,16 +357,14 @@ impl ObjectCache {
             return Ok(MoveToDisk::NoBlock);
         };
         let block = victim.block();
+        let picked = PickedVictim::new(self.policy.as_ref(), chunk, block);
         let Some(writer) = self.allocate_disk() else {
-            self.policy.on_admit(Tier::Memory, chunk, block);
             return Ok(MoveToDisk::DiskFull);
         };
         let hold = writer.hold_for_write(self.disk.chunks());
         let pages = victim.lend_for_write(&self.memory, hold);
-        if let Err(error) = self.disk.write(&writer, pages).await {
-            self.policy.on_admit(Tier::Memory, chunk, block);
-            return Err(error);
-        }
+        self.disk.write(&writer, pages).await?;
+        picked.settle();
         let on_disk = writer.publish(block);
         let to_disk = Location::Disk(on_disk.chunk());
         if self
@@ -421,19 +419,21 @@ impl ObjectCache {
     /// Whether the index and both tiers agree, as they do once every read,
     /// fill and eviction is done, and the I/O each started: each entry names
     /// a chunk that holds its block, each chunk that holds a block has an
-    /// entry naming it, and every other chunk is free. `Err` says where they
-    /// don't.
+    /// entry naming it, and every other chunk is free. If so, the chunks
+    /// that hold a block, each with its tier; `Err` says where they don't.
     #[cfg(any(test, feature = "__fuzz"))]
-    pub(super) fn check_at_rest(&self) -> std::result::Result<(), String> {
+    pub(super) fn check_at_rest(&self) -> std::result::Result<Vec<(Tier, ChunkId)>, String> {
         let mut memory =
             (self.memory.blocks_at_rest()).map_err(|error| format!("memory {error}"))?;
         let mut disk =
             (self.disk.chunks().blocks_at_rest()).map_err(|error| format!("disk {error}"))?;
+        let mut in_use = Vec::new();
         for (block, location) in self.blocks.entries() {
-            let (chunks, chunk) = match location {
-                Location::Memory(chunk) => (&mut memory, chunk),
-                Location::Disk(chunk) => (&mut disk, chunk),
+            let (chunks, tier, chunk) = match location {
+                Location::Memory(chunk) => (&mut memory, Tier::Memory, chunk),
+                Location::Disk(chunk) => (&mut disk, Tier::Disk, chunk),
             };
+            in_use.push((tier, chunk));
             // Taken, so that a second entry naming the chunk finds none.
             let held = chunks
                 .get_mut(chunk.index() as usize)
@@ -454,7 +454,7 @@ impl ObjectCache {
                 ));
             }
         }
-        Ok(())
+        Ok(in_use)
     }
 
     /// Holds the chunk with `key`'s block, the index having said it is at
@@ -515,6 +515,44 @@ enum Promotion<'cache> {
     InMemory(MemoryChunkReader<'cache>),
     /// Memory had no room: the block is in this disk chunk still.
     NoRoom(DiskChunkReader<'cache>),
+}
+
+/// A memory victim being moved to disk. The policy forgot its chunk when it
+/// picked it, so a move that leaves the block in memory, for want of room
+/// on disk, a failed write, or a dropped future, must give the chunk back,
+/// or the policy never picks it again. Dropping this gives it back, unless
+/// the move [settled](Self::settle) first.
+struct PickedVictim<'c> {
+    policy: &'c dyn CachePolicy,
+    chunk: ChunkId,
+    block: BlockKey,
+    settled: bool,
+}
+
+impl<'c> PickedVictim<'c> {
+    fn new(policy: &'c dyn CachePolicy, chunk: ChunkId, block: BlockKey) -> Self {
+        Self {
+            policy,
+            chunk,
+            block,
+            settled: false,
+        }
+    }
+
+    /// The block's copy is written: the block moves to disk, which the
+    /// policy hears of, or it left memory another way meanwhile. Either way,
+    /// its memory chunk doesn't go back to the policy.
+    fn settle(mut self) {
+        self.settled = true;
+    }
+}
+
+impl Drop for PickedVictim<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.policy.on_admit(Tier::Memory, self.chunk, self.block);
+        }
+    }
 }
 
 /// What became of a move to disk.

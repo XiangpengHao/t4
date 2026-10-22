@@ -121,7 +121,7 @@ fn racing_fills_of_one_block_take_one_chunk() {
         let (cache, _policy) = cache(3, 1);
         let a = resolve(&cache, b"a");
         join_all((0..3).map(|_| spawn(&cache, move |cache| read(cache, &a, true))));
-        assert_eq!(cache.check_at_rest(), Ok(()));
+        cache.check_at_rest().unwrap();
         assert_eq!(cache.memory.free_count(), 2);
         read(&cache, &a, false);
         assert!(memory_chunk(&cache, &a).is_some());
@@ -147,7 +147,7 @@ fn a_read_racing_eviction_and_reuse_reads_its_bytes_or_misses() {
         });
         join_all([reader, evictor]);
         assert_eq!(location(&cache, &a), None);
-        assert_eq!(cache.check_at_rest(), Ok(()));
+        cache.check_at_rest().unwrap();
     });
 }
 
@@ -163,7 +163,7 @@ fn eviction_racing_a_refill_keeps_entries_and_chunks_in_step() {
             spawn(&cache, move |cache| read(cache, &a, true)),
             spawn(&cache, move |cache| read(cache, &a, false)),
         ]);
-        assert_eq!(cache.check_at_rest(), Ok(()));
+        cache.check_at_rest().unwrap();
     });
 }
 
@@ -186,7 +186,7 @@ fn of_two_evictions_of_one_chunk_one_evicts() {
             1,
             "freed once, by the last to leave"
         );
-        assert_eq!(cache.check_at_rest(), Ok(()));
+        cache.check_at_rest().unwrap();
     });
 }
 
@@ -209,7 +209,7 @@ fn a_read_racing_a_move_to_disk_reads_its_bytes() {
         reader.join().unwrap();
         assert_eq!(mover.join().unwrap(), MoveToDisk::Moved);
         assert!(disk_chunk(&cache, &a).is_some());
-        assert_eq!(cache.check_at_rest(), Ok(()));
+        cache.check_at_rest().unwrap();
     });
 }
 
@@ -231,7 +231,7 @@ fn a_move_racing_an_eviction_from_memory_keeps_the_tiers_in_step() {
         // The block ends on disk only if the move won.
         assert_eq!(disk_chunk(&cache, &a).is_some(), moved == MoveToDisk::Moved);
         assert!(moved == MoveToDisk::Moved || evicted);
-        assert_eq!(cache.check_at_rest(), Ok(()));
+        cache.check_at_rest().unwrap();
     });
 }
 
@@ -252,7 +252,7 @@ fn of_two_moves_of_one_chunk_one_moves() {
             .filter(|&&outcome| outcome == MoveToDisk::Moved)
             .count();
         assert_eq!(moved, 1, "{outcomes:?}");
-        assert_eq!(cache.check_at_rest(), Ok(()));
+        cache.check_at_rest().unwrap();
         assert_eq!(cache.disk.chunks().free_count(), 1, "one copy on disk");
     });
 }
@@ -278,7 +278,7 @@ fn a_read_racing_eviction_from_disk_and_reuse_reads_its_bytes_or_misses() {
         });
         join_all([reader, evictor]);
         assert_eq!(location(&cache, &a), None);
-        assert_eq!(cache.check_at_rest(), Ok(()));
+        cache.check_at_rest().unwrap();
     });
 }
 
@@ -319,6 +319,42 @@ fn a_dropped_move_frees_its_chunks_after_its_write() {
     });
 }
 
+/// A fill dropped while the move of its victim to disk is being written:
+/// the policy, which forgot the victim when it picked it, gets it back, so
+/// memory can evict it for the next block. Were it lost, it would hold its
+/// chunk for good, and memory would take no other block.
+#[test]
+fn a_dropped_eviction_gives_its_victim_back() {
+    explore(|| {
+        let (cache, _policy) = cache(1, 1);
+        let (a, b, c) = (
+            resolve(&cache, b"a"),
+            resolve(&cache, b"b"),
+            resolve(&cache, b"c"),
+        );
+        read(&cache, &a, true);
+        // `b`'s fill picks `a` and writes it to disk. One poll submits the
+        // write; dropping the fill then is a caller giving up on it, unless
+        // that poll finished it.
+        let mut out = Vec::new();
+        let missed = block_on(cache.read(&b, 0..FILE_SIZE, &mut out)).unwrap();
+        let _ = cache
+            .cache_fetched(&missed, 0, &contents(b.path))
+            .now_or_never();
+        let mut waits = 0;
+        while cache.check_at_rest().is_err() {
+            waits += 1;
+            assert!(waits < 1000, "the dropped write's chunks never went free");
+            thread::yield_now();
+        }
+        read(&cache, &c, true);
+        assert!(
+            memory_chunk(&cache, &c).is_some(),
+            "memory made room for it"
+        );
+    });
+}
+
 /// Two insertions into a full memory, each evicting the other's block to
 /// disk, a read of one meanwhile.
 #[test]
@@ -336,7 +372,7 @@ fn insertions_racing_for_a_full_memory_keep_the_tiers_in_step() {
             spawn(&cache, move |cache| read(cache, &b, true)),
             spawn(&cache, move |cache| read(cache, &c, false)),
         ]);
-        assert_eq!(cache.check_at_rest(), Ok(()));
+        cache.check_at_rest().unwrap();
         for file in [a, b, c] {
             read(&cache, &file, false);
         }
@@ -360,7 +396,7 @@ fn a_promotion_racing_an_eviction_from_disk_keeps_the_tiers_in_step() {
                 cache.evict_from_disk(on_disk);
             }),
         ]);
-        assert_eq!(cache.check_at_rest(), Ok(()));
+        cache.check_at_rest().unwrap();
     });
 }
 
@@ -374,7 +410,7 @@ fn two_promotions_of_one_block_leave_one_copy() {
         read(&cache, &a, true);
         policy.set_disk_hit(DiskHit::Promote);
         join_all((0..2).map(|_| spawn(&cache, move |cache| read(cache, &a, false))));
-        assert_eq!(cache.check_at_rest(), Ok(()));
+        cache.check_at_rest().unwrap();
         assert!(memory_chunk(&cache, &a).is_some());
         assert_eq!(cache.disk.chunks().free_count(), 1);
     });

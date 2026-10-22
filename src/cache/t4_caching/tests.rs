@@ -1,6 +1,9 @@
+use std::future::poll_fn;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
 
-use futures_util::TryStreamExt;
+use futures_util::{FutureExt, TryStreamExt};
 use object_store::memory::InMemory;
 use object_store::{ListResult, ObjectStoreExt};
 use pollster::block_on;
@@ -17,17 +20,69 @@ enum Asked {
     Get(Option<GetRange>),
 }
 
-/// An in-memory store that records every get the cache makes of it.
+/// An in-memory store that records every get the cache makes of it, and
+/// can acknowledge its writes late.
 #[derive(Debug, Default)]
 struct CountingStore {
     store: InMemory,
     asked: Mutex<Vec<Asked>>,
+    acks: Acks,
 }
 
 impl CountingStore {
     /// What the cache asked since the last call.
     fn take_asked(&self) -> Vec<Asked> {
         std::mem::take(&mut self.asked.lock().unwrap())
+    }
+
+    fn ack_writes_late(&self, late: bool) {
+        self.acks.0.store(late, Ordering::Relaxed);
+    }
+}
+
+/// Whether a store acknowledges a write a poll after doing it, as a store
+/// across a network does: a caller that gives up then has written anyway.
+/// Shared by the store, its uploads and its deletes.
+#[derive(Clone, Debug, Default)]
+struct Acks(Arc<AtomicBool>);
+
+impl Acks {
+    /// The acknowledgement of a write that is done: a poll later, if late.
+    async fn arrive(&self) {
+        let mut on_its_way = self.0.load(Ordering::Relaxed);
+        poll_fn(|cx| {
+            if std::mem::take(&mut on_its_way) {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        })
+        .await;
+    }
+}
+
+/// An upload whose completion its store acknowledges as it does writes.
+#[derive(Debug)]
+struct AckedUpload {
+    upload: Box<dyn MultipartUpload>,
+    acks: Acks,
+}
+
+#[async_trait]
+impl MultipartUpload for AckedUpload {
+    fn put_part(&mut self, data: PutPayload) -> UploadPart {
+        self.upload.put_part(data)
+    }
+
+    async fn complete(&mut self) -> object_store::Result<PutResult> {
+        let completed = self.upload.complete().await;
+        self.acks.arrive().await;
+        completed
+    }
+
+    async fn abort(&mut self) -> object_store::Result<()> {
+        self.upload.abort().await
     }
 }
 
@@ -45,7 +100,9 @@ impl ObjectStore for CountingStore {
         payload: PutPayload,
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
-        self.store.put_opts(location, payload, opts).await
+        let put = self.store.put_opts(location, payload, opts).await;
+        self.acks.arrive().await;
+        put
     }
 
     async fn put_multipart_opts(
@@ -53,7 +110,11 @@ impl ObjectStore for CountingStore {
         location: &Path,
         opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        self.store.put_multipart_opts(location, opts).await
+        let upload = self.store.put_multipart_opts(location, opts).await?;
+        Ok(Box::new(AckedUpload {
+            upload,
+            acks: self.acks.clone(),
+        }))
     }
 
     async fn get_opts(
@@ -74,7 +135,17 @@ impl ObjectStore for CountingStore {
         &self,
         locations: BoxStream<'static, object_store::Result<Path>>,
     ) -> BoxStream<'static, object_store::Result<Path>> {
-        self.store.delete_stream(locations)
+        let acks = self.acks.clone();
+        self.store
+            .delete_stream(locations)
+            .then(move |deleted| {
+                let acks = acks.clone();
+                async move {
+                    acks.arrive().await;
+                    deleted
+                }
+            })
+            .boxed()
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -91,7 +162,9 @@ impl ObjectStore for CountingStore {
         to: &Path,
         options: CopyOptions,
     ) -> object_store::Result<()> {
-        self.store.copy_opts(from, to, options).await
+        let copied = self.store.copy_opts(from, to, options).await;
+        self.acks.arrive().await;
+        copied
     }
 }
 
@@ -317,6 +390,80 @@ fn a_deleted_file_is_not_found() {
         matches!(missing, object_store::Error::NotFound { .. }),
         "{missing}"
     );
+}
+
+/// A write through the cache to `to`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum WriteThrough {
+    Put,
+    Multipart,
+    /// Of `from`, onto `to`.
+    Copy,
+    /// Of `from`, onto `to`.
+    Rename,
+    Delete,
+}
+
+impl WriteThrough {
+    const ALL: [Self; 5] = [
+        Self::Put,
+        Self::Multipart,
+        Self::Copy,
+        Self::Rename,
+        Self::Delete,
+    ];
+
+    /// Writes `to` through `store`: `bytes` for a put, `from` for a copy or
+    /// a rename.
+    async fn run(
+        self,
+        store: &T4Caching,
+        from: &Path,
+        to: &Path,
+        bytes: &Bytes,
+    ) -> object_store::Result<()> {
+        match self {
+            Self::Put => store.put(to, bytes.clone().into()).await.map(drop),
+            Self::Multipart => {
+                let mut upload = store.put_multipart(to).await?;
+                upload.put_part(bytes.clone().into()).await?;
+                upload.complete().await.map(drop)
+            }
+            Self::Copy => store.copy(from, to).await,
+            Self::Rename => store.rename(from, to).await,
+            Self::Delete => store.delete(to).await,
+        }
+    }
+}
+
+/// A write given up on once the store has done it, its acknowledgement
+/// still on the way, as a caller dropping its future does: the cache
+/// forgets the path all the same, so a read gets what the store has, not
+/// the old file's cached blocks.
+#[test]
+fn a_write_given_up_on_after_it_lands_is_read_back() {
+    let stale: Vec<_> = WriteThrough::ALL
+        .into_iter()
+        .filter(|&write| {
+            let (_dir, store, inner) = t4_caching();
+            let (from, to) = (Path::from("from"), Path::from("to"));
+            put(inner.as_ref(), &from, &file_bytes(MIB, 1));
+            put(inner.as_ref(), &to, &file_bytes(MIB, 2));
+            get_range(&store, &to, 0..MIB);
+
+            inner.ack_writes_late(true);
+            let bytes = file_bytes(MIB, 3);
+            let written = write.run(&store, &from, &to, &bytes);
+            assert!(written.now_or_never().is_none(), "{write:?} given up on");
+            inner.ack_writes_late(false);
+
+            let in_store = block_on(async { inner.get(&to).await?.bytes().await });
+            let read = block_on(async { store.get(&to).await?.bytes().await });
+            // Both the same bytes, or both no file.
+            in_store.ok() != read.ok()
+        })
+        .collect();
+    assert_eq!(stale, [], "these writes left the old file to be read");
 }
 
 #[test]

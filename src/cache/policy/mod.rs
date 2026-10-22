@@ -21,9 +21,10 @@ use std::ops::Range;
 /// every chunk it hears of or picks is below its tier's count.
 ///
 /// Every chunk the policy picks as a victim, the cache frees, or gives back
-/// with [`Self::on_admit`]: so a policy that forgets a chunk when it picks it
-/// never loses one that still holds a block. A chunk it picks may hold no
-/// block by then; the cache skips it.
+/// with [`Self::on_admit`], even if the read that evicts it is given up on
+/// midway: so a policy that forgets a chunk when it picks it never loses one
+/// that still holds a block. A chunk it picks may hold no block by then; the
+/// cache skips it.
 pub trait CachePolicy: Send + Sync {
     /// A read found its block in memory chunk `chunk`. On the hit path:
     /// keep it cheap.

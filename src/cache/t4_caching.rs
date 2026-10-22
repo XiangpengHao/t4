@@ -9,6 +9,8 @@
 //!   goes to the inner store.
 //! - **Writes,** puts, copies, renames and deletes, go to the inner store,
 //!   and the cache forgets the paths they change: the next read asks again.
+//!   It forgets them once the write is done, has failed, or was given up
+//!   on, its future dropped: a write given up on may have landed anyway.
 //! - **Reads the cache can't serve** go to the inner store as they are:
 //!   conditional ones but `If-Match` on the file's e_tag, reads of a named
 //!   version, of a file with no e_tag, and those a read of the cache file
@@ -18,6 +20,7 @@ use std::fmt;
 use std::num::NonZeroU32;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::PoisonError;
 
 use async_trait::async_trait;
 use bbtree::BBTreeMap;
@@ -31,11 +34,15 @@ use object_store::{
     PutOptions, PutPayload, PutResult, RenameOptions, UploadPart,
 };
 
+#[cfg(feature = "__fuzz")]
+use super::ChunkId;
 use super::cache_file::CacheFile;
 use super::object_cache::{CacheableFile, ObjectCache};
+#[cfg(feature = "__fuzz")]
+use super::policy::Tier;
 use super::policy::{CachePolicy, ClockPolicy, TierSizes};
 use super::{BLOCK_SIZE_U64, InsertOrAbort};
-use crate::io::sync::Arc;
+use crate::io::sync::{Arc, Mutex, MutexGuard};
 
 /// The name errors give this store.
 const STORE: &str = "t4";
@@ -48,7 +55,8 @@ type PolicyMaker = Box<dyn FnOnce(TierSizes) -> Arc<dyn CachePolicy>>;
 pub struct T4Caching {
     inner: Arc<dyn ObjectStore>,
     cache: ObjectCache,
-    /// Shared with the uploads in flight, which forget their path once done.
+    /// Shared with the uploads and deletes in flight, which forget their
+    /// paths once done.
     known: Arc<KnownFiles>,
 }
 
@@ -272,10 +280,11 @@ impl T4Caching {
     }
 
     /// Whether the cache's index and tiers agree, as they must once nothing
-    /// is in flight. For the fuzz target (`fuzz/`), not part of the API.
+    /// is in flight; if so, the chunks that hold a block, each with its tier.
+    /// For the fuzz target (`fuzz/`), not part of the API.
     #[cfg(feature = "__fuzz")]
     #[doc(hidden)]
-    pub fn check_at_rest(&self) -> Result<(), String> {
+    pub fn check_at_rest(&self) -> Result<Vec<(Tier, ChunkId)>, String> {
         self.cache.check_at_rest()
     }
 
@@ -298,9 +307,8 @@ impl ObjectStore for T4Caching {
         payload: PutPayload,
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
-        let put = self.inner.put_opts(location, payload, opts).await;
-        self.known.forget(location);
-        put
+        let _forget = ForgetOnDrop::new(&self.known, [location]);
+        self.inner.put_opts(location, payload, opts).await
     }
 
     async fn put_multipart_opts(
@@ -362,12 +370,22 @@ impl ObjectStore for T4Caching {
         &self,
         locations: BoxStream<'static, object_store::Result<Path>>,
     ) -> BoxStream<'static, object_store::Result<Path>> {
-        let known = Arc::clone(&self.known);
+        // Each location the inner store takes, forgotten as its delete is
+        // done, and when this stream drops, done or given up on.
+        let forget = Arc::new(ForgetOnDrop::new(&self.known, []));
+        let taken = Arc::clone(&forget);
+        let locations = locations
+            .inspect(move |location| {
+                if let Ok(location) = location {
+                    taken.add(location);
+                }
+            })
+            .boxed();
         self.inner
             .delete_stream(locations)
             .map(move |deleted| {
                 if let Ok(location) = &deleted {
-                    known.forget(location);
+                    forget.known.forget(location);
                 }
                 deleted
             })
@@ -396,9 +414,8 @@ impl ObjectStore for T4Caching {
         to: &Path,
         options: CopyOptions,
     ) -> object_store::Result<()> {
-        let copied = self.inner.copy_opts(from, to, options).await;
-        self.known.forget(to);
-        copied
+        let _forget = ForgetOnDrop::new(&self.known, [to]);
+        self.inner.copy_opts(from, to, options).await
     }
 
     async fn rename_opts(
@@ -407,10 +424,8 @@ impl ObjectStore for T4Caching {
         to: &Path,
         options: RenameOptions,
     ) -> object_store::Result<()> {
-        let renamed = self.inner.rename_opts(from, to, options).await;
-        self.known.forget(from);
-        self.known.forget(to);
-        renamed
+        let _forget = ForgetOnDrop::new(&self.known, [from, to]);
+        self.inner.rename_opts(from, to, options).await
     }
 }
 
@@ -462,6 +477,41 @@ impl KnownFiles {
     }
 }
 
+/// The paths a write through the cache changes, which it forgets when this
+/// drops: once the write is done, has failed, or was given up on, as a
+/// write given up on may have landed all the same.
+struct ForgetOnDrop {
+    known: Arc<KnownFiles>,
+    paths: Mutex<Vec<Path>>,
+}
+
+impl ForgetOnDrop {
+    fn new<'p>(known: &Arc<KnownFiles>, paths: impl IntoIterator<Item = &'p Path>) -> Self {
+        Self {
+            known: Arc::clone(known),
+            paths: Mutex::new(paths.into_iter().cloned().collect()),
+        }
+    }
+
+    /// One more path the write changes.
+    fn add(&self, path: &Path) {
+        self.paths().push(path.clone());
+    }
+
+    fn paths(&self) -> MutexGuard<'_, Vec<Path>> {
+        // A push can't leave the list half made: a panic leaves it whole.
+        self.paths.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Drop for ForgetOnDrop {
+    fn drop(&mut self) {
+        for path in self.paths().iter() {
+            self.known.forget(path);
+        }
+    }
+}
+
 /// An upload through the cache, which forgets its path once done.
 #[derive(Debug)]
 struct ForgettingUpload {
@@ -483,9 +533,8 @@ impl MultipartUpload for ForgettingUpload {
     }
 
     async fn complete(&mut self) -> object_store::Result<PutResult> {
-        let completed = self.upload.complete().await;
-        self.known.forget(&self.location);
-        completed
+        let _forget = ForgetOnDrop::new(&self.known, [&self.location]);
+        self.upload.complete().await
     }
 
     async fn abort(&mut self) -> object_store::Result<()> {

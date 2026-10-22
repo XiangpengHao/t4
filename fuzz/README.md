@@ -7,7 +7,9 @@ an in-memory `object_store`:
   renames;
 - writes behind its back, straight to the store;
 - heads, and reads of every shape: whole, `GetRange::Bounded`, `Offset` and
-  `Suffix`, some joined so they interleave at each I/O.
+  `Suffix`, some joined so they interleave at each I/O, and some given up
+  on after a few polls, their futures dropped midway through a fetch, a
+  fill, an eviction or a promotion.
 
 Its tiers are 1 to 4 blocks of memory and 1 to 6 on disk, and its files up
 to four blocks, so eviction, moves to disk and promotions start within a few
@@ -19,10 +21,13 @@ It checks that:
 - every answer is one the cache may give: the file as the store holds it,
   or, after a write behind the cache's back, a version the cache may still
   trust (`doc/03-cache.md`, decision 11);
-- after every operation, the cache's index and tiers agree: each entry names
-  a chunk that holds its block, each chunk that holds a block has an entry,
-  and every other chunk is free (`T4Caching::check_at_rest`, behind the
-  `__fuzz` feature);
+- after every operation, once the I/O a given-up read left in flight is
+  done, the cache's index and tiers agree: each entry names a chunk that
+  holds its block, each chunk that holds a block has an entry, and every
+  other chunk is free (`T4Caching::check_at_rest`, behind the `__fuzz`
+  feature);
+- the scripted policy can still pick every chunk that holds a block: the
+  cache frees each victim, or gives it back;
 - the cache never names a chunk past its tier's to the policy.
 
 ## Run it
@@ -59,4 +64,7 @@ cargo fuzz fmt cache_equivalence fuzz/artifacts/cache_equivalence/<file>
 
 - Threads racing: the shuttle tests (`cargo test --features shuttle
   shuttle`). The target's concurrent reads share one thread.
+- Writes given up on: its store applies a write in the call's first poll,
+  so there's no point to give one up at. The unit test
+  `a_write_given_up_on_after_it_lands_is_read_back` covers them.
 - Direct I/O, and I/O or a store that fails.

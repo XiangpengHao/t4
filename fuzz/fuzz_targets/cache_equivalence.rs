@@ -1,19 +1,25 @@
 #![no_main]
 
 //! `T4Caching` against the store under it: random writes through the cache
-//! and behind its back, and reads of every shape, some at once, with tiers
-//! of a few blocks, under the default policy or one the input scripts.
+//! and behind its back, and reads of every shape, some at once, some given
+//! up on midway, with tiers of a few blocks, under the default policy or one
+//! the input scripts.
 //!
 //! Every answer must be one the cache may give: the file as the store holds
 //! it, or, after a write behind its back, a version the cache may still
-//! trust (`doc/03-cache.md`, decision 11). After every operation, the
-//! cache's index and tiers must agree (`T4Caching::check_at_rest`).
+//! trust (`doc/03-cache.md`, decision 11). After every operation, once the
+//! I/O reads given up on left behind is done, the cache's index and tiers
+//! must agree (`T4Caching::check_at_rest`), and a scripted policy must
+//! still be able to pick every chunk that holds a block.
 
 use std::collections::BTreeSet;
 use std::fmt;
 use std::ops::Range;
+use std::pin::pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
 
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
@@ -124,13 +130,19 @@ enum Operation {
     Get(Read),
     /// Reads joined on one thread, which interleave at each I/O.
     GetAtOnce([Read; 3]),
+    /// A read polled a few times, then given up on, its future dropped
+    /// wherever it got to: a fetch, a fill, an eviction, a promotion.
+    GiveUp {
+        read: Read,
+        polls: u8,
+    },
 }
 
 impl<'a> Arbitrary<'a> for Operation {
-    /// An operation in a byte or so: reads a third of the time, as they
+    /// An operation in a byte or so: reads two times in five, as they
     /// fill, evict and promote.
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        Ok(match u.choose_index(15)? {
+        Ok(match u.choose_index(17)? {
             0 | 1 => Self::Put {
                 file: u.arbitrary()?,
                 size: u.arbitrary()?,
@@ -161,7 +173,11 @@ impl<'a> Arbitrary<'a> for Operation {
                 file: u.arbitrary()?,
             },
             10..=12 => Self::Get(u.arbitrary()?),
-            _ => Self::GetAtOnce(u.arbitrary()?),
+            13 | 14 => Self::GetAtOnce(u.arbitrary()?),
+            _ => Self::GiveUp {
+                read: u.arbitrary()?,
+                polls: u.int_in_range(1..=4)?,
+            },
         })
     }
 }
@@ -384,6 +400,8 @@ struct Harness {
     store: Arc<InMemory>,
     cache: T4Caching,
     model: Model,
+    /// What a scripted policy can still pick; `None` under CLOCK.
+    pickable: Option<Arc<PickableChunks>>,
 }
 
 impl Harness {
@@ -398,11 +416,15 @@ impl Harness {
             .with_queue_depth(scenario.queue_depth)
             // So the cache file can be on tmpfs (`fuzz/README.md`).
             .with_direct_io(false);
-        let builder = match &scenario.policy {
-            PolicyChoice::Clock => builder,
+        let (builder, pickable) = match &scenario.policy {
+            PolicyChoice::Clock => (builder, None),
             PolicyChoice::Scripted(script) => {
                 let script = script.clone();
-                builder.with_policy(move |sizes| ScriptedPolicy::new(sizes, script))
+                let pickable = Arc::new(PickableChunks::default());
+                let shared = Arc::clone(&pickable);
+                let builder =
+                    builder.with_policy(move |sizes| ScriptedPolicy::new(sizes, script, shared));
+                (builder, Some(pickable))
             }
         };
         let cache = match builder.build() {
@@ -419,6 +441,7 @@ impl Harness {
             store,
             cache,
             model: Model::default(),
+            pickable,
         })
     }
 
@@ -426,9 +449,39 @@ impl Harness {
         for operation in operations {
             self.apply(operation).await;
             self.check_model().await;
-            if let Err(error) = self.cache.check_at_rest() {
-                panic!("after {operation:?}, the cache is out of step: {error}");
+            let in_use = self.at_rest(operation);
+            self.check_policy_can_pick(&in_use, operation);
+        }
+    }
+
+    /// The chunks that hold a block, each with its tier, once the cache is
+    /// at rest: a read given up on may leave I/O in flight, which holds its
+    /// chunks until it is done. Panics if the index and tiers don't agree by
+    /// then.
+    fn at_rest(&self, after: &Operation) -> Vec<(Tier, ChunkId)> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.cache.check_at_rest() {
+                Ok(in_use) => return in_use,
+                Err(error) if Instant::now() > deadline => {
+                    panic!("after {after:?}, the cache is out of step: {error}")
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(1)),
             }
+        }
+    }
+
+    /// Panics unless a scripted policy can still pick every chunk in use:
+    /// the cache gives each victim it doesn't free back to the policy.
+    fn check_policy_can_pick(&self, in_use: &[(Tier, ChunkId)], after: &Operation) {
+        let Some(pickable) = &self.pickable else {
+            return;
+        };
+        for &(tier, chunk) in in_use {
+            assert!(
+                pickable.of(tier).contains(&chunk.index()),
+                "after {after:?}, {chunk:?} in {tier:?} holds a block the policy can't pick"
+            );
         }
     }
 
@@ -511,6 +564,16 @@ impl Harness {
                 let answer = read.answer(&self.cache).await;
                 self.check_answer(read, &answer);
             }
+            Operation::GiveUp { ref read, polls } => {
+                let mut answer = pin!(read.answer(&self.cache));
+                let mut cx = Context::from_waker(Waker::noop());
+                for _ in 0..polls {
+                    if let Poll::Ready(answer) = answer.as_mut().poll(&mut cx) {
+                        self.check_answer(read, &answer);
+                        break;
+                    }
+                }
+            }
             Operation::GetAtOnce(ref reads) => {
                 let answers = join_all(reads.iter().map(|read| read.answer(&self.cache))).await;
                 for (read, answer) in reads.iter().zip(&answers) {
@@ -549,20 +612,35 @@ struct ScriptedPolicy {
     sizes: TierSizes,
     script: Vec<u8>,
     next: AtomicUsize,
-    /// Each tier's chunks the cache said took a block, and the policy hasn't
-    /// picked since: where its victims mostly come from.
+    /// Where its victims mostly come from.
+    pickable: Arc<PickableChunks>,
+}
+
+/// Each tier's chunks a [`ScriptedPolicy`] can still pick: those the cache
+/// said took a block, less those it picked since, by index. Shared with the
+/// harness, which checks that every chunk in use is among them.
+#[derive(Default)]
+struct PickableChunks {
     memory: Mutex<BTreeSet<u32>>,
     disk: Mutex<BTreeSet<u32>>,
 }
 
+impl PickableChunks {
+    fn of(&self, tier: Tier) -> MutexGuard<'_, BTreeSet<u32>> {
+        match tier {
+            Tier::Memory => self.memory.lock().unwrap(),
+            Tier::Disk => self.disk.lock().unwrap(),
+        }
+    }
+}
+
 impl ScriptedPolicy {
-    fn new(sizes: TierSizes, script: Vec<u8>) -> Self {
+    fn new(sizes: TierSizes, script: Vec<u8>, pickable: Arc<PickableChunks>) -> Self {
         Self {
             sizes,
             script,
             next: AtomicUsize::new(0),
-            memory: Mutex::new(BTreeSet::new()),
-            disk: Mutex::new(BTreeSet::new()),
+            pickable,
         }
     }
 
@@ -582,13 +660,6 @@ impl ScriptedPolicy {
         }
     }
 
-    fn admitted(&self, tier: Tier) -> &Mutex<BTreeSet<u32>> {
-        match tier {
-            Tier::Memory => &self.memory,
-            Tier::Disk => &self.disk,
-        }
-    }
-
     fn heard(&self, tier: Tier, chunk: ChunkId) {
         assert!(
             chunk.index() < self.chunk_count(tier),
@@ -600,7 +671,7 @@ impl ScriptedPolicy {
     /// Up to `count` victims of `tier`, none at times: mostly chunks it
     /// admitted, else any chunk.
     fn pick(&self, tier: Tier, count: usize) -> Vec<ChunkId> {
-        let mut admitted = self.admitted(tier).lock().unwrap();
+        let mut admitted = self.pickable.of(tier);
         let wanted = match self.next_byte() {
             0..32 => 0,
             byte => usize::from(byte)
@@ -649,7 +720,7 @@ impl CachePolicy for ScriptedPolicy {
 
     fn on_admit(&self, tier: Tier, chunk: ChunkId, _block: BlockKey) {
         self.heard(tier, chunk);
-        self.admitted(tier).lock().unwrap().insert(chunk.index());
+        self.pickable.of(tier).insert(chunk.index());
     }
 
     fn pick_memory_victims(&self, count: usize) -> Vec<MemoryVictim> {
