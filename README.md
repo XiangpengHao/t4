@@ -104,9 +104,14 @@ cargo test --features shuttle shuttle
 cargo verus focus
 ```
 
+```bash
+TMPDIR=/dev/shm cargo fuzz run cache_equivalence -- -timeout=10
+```
+
 These run the unit tests, the concurrency tests under
-[shuttle](https://github.com/awslabs/shuttle), and the Verus proofs of the
-alignment and range arithmetic. Where the docs start:
+[shuttle](https://github.com/awslabs/shuttle), the Verus proofs of the
+alignment and range arithmetic, and the fuzz target
+([fuzz/README.md](fuzz/README.md)). Where the docs start:
 [doc/00-meta.md](doc/00-meta.md).
 
 ## Vision

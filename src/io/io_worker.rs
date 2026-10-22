@@ -19,8 +19,7 @@ use crate::io::simulated::{self, SimDisk};
 ///
 /// Cloning shares the same underlying worker. Dropping the last clone
 /// disconnects the worker's channel and waits for the thread to exit, so
-/// the file it owns, and the store's mount lock on it, are released by the
-/// time the drop returns.
+/// the file it owns is closed by the time the drop returns.
 #[derive(Clone)]
 pub struct IoWorker {
     // Declared before `_thread`, so it drops first: the worker sees its

@@ -6,6 +6,9 @@ description = "A cache for object stores, in memory and on a local NVMe drive, o
 license = "Apache-2.0"
 repository = "https://github.com/XiangpengHao/t4"
 
+[workspace]
+members = [".", "fuzz"]
+
 [features]
 default = ["io-uring"]
 shuttle = ["dep:shuttle"]
@@ -13,6 +16,9 @@ io-uring = ["dep:io-uring"]
 # Exposes internal types (IoWorker, AlignedBuf, PageWrite) for benchmarking.
 # Not part of the public API; the leading underscores signal "do not depend on this".
 __bench = []
+# Exposes `T4Caching::check_at_rest` to the fuzz target (`fuzz/`). Not part of
+# the public API either.
+__fuzz = []
 
 [dependencies]
 bbtree = "0.1.4"

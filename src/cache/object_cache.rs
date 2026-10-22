@@ -418,6 +418,45 @@ impl ObjectCache {
         closed
     }
 
+    /// Whether the index and both tiers agree, as they do once every read,
+    /// fill and eviction is done, and the I/O each started: each entry names
+    /// a chunk that holds its block, each chunk that holds a block has an
+    /// entry naming it, and every other chunk is free. `Err` says where they
+    /// don't.
+    #[cfg(any(test, feature = "__fuzz"))]
+    pub(super) fn check_at_rest(&self) -> std::result::Result<(), String> {
+        let mut memory =
+            (self.memory.blocks_at_rest()).map_err(|error| format!("memory {error}"))?;
+        let mut disk =
+            (self.disk.chunks().blocks_at_rest()).map_err(|error| format!("disk {error}"))?;
+        for (block, location) in self.blocks.entries() {
+            let (chunks, chunk) = match location {
+                Location::Memory(chunk) => (&mut memory, chunk),
+                Location::Disk(chunk) => (&mut disk, chunk),
+            };
+            // Taken, so that a second entry naming the chunk finds none.
+            let held = chunks
+                .get_mut(chunk.index() as usize)
+                .and_then(Option::take);
+            if held != Some(block) {
+                return Err(format!(
+                    "{block:?} is at {location:?}, which holds {held:?}"
+                ));
+            }
+        }
+        for (tier, chunks) in [("memory", memory), ("disk", disk)] {
+            if let Some((index, block)) = (0..)
+                .zip(chunks)
+                .find_map(|(index, block)| Some((index, block?)))
+            {
+                return Err(format!(
+                    "{tier} chunk {index} holds {block:?}, which no entry names"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Holds the chunk with `key`'s block, the index having said it is at
     /// `location`.
     ///

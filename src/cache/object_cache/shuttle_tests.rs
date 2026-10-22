@@ -100,34 +100,6 @@ fn disk_chunk(cache: &ObjectCache, file: &CacheableFile<'_>) -> Option<ChunkId> 
     }
 }
 
-/// Whether the index and both tiers agree: each entry names a chunk that
-/// holds its block, and each chunk in use, in either tier, has an entry
-/// naming it. True once every thread and I/O is done.
-fn in_step(cache: &ObjectCache, files: &[CacheableFile<'_>]) -> bool {
-    let (mut in_memory, mut on_disk) = (0, 0);
-    for file in files {
-        let block = BlockKey::new(file.version().id(), 0);
-        let holds_its_block = match location(cache, file) {
-            Some(Location::Memory(chunk)) => {
-                in_memory += 1;
-                cache.memory.read(chunk, block).is_some()
-            }
-            Some(Location::Disk(chunk)) => {
-                on_disk += 1;
-                cache.disk.chunks().read(chunk, block).is_some()
-            }
-            None => true,
-        };
-        if !holds_its_block {
-            return false;
-        }
-    }
-    let memory = &cache.memory;
-    let disk = cache.disk.chunks();
-    memory.chunk_count() - memory.free_count() == in_memory
-        && disk.chunk_count() - disk.free_count() == on_disk
-}
-
 fn spawn<T: Send + 'static>(
     cache: &Arc<ObjectCache>,
     job: impl FnOnce(&ObjectCache) -> T + Send + 'static,
@@ -149,7 +121,7 @@ fn racing_fills_of_one_block_take_one_chunk() {
         let (cache, _policy) = cache(3, 1);
         let a = resolve(&cache, b"a");
         join_all((0..3).map(|_| spawn(&cache, move |cache| read(cache, &a, true))));
-        assert!(in_step(&cache, &[a]));
+        assert_eq!(cache.check_at_rest(), Ok(()));
         assert_eq!(cache.memory.free_count(), 2);
         read(&cache, &a, false);
         assert!(memory_chunk(&cache, &a).is_some());
@@ -175,7 +147,7 @@ fn a_read_racing_eviction_and_reuse_reads_its_bytes_or_misses() {
         });
         join_all([reader, evictor]);
         assert_eq!(location(&cache, &a), None);
-        assert!(in_step(&cache, &[a, b]));
+        assert_eq!(cache.check_at_rest(), Ok(()));
     });
 }
 
@@ -191,7 +163,7 @@ fn eviction_racing_a_refill_keeps_entries_and_chunks_in_step() {
             spawn(&cache, move |cache| read(cache, &a, true)),
             spawn(&cache, move |cache| read(cache, &a, false)),
         ]);
-        assert!(in_step(&cache, &[a]));
+        assert_eq!(cache.check_at_rest(), Ok(()));
     });
 }
 
@@ -214,7 +186,7 @@ fn of_two_evictions_of_one_chunk_one_evicts() {
             1,
             "freed once, by the last to leave"
         );
-        assert!(in_step(&cache, &[a]));
+        assert_eq!(cache.check_at_rest(), Ok(()));
     });
 }
 
@@ -237,7 +209,7 @@ fn a_read_racing_a_move_to_disk_reads_its_bytes() {
         reader.join().unwrap();
         assert_eq!(mover.join().unwrap(), MoveToDisk::Moved);
         assert!(disk_chunk(&cache, &a).is_some());
-        assert!(in_step(&cache, &[a]));
+        assert_eq!(cache.check_at_rest(), Ok(()));
     });
 }
 
@@ -259,7 +231,7 @@ fn a_move_racing_an_eviction_from_memory_keeps_the_tiers_in_step() {
         // The block ends on disk only if the move won.
         assert_eq!(disk_chunk(&cache, &a).is_some(), moved == MoveToDisk::Moved);
         assert!(moved == MoveToDisk::Moved || evicted);
-        assert!(in_step(&cache, &[a]));
+        assert_eq!(cache.check_at_rest(), Ok(()));
     });
 }
 
@@ -280,7 +252,7 @@ fn of_two_moves_of_one_chunk_one_moves() {
             .filter(|&&outcome| outcome == MoveToDisk::Moved)
             .count();
         assert_eq!(moved, 1, "{outcomes:?}");
-        assert!(in_step(&cache, &[a]));
+        assert_eq!(cache.check_at_rest(), Ok(()));
         assert_eq!(cache.disk.chunks().free_count(), 1, "one copy on disk");
     });
 }
@@ -306,7 +278,7 @@ fn a_read_racing_eviction_from_disk_and_reuse_reads_its_bytes_or_misses() {
         });
         join_all([reader, evictor]);
         assert_eq!(location(&cache, &a), None);
-        assert!(in_step(&cache, &[a, b]));
+        assert_eq!(cache.check_at_rest(), Ok(()));
     });
 }
 
@@ -333,7 +305,7 @@ fn a_dropped_move_frees_its_chunks_after_its_write() {
         read(&cache, &b, false);
         read(&cache, &a, false);
         let mut waits = 0;
-        while !in_step(&cache, &[a, b]) {
+        while cache.check_at_rest().is_err() {
             waits += 1;
             assert!(waits < 1000, "the dropped write's chunks never went free");
             thread::yield_now();
@@ -364,7 +336,7 @@ fn insertions_racing_for_a_full_memory_keep_the_tiers_in_step() {
             spawn(&cache, move |cache| read(cache, &b, true)),
             spawn(&cache, move |cache| read(cache, &c, false)),
         ]);
-        assert!(in_step(&cache, &[a, b, c]));
+        assert_eq!(cache.check_at_rest(), Ok(()));
         for file in [a, b, c] {
             read(&cache, &file, false);
         }
@@ -388,7 +360,7 @@ fn a_promotion_racing_an_eviction_from_disk_keeps_the_tiers_in_step() {
                 cache.evict_from_disk(on_disk);
             }),
         ]);
-        assert!(in_step(&cache, &[a]));
+        assert_eq!(cache.check_at_rest(), Ok(()));
     });
 }
 
@@ -402,7 +374,7 @@ fn two_promotions_of_one_block_leave_one_copy() {
         read(&cache, &a, true);
         policy.set_disk_hit(DiskHit::Promote);
         join_all((0..2).map(|_| spawn(&cache, move |cache| read(cache, &a, false))));
-        assert!(in_step(&cache, &[a]));
+        assert_eq!(cache.check_at_rest(), Ok(()));
         assert!(memory_chunk(&cache, &a).is_some());
         assert_eq!(cache.disk.chunks().free_count(), 1);
     });

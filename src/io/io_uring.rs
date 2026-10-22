@@ -11,6 +11,13 @@ use crate::io::sync::mpsc;
 pub(crate) struct UringDriver {
     ring: IoUring,
     file: File,
+    /// Operations pushed whose completions aren't reaped yet: at most the
+    /// submission queue's size, so their completions fit the completion
+    /// queue, twice that. The kernel frees a submission slot once it takes
+    /// the entry, so free slots alone would let more go out; and completions
+    /// past the queue's room wait in the kernel for an `io_uring_enter`,
+    /// which the loop makes only to submit.
+    in_flight: usize,
 }
 
 impl UringDriver {
@@ -18,6 +25,7 @@ impl UringDriver {
         Ok(Self {
             ring: IoUring::new(queue_depth)?,
             file,
+            in_flight: 0,
         })
     }
 
@@ -57,8 +65,8 @@ impl UringDriver {
 
 impl IoDriver for UringDriver {
     fn available_submission_slots(&mut self) -> usize {
-        let sq = self.ring.submission();
-        sq.capacity() - sq.len()
+        // Pushed entries the kernel hasn't taken yet are in flight too.
+        self.ring.submission().capacity() - self.in_flight
     }
 
     fn push(&mut self, entry: SubmissionEntry) -> Result<()> {
@@ -72,6 +80,7 @@ impl IoDriver for UringDriver {
                 ))
             })?;
         }
+        self.in_flight += 1;
         Ok(())
     }
 
@@ -81,8 +90,9 @@ impl IoDriver for UringDriver {
     }
 
     fn pop_completion(&mut self) -> Option<CompletionEvent> {
-        let mut cq = self.ring.completion();
-        cq.next().map(|cqe| CompletionEvent {
+        let cqe = self.ring.completion().next()?;
+        self.in_flight -= 1;
+        Some(CompletionEvent {
             user_data: cqe.user_data(),
             result: cqe.result(),
         })
@@ -100,4 +110,35 @@ pub(crate) fn new_backend(
 ) -> Result<BackendLoop<UringDriver>> {
     let driver = UringDriver::new(file, queue_depth)?;
     Ok(BackendLoop::new(queue_depth as usize, rx, driver))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PAGE_SIZE_NZ_U32;
+    use crate::buffer::AlignedBuf;
+
+    /// A slot frees once its completion is reaped, not once the kernel takes
+    /// the entry: so the operations in flight never outgrow the completion
+    /// queue, whose overflow would wait for an `io_uring_enter` that may
+    /// never come.
+    #[test]
+    fn a_slot_frees_once_its_completion_is_reaped() {
+        let mut driver = UringDriver::new(tempfile::tempfile().unwrap(), 1).unwrap();
+        let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
+        let read = SubmissionEntry::Read {
+            buf_ptr: buf.as_mut_ptr(),
+            buf_len: buf.len_u32(),
+            offset: 0,
+            user_data: 7,
+        };
+        driver.push(read).unwrap();
+        driver.submit().unwrap();
+        assert_eq!(driver.available_submission_slots(), 0, "taken, not reaped");
+        let completion = std::iter::repeat_with(|| driver.pop_completion())
+            .find_map(|completion| completion)
+            .unwrap();
+        assert_eq!(completion.user_data, 7);
+        assert_eq!(driver.available_submission_slots(), 1);
+    }
 }

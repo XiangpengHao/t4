@@ -1,0 +1,26 @@
+[package]
+name = "t4-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = "1"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+libc = "0.2"
+libfuzzer-sys = "0.4"
+object_store = { version = "0.13.2", default-features = false }
+pollster = "1.0"
+t4 = { path = "..", features = ["__fuzz"] }
+tempfile = "3"
+
+[[bin]]
+name = "cache_equivalence"
+path = "fuzz_targets/cache_equivalence.rs"
+test = false
+doc = false
+bench = false

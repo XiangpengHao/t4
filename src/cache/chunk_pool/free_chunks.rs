@@ -68,6 +68,12 @@ impl FreeChunks {
         self.free_count
     }
 
+    #[cfg(any(test, feature = "__fuzz"))]
+    pub(super) fn is_free(&self, chunk: ChunkId) -> bool {
+        let (word_index, mask) = self.bit_of(chunk);
+        self.taken[word_index] & mask == 0
+    }
+
     /// The word holding `chunk`'s bit, and the bit's mask in it.
     fn bit_of(&self, chunk: ChunkId) -> (usize, u64) {
         // The padding bits past the last chunk are set: freeing one would

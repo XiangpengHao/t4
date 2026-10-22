@@ -49,6 +49,15 @@ impl DiskChunks {
         self.table.free_count()
     }
 
+    /// The block published in each chunk, once nothing holds any
+    /// ([`ChunkTable::blocks_at_rest`]).
+    #[cfg(any(test, feature = "__fuzz"))]
+    pub(in crate::cache) fn blocks_at_rest(
+        &self,
+    ) -> std::result::Result<Vec<Option<BlockKey>>, String> {
+        self.table.blocks_at_rest()
+    }
+
     /// A free chunk for one writer to fill; `None` when every chunk is taken.
     pub(in crate::cache) fn allocate(&self) -> Option<DiskChunkWriter<'_>> {
         let lease = self.table.allocate()?;

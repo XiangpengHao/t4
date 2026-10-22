@@ -51,6 +51,33 @@ impl ChunkTable {
         self.free_chunks().free_count()
     }
 
+    /// The block published in each chunk, `None` for a free one, as they
+    /// are once nothing holds any: no writer, reader or I/O. `Err` names a
+    /// chunk held still, or one the free bitmap has wrong.
+    #[cfg(any(test, feature = "__fuzz"))]
+    pub(super) fn blocks_at_rest(&self) -> Result<Vec<Option<BlockKey>>, String> {
+        let free = self.free_chunks();
+        (0..self.chunk_count())
+            .map(ChunkId::new)
+            .map(|chunk| {
+                let slot = self.slot(chunk);
+                // Acquire: sees the owner its writer published.
+                let state = slot.state.load(Ordering::Acquire);
+                if state & Self::READERS != 0 {
+                    return Err(format!("{chunk:?} is held"));
+                }
+                match (state & Self::PUBLISHED != 0, free.is_free(chunk)) {
+                    (true, false) => Ok(Some(slot.owner())),
+                    (false, true) => Ok(None),
+                    (true, true) => Err(format!("{chunk:?} holds a block, yet is free")),
+                    (false, false) => Err(format!(
+                        "{chunk:?} is taken, though it holds no block and nothing holds it"
+                    )),
+                }
+            })
+            .collect()
+    }
+
     /// A free chunk, leased to one writer; `None` when every chunk is taken.
     pub(super) fn allocate(&self) -> Option<ChunkLease<'_>> {
         let chunk = self.free_chunks().allocate()?;

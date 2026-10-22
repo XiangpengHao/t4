@@ -74,3 +74,11 @@ so it finds interleavings, not memory orderings too weak: those rest on the
 ```bash
 cargo test --features shuttle shuttle    # the shuttle tests, as CI runs them
 ```
+
+A fuzz target checks the cache as a whole against the object store under
+it, writes behind its back included, and the cache's index and tiers
+against each other after every operation (`fuzz/README.md`).
+
+```bash
+TMPDIR=/dev/shm cargo fuzz run cache_equivalence -- -timeout=10
+```

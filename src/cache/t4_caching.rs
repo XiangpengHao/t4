@@ -271,6 +271,14 @@ impl T4Caching {
             && options.version.is_none()
     }
 
+    /// Whether the cache's index and tiers agree, as they must once nothing
+    /// is in flight. For the fuzz target (`fuzz/`), not part of the API.
+    #[cfg(feature = "__fuzz")]
+    #[doc(hidden)]
+    pub fn check_at_rest(&self) -> Result<(), String> {
+        self.cache.check_at_rest()
+    }
+
     /// A get's answer: `bytes`, the file's `range`.
     fn answer(meta: &ObjectMeta, range: Range<u64>, bytes: Bytes) -> GetResult {
         GetResult {

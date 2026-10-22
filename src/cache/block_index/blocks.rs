@@ -49,6 +49,17 @@ impl BlockTable {
         self.blocks.insert(key.packed(), location).or_abort()
     }
 
+    /// Every entry, in order.
+    #[cfg(any(test, feature = "__fuzz"))]
+    pub(in crate::cache) fn entries(&self) -> Vec<(BlockKey, Location)> {
+        let mut entries = Vec::new();
+        self.blocks.scan::<u64, ()>(.., |key, location| {
+            entries.push((BlockKey::from_packed(*key), *location));
+            ControlFlow::Continue(())
+        });
+        entries
+    }
+
     /// Puts `key`'s block at `location` if no tier holds it, and says
     /// whether it did: of two fetches of one block, the first to finish
     /// caches it.

@@ -101,6 +101,7 @@ fn the_default_policy_streams_blocks_through_both_tiers() {
     memory_chunk(&cache, &file, 9);
     let (out, _) = read_through(&cache, &file, &data, 0..size);
     assert_eq!(out, data, "every read right, wherever its blocks were");
+    assert_eq!(cache.check_at_rest(), Ok(()));
 }
 
 #[test]
@@ -203,6 +204,7 @@ fn racing_fetches_of_one_block_take_one_chunk() {
         }
     });
     assert_eq!(cache.memory.free_count(), THREADS as u32 - 1);
+    assert_eq!(cache.check_at_rest(), Ok(()));
     let (out, fetches) = read_through(&cache, &file, &data, 0..MIB);
     assert!(fetches.is_empty());
     assert_eq!(out, data);
@@ -284,6 +286,7 @@ fn blocks_moved_to_disk_read_back_from_disk() {
         assert!(fetches.is_empty(), "{range:?}");
         assert_eq!(out, data[range.start as usize..range.end as usize]);
     }
+    assert_eq!(cache.check_at_rest(), Ok(()));
 }
 
 #[test]
@@ -336,6 +339,7 @@ fn a_full_disk_drops_its_victims_to_take_memorys() {
     let (out, fetches) = read_through(&cache, &file, &data, MIB..3 * MIB);
     assert!(fetches.is_empty());
     assert_eq!(out, data[MIB as usize..]);
+    assert_eq!(cache.check_at_rest(), Ok(()));
 }
 
 #[test]
@@ -398,6 +402,7 @@ fn a_promoted_block_moves_to_memory() {
     let (out, fetches) = read_through(&cache, &file, &data, 0..size);
     assert!(fetches.is_empty());
     assert_eq!(out, data);
+    assert_eq!(cache.check_at_rest(), Ok(()));
 }
 
 #[test]
@@ -420,6 +425,7 @@ fn a_promotion_with_no_room_reads_from_disk() {
     assert_eq!(out, data[10..MIB as usize - 10]);
     disk_chunk(&cache, &file, 0);
     drop(held);
+    assert_eq!(cache.check_at_rest(), Ok(()));
 }
 
 #[test]
@@ -444,6 +450,7 @@ fn a_victim_kept_for_want_of_disk_goes_back_to_the_policy() {
     assert_eq!(memory_chunk(&cache, &file, 1), in_memory);
     assert_eq!(policy.queued(Tier::Memory), [in_memory]);
     drop(held);
+    assert_eq!(cache.check_at_rest(), Ok(()));
 }
 
 #[test]
@@ -486,6 +493,36 @@ fn a_new_version_misses_the_old_ones_blocks() {
     let v2 = cache.resolve(b"a", Some("v2"), MIB).unwrap();
     let (_, fetches) = read_through(&cache, &v2, &data, 0..MIB);
     assert_eq!(fetches, [0..MIB]);
+}
+
+#[test]
+fn the_check_at_rest_finds_held_free_and_unnamed_chunks() {
+    let (_dir, cache, _policy) = cache(2, 1);
+    let data = file_bytes(MIB);
+    let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
+    read_through(&cache, &file, &data, 0..MIB);
+    assert_eq!(cache.check_at_rest(), Ok(()));
+    let chunk = memory_chunk(&cache, &file, 0);
+
+    let reader = cache.memory.read(chunk, key(&file, 0)).unwrap();
+    let held = cache.check_at_rest().unwrap_err();
+    assert!(held.contains("is held"), "{held}");
+    // Evicted, and its entry not yet dropped.
+    assert!(reader.unpublish());
+    drop(reader);
+    let named = cache.check_at_rest().unwrap_err();
+    assert!(named.contains("which holds None"), "{named}");
+    assert!(
+        cache
+            .blocks
+            .remove_if(key(&file, 0), Location::Memory(chunk))
+    );
+    assert_eq!(cache.check_at_rest(), Ok(()));
+
+    // Published, with no entry naming it.
+    drop(cache.memory.allocate().unwrap().publish(key(&file, 0)));
+    let unnamed = cache.check_at_rest().unwrap_err();
+    assert!(unnamed.contains("which no entry names"), "{unnamed}");
 }
 
 #[test]

@@ -262,7 +262,11 @@ chunk table the frame table.
 
 Tests sit beside each module. Shuttle tests (`cargo test --features
 shuttle shuttle`) drive the chunk table, the CLOCK, and the cache on a
-simulated disk whose I/O completes in any order.
+simulated disk whose I/O completes in any order. A fuzz target
+(`fuzz/README.md`) checks `T4Caching` against the store under it, with
+writes behind its back too. The unit, shuttle and fuzz tests share one
+check of the cache at rest, `ObjectCache::check_at_rest`: the index and
+both tiers agree, and no chunk leaks.
 
 t4 began as a single-file key-value store, with a WAL, its own index and
 a shared mode for several processes. The cache replaced it, and it was
