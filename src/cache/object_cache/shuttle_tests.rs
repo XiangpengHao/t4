@@ -68,11 +68,10 @@ fn contents(path: &[u8]) -> Vec<u8> {
 /// a tier, or nothing and a fetch of the file; then, if `fill`, caches what
 /// it fetched.
 fn read(cache: &ObjectCache, file: &CacheableFile<'static>, fill: bool) {
-    let mut out = Vec::new();
-    let read = block_on(cache.read(file, 0..FILE_SIZE, &mut out)).unwrap();
+    let read = block_on(cache.read(file, 0..FILE_SIZE)).unwrap();
     if read.fetches().is_empty() {
         assert_eq!(
-            out,
+            read.into_bytes().unwrap(),
             contents(file.path),
             "a hit reads its own block's bytes"
         );
@@ -340,8 +339,7 @@ fn a_dropped_eviction_gives_its_victim_back() {
         // `b`'s fill picks `a` and writes it to disk. One poll submits the
         // write; dropping the fill then is a caller giving up on it, unless
         // that poll finished it.
-        let mut out = Vec::new();
-        let missed = block_on(cache.read(&b, 0..FILE_SIZE, &mut out)).unwrap();
+        let missed = block_on(cache.read(&b, 0..FILE_SIZE)).unwrap();
         let _ = cache
             .cache_fetched(&missed, 0, &contents(b.path))
             .now_or_never();

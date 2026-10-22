@@ -5,7 +5,6 @@
 use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::num::NonZeroU32;
-use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use super::BLOCK_SIZE_U64;
@@ -109,18 +108,18 @@ impl CacheFiles {
         self.io.read_exact_at(into, reader.position()).await
     }
 
-    /// Reads `pages`, offsets in the chunk `reader` holds, into a buffer of
-    /// their own. The read is submitted now, so reads started together run
-    /// at once, and the future gives its buffer when it lands.
-    pub(super) fn read_pages(
+    /// Reads the pages of the chunk `reader` holds from `from`, an offset in
+    /// it, into `into`, as many as it has room for. The read is submitted
+    /// now, so reads started together run at once, and the future is done
+    /// when it lands.
+    pub(super) fn read_into(
         &self,
         reader: &DiskChunkReader<'_>,
-        pages: Range<u32>,
-    ) -> Result<impl Future<Output = Result<AlignedBuf>> + use<>> {
-        let len = NonZeroU32::new(pages.end - pages.start)
-            .ok_or(Error::InvalidArgument("a disk read takes a page or more"))?;
-        let at = reader.position().advanced(u64::from(pages.start));
-        let read = self.io.read_at(AlignedBuf::new_zeroed(len)?, at)?;
+        from: u32,
+        into: AlignedBuf,
+    ) -> Result<impl Future<Output = Result<()>> + use<>> {
+        let at = reader.position().advanced(u64::from(from));
+        let read = self.io.read_at(into, at)?;
         Ok(async move {
             let (buf, read_len) = read.await?;
             if read_len != buf.len() {
@@ -129,7 +128,7 @@ impl CacheFiles {
                     format!("short read of a disk chunk: {read_len} of {}", buf.len()),
                 )));
             }
-            Ok(buf)
+            Ok(())
         })
     }
 

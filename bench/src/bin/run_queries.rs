@@ -31,6 +31,13 @@ use t4_bench::host_counters::{CgroupMemory, HostCounters, HostProbe};
 use t4_bench::request_trace::{RequestTrace, TracedStore};
 use t4_bench::table_store::{CacheOptions, TableLocation};
 
+/// The allocator: mimalloc unless built `--no-default-features`, as the
+/// `mimalloc` feature in `bench/Cargo.toml` explains. A static, as Rust takes
+/// a global allocator only so.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser)]
 struct Args {
     /// A table, `name=location`: a Parquet file, or a directory of them, at

@@ -37,14 +37,14 @@ fn read_through(
     data: &[u8],
     range: Range<u64>,
 ) -> (Vec<u8>, Vec<Range<u64>>) {
-    let mut out = Vec::new();
-    let read = block_on(cache.read(file, range, &mut out)).unwrap();
-    for fetch in read.fetches() {
+    let mut read = block_on(cache.read(file, range)).unwrap();
+    let fetches = read.fetches().to_vec();
+    for fetch in &fetches {
         let fetched = &data[fetch.start as usize..fetch.end as usize];
-        read.fill(&mut out, fetch.start, fetched);
+        read.fill(fetch.start, fetched);
         block_on(cache.cache_fetched(&read, fetch.start, fetched)).unwrap();
     }
-    (out, read.fetches().to_vec())
+    (read.into_bytes().unwrap().to_vec(), fetches)
 }
 
 fn location(cache: &ObjectCache, file: &CacheableFile<'_>, index: u32) -> Option<Location> {
@@ -137,24 +137,14 @@ fn a_read_fetches_only_the_blocks_memory_lacks() {
     read_through(&cache, &file, &data, MIB..2 * MIB);
     read_through(&cache, &file, &data, 3 * MIB..4 * MIB);
 
-    let mut out = Vec::new();
-    let read = block_on(cache.read(&file, 10..4 * MIB - 10, &mut out)).unwrap();
+    let mut read = block_on(cache.read(&file, 10..4 * MIB - 10)).unwrap();
     assert_eq!(read.bytes(), 10..4 * MIB - 10);
     assert_eq!(read.fetches(), [0..MIB, 2 * MIB..3 * MIB]);
-    // The cached blocks are in, the missing ones zeros until filled.
-    assert_eq!(
-        out[MIB as usize - 10..2 * MIB as usize - 10],
-        data[MIB as usize..2 * MIB as usize]
-    );
-    assert!(out[..MIB as usize - 10].iter().all(|&byte| byte == 0));
-    for fetch in read.fetches() {
-        read.fill(
-            &mut out,
-            fetch.start,
-            &data[fetch.start as usize..fetch.end as usize],
-        );
+    for fetch in read.fetches().to_vec() {
+        read.fill(fetch.start, &data[fetch.start as usize..fetch.end as usize]);
     }
-    assert_eq!(out, data[10..4 * MIB as usize - 10]);
+    // The cached blocks came from memory, the missing ones from the fills.
+    assert_eq!(read.into_bytes().unwrap(), data[10..4 * MIB as usize - 10]);
 }
 
 #[test]
@@ -189,8 +179,7 @@ fn racing_fetches_of_one_block_take_one_chunk() {
     std::thread::scope(|scope| {
         for _ in 0..THREADS {
             scope.spawn(|| {
-                let mut out = Vec::new();
-                let read = block_on(cache.read(&file, 0..MIB, &mut out)).unwrap();
+                let read = block_on(cache.read(&file, 0..MIB)).unwrap();
                 barrier.wait();
                 for fetch in read.fetches() {
                     block_on(cache.cache_fetched(&read, fetch.start, &data)).unwrap();
@@ -524,17 +513,15 @@ fn the_check_at_rest_finds_held_free_and_unnamed_chunks() {
 fn fill_copies_only_the_overlap() {
     let (_dir, cache, _policy) = cache(1, 1);
     let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
-    let read = PartialRead::new(file.version(), 100..200);
-    let mut out = vec![0; 100];
-    read.fill(&mut out, 150, &[7; 100]);
-    assert!(out[..50].iter().all(|&byte| byte == 0));
-    assert!(out[50..].iter().all(|&byte| byte == 7));
-    read.fill(&mut out, 0, &[9; 120]);
-    assert!(out[..20].iter().all(|&byte| byte == 9));
-    assert_eq!(out[20], 0);
-    read.fill(&mut out, 300, &[1; 10]);
-    read.fill(&mut out, 0, &[1; 100]);
-    assert!(out[..20].iter().all(|&byte| byte == 9));
+    let mut read = PartialRead::new(file.version(), 100..200).unwrap();
+    read.fill(150, &[7; 100]);
+    // Past the read, and up to its start: nothing.
+    read.fill(300, &[1; 10]);
+    read.fill(0, &[1; 100]);
+    read.fill(0, &[9; 150]);
+    let bytes = read.into_bytes().unwrap();
+    assert_eq!(bytes[..50], [9; 50]);
+    assert_eq!(bytes[50..], [7; 50]);
 }
 
 #[test]
@@ -542,7 +529,6 @@ fn fill_copies_only_the_overlap() {
 fn a_fetch_of_part_of_a_block_is_refused() {
     let (_dir, cache, _policy) = cache(1, 1);
     let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
-    let mut out = Vec::new();
-    let read = block_on(cache.read(&file, 0..MIB, &mut out)).unwrap();
+    let read = block_on(cache.read(&file, 0..MIB)).unwrap();
     let _ = block_on(cache.cache_fetched(&read, 0, &file_bytes(MIB / 2)));
 }

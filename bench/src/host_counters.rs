@@ -66,6 +66,7 @@ impl HostProbe {
     /// The counters now, or `None` where `/proc` has none.
     pub fn sample(&self) -> Option<HostCounters> {
         let network_received = Self::network_received()?;
+        let minor_faults = Self::minor_faults()?;
         let (mut drive_read, mut drive_written) = (0, 0);
         for &numbers in &self.drives {
             let (read, written) = Self::drive_bytes(numbers)?;
@@ -76,6 +77,7 @@ impl HostProbe {
             drive_read,
             drive_written,
             network_received,
+            minor_faults,
         })
     }
 
@@ -102,6 +104,16 @@ impl HostProbe {
         })
     }
 
+    /// The page faults this process took since it started that found the
+    /// page in memory, or made it there: each a fresh page faulted in.
+    /// `/proc/self/stat`'s 10th field, `minflt`, the 8th after the
+    /// command's name, which ends in the last `)`.
+    fn minor_faults() -> Option<u64> {
+        let stat = fs::read_to_string("/proc/self/stat").ok()?;
+        let (_, after_name) = stat.rsplit_once(')')?;
+        after_name.split_whitespace().nth(7)?.parse().ok()
+    }
+
     /// The bytes every interface but loopback received since boot, from
     /// `/proc/net/dev`: the first field after an interface's name.
     fn network_received() -> Option<u64> {
@@ -117,27 +129,32 @@ impl HostProbe {
 }
 
 /// Bytes moved: by the probed drive, read and written, and received by the
-/// network.
+/// network; and the page faults the process took.
 #[derive(Clone, Copy, Debug)]
 pub struct HostCounters {
     drive_read: u64,
     drive_written: u64,
     network_received: u64,
+    minor_faults: u64,
 }
 
 impl HostCounters {
     /// The CSV columns [`Self::csv_fields`] fills.
-    pub const CSV_COLUMNS: &str = "drive_read_bytes,drive_written_bytes,network_received_bytes";
+    pub const CSV_COLUMNS: &str =
+        "drive_read_bytes,drive_written_bytes,network_received_bytes,minor_faults";
 
     /// `counters` as the fields of [`Self::CSV_COLUMNS`], empty where none
     /// were counted.
     pub fn csv_fields(counters: Option<&Self>) -> String {
         counters.map_or_else(
-            || ",,".to_owned(),
+            || ",,,".to_owned(),
             |moved| {
                 format!(
-                    "{},{},{}",
-                    moved.drive_read, moved.drive_written, moved.network_received
+                    "{},{},{},{}",
+                    moved.drive_read,
+                    moved.drive_written,
+                    moved.network_received,
+                    moved.minor_faults
                 )
             },
         )
@@ -151,6 +168,7 @@ impl HostCounters {
             network_received: self
                 .network_received
                 .saturating_sub(earlier.network_received),
+            minor_faults: self.minor_faults.saturating_sub(earlier.minor_faults),
         }
     }
 
@@ -165,6 +183,10 @@ impl HostCounters {
     pub fn network_received(&self) -> u64 {
         self.network_received
     }
+
+    pub fn minor_faults(&self) -> u64 {
+        self.minor_faults
+    }
 }
 
 impl fmt::Display for HostCounters {
@@ -172,10 +194,11 @@ impl fmt::Display for HostCounters {
         let mib = |bytes: u64| bytes as f64 / f64::from(1 << 20);
         write!(
             f,
-            "drive read {:.0} MiB, written {:.0} MiB, network {:.0} MiB",
+            "drive read {:.0} MiB, written {:.0} MiB, network {:.0} MiB, {} page faults",
             mib(self.drive_read),
             mib(self.drive_written),
-            mib(self.network_received)
+            mib(self.network_received),
+            self.minor_faults
         )
     }
 }

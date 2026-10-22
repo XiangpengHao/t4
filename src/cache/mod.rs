@@ -9,6 +9,8 @@
 //!   read and written by direct I/O (`doc/04-multi-device.md`).
 //! - `policy`: what the cache asks of its policy, and the default one.
 //! - `object_cache`: reads, fills and evictions over them all.
+//! - `read_output`: the buffer a read's bytes land in, the caller's as
+//!   `Bytes` with no copy.
 //! - `t4_caching`: the front end, an `ObjectStore` over another.
 
 mod block_index;
@@ -16,6 +18,7 @@ mod cache_files;
 mod chunk_pool;
 mod object_cache;
 pub mod policy;
+mod read_output;
 mod t4_caching;
 
 pub use t4_caching::{T4Caching, T4CachingBuilder};

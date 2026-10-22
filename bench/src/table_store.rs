@@ -125,6 +125,10 @@ pub struct CacheOptions {
     /// Each cache file's size, in GiB.
     #[arg(long = "cache-disk-gib")]
     disk_gib: Option<u64>,
+    /// The I/Os to the cache files in flight at most, all of them together;
+    /// t4's default unless given.
+    #[arg(long = "cache-queue-depth")]
+    queue_depth: Option<u32>,
 }
 
 /// Which policy t4 runs.
@@ -169,6 +173,10 @@ impl CacheOptions {
                 builder.with_disk_file(path, disk_gib << 30)
             })
             .with_memory_capacity(memory_mib << 20);
+        let builder = match self.queue_depth {
+            Some(queue_depth) => builder.with_queue_depth(queue_depth),
+            None => builder,
+        };
         let builder = match policy {
             CachePolicyChoice::Clock => builder,
             CachePolicyChoice::Memory => {

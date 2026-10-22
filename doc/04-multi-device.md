@@ -91,7 +91,152 @@ them (`bench/`, `replay_reads`), every block pinned to disk, on a
 Three drives read 2.9 times what one does, 98% of their cap, with one I/O
 worker: one thread keeps three drives busy at 1 MiB I/Os. A call's
 latency falls with the queue it waits in: most of a call's time on one
-drive is waiting behind the others'.
+drive is waiting behind the others'. A range inside a block is one I/O on
+one drive still; a call of several blocks reads from several drives, as
+blocks filled together take adjacent chunks.
+
+Against memory, on the same machine and replay, the warm pass all in RAM:
+
+| Where the blocks are | Warm pass | Throughput | Calls 64 KiB – 1 MiB, p50 / p99 | Calls ≥ 4 MiB, p50 / p99 |
+|---|---|---|---|---|
+| the page cache, a local copy of the file | 2.63 s | 17.1 GiB/s | 0.18 / 0.61 ms | 4.9 / 77 ms |
+| t4's memory tier | 2.59 s | 17.4 GiB/s | 0.09 / 0.52 ms | 3.5 / 101 ms |
+| t4's disk tier, three drives | 5.28 s | 8.5 GiB/s | 0.81 / 6.4 ms | 12.6 / 153 ms |
+
+Three drives reach half of what memory serves here; at about 3 GB/s a
+drive, six would match it. A small read stays a drive's latency behind
+memory's, however many drives there are.
+
+### Twelve drives
+
+The same replay on a `z3-highmem-88-highlssd` (twelve SSDs, 88 vCPUs;
+`bench/clickbench/stripe_sweep.sh`), t4 striped over the first `n`, every
+block on disk, filled from a local copy of the file; the page cache holding
+all of that copy. Warm pass:
+
+| Read through | Drives | 14 streams | 56 streams |
+|---|---|---|---|
+| the page cache | — | 22.7 GiB/s | 41.1 GiB/s |
+| t4 | 1 | 3.0 GiB/s | |
+| t4 | 2 | 5.9 GiB/s | |
+| t4 | 3 | 8.7 GiB/s | |
+| t4 | 4 | 11.3 GiB/s | |
+| t4 | 6 | 12.6–13.1 GiB/s | |
+| t4 | 8 | 14.0–14.1 GiB/s | |
+| t4 | 12 | 12.5–13.3 GiB/s | 17.8 GiB/s |
+
+(Ranges: queue depth 64 and 256, which change nothing.) t4 reads each
+drive at its cap up to four, then stops at about 14 GiB/s, 62% of the page
+cache, with twelve drives' 36 GiB/s to spare. Neither the drives, the queue
+depth nor the one I/O worker hold it: a profile of the warm passes on
+twelve finds the tokio workers busy, and the I/O worker at about 3% of the
+samples. Of the workers' time, zeroing buffers (`memset`) takes about a
+third, copying the pages read into the output (`memmove`) more than a
+quarter, and faulting in freshly allocated buffers about a fifth: the read
+path's own copies (`03-cache.md`, "Later": "Fewer copies on the I/O
+path"), each paid on the calling task, so a stream's throughput is capped
+by them. The page cache pays one copy a byte.
+
+### Reading straight into the output
+
+Since, a disk hit reads into the buffer the caller gets (`ReadOutput`,
+`src/cache/read_output.rs`): no zeroing, no copy. Two things then decide
+the result:
+
+- **Where fresh pages fault in.** A direct read pins the pages it fills on
+  the thread that submits it, the one I/O worker. Into pages never touched,
+  that worker faults in, and the kernel zeroes, every read's pages alone,
+  at 98% of a CPU: t4 fell to 8.5 GiB/s. Faulting them in on the reading
+  task first (`MADV_POPULATE_WRITE`) takes it to 10.4.
+- **The allocator.** glibc's hands each read fresh pages to fault in;
+  mimalloc reuses what it freed, still mapped. The bench binaries run on
+  mimalloc, a `#[global_allocator]` (`bench/Cargo.toml`, feature
+  `mimalloc`); `--no-default-features` builds them on glibc. It speeds the
+  page cache too: the copy into its fresh output faults less.
+
+Twelve drives, warm pass, 14 streams; page faults are the process's minor
+faults over the pass (`/proc/self/stat`):
+
+| Read through | glibc | page faults | mimalloc | page faults |
+|---|---|---|---|---|
+| the page cache | 24.2 GiB/s | 1,142,973 | 30.1 GiB/s | 47,177 |
+| t4 | 11.1 GiB/s | 4,078,340 | 34.6 GiB/s | 49,088 |
+
+On mimalloc t4 takes 83 times fewer faults, and passes the page cache:
+34.6 GiB/s is 98% of the twelve drives' cap. (Ubuntu's mimalloc 3,
+preloaded, did worse, 24.8 GiB/s; unexplored.) At 56 streams the page
+cache passes it again ("At 56 streams").
+
+The one I/O worker shows a whole CPU at 56 streams, but it spins while I/O
+is in flight. A flamegraph of it splits its time: `io_uring_enter` about
+half (the NVMe driver's queueing 16%, pinning each read's pages, `gup`,
+15%, the block layer 11%, iomap's direct I/O 5%, marking pages dirty 2%);
+other kernel time 8%; the request channel 4%; completing tasks 1%; and
+about a third spinning, to spare. At twelve drives' cap one worker still
+has room; decision 4 holds.
+
+### At 56 streams
+
+`--copies 4` runs each query's tasks four times at once: 56 streams, 180
+GiB a warm pass. Twelve drives, mimalloc; each drive's reads and busy time
+over the warm pass from `/sys/block/*/stat`:
+
+| Read through | 14 streams | 56 streams | The drives, 56 streams |
+|---|---|---|---|
+| the page cache | 25.2 GiB/s | 43.4 GiB/s | — |
+| t4, queue depth 64 | 31.4 GiB/s | 32.0 GiB/s | 32,836 MiB/s, eleven 86–92% busy |
+| t4, queue depth 256 | | 33.0 GiB/s | 33,925 MiB/s, eleven 92–95% busy |
+
+At 56 streams t4 is held by the drives: they read 94% of their 36,000
+MiB/s cap, eleven of them at 2,860–2,940 MiB/s. The page cache serves from
+memory, its rate set by the threads copying out of it, and at 56 it passes
+what twelve drives can read; matching it takes fifteen or sixteen. At 14
+streams it is under the drives' cap, and t4 passes it.
+
+The page cache is read through object_store's `LocalFileSystem`: a call
+runs on a thread of tokio's blocking pool, which zeroes a buffer for each
+range and `pread`s into it, the ranges one after another. A stream keeps
+one call in flight, so 14 streams copy on 14 threads, of 88 vCPUs, each
+writing every byte twice. A t4 call costs its task no work a byte: the
+drives write the output, a call's blocks from several drives at once. A deeper queue
+fills the drives a little more: 64 in flight is about five a drive.
+
+(The 14-stream runs here are lower than in "Reading straight into the
+output", 25.2 against 30.1 and 31.4 against 34.6, on a box five minutes up;
+not yet explained.)
+
+One drive reads less, and at 56 streams only: file 0's, about 2,000 MiB/s
+and 70% busy, 6% of the bytes where the stripe would give it 8%. The
+others then hold the pass about 3% longer than balanced drives would. A
+guess, not yet checked by counting each file's chunks: four copies miss
+each block at once in the cold pass, and each fetches it and writes it to
+a chunk of its own (`03-cache.md`, "Later": "Two readers missing one
+block"); the first write done takes the block's entry, and the others'
+chunks go free. File 0's drive also holds the local copy the cold pass
+fetches from, so its writes finish later, and it wins fewer blocks.
+
+### End to end
+
+ClickBench's 43 queries in DataFusion (`run_queries`, 88 partitions) over
+the single file, its origin a local copy, two passes in one process; the
+page cache dropped before each run:
+
+| The warm pass reads from | Warm pass | Cold pass |
+|---|---|---|
+| the page cache | 15.27 s | 17.48 s |
+| t4's memory tier | 15.31 s | 17.92 s |
+| t4's disk tier, one SSD | 21.95 s | 24.17 s |
+| t4's disk tier, twelve SSDs | 14.93 s | 18.10 s |
+
+On twelve SSDs the queries run as fast as from memory. On one they take
+44% longer, all of it in the scans of many columns: query 23 reads 13.8
+GiB off the drives, in 5.03 s on one (2.7 GiB/s, the drive's cap) and 2.40
+s on twelve (5.7 GiB/s; decoding is then the limit). Over the warm pass
+DataFusion asks for 3 GiB/s on average, far under the replay's 35: the
+drives matter at the large scans only. Decoding bytes the drives wrote,
+which no CPU copied, costs nothing measurable. One run each: queries
+reading nothing off the drives differ by up to a third between runs (7,
+29, 37), so the totals and the large scans are what to read.
 
 ## Rejected
 

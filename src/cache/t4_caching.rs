@@ -210,16 +210,15 @@ impl T4Caching {
         range: Range<u64>,
         extensions: &Extensions,
     ) -> object_store::Result<Option<Bytes>> {
-        let mut out = Vec::new();
-        let Ok(read) = self.cache.read(file, range, &mut out).await else {
+        let Ok(mut read) = self.cache.read(file, range).await else {
             return Ok(None);
         };
         // Every fetch is in flight at once: a read's misses keep the NIC busy.
-        let fetches = read
-            .fetches()
+        let fetches = read.fetches().to_vec();
+        let fetched = fetches
             .iter()
             .map(|fetch| self.fetch(location, e_tag, fetch.clone(), extensions));
-        for (fetch, fetched) in read.fetches().iter().zip(join_all(fetches).await) {
+        for (fetch, fetched) in fetches.iter().zip(join_all(fetched).await) {
             let bytes = match fetched {
                 Ok(bytes) => bytes,
                 Err(object_store::Error::Precondition { .. }) => {
@@ -228,12 +227,12 @@ impl T4Caching {
                 }
                 Err(error) => return Err(error),
             };
-            read.fill(&mut out, fetch.start, &bytes);
+            read.fill(fetch.start, &bytes);
             // A block the cache fails to keep is fetched again next time: this
             // read has its bytes either way.
             let _ = self.cache.cache_fetched(&read, fetch.start, &bytes).await;
         }
-        Ok(Some(Bytes::from(out)))
+        Ok(read.into_bytes())
     }
 
     /// `range` of the file at `location` from the inner store, if it is still

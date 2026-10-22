@@ -33,6 +33,13 @@ use t4_bench::replay::{CallSize, LatencySummary, QueryReplay, ReplayPlan, Replay
 use t4_bench::request_trace::RecordedRequest;
 use t4_bench::table_store::{CacheOptions, TableLocation};
 
+/// The allocator: mimalloc unless built `--no-default-features`, as the
+/// `mimalloc` feature in `bench/Cargo.toml` explains. A static, as Rust takes
+/// a global allocator only so.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser)]
 struct Args {
     /// The trace to replay, as `run_queries --trace` wrote it.
@@ -138,8 +145,13 @@ impl PassSummary<'_> {
         let elapsed: Duration = self.results.iter().map(|r| r.replay.elapsed()).sum();
         let bytes: u64 = self.results.iter().map(|r| r.replay.bytes()).sum();
         let calls = || self.results.iter().flat_map(|r| r.replay.calls());
+        let faults: u64 = self
+            .results
+            .iter()
+            .filter_map(|r| r.moved.as_ref().map(HostCounters::minor_faults))
+            .sum();
         println!(
-            "pass {}: {:.2} s, {:.2} GiB, {:.2} GiB/s, {} calls",
+            "pass {}: {:.2} s, {:.2} GiB, {:.2} GiB/s, {} calls, {faults} page faults",
             self.pass,
             elapsed.as_secs_f64(),
             bytes as f64 / f64::from(1 << 30),

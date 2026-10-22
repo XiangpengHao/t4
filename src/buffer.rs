@@ -286,6 +286,7 @@ impl AlignedBuf {
         self.ptr.as_ptr()
     }
 
+    #[cfg(test)]
     pub fn as_slice(&self) -> &[u8] {
         debug_assert!(
             self.is_owned(),

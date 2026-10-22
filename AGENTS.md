@@ -24,7 +24,7 @@
 
 - organize the code by features, not by technical buckets, e.g., don't have `api.rs`, `views.rs`, `data.rs`, etc. Instead, do `settings.rs`, `data_panel.rs`, `code_map.rs`, etc.
 
-- No static variables.
+- No static variables, except a binary's `#[global_allocator]`, which Rust takes only as a static.
 
 ## Performance reasoning
 

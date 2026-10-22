@@ -3,8 +3,10 @@
 # vCPUs, 176 GB, and three 3 TB local SSDs at 3,000 MiB/s read each, for
 # the disk tier striped over several drives (doc/04-multi-device.md).
 #
-# On-demand, not Spot: a Z3 with up to 18 TB of local SSD must live-migrate
-# through host maintenance, which Spot VMs can't. Stop it when idle.
+# On-demand by default: a Z3 with up to 18 TB of local SSD must
+# live-migrate through host maintenance, which Spot VMs can't. SPOT=1 makes
+# a Spot VM, stopped on preemption, for a Z3 with more, which maintenance
+# stops instead (z3-highmem-88-highlssd, twelve SSDs). Stop it when idle.
 #
 # A stop wipes the local SSDs but keeps the boot disk. So the repo, the
 # toolchain and target/ live on the boot disk, and startup.sh formats each
@@ -28,6 +30,12 @@ NAME="${NAME:-t4-devbox}"
 ZONE="${ZONE:-us-east4-b}"
 MACHINE_TYPE="${MACHINE_TYPE:-z3-highmem-22-highlssd}"
 
+if [ -n "${SPOT:-}" ]; then
+    scheduling=(--provisioning-model=SPOT --instance-termination-action=STOP
+        --maintenance-policy=TERMINATE)
+else
+    scheduling=(--maintenance-policy=MIGRATE)
+fi
 if [ -n "${BOOT_DISK:-}" ]; then
     boot=(--disk="name=$BOOT_DISK,boot=yes,auto-delete=yes")
 else
@@ -39,7 +47,7 @@ gcloud compute instances create "$NAME" \
     --project="$PROJECT" \
     --zone="$ZONE" \
     --machine-type="$MACHINE_TYPE" \
-    --maintenance-policy=MIGRATE \
+    "${scheduling[@]}" \
     --network-interface=nic-type=GVNIC,network=spiral-robotics,subnet=spiral-robotics-us-east4 \
     "${boot[@]}" \
     --scopes=cloud-platform \

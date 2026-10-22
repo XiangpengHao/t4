@@ -13,9 +13,11 @@
 //! Tiers are exclusive: a block is in one at a time, and the index names it
 //! there. Request coalescing comes later.
 
+use std::future::Future;
 use std::num::NonZeroU32;
 use std::ops::Range;
 
+use bytes::Bytes;
 use futures_util::future::join_all;
 
 use super::block_index::{
@@ -25,6 +27,7 @@ use super::cache_files::CacheFiles;
 use super::chunk_pool::disk_chunks::{DiskChunkReader, DiskChunkWriter};
 use super::chunk_pool::memory_pool::{MemoryChunkReader, MemoryChunkWriter, MemoryPool};
 use super::policy::{Admit, BlockRead, CachePolicy, DiskHit, MemoryVictim, Tier, VictimAction};
+use super::read_output::ReadOutput;
 use super::{BLOCK_SIZE, BLOCK_SIZE_U64, BlockKey, ChunkId};
 use crate::PAGE_SIZE_U32;
 use crate::buffer::AlignedBuf;
@@ -82,10 +85,10 @@ impl ObjectCache {
         Ok(CacheableFile { path, version })
     }
 
-    /// Reads `range` of `file` into `out`, which it sets to the bytes the
-    /// read takes, the range clamped to the file: those of blocks memory
-    /// holds copied in, those of blocks on disk read in, the rest zeros. The
-    /// [`PartialRead`] names what the caller fetches for the rest.
+    /// Reads `range` of `file`, clamped to the file, into the output of the
+    /// [`PartialRead`] it returns: the bytes of blocks memory holds copied
+    /// in, those of blocks on disk read straight in. The read names what the
+    /// caller fetches for the rest, and takes it ([`PartialRead::fill`]).
     ///
     /// The policy hears of every block: a hit in either tier, where a disk
     /// hit goes, a miss and where its block goes once fetched.
@@ -97,12 +100,9 @@ impl ObjectCache {
         &self,
         file: &CacheableFile<'_>,
         range: Range<u64>,
-        out: &mut Vec<u8>,
     ) -> Result<PartialRead> {
         let plan = self.blocks.plan_read(file.version, range.clone());
-        let mut read = PartialRead::new(file.version, plan.bytes());
-        out.clear();
-        out.resize(PartialRead::offset(read.bytes.end - read.bytes.start), 0);
+        let mut read = PartialRead::new(file.version, plan.bytes())?;
         let mut page_reads = Vec::new();
         let mut promotions = Vec::new();
         for &block in plan.blocks() {
@@ -111,13 +111,13 @@ impl ObjectCache {
             match self.hold(block.key(), block.location()) {
                 HeldBlock::Memory(reader) => {
                     self.policy.on_memory_hit(reader.chunk(), &context);
-                    read.place_from_chunk(out, &block, reader.bytes());
+                    read.place_from_chunk(&block, reader.bytes());
                 }
                 HeldBlock::Disk(reader) => {
                     match self.policy.on_disk_hit(reader.chunk(), &context) {
                         DiskHit::Stay => {
-                            let pages = self.disk.read_pages(&reader, block.window().pages())?;
-                            page_reads.push((reader, pages, block));
+                            let pages = self.read_pages(&mut read, &reader, &block)?;
+                            page_reads.push((reader, pages));
                         }
                         DiskHit::Promote => promotions.push((reader, block)),
                     }
@@ -125,10 +125,11 @@ impl ObjectCache {
                 HeldBlock::Missing => read.miss(&block, self.policy.on_miss(&context)),
             }
         }
-        // Every page read was submitted above, so they run at once. Each
-        // keeps its chunk held until its bytes land.
-        for (_held, pages, block) in page_reads {
-            read.place_from_pages(out, &block, pages.await?.as_slice());
+        // Every page read was submitted above, so they run at once, each
+        // straight into the read's output. Each keeps its chunk held until
+        // its bytes land.
+        for (_held, pages) in page_reads {
+            pages.await?;
         }
         let promoted =
             join_all(promotions.into_iter().map(|(on_disk, block)| async move {
@@ -137,16 +138,30 @@ impl ObjectCache {
             .await;
         for (promotion, block) in promoted {
             match promotion? {
-                Promotion::InMemory(reader) => read.place_from_chunk(out, &block, reader.bytes()),
+                Promotion::InMemory(reader) => read.place_from_chunk(&block, reader.bytes()),
                 // No room in memory: the block stays, and the read takes its
                 // pages after all.
-                Promotion::NoRoom(on_disk) => {
-                    let pages = self.disk.read_pages(&on_disk, block.window().pages())?;
-                    read.place_from_pages(out, &block, pages.await?.as_slice());
-                }
+                Promotion::NoRoom(on_disk) => self.read_pages(&mut read, &on_disk, &block)?.await?,
             }
         }
         Ok(read)
+    }
+
+    /// Reads the pages of `block` that `read` needs from the disk chunk
+    /// `on_disk` holds, straight into the read's output. Submitted now, so
+    /// reads started together run at once; done when the future is.
+    fn read_pages(
+        &self,
+        read: &mut PartialRead,
+        on_disk: &DiskChunkReader<'_>,
+        block: &PlannedBlock,
+    ) -> Result<impl Future<Output = Result<()>> + use<>> {
+        let pages = block.window().pages();
+        let start = block.object_range().start;
+        let into = read
+            .output
+            .lend(start + u64::from(pages.start)..start + u64::from(pages.end))?;
+        self.disk.read_into(on_disk, pages.start, into)
     }
 
     /// Caches the blocks that `fetched` holds, the file's bytes from
@@ -569,13 +584,15 @@ enum MoveToDisk {
     Superseded,
 }
 
-/// A read that the cache served in part: the bytes it takes, the ranges of
-/// the file to fetch for the rest, whole blocks, adjacent ones in one, and
-/// where each block fetched goes.
-#[derive(Debug, PartialEq, Eq)]
+/// A read that the cache served in part: the bytes it takes, the output they
+/// land in, the ranges of the file to fetch for the rest, whole blocks,
+/// adjacent ones in one, and where each block fetched goes.
+#[derive(Debug)]
 pub(super) struct PartialRead {
     version: FileVersion,
     bytes: Range<u64>,
+    /// Where the read's bytes land, the caller's once filled.
+    output: ReadOutput,
     fetches: Vec<Range<u64>>,
     /// The blocks the read missed, by number, in order, and where each goes
     /// once fetched, as the policy said.
@@ -583,16 +600,17 @@ pub(super) struct PartialRead {
 }
 
 impl PartialRead {
-    fn new(version: FileVersion, bytes: Range<u64>) -> Self {
-        Self {
+    fn new(version: FileVersion, bytes: Range<u64>) -> Result<Self> {
+        Ok(Self {
             version,
+            output: ReadOutput::new(bytes.clone())?,
             bytes,
             fetches: Vec::new(),
             missed: Vec::new(),
-        }
+        })
     }
 
-    /// The file's bytes the read takes, which `out` holds.
+    /// The file's bytes the read takes, which its output holds.
     #[cfg(all(test, not(feature = "shuttle")))]
     pub(super) fn bytes(&self) -> Range<u64> {
         self.bytes.clone()
@@ -604,17 +622,24 @@ impl PartialRead {
     }
 
     /// Copies the part of `fetched`, the file's bytes from `start`, that the
-    /// read takes into `out`, the buffer [`ObjectCache::read`] filled.
-    pub(super) fn fill(&self, out: &mut [u8], start: u64, fetched: &[u8]) {
+    /// read takes into its output.
+    pub(super) fn fill(&mut self, start: u64, fetched: &[u8]) {
         let fetched_end = start + fetched.len() as u64;
         let overlap = self.bytes.start.max(start)..self.bytes.end.min(fetched_end);
         if overlap.is_empty() {
             return;
         }
-        let len = Self::offset(overlap.end - overlap.start);
-        let at = Self::offset(overlap.start - self.bytes.start);
         let from = Self::offset(overlap.start - start);
-        out[at..at + len].copy_from_slice(&fetched[from..from + len]);
+        let len = Self::offset(overlap.end - overlap.start);
+        self.output
+            .copy_in(overlap.start, &fetched[from..from + len]);
+    }
+
+    /// The read's bytes, once the caller has filled what it missed: `None`
+    /// if a read from disk it started is still writing them, as after one
+    /// failed.
+    pub(super) fn into_bytes(self) -> Option<Bytes> {
+        self.output.into_bytes()
     }
 
     /// Notes that the read missed `block`, which goes where `admit` says
@@ -638,32 +663,12 @@ impl PartialRead {
     }
 
     /// Copies the part of `block` the read takes from `chunk`, the whole of
-    /// the chunk that holds it, into `out`.
-    fn place_from_chunk(&self, out: &mut [u8], block: &PlannedBlock, chunk: &[u8]) {
+    /// the chunk that holds it, into its output.
+    fn place_from_chunk(&mut self, block: &PlannedBlock, chunk: &[u8]) {
         let wanted = block.window().bytes();
-        self.place(
-            out,
-            block,
-            &chunk[wanted.start as usize..wanted.end as usize],
-        );
-    }
-
-    /// Copies the part of `block` the read takes from `pages`, the block's
-    /// pages around it, into `out`.
-    fn place_from_pages(&self, out: &mut [u8], block: &PlannedBlock, pages: &[u8]) {
-        let wanted = block.window().bytes_in_pages();
-        self.place(
-            out,
-            block,
-            &pages[wanted.start as usize..wanted.end as usize],
-        );
-    }
-
-    /// Copies `wanted`, the bytes of `block` the read takes, into `out`.
-    fn place(&self, out: &mut [u8], block: &PlannedBlock, wanted: &[u8]) {
-        let start = block.object_range().start + u64::from(block.window().bytes().start);
-        let at = Self::offset(start - self.bytes.start);
-        out[at..at + wanted.len()].copy_from_slice(wanted);
+        let at = block.object_range().start + u64::from(wanted.start);
+        self.output
+            .copy_in(at, &chunk[wanted.start as usize..wanted.end as usize]);
     }
 
     /// A length or an offset within a read's bytes, as a `usize`: the

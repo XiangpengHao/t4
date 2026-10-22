@@ -14,10 +14,19 @@ clap = { version = "4", features = ["derive"] }
 # from; on object_store 0.13, as t4 is.
 datafusion = "55.2.0"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# The bench binaries' allocator (`mimalloc` feature, on unless
+# `--no-default-features`): it keeps freed memory mapped and reuses it, as
+# DataFusion deployments run, where glibc's hands each read fresh pages to
+# fault in (doc/04-multi-device.md, "Reading straight into the output").
+mimalloc = { version = "0.1", default-features = false, optional = true }
 object_store = { version = "0.13.2", default-features = false, features = ["fs", "gcp"] }
 t4 = { path = ".." }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 url = "2"
+
+[features]
+default = ["mimalloc"]
+mimalloc = ["dep:mimalloc"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

@@ -27,6 +27,42 @@ for ssd in "${ssds[@]}"; do
     chmod 1777 "$mount"
 done
 
+# Stops the box once it has sat idle for 30 minutes: nobody logged in, and
+# the 5-minute load under 0.5. A check every 5 minutes; six idle in a row
+# power it off. The count lives in /run, so each boot starts it afresh.
+cat > /usr/local/sbin/t4-idle-stop <<'EOF'
+#!/usr/bin/env bash
+count=/run/t4-idle-checks
+if [ -z "$(who)" ] && awk '{ exit !($2 < 0.5) }' /proc/loadavg; then
+    idle=$(($(cat "$count" 2>/dev/null || echo 0) + 1))
+else
+    idle=0
+fi
+echo "$idle" > "$count"
+if [ "$idle" -ge 6 ]; then
+    systemctl poweroff
+fi
+EOF
+chmod +x /usr/local/sbin/t4-idle-stop
+cat > /etc/systemd/system/t4-idle-stop.service <<'EOF'
+[Unit]
+Description=Stop the t4 dev box after 30 idle minutes
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/t4-idle-stop
+EOF
+cat > /etc/systemd/system/t4-idle-stop.timer <<'EOF'
+[Unit]
+Description=Check every 5 minutes whether the t4 dev box is idle
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+systemctl enable --now t4-idle-stop.timer
+
 # Packages, once: they live on the boot disk.
 if [ ! -e /var/lib/t4-devbox-packages ]; then
     apt-get update

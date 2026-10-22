@@ -130,6 +130,7 @@ impl PageWindow {
     }
 
     /// Where the bytes asked for start in the window.
+    #[cfg(test)]
     pub(crate) fn start(&self) -> u32 {
         self.start
     }
