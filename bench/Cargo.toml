@@ -3,7 +3,7 @@ name = "t4-bench"
 version = "0.0.0"
 publish = false
 edition = "2024"
-description = "t4's benchmark harness: the workloads it serves, recorded and replayed, against a simulated object store."
+description = "t4's benchmark harness: DataFusion queries over Parquet in GCS or on a local drive, read directly or through t4."
 
 [dependencies]
 async-trait = "0.1"
@@ -14,7 +14,7 @@ clap = { version = "4", features = ["derive"] }
 # from; on object_store 0.13, as t4 is.
 datafusion = "55.2.0"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-object_store = { version = "0.13.2", default-features = false, features = ["fs"] }
+object_store = { version = "0.13.2", default-features = false, features = ["fs", "gcp"] }
 t4 = { path = ".." }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 url = "2"

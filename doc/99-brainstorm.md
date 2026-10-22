@@ -13,3 +13,5 @@ We show that 1. cold run saturates network, 2. cold run saturates disk, 3. varie
 
 We need to cover both parquet and vortex.
 
+- [ ] datafusion clickbench workload analysis: https://claude.ai/artifact/NsCkwMvhFJnVvT4QxyyxM1?sk=mrUcYUF7vGDUiLBcmQSiOA
+
