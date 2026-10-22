@@ -50,7 +50,11 @@ fuzz_target!(|scenario: Scenario| {
 #[derive(Debug)]
 struct Scenario {
     memory_blocks: u64,
+    /// The blocks the smallest cache file holds: the first; the others are
+    /// a block larger each, room the tier leaves unused.
     disk_blocks: u64,
+    /// The cache files the disk tier stripes over.
+    disk_files: u64,
     queue_depth: u32,
     policy: PolicyChoice,
     operations: Vec<Operation>,
@@ -64,6 +68,7 @@ impl<'a> Arbitrary<'a> for Scenario {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let memory_blocks = u.int_in_range(1..=4)?;
         let disk_blocks = u.int_in_range(1..=6)?;
+        let disk_files = u.int_in_range(1..=3)?;
         let queue_depth = u.int_in_range(1..=8)?;
         let policy = if u.arbitrary()? {
             PolicyChoice::Clock
@@ -78,6 +83,7 @@ impl<'a> Arbitrary<'a> for Scenario {
         Ok(Self {
             memory_blocks,
             disk_blocks,
+            disk_files,
             queue_depth,
             policy,
             operations,
@@ -395,7 +401,7 @@ impl Model {
 
 /// A cache over an in-memory store, and the model of both.
 struct Harness {
-    /// The cache file's directory, which lives as long as the cache.
+    /// The cache files' directory, which lives as long as the cache.
     _dir: TempDir,
     store: Arc<InMemory>,
     cache: T4Caching,
@@ -409,12 +415,17 @@ impl Harness {
     fn new(scenario: &Scenario) -> Option<Self> {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(InMemory::new());
-        let builder = T4Caching::builder(Arc::clone(&store) as Arc<dyn ObjectStore>)
+        let builder = (0..scenario.disk_files)
+            .fold(
+                T4Caching::builder(Arc::clone(&store) as Arc<dyn ObjectStore>),
+                |builder, file| {
+                    let path = dir.path().join(format!("cache{file}"));
+                    builder.with_disk_file(path, (scenario.disk_blocks + file) * BLOCK)
+                },
+            )
             .with_memory_capacity(scenario.memory_blocks * BLOCK)
-            .with_disk_path(dir.path().join("cache"))
-            .with_disk_capacity(scenario.disk_blocks * BLOCK)
             .with_queue_depth(scenario.queue_depth)
-            // So the cache file can be on tmpfs (`fuzz/README.md`).
+            // So the cache files can be on tmpfs (`fuzz/README.md`).
             .with_direct_io(false);
         let (builder, pickable) = match &scenario.policy {
             PolicyChoice::Clock => (builder, None),

@@ -19,7 +19,7 @@ use shuttle::scheduler::PctScheduler;
 use super::test_policy::TestPolicy;
 use super::{CacheableFile, MoveToDisk, ObjectCache};
 use crate::cache::block_index::Location;
-use crate::cache::cache_file::CacheFile;
+use crate::cache::cache_files::CacheFiles;
 use crate::cache::policy::{Admit, CachePolicy, DiskHit};
 use crate::cache::{BlockKey, ChunkId};
 use crate::io::io_worker::IoWorker;
@@ -39,11 +39,15 @@ fn explore(test: impl Fn() + Send + Sync + 'static) {
     shuttle::Runner::new(PctScheduler::new(3, 1000), config).run(test);
 }
 
-/// A cache of `memory_chunks` chunks of memory and `disk_chunks` on a
-/// simulated disk, run by a [`TestPolicy`].
+/// A cache of `memory_chunks` chunks of memory and `disk_chunks` on
+/// simulated disks, run by a [`TestPolicy`]: two disks, chunks striped over
+/// them, if `disk_chunks` is even; else one.
 fn cache(memory_chunks: u32, disk_chunks: u32) -> (Arc<ObjectCache>, Arc<TestPolicy>) {
-    let io = IoWorker::simulated(NonZeroU32::new(4).unwrap(), SimDisk::new()).unwrap();
-    let disk = CacheFile::on(io, NonZeroU32::new(disk_chunks).unwrap()).unwrap();
+    let files = if disk_chunks.is_multiple_of(2) { 2 } else { 1 };
+    let disks = (0..files).map(|_| SimDisk::new()).collect();
+    let io = IoWorker::simulated(NonZeroU32::new(4).unwrap(), disks).unwrap();
+    let files = NonZeroU32::new(files).unwrap();
+    let disk = CacheFiles::on(io, files, disk_chunks / files.get()).unwrap();
     let policy = Arc::new(TestPolicy::new());
     let memory = NonZeroU32::new(memory_chunks).unwrap();
     let cache = ObjectCache::new(memory, disk, Arc::clone(&policy) as Arc<dyn CachePolicy>);

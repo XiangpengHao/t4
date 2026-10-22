@@ -1,7 +1,7 @@
 use crate::buffer::AlignedBuf;
 use crate::io::common::{BackendLoop, IoDriver};
 use crate::io::io_task::{
-    FileReadTask, FileWriteTask, PageWrite, WorkerRequest, worker_disconnected_error,
+    FilePosition, FileReadTask, FileWriteTask, PageWrite, WorkerRequest, worker_disconnected_error,
 };
 use crate::io::sync::Arc;
 use crate::io::sync::mpsc;
@@ -15,11 +15,13 @@ use crate::io::new_backend;
 #[cfg(all(feature = "shuttle", test))]
 use crate::io::simulated::{self, SimDisk};
 
-/// Handle to the I/O worker thread.
+/// Handle to the I/O worker thread, which reads and writes a list of files
+/// (`doc/04-multi-device.md`, decision 4): an I/O names its file by its
+/// place in the list ([`FilePosition`]).
 ///
 /// Cloning shares the same underlying worker. Dropping the last clone
 /// disconnects the worker's channel and waits for the thread to exit, so
-/// the file it owns is closed by the time the drop returns.
+/// the files it owns are closed by the time the drop returns.
 #[derive(Clone)]
 pub struct IoWorker {
     // Declared before `_thread`, so it drops first: the worker sees its
@@ -48,14 +50,17 @@ impl fmt::Debug for IoWorker {
 }
 
 impl IoWorker {
-    pub fn new(queue_depth: NonZeroU32, file: File) -> Result<Self> {
-        Self::start(move |rx| new_backend(file, queue_depth.get(), rx))
+    pub fn new(queue_depth: NonZeroU32, files: Vec<File>) -> Result<Self> {
+        if files.is_empty() {
+            return Err(Error::InvalidArgument("an I/O worker needs a file"));
+        }
+        Self::start(move |rx| new_backend(files, queue_depth.get(), rx))
     }
 
-    /// A worker on a simulated disk, for shuttle tests.
+    /// A worker on simulated disks, one a file, for shuttle tests.
     #[cfg(all(feature = "shuttle", test))]
-    pub(crate) fn simulated(queue_depth: NonZeroU32, disk: SimDisk) -> Result<Self> {
-        Self::start(move |rx| Ok(simulated::new_backend_on(disk, queue_depth.get(), rx)))
+    pub(crate) fn simulated(queue_depth: NonZeroU32, disks: Vec<SimDisk>) -> Result<Self> {
+        Self::start(move |rx| Ok(simulated::new_backend_on(disks, queue_depth.get(), rx)))
     }
 
     /// Spawns the worker thread, which builds its backend with `backend`
@@ -90,17 +95,17 @@ impl IoWorker {
         }
     }
 
-    pub fn read_at(&self, buf: AlignedBuf, offset: u64) -> Result<FileReadTask> {
-        FileReadTask::new(self.tx.clone(), buf, offset)
+    pub fn read_at(&self, buf: AlignedBuf, at: FilePosition) -> Result<FileReadTask> {
+        FileReadTask::new(self.tx.clone(), buf, at)
     }
 
     pub fn write(&self, writes: Vec<PageWrite>) -> Result<FileWriteTask> {
         FileWriteTask::new(self.tx.clone(), writes)
     }
 
-    pub async fn read_exact_at(&self, buf: AlignedBuf, offset: u64) -> Result<AlignedBuf> {
+    pub async fn read_exact_at(&self, buf: AlignedBuf, at: FilePosition) -> Result<AlignedBuf> {
         let expected = buf.len();
-        let (buf, n) = self.read_at(buf, offset)?.await?;
+        let (buf, n) = self.read_at(buf, at)?.await?;
         if n != expected {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
@@ -119,33 +124,65 @@ mod test {
     use tempfile::tempfile;
 
     use crate::buffer::AlignedBuf;
-    use crate::io::io_task::PageWrite;
+    use crate::io::io_task::{FilePosition, PageWrite};
     use crate::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U64};
 
     use super::IoWorker;
 
+    /// A page whose first bytes are `text`.
+    fn page_of(text: &str) -> AlignedBuf {
+        let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
+        buf.as_mut_slice()[..text.len()].copy_from_slice(text.as_bytes());
+        buf
+    }
+
     #[test]
     fn basic_io_worker_test() {
         let tmp_file = tempfile().unwrap();
-        let io_worker = IoWorker::new(NonZero::new(12).unwrap(), tmp_file).unwrap();
-
-        let mut write_buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
-        write_buf.as_mut_slice()[..5].copy_from_slice(b"hello");
+        let io_worker = IoWorker::new(NonZero::new(12).unwrap(), vec![tmp_file]).unwrap();
+        let start = FilePosition::new(0, 0);
 
         block_on(
             io_worker
                 .write(vec![PageWrite {
-                    buf: write_buf,
-                    offset: 0,
+                    buf: page_of("hello"),
+                    at: start,
                 }])
                 .unwrap(),
         )
         .unwrap();
 
         let read_buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
-        let read_buf = block_on(io_worker.read_exact_at(read_buf, 0)).unwrap();
+        let read_buf = block_on(io_worker.read_exact_at(read_buf, start)).unwrap();
 
         assert_eq!(&read_buf.as_slice()[..5], b"hello");
+    }
+
+    /// One worker over two files: an I/O goes to the file it names, so the
+    /// same offset in each holds its own bytes; a file past the list fails.
+    #[test]
+    fn one_worker_reads_and_writes_several_files() {
+        let files = vec![tempfile().unwrap(), tempfile().unwrap()];
+        let io_worker = IoWorker::new(NonZero::new(4).unwrap(), files).unwrap();
+        let writes = ["zero", "one"]
+            .iter()
+            .enumerate()
+            .map(|(file, text)| PageWrite {
+                buf: page_of(text),
+                at: FilePosition::new(file as u32, PAGE_SIZE_U64),
+            })
+            .collect();
+        block_on(io_worker.write(writes).unwrap()).unwrap();
+
+        for (file, text) in ["zero", "one"].iter().enumerate() {
+            let at = FilePosition::new(file as u32, PAGE_SIZE_U64);
+            let buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
+            let buf = block_on(io_worker.read_exact_at(buf, at)).unwrap();
+            assert_eq!(&buf.as_slice()[..text.len()], text.as_bytes());
+        }
+        let buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
+        assert!(block_on(io_worker.read_exact_at(buf, FilePosition::new(2, 0))).is_err());
+        assert!(IoWorker::new(NonZero::new(4).unwrap(), Vec::new()).is_err());
     }
 
     #[test]
@@ -155,7 +192,7 @@ mod test {
         const QUEUE_DEPTH: u32 = 32;
 
         let tmp_file = tempfile().unwrap();
-        let io_worker = IoWorker::new(NonZero::new(QUEUE_DEPTH).unwrap(), tmp_file).unwrap();
+        let io_worker = IoWorker::new(NonZero::new(QUEUE_DEPTH).unwrap(), vec![tmp_file]).unwrap();
 
         let marker = |t: u64, i: u64| format!("t{t}-p{i}");
 
@@ -172,16 +209,15 @@ mod test {
                     buf.as_mut_slice()[..bytes.len()].copy_from_slice(bytes.as_bytes());
                     writes.push(PageWrite {
                         buf,
-                        offset: (base + i) * PAGE_SIZE_U64,
+                        at: FilePosition::new(0, (base + i) * PAGE_SIZE_U64),
                     });
                 }
                 block_on(worker.write(writes).unwrap()).unwrap();
 
                 for i in 0..PAGES_PER_THREAD {
                     let read_buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
-                    let read_buf =
-                        block_on(worker.read_exact_at(read_buf, (base + i) * PAGE_SIZE_U64))
-                            .unwrap();
+                    let at = FilePosition::new(0, (base + i) * PAGE_SIZE_U64);
+                    let read_buf = block_on(worker.read_exact_at(read_buf, at)).unwrap();
                     let expected = marker(t, i);
                     assert_eq!(&read_buf.as_slice()[..expected.len()], expected.as_bytes(),);
                 }

@@ -26,7 +26,7 @@ pub use io::error::{Error, Result};
 #[doc(hidden)]
 pub mod __bench {
     pub use crate::buffer::AlignedBuf;
-    pub use crate::io::io_task::PageWrite;
+    pub use crate::io::io_task::{FilePosition, PageWrite};
     pub use crate::io::io_worker::IoWorker;
 }
 

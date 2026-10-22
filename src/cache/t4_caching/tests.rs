@@ -173,8 +173,7 @@ impl ObjectStore for CountingStore {
 fn builder(inner: &Arc<CountingStore>, dir: &TempDir) -> T4CachingBuilder {
     T4Caching::builder(Arc::clone(inner) as Arc<dyn ObjectStore>)
         .with_memory_capacity(4 * MIB)
-        .with_disk_path(dir.path().join("cache"))
-        .with_disk_capacity(8 * MIB)
+        .with_disk_file(dir.path().join("cache"), 8 * MIB)
 }
 
 /// A cache over a [`CountingStore`], in a directory of its own that lives
@@ -207,15 +206,14 @@ fn bounded(range: Range<u64>) -> Asked {
 }
 
 #[test]
-fn a_builder_needs_both_capacities_and_a_disk_path() {
+fn a_builder_needs_a_memory_capacity_and_a_disk_file() {
     let dir = tempfile::tempdir().unwrap();
     let inner = Arc::new(CountingStore::default());
     let store = || T4Caching::builder(Arc::clone(&inner) as Arc<dyn ObjectStore>);
     let path = dir.path().join("cache");
     let incomplete = [
-        store().with_disk_path(&path).with_disk_capacity(MIB),
-        store().with_memory_capacity(MIB).with_disk_capacity(MIB),
-        store().with_memory_capacity(MIB).with_disk_path(&path),
+        store().with_disk_file(&path, MIB),
+        store().with_memory_capacity(MIB),
         builder(&inner, &dir).with_queue_depth(0),
     ];
     for builder in incomplete {
@@ -227,6 +225,44 @@ fn a_builder_needs_both_capacities_and_a_disk_path() {
         .with_memory_capacity(1)
         .build()
         .unwrap();
+}
+
+/// Files of unequal size each hold as many chunks as the smallest, and
+/// take only those; the tier is all of them, and serves reads.
+#[test]
+fn the_disk_tier_stripes_over_its_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(CountingStore::default());
+    let sizes = Arc::new(Mutex::new(None));
+    let seen = Arc::clone(&sizes);
+    let (small, large) = (dir.path().join("small"), dir.path().join("large"));
+    let store = T4Caching::builder(Arc::clone(&inner) as Arc<dyn ObjectStore>)
+        .with_memory_capacity(MIB)
+        .with_disk_file(&small, 3 * MIB)
+        .with_disk_file(&large, 5 * MIB)
+        .with_policy(move |tiers: TierSizes| {
+            *seen.lock().unwrap() = Some(tiers);
+            ClockPolicy::new(tiers.memory_chunks(), tiers.disk_chunks())
+        })
+        .build()
+        .unwrap();
+    let tiers = sizes.lock().unwrap().expect("build made the policy");
+    assert_eq!(tiers.disk_chunks().get(), 6);
+    for file in [&small, &large] {
+        assert_eq!(std::fs::metadata(file).unwrap().len(), 3 * MIB);
+    }
+
+    // More blocks than memory holds: most go to disk, and read back.
+    let path = Path::from("data");
+    let bytes = file_bytes(6 * MIB, 3);
+    put(inner.as_ref(), &path, &bytes);
+    for _ in 0..2 {
+        for block in 0..6 {
+            let range = block * MIB..(block + 1) * MIB;
+            let read = get_range(&store, &path, range.clone());
+            assert_eq!(read, bytes.slice(range.start as usize..range.end as usize));
+        }
+    }
 }
 
 #[test]

@@ -5,14 +5,14 @@
 //!   each holds (build step 1).
 //! - `block_index`: which blocks of which objects are cached, and where
 //!   (build step 2).
-//! - `cache_file`: the disk tier, its chunks in one file read and written
-//!   by direct I/O.
+//! - `cache_files`: the disk tier, its chunks striped over its cache files,
+//!   read and written by direct I/O (`doc/04-multi-device.md`).
 //! - `policy`: what the cache asks of its policy, and the default one.
 //! - `object_cache`: reads, fills and evictions over them all.
 //! - `t4_caching`: the front end, an `ObjectStore` over another.
 
 mod block_index;
-mod cache_file;
+mod cache_files;
 mod chunk_pool;
 mod object_cache;
 pub mod policy;

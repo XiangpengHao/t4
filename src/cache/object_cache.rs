@@ -21,7 +21,7 @@ use futures_util::future::join_all;
 use super::block_index::{
     BlockTable, FileVersion, Location, PathTable, PlannedBlock, UncacheableObject,
 };
-use super::cache_file::CacheFile;
+use super::cache_files::CacheFiles;
 use super::chunk_pool::disk_chunks::{DiskChunkReader, DiskChunkWriter};
 use super::chunk_pool::memory_pool::{MemoryChunkReader, MemoryChunkWriter, MemoryPool};
 use super::policy::{Admit, BlockRead, CachePolicy, DiskHit, MemoryVictim, Tier, VictimAction};
@@ -38,7 +38,7 @@ pub(super) struct ObjectCache {
     blocks: BlockTable,
     /// Shared with the I/O in flight that lends its chunks.
     memory: Arc<MemoryPool>,
-    disk: CacheFile,
+    disk: CacheFiles,
     policy: Arc<dyn CachePolicy>,
 }
 
@@ -57,7 +57,7 @@ impl ObjectCache {
     /// for both counts.
     pub(super) fn new(
         memory_chunks: NonZeroU32,
-        disk: CacheFile,
+        disk: CacheFiles,
         policy: Arc<dyn CachePolicy>,
     ) -> Result<Self> {
         Ok(Self {

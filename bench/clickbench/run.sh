@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # Runs ClickBench on the dev box (bench/devbox/) every way the benchmark
 # compares, each in a process of its own, and writes one CSV a run to
-# ~/t4-results/<tool>-<dataset>-<time>/:
+# ~/t4-results/<tool>-<dataset>-<ssds>ssd-<time>/:
 #
 #   gcs.csv               the dataset from GCS, no cache
-#   local-<n>g.csv        the copy on the SSD through the page cache, in a
-#                         cgroup of n GiB and the tool's working memory:
+#   local-<n>g.csv        the copy on the first SSD through the page cache,
+#                         in a cgroup of n GiB and the tool's working memory:
 #                         pass 0 cold, pass 1 warm
-#   t4-<n>g.csv           through t4, its default CLOCK policy, the SSD, and
-#                         a memory tier the size the page cache was in
-#                         local-<n>g: pass 0 cold, pass 1 warm
-#   t4-pinned-disk.csv    through t4, every block on the SSD: disk hits alone
+#   t4-<n>g.csv           through t4, its default CLOCK policy, a cache file
+#                         on each SSD, and a memory tier the size the page
+#                         cache was in local-<n>g: pass 0 cold, pass 1 warm
+#   t4-pinned-disk.csv    through t4, every block on the SSDs: disk hits alone
 #   t4-pinned-memory.csv  through t4, every block in memory: memory hits alone
+#
+# The dev box mounts local SSD n at /mnt/t4/<n> (bench/devbox/startup.sh).
+# SSDS picks how many t4 stripes its disk tier over, the first so many
+# (default all); the local copy is on the first alone.
 #
 # Every run starts with the page cache dropped (it outlives a cgroup), and
 # runs in a cgroup whose memory holds its cache and its working memory.
@@ -32,15 +36,17 @@ cd "$(dirname "$0")/../.."
 TOOL=${TOOL:-queries}
 DATASET=${DATASET:-single}
 BUDGETS=${BUDGETS:-1 32}
-SSD=/mnt/t4
+mounts=(/mnt/t4/[0-9]*)
+SSDS=${SSDS:-${#mounts[@]}}
+ssds=("${mounts[@]:0:$SSDS}")
 case "$DATASET" in
 single)
     REMOTE=gs://t4-bench-us-east4/clickbench/hits.parquet
-    LOCAL=$SSD/data/hits.parquet
+    LOCAL=${ssds[0]}/data/hits.parquet
     ;;
 partitioned)
     REMOTE=gs://t4-bench-us-east4/clickbench/partitioned/
-    LOCAL=$SSD/data/partitioned/
+    LOCAL=${ssds[0]}/data/partitioned/
     ;;
 *)
     echo "DATASET is single or partitioned, not $DATASET" >&2
@@ -66,11 +72,17 @@ replay)
     exit 1
     ;;
 esac
-CACHE=$SSD/t4.cache
-OUT=${OUT:-$HOME/t4-results/$TOOL-$DATASET-$(date +%Y%m%d-%H%M%S)}
+caches=("${ssds[@]/%//t4.cache}")
+drives=()
+t4=(--cache-disk-gib 32)
+for ssd in "${ssds[@]}"; do
+    drives+=(--drive-dir "$ssd")
+    t4+=(--cache-path "$ssd/t4.cache")
+done
+OUT=${OUT:-$HOME/t4-results/$TOOL-$DATASET-${SSDS}ssd-$(date +%Y%m%d-%H%M%S)}
 
 cargo build --release -p t4-bench --bin run_queries --bin replay_reads
-mkdir -p "$OUT"
+mkdir -p "$OUT" "$(dirname "$LOCAL")"
 [ -e "$LOCAL" ] || gcloud storage cp -r "$REMOTE" "$(dirname "$LOCAL")/"
 
 # Reads the table at $3 with the tool, in a cgroup of $2 MiB, writing
@@ -79,7 +91,7 @@ run() {
     local name=$1 memory_mib=$2 location=$3
     shift 3
     echo "== $name, cgroup memory $memory_mib MiB"
-    rm -f "$CACHE"
+    rm -f "${caches[@]}"
     sync
     echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
     local tool
@@ -89,8 +101,8 @@ run() {
     esac
     sudo systemd-run --scope --quiet --same-dir --uid="$(id -u)" --gid="$(id -g)" \
         -p MemoryMax="${memory_mib}M" -p MemorySwapMax=0 -- \
-        "${tool[@]}" --drive-dir "$SSD" --out "$OUT/$name.csv" "$@"
-    rm -f "$CACHE"
+        "${tool[@]}" "${drives[@]}" --out "$OUT/$name.csv" "$@"
+    rm -f "${caches[@]}"
 }
 # The median page cache, in MiB, after the warm (pass 1) queries of the run
 # whose CSV is $1.
@@ -99,8 +111,6 @@ median_page_cache_mib() {
         $1 == 1 { print int($col / 1048576) }' "$1" | sort -n |
         awk '{ v[NR] = $1 } END { print v[int((NR + 1) / 2)] }'
 }
-t4=(--cache-path "$CACHE" --cache-disk-gib 32)
-
 run gcs $((32 * 1024 + LOCAL_OVERHEAD_MIB)) "$REMOTE" "$@"
 for budget in $BUDGETS; do
     run "local-${budget}g" $((budget * 1024 + LOCAL_OVERHEAD_MIB)) "$LOCAL" --passes 2 "$@"

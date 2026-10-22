@@ -56,8 +56,9 @@ chunk table the frame table.
    A 1 MB I/O already reaches the drive's bandwidth, so contiguity past a
    chunk buys nothing. Free chunks are a bitmap: any free chunk serves any
    block, so nothing fragments and nothing merges. The memory pool is taken
-   once, at startup, and never given back; the cache file is preallocated to
-   the disk budget. The block is the smallest unit: an object's last
+   once, at startup, and never given back; the cache files are
+   preallocated to the disk budget, the chunks striped over them
+   (`04-multi-device.md`). The block is the smallest unit: an object's last
    block, and an object smaller than a block, still take a whole chunk,
    and a block moves to disk as its whole chunk.
 3. **Reads can be partial.** A read inside a block takes only the 4 KB
@@ -152,8 +153,9 @@ chunk table the frame table.
 
 10. **t4 fetches from the object store itself.** `T4Caching`
     (`src/cache/t4_caching.rs`) is an `object_store::ObjectStore` (0.13, as
-    DataFusion 55 uses) over another, made by a builder: the memory and disk
-    capacities and the cache file's path are required; the queue depth,
+    DataFusion 55 uses) over another, made by a builder: the memory
+    capacity and a cache file or more, each a path and a size, are
+    required; the queue depth,
     direct I/O and the policy, built for the tiers' chunk counts, are not.
     A read names a path and a range, and t4 turns the blocks it misses into
     GETs, all in flight at once. So t4 decides how misses are split and
@@ -255,7 +257,7 @@ chunk table the frame table.
 | `src/cache/policy/` | the `CachePolicy` trait, and `ClockPolicy`, the default | 7 |
 | `src/cache/block_index/` | `paths` and `blocks` on bbtree, and planning a read's blocks | 1, 4, 5, 6 |
 | `src/cache/chunk_pool/` | each tier's chunks: the free bitmap, the chunk table, the memory pool, the disk chunks | 2, 8 |
-| `src/cache/cache_file.rs` | the cache file and the I/O worker that reads and writes it | 2, 9 |
+| `src/cache/cache_files.rs` | the cache files and the I/O worker that reads and writes them | 2, 9 |
 | `src/io/` | the I/O worker: io_uring on Linux, a thread pool elsewhere, and a simulated drive for shuttle tests | 2 |
 | `src/buffer.rs` | page-aligned buffers for direct I/O, and alignment arithmetic | |
 | `src/range.rs` | byte ranges, and the whole pages around one | 1 |

@@ -119,10 +119,10 @@ pub struct CacheOptions {
     /// t4's memory tier, in MiB.
     #[arg(long = "cache-memory-mib")]
     memory_mib: Option<u64>,
-    /// t4's cache file.
+    /// A cache file of t4's, one a drive: the disk tier stripes over them.
     #[arg(long = "cache-path")]
-    path: Option<PathBuf>,
-    /// t4's disk tier, the cache file's size, in GiB.
+    paths: Vec<PathBuf>,
+    /// Each cache file's size, in GiB.
     #[arg(long = "cache-disk-gib")]
     disk_gib: Option<u64>,
 }
@@ -155,17 +155,20 @@ impl CacheOptions {
         let Some(policy) = self.policy else {
             return Ok(origin);
         };
-        let (Some(memory_mib), Some(path), Some(disk_gib)) =
-            (self.memory_mib, &self.path, self.disk_gib)
+        let (Some(memory_mib), false, Some(disk_gib)) =
+            (self.memory_mib, self.paths.is_empty(), self.disk_gib)
         else {
             return Err(
                 "--cache-policy needs --cache-memory-mib, --cache-path and --cache-disk-gib".into(),
             );
         };
-        let builder = T4Caching::builder(origin)
-            .with_memory_capacity(memory_mib << 20)
-            .with_disk_path(path)
-            .with_disk_capacity(disk_gib << 30);
+        let builder = self
+            .paths
+            .iter()
+            .fold(T4Caching::builder(origin), |builder, path| {
+                builder.with_disk_file(path, disk_gib << 30)
+            })
+            .with_memory_capacity(memory_mib << 20);
         let builder = match policy {
             CachePolicyChoice::Clock => builder,
             CachePolicyChoice::Memory => {

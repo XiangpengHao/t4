@@ -11,10 +11,41 @@ use crate::io::sync::{Arc, Mutex};
 pub(crate) type ReadCompletion = Arc<TaskCompletion<(AlignedBuf, usize)>>;
 pub(crate) type WriteCompletion = Arc<TaskCompletion<()>>;
 
+/// Where an I/O goes: one of the worker's files, by its place in the list
+/// the worker opened, and an offset in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FilePosition {
+    file: u32,
+    offset: u64,
+}
+
+impl FilePosition {
+    pub fn new(file: u32, offset: u64) -> Self {
+        Self { file, offset }
+    }
+
+    /// The file's place in the worker's list.
+    pub fn file(self) -> u32 {
+        self.file
+    }
+
+    pub fn offset(self) -> u64 {
+        self.offset
+    }
+
+    /// The position `bytes` further into the same file.
+    pub fn advanced(self, bytes: u64) -> Self {
+        Self {
+            file: self.file,
+            offset: self.offset + bytes,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct PageWrite {
     pub buf: AlignedBuf,
-    pub offset: u64,
+    pub at: FilePosition,
 }
 
 pub(crate) struct TaskCompletion<T> {
@@ -100,7 +131,7 @@ pub(crate) fn worker_disconnected_error() -> Error {
 pub(crate) enum WorkerRequest {
     Read {
         buf: AlignedBuf,
-        offset: u64,
+        at: FilePosition,
         completion: ReadCompletion,
     },
     Write {
@@ -127,12 +158,12 @@ impl FileReadTask {
     pub(crate) fn new(
         tx: mpsc::Sender<WorkerRequest>,
         buf: AlignedBuf,
-        offset: u64,
+        at: FilePosition,
     ) -> Result<Self> {
         let completion = Arc::new(TaskCompletion::new());
         let request = WorkerRequest::Read {
             buf,
-            offset,
+            at,
             completion: Arc::clone(&completion),
         };
         tx.send(request).map_err(|_| worker_disconnected_error())?;

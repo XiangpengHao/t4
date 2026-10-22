@@ -1,12 +1,12 @@
-//! [`CacheFile`]: the disk tier, its chunks in one file, read and written
-//! by direct I/O through the I/O worker (`doc/03-cache.md`, decisions 2, 3
-//! and 9).
+//! [`CacheFiles`]: the disk tier, its chunks striped over its cache files,
+//! one a drive, read and written by direct I/O through one I/O worker
+//! (`doc/03-cache.md`, decisions 2, 3 and 9; `doc/04-multi-device.md`).
 
 use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::BLOCK_SIZE_U64;
 use super::chunk_pool::disk_chunks::{DiskChunkReader, DiskChunkWriter, DiskChunks};
@@ -16,40 +16,69 @@ use crate::io::io_task::PageWrite;
 use crate::io::io_worker::IoWorker;
 use crate::io::sync::Arc;
 
-/// The disk tier: the file's chunks, all of it from offset 0, and the I/O
-/// worker that reads and writes them.
-pub(super) struct CacheFile {
+/// A cache file the user gives: where it is, and the bytes it may take.
+#[derive(Clone, Debug)]
+pub(super) struct DiskFile {
+    path: PathBuf,
+    capacity: u64,
+}
+
+impl DiskFile {
+    pub(super) fn new(path: PathBuf, capacity: u64) -> Self {
+        Self { path, capacity }
+    }
+}
+
+/// The disk tier: its chunks, striped over its files by number, and the
+/// one I/O worker that reads and writes them all.
+pub(super) struct CacheFiles {
     io: IoWorker,
     chunks: Arc<DiskChunks>,
 }
 
-impl CacheFile {
-    /// Opens the cache file at `path`, made if missing, with room for
-    /// `chunk_count` chunks, and `queue_depth` I/Os in flight. Whatever it
-    /// held is nothing to the cache: the index isn't kept across restarts
-    /// (decision 9), so every chunk starts free. Direct I/O unless
-    /// `direct_io` is off, and no `O_DSYNC`: nothing on disk has to outlast
-    /// a crash.
+impl CacheFiles {
+    /// Opens `files`, each made if missing, with `queue_depth` I/Os in
+    /// flight across them. Each holds as many chunks as the smallest has
+    /// room for (`doc/04-multi-device.md`, decision 3), one at least, and
+    /// takes only those. Whatever a file held is nothing to the cache: the
+    /// index isn't kept across restarts (decision 9), so every chunk starts
+    /// free. Direct I/O unless `direct_io` is off, and no `O_DSYNC`: nothing
+    /// on disk has to outlast a crash.
     pub(super) fn open(
-        path: &Path,
-        chunk_count: NonZeroU32,
+        files: &[DiskFile],
         queue_depth: NonZeroU32,
         direct_io: bool,
     ) -> Result<Self> {
-        let file = Self::open_file(path, direct_io)?;
-        // Room for every chunk now, so that no write finds the drive full.
-        let len = u64::from(chunk_count.get()) * BLOCK_SIZE_U64;
-        rustix::fs::fallocate(&file, rustix::fs::FallocateFlags::empty(), 0, len)
-            .map_err(std::io::Error::from)?;
-        Self::on(IoWorker::new(queue_depth, file)?, chunk_count)
+        let count = u32::try_from(files.len())
+            .ok()
+            .and_then(NonZeroU32::new)
+            .ok_or(Error::InvalidArgument(
+                "the disk tier needs from 1 to 2^32 - 1 files",
+            ))?;
+        let smallest = files.iter().map(|file| file.capacity).min().unwrap_or(0);
+        let chunks_per_file =
+            (smallest / BLOCK_SIZE_U64).clamp(1, u64::from(u32::MAX / count)) as u32;
+        let opened = files
+            .iter()
+            .map(|file| {
+                let opened = Self::open_file(&file.path, direct_io)?;
+                // Room for every chunk now, so that no write finds the drive
+                // full.
+                let len = u64::from(chunks_per_file) * BLOCK_SIZE_U64;
+                rustix::fs::fallocate(&opened, rustix::fs::FallocateFlags::empty(), 0, len)
+                    .map_err(std::io::Error::from)?;
+                Ok(opened)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Self::on(IoWorker::new(queue_depth, opened)?, count, chunks_per_file)
     }
 
-    /// The disk tier on the file `io` reads and writes, of `chunk_count`
-    /// chunks.
-    pub(super) fn on(io: IoWorker, chunk_count: NonZeroU32) -> Result<Self> {
+    /// The disk tier on the `files` files `io` reads and writes, of
+    /// `chunks_per_file` chunks each.
+    pub(super) fn on(io: IoWorker, files: NonZeroU32, chunks_per_file: u32) -> Result<Self> {
         Ok(Self {
             io,
-            chunks: Arc::new(DiskChunks::new(0, chunk_count.get())?),
+            chunks: Arc::new(DiskChunks::new(files, chunks_per_file)?),
         })
     }
 
@@ -65,7 +94,7 @@ impl CacheFile {
     ) -> Result<()> {
         let write = PageWrite {
             buf: pages,
-            offset: writer.offset(),
+            at: writer.position(),
         };
         self.io.write(vec![write])?.await
     }
@@ -77,7 +106,7 @@ impl CacheFile {
         reader: &DiskChunkReader<'_>,
         into: AlignedBuf,
     ) -> Result<AlignedBuf> {
-        self.io.read_exact_at(into, reader.offset()).await
+        self.io.read_exact_at(into, reader.position()).await
     }
 
     /// Reads `pages`, offsets in the chunk `reader` holds, into a buffer of
@@ -90,8 +119,8 @@ impl CacheFile {
     ) -> Result<impl Future<Output = Result<AlignedBuf>> + use<>> {
         let len = NonZeroU32::new(pages.end - pages.start)
             .ok_or(Error::InvalidArgument("a disk read takes a page or more"))?;
-        let offset = reader.offset() + u64::from(pages.start);
-        let read = self.io.read_at(AlignedBuf::new_zeroed(len)?, offset)?;
+        let at = reader.position().advanced(u64::from(pages.start));
+        let read = self.io.read_at(AlignedBuf::new_zeroed(len)?, at)?;
         Ok(async move {
             let (buf, read_len) = read.await?;
             if read_len != buf.len() {

@@ -8,18 +8,20 @@ The interface of this caching will be very similar to object_store, but internal
 
 But so far, we only focus on the second part.
 
-Built so far (2026-10-21, `03-cache.md`): `t4::T4Caching`, an
-`object_store::ObjectStore` that caches another in memory and on a local
-drive, with cache replacement (a pluggable policy, a lock-free CLOCK by
-default) and io_uring reads and writes on one drive. Not yet: request
-coalescing and splits, several drives, racing reads.
+Built so far (2026-10-22, `03-cache.md`, `04-multi-device.md`):
+`t4::T4Caching`, an `object_store::ObjectStore` that caches another in
+memory and on local drives, with cache replacement (a pluggable policy, a
+lock-free CLOCK by default) and io_uring reads and writes, chunks striped
+over a file on each drive. Not yet: request coalescing and splits, racing
+reads.
 
 ## What It Is
 
 `t4` is a cache for object stores. `T4Caching` wraps an
 `object_store::ObjectStore` (S3, GCS, Azure, or any other) and keeps what is
-read in two tiers of fixed size: memory, and one file on a local NVMe
-drive, read and written with `O_DIRECT` through io_uring. It fetches what
+read in two tiers of fixed size: memory, and a file on each local NVMe
+drive it is given, chunks striped over them, read and written with
+`O_DIRECT` through io_uring (`04-multi-device.md`). It fetches what
 it misses itself. The design: `03-cache.md`.
 
 ## The docs
@@ -27,6 +29,8 @@ it misses itself. The design: `03-cache.md`.
 - `00-meta.md`: this.
 - `03-cache.md`: the cache: its design, the decisions behind it, what's
   built, and what comes later.
+- `04-multi-device.md`: the disk tier over several devices: chunks
+  striped over the cache files by number, one I/O worker for all.
 - `98-cachefs-vs-fs.md`: how a cache's storage differs from a file
   system's.
 - `99-brainstorm.md`: open notes.

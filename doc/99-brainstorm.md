@@ -15,3 +15,36 @@ We need to cover both parquet and vortex.
 
 - [ ] datafusion clickbench workload analysis: https://claude.ai/artifact/NsCkwMvhFJnVvT4QxyyxM1?sk=mrUcYUF7vGDUiLBcmQSiOA
 
+- [ ] on a disk miss, current we allow it to fetch from object store, use it, and drop it.
+On a memory miss, we fetch it from disk, use it, and drop.
+This means every miss, we need to at runtime allocate memory, use it once and remove. 
+This also means io_uring need to setup the memory mapping each time, which is stupid.
+
+I think ideally, we should never at runtime allocate memory for buffering, we just use exactly what are we pre-allocated.
+This means we either: 
+1. Reserve a few buffers for one time use, we make sure those memory are always avaliable, those are the scratch pad memory, already mapped. but this may limit the amount of in flight io request, which may not be great.
+2. every io/network read means we need to make some space in memory chunk. so there's no pre-reservation, full memory space is used, no limit on inflight io. But, the problem is we might need to first evict data to make room. 
+
+- [ ]
+when serving a request, we basically have 3 modes: 1. cost optimized, 2. latency optimized, 3. throughput optimized.
+
+1. cost optimized: object store charges per request, and the traffic is free within the provider network.
+So downloading 1GB of data costs the same as downloading 1MB of data.
+This is useful when we pre-warm the cache.
+
+2. throughput optimized: most of the time, scanning is throughput optimized. 
+For reading from object store: breaking down the large requests into smaller requests helps.
+For reading from disk cache: distribute the cache chunks across multiple devices helps.
+For reading from memory cache: struggler decides the throughput, a get_ranges must wait until all chunks are read.
+
+3. latency optimized: some parts of the files are latency critical, like metadata.
+From object store: racing reads, multi requests for metadata, taking the fastest one.
+From disk cache: replicate the metadata to multiple devices, sending to multiple devices, taking the fastest one.
+From memory cache: it should by default stays in memory.
+
+How do we know which part are latency critical? 1. parquet's foot, 2. similar reagion of vortex, 3. mp4, jpeg?, 4. HEAD, LIST requests
+
+- [ ] We need to show a cost-latency Pareto frontier.
+Basically, how much does it cost to run a query, maybe?
+
+- [ ] We need to measure the p-max, because it's very important to demonstrate the effect of racing reads.

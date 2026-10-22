@@ -57,9 +57,9 @@ struct Args {
     #[arg(long = "query")]
     only: Vec<usize>,
     /// Count the bytes read and written on the drive that holds this
-    /// directory (Linux only).
-    #[arg(long)]
-    drive_dir: Option<PathBuf>,
+    /// directory, summed over every one given (Linux only).
+    #[arg(long = "drive-dir")]
+    drive_dirs: Vec<PathBuf>,
     /// Where each query's time, bytes and latencies go, as CSV.
     #[arg(long)]
     out: PathBuf,
@@ -179,7 +179,7 @@ async fn main() -> Result<(), Error> {
     let plan = ReplayPlan::new(&trace, &args.location)?;
     let store = args.cache.in_front_of(args.location.origin()?)?;
     let replayer = Replayer::new(store, args.copies);
-    let probe = HostProbe::new(args.drive_dir.as_deref())?;
+    let probe = HostProbe::new(&args.drive_dirs)?;
 
     let setup = replayer.sequence(plan.setup()).await?;
     println!(

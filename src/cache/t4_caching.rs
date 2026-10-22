@@ -36,7 +36,7 @@ use object_store::{
 
 #[cfg(feature = "__fuzz")]
 use super::ChunkId;
-use super::cache_file::CacheFile;
+use super::cache_files::{CacheFiles, DiskFile};
 use super::object_cache::{CacheableFile, ObjectCache};
 #[cfg(feature = "__fuzz")]
 use super::policy::Tier;
@@ -66,8 +66,8 @@ pub struct T4Caching {
 /// # fn example(s3: std::sync::Arc<dyn object_store::ObjectStore>) -> t4::Result<()> {
 /// let store = t4::T4Caching::builder(s3)
 ///     .with_memory_capacity(64 << 30)
-///     .with_disk_path("/mnt/nvme/t4.cache")
-///     .with_disk_capacity(4 << 40)
+///     .with_disk_file("/mnt/nvme0/t4.cache", 3 << 40)
+///     .with_disk_file("/mnt/nvme1/t4.cache", 3 << 40)
 ///     .build()?;
 /// # Ok(())
 /// # }
@@ -75,8 +75,7 @@ pub struct T4Caching {
 pub struct T4CachingBuilder {
     inner: Arc<dyn ObjectStore>,
     memory_capacity: Option<u64>,
-    disk_path: Option<PathBuf>,
-    disk_capacity: Option<u64>,
+    disk_files: Vec<DiskFile>,
     queue_depth: u32,
     direct_io: bool,
     policy: Option<PolicyMaker>,
@@ -90,27 +89,24 @@ impl T4CachingBuilder {
         self
     }
 
-    /// The cache file, made if missing. Whatever it held is nothing to the
-    /// cache, which starts cold every time (decision 9). Required.
-    pub fn with_disk_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.disk_path = Some(path.into());
+    /// A cache file at `path`, made if missing, of `capacity` bytes: one a
+    /// drive, one at least. t4 stripes its disk tier over them by 1 MiB
+    /// chunk, each file holding as many chunks as the smallest has room for
+    /// (`doc/04-multi-device.md`). Whatever a file held is nothing to the
+    /// cache, which starts cold every time (decision 9).
+    pub fn with_disk_file(mut self, path: impl Into<PathBuf>, capacity: u64) -> Self {
+        self.disk_files.push(DiskFile::new(path.into(), capacity));
         self
     }
 
-    /// Disk for cached bytes, in whole 1 MiB blocks, one at least: the cache
-    /// file's size. Required.
-    pub fn with_disk_capacity(mut self, bytes: u64) -> Self {
-        self.disk_capacity = Some(bytes);
-        self
-    }
-
-    /// The I/Os to the cache file in flight at most; 64 unless set.
+    /// The I/Os to the cache files in flight at most, all of them together;
+    /// 64 unless set.
     pub fn with_queue_depth(mut self, queue_depth: u32) -> Self {
         self.queue_depth = queue_depth;
         self
     }
 
-    /// Whether the cache file is read and written past the page cache; so
+    /// Whether the cache files are read and written past the page cache; so
     /// unless set.
     pub fn with_direct_io(mut self, direct_io: bool) -> Self {
         self.direct_io = direct_io;
@@ -127,23 +123,25 @@ impl T4CachingBuilder {
         self
     }
 
-    /// The store: its cache file made and sized, its memory mapped, its
+    /// The store: its cache files made and sized, its memory mapped, its
     /// policy built.
     ///
     /// # Errors
     ///
-    /// If a capacity or the disk path wasn't given, the queue depth is 0, or
-    /// the cache file can't be made, sized and opened, or the memory mapped.
+    /// If the memory capacity or a disk file wasn't given, the queue depth
+    /// is 0, or a cache file can't be made, sized and opened, or the memory
+    /// mapped.
     pub fn build(self) -> crate::Result<T4Caching> {
         let memory_chunks =
             Self::chunks(self.memory_capacity, "T4Caching needs a memory capacity")?;
-        let disk_chunks = Self::chunks(self.disk_capacity, "T4Caching needs a disk capacity")?;
-        let disk_path = self
-            .disk_path
-            .ok_or(crate::Error::InvalidArgument("T4Caching needs a disk path"))?;
+        if self.disk_files.is_empty() {
+            return Err(crate::Error::InvalidArgument("T4Caching needs a disk file"));
+        }
         let queue_depth = NonZeroU32::new(self.queue_depth)
             .ok_or(crate::Error::InvalidArgument("queue depth must be > 0"))?;
-        let disk = CacheFile::open(&disk_path, disk_chunks, queue_depth, self.direct_io)?;
+        let disk = CacheFiles::open(&self.disk_files, queue_depth, self.direct_io)?;
+        let disk_chunks = NonZeroU32::new(disk.chunks().chunk_count())
+            .expect("a disk file holds a chunk at least");
         let sizes = TierSizes::new(memory_chunks, disk_chunks);
         let policy = match self.policy {
             Some(build) => build(sizes),
@@ -170,8 +168,7 @@ impl fmt::Debug for T4CachingBuilder {
         f.debug_struct("T4CachingBuilder")
             .field("inner", &self.inner)
             .field("memory_capacity", &self.memory_capacity)
-            .field("disk_path", &self.disk_path)
-            .field("disk_capacity", &self.disk_capacity)
+            .field("disk_files", &self.disk_files)
             .field("queue_depth", &self.queue_depth)
             .field("direct_io", &self.direct_io)
             .finish_non_exhaustive()
@@ -184,8 +181,7 @@ impl T4Caching {
         T4CachingBuilder {
             inner,
             memory_capacity: None,
-            disk_path: None,
-            disk_capacity: None,
+            disk_files: Vec::new(),
             queue_depth: 64,
             direct_io: true,
             policy: None,

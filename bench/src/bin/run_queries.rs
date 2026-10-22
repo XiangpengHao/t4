@@ -56,9 +56,9 @@ struct Args {
     #[command(flatten)]
     cache: CacheOptions,
     /// Count the bytes read and written on the drive that holds this
-    /// directory (Linux only).
-    #[arg(long)]
-    drive_dir: Option<PathBuf>,
+    /// directory, summed over every one given (Linux only).
+    #[arg(long = "drive-dir")]
+    drive_dirs: Vec<PathBuf>,
     /// Record every call made of the tables' stores, as CSV, here.
     #[arg(long)]
     trace: Option<PathBuf>,
@@ -139,7 +139,7 @@ impl QuerySession {
                 )
                 .await?;
         }
-        let probe = HostProbe::new(args.drive_dir.as_deref())?;
+        let probe = HostProbe::new(&args.drive_dirs)?;
         Ok(Self {
             context,
             trace,

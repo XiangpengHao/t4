@@ -4,7 +4,7 @@ use crate::buffer::AlignedBuf;
 use crate::io::error::{Error, Result};
 use crate::io::sync::mpsc;
 
-use super::io_task::{PageWrite, ReadCompletion, WorkerRequest, WriteCompletion};
+use super::io_task::{FilePosition, PageWrite, ReadCompletion, WorkerRequest, WriteCompletion};
 
 fn worker_failed_error(message: impl Into<String>) -> Error {
     Error::Io(std::io::Error::other(message.into()))
@@ -126,18 +126,18 @@ fn request_op_count(request: &WorkerRequest) -> usize {
 }
 
 /// Backend-agnostic submission record handed to a driver, which owns the
-/// file it goes to.
+/// files it goes to.
 pub(crate) enum SubmissionEntry {
     Read {
         buf_ptr: *mut u8,
         buf_len: u32,
-        offset: u64,
+        at: FilePosition,
         user_data: u64,
     },
     Write {
         buf_ptr: *const u8,
         buf_len: u32,
-        offset: u64,
+        at: FilePosition,
         user_data: u64,
         /// is_last_in_batch only required for io_uring backend
         #[allow(dead_code)]
@@ -255,7 +255,7 @@ impl<D: IoDriver> BackendLoop<D> {
         match request {
             WorkerRequest::Read {
                 buf,
-                offset,
+                at,
                 completion,
             } => {
                 self.inflight_requests.insert(
@@ -283,7 +283,7 @@ impl<D: IoDriver> BackendLoop<D> {
                     self.driver.push(SubmissionEntry::Read {
                         buf_ptr: buf.as_mut_ptr(),
                         buf_len: buf.len_u32(),
-                        offset,
+                        at,
                         user_data: encode_user_data(request_id, 0),
                     })
                 };
@@ -320,7 +320,7 @@ impl<D: IoDriver> BackendLoop<D> {
                         self.driver.push(SubmissionEntry::Write {
                             buf_ptr: page.buf.as_ptr(),
                             buf_len: page.buf.len_u32(),
-                            offset: page.offset,
+                            at: page.at,
                             user_data: encode_user_data(request_id, index),
                             is_last_in_batch: is_last,
                         })

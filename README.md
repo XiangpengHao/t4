@@ -4,8 +4,9 @@
 
 ## Features
 
-- **Two tiers of fixed size:** memory, and one file on a local drive. The
-  cache never grows past either.
+- **Two tiers of fixed size:** memory, and a file on each local drive you
+  give it, 1 MiB chunks striped over them. The cache never grows past
+  either.
 - **`io_uring` and `O_DIRECT`** for the drive. A hit on disk reads only the
   4 KiB pages it needs.
 - **1 MiB blocks.** A miss fetches whole blocks, adjacent ones in one GET,
@@ -27,9 +28,9 @@ use t4::T4Caching;
 
 let s3: Arc<dyn ObjectStore> = /* any ObjectStore */;
 let store = T4Caching::builder(s3)
-    .with_memory_capacity(64 << 30)        
-    .with_disk_path("/mnt/nvme/t4.cache")
-    .with_disk_capacity(4 << 40)          
+    .with_memory_capacity(64 << 30)
+    .with_disk_file("/mnt/nvme0/t4.cache", 3 << 40)
+    .with_disk_file("/mnt/nvme1/t4.cache", 3 << 40)
     .build()?;
 
 let footer = store

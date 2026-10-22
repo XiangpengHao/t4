@@ -5,12 +5,13 @@ use io_uring::{IoUring, opcode, types};
 
 use crate::io::common::{BackendLoop, CompletionEvent, IoDriver, SubmissionEntry};
 use crate::io::error::{Error, Result};
-use crate::io::io_task::WorkerRequest;
+use crate::io::io_task::{FilePosition, WorkerRequest};
 use crate::io::sync::mpsc;
 
 pub(crate) struct UringDriver {
     ring: IoUring,
-    file: File,
+    /// The files the worker reads and writes, by their place in the list.
+    files: Box<[File]>,
     /// Operations pushed whose completions aren't reaped yet: at most the
     /// submission queue's size, so their completions fit the completion
     /// queue, twice that. The kernel frees a submission slot once it takes
@@ -21,30 +22,40 @@ pub(crate) struct UringDriver {
 }
 
 impl UringDriver {
-    fn new(file: File, queue_depth: u32) -> Result<Self> {
+    fn new(files: Vec<File>, queue_depth: u32) -> Result<Self> {
         Ok(Self {
             ring: IoUring::new(queue_depth)?,
-            file,
+            files: files.into_boxed_slice(),
             in_flight: 0,
         })
     }
 
-    fn build_sqe(&self, entry: SubmissionEntry) -> io_uring::squeue::Entry {
-        let fd = types::Fd(self.file.as_raw_fd());
-        match entry {
+    /// The descriptor of the file at `at`.
+    fn fd(&self, at: FilePosition) -> Result<types::Fd> {
+        let file = self
+            .files
+            .get(at.file() as usize)
+            .ok_or(Error::InvalidArgument(
+                "an I/O names a file the worker hasn't",
+            ))?;
+        Ok(types::Fd(file.as_raw_fd()))
+    }
+
+    fn build_sqe(&self, entry: SubmissionEntry) -> Result<io_uring::squeue::Entry> {
+        Ok(match entry {
             SubmissionEntry::Read {
                 buf_ptr,
                 buf_len,
-                offset,
+                at,
                 user_data,
-            } => opcode::Read::new(fd, buf_ptr, buf_len)
-                .offset(offset)
+            } => opcode::Read::new(self.fd(at)?, buf_ptr, buf_len)
+                .offset(at.offset())
                 .build()
                 .user_data(user_data),
             SubmissionEntry::Write {
                 buf_ptr,
                 buf_len,
-                offset,
+                at,
                 user_data,
                 is_last_in_batch,
             } => {
@@ -53,13 +64,13 @@ impl UringDriver {
                 } else {
                     io_uring::squeue::Flags::IO_LINK
                 };
-                opcode::Write::new(fd, buf_ptr, buf_len)
-                    .offset(offset)
+                opcode::Write::new(self.fd(at)?, buf_ptr, buf_len)
+                    .offset(at.offset())
                     .build()
                     .flags(flags)
                     .user_data(user_data)
             }
-        }
+        })
     }
 }
 
@@ -70,7 +81,7 @@ impl IoDriver for UringDriver {
     }
 
     fn push(&mut self, entry: SubmissionEntry) -> Result<()> {
-        let sqe = self.build_sqe(entry);
+        let sqe = self.build_sqe(entry)?;
         let mut sq = self.ring.submission();
         unsafe {
             sq.push(&sqe).map_err(|_| {
@@ -104,11 +115,11 @@ impl IoDriver for UringDriver {
 }
 
 pub(crate) fn new_backend(
-    file: File,
+    files: Vec<File>,
     queue_depth: u32,
     rx: mpsc::Receiver<WorkerRequest>,
 ) -> Result<BackendLoop<UringDriver>> {
-    let driver = UringDriver::new(file, queue_depth)?;
+    let driver = UringDriver::new(files, queue_depth)?;
     Ok(BackendLoop::new(queue_depth as usize, rx, driver))
 }
 
@@ -124,12 +135,12 @@ mod tests {
     /// never come.
     #[test]
     fn a_slot_frees_once_its_completion_is_reaped() {
-        let mut driver = UringDriver::new(tempfile::tempfile().unwrap(), 1).unwrap();
+        let mut driver = UringDriver::new(vec![tempfile::tempfile().unwrap()], 1).unwrap();
         let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
         let read = SubmissionEntry::Read {
             buf_ptr: buf.as_mut_ptr(),
             buf_len: buf.len_u32(),
-            offset: 0,
+            at: FilePosition::new(0, 0),
             user_data: 7,
         };
         driver.push(read).unwrap();

@@ -9,14 +9,14 @@ use crate::io::io_task::WorkerRequest;
 use crate::io::sync::mpsc;
 
 struct IoJob {
-    file: Arc<File>,
+    files: Arc<[File]>,
     entry: SubmissionEntry,
 }
 
 unsafe impl Send for IoJob {}
 
 pub(crate) struct GenericIoDriver {
-    file: Arc<File>,
+    files: Arc<[File]>,
     queue_size: usize,
     inflight: usize,
     job_tx: Sender<IoJob>,
@@ -24,7 +24,7 @@ pub(crate) struct GenericIoDriver {
 }
 
 impl GenericIoDriver {
-    fn new(file: File, queue_size: usize) -> Result<Self> {
+    fn new(files: Vec<File>, queue_size: usize) -> Result<Self> {
         let num_threads = std::thread::available_parallelism()
             .map(|n| n.get())?
             .min(queue_size.max(1));
@@ -39,7 +39,7 @@ impl GenericIoDriver {
         }
 
         Ok(Self {
-            file: Arc::new(file),
+            files: files.into(),
             queue_size,
             inflight: 0,
             job_tx,
@@ -55,7 +55,7 @@ impl IoDriver for GenericIoDriver {
 
     fn push(&mut self, entry: SubmissionEntry) -> Result<()> {
         let job = IoJob {
-            file: Arc::clone(&self.file),
+            files: Arc::clone(&self.files),
             entry,
         };
         self.job_tx.try_send(job).map_err(|_| {
@@ -92,18 +92,18 @@ impl IoDriver for GenericIoDriver {
 
 fn worker_loop(job_rx: Receiver<IoJob>, completion_tx: Sender<CompletionEvent>) {
     while let Ok(job) = job_rx.recv() {
-        if completion_tx.send(job.entry.execute(&job.file)).is_err() {
+        if completion_tx.send(job.entry.execute(&job.files)).is_err() {
             return;
         }
     }
 }
 
 pub(crate) fn new_backend(
-    file: File,
+    files: Vec<File>,
     queue_depth: u32,
     rx: mpsc::Receiver<WorkerRequest>,
 ) -> Result<BackendLoop<GenericIoDriver>> {
     let queue_depth = queue_depth as usize;
-    let driver = GenericIoDriver::new(file, queue_depth)?;
+    let driver = GenericIoDriver::new(files, queue_depth)?;
     Ok(BackendLoop::new(queue_depth, rx, driver))
 }

@@ -4,7 +4,7 @@ use divan::counter::BytesCount;
 use pollster::block_on;
 use tempfile::tempfile_in;
 
-use t4::__bench::{AlignedBuf, IoWorker, PageWrite};
+use t4::__bench::{AlignedBuf, FilePosition, IoWorker, PageWrite};
 use t4::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U64};
 
 // Place the temp file on the crate's filesystem (real disk), not /tmp,
@@ -19,14 +19,14 @@ const BATCH_SIZES: &[usize] = &[1, 4, 16, 64, 128];
 
 fn new_worker() -> IoWorker {
     let file = tempfile_in(BENCH_DIR).expect("tempfile");
-    IoWorker::new(NonZero::new(QUEUE_DEPTH).unwrap(), file).expect("io worker")
+    IoWorker::new(NonZero::new(QUEUE_DEPTH).unwrap(), vec![file]).expect("io worker")
 }
 
 fn page_writes(batch: usize, base_offset: u64) -> Vec<PageWrite> {
     (0..batch)
         .map(|i| PageWrite {
             buf: AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap(),
-            offset: base_offset + i as u64 * PAGE_SIZE_U64,
+            at: FilePosition::new(0, base_offset + i as u64 * PAGE_SIZE_U64),
         })
         .collect()
 }
@@ -52,7 +52,8 @@ fn read(bencher: divan::Bencher, batch: usize) {
         .bench(|| {
             for i in 0..batch {
                 let buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
-                let out = block_on(worker.read_exact_at(buf, i as u64 * PAGE_SIZE_U64)).unwrap();
+                let at = FilePosition::new(0, i as u64 * PAGE_SIZE_U64);
+                let out = block_on(worker.read_exact_at(buf, at)).unwrap();
                 divan::black_box(out);
             }
         });

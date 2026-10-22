@@ -5,6 +5,7 @@ use tempfile::TempDir;
 
 use super::test_policy::{Heard, TestPolicy};
 use super::*;
+use crate::cache::cache_files::DiskFile;
 
 const MIB: u64 = BLOCK_SIZE_U64;
 
@@ -13,13 +14,8 @@ const MIB: u64 = BLOCK_SIZE_U64;
 /// the cache.
 fn cache(memory_chunks: u32, disk_chunks: u32) -> (TempDir, ObjectCache, Arc<TestPolicy>) {
     let dir = tempfile::tempdir().unwrap();
-    let disk = CacheFile::open(
-        &dir.path().join("cache"),
-        NonZeroU32::new(disk_chunks).unwrap(),
-        NonZeroU32::new(8).unwrap(),
-        true,
-    )
-    .unwrap();
+    let file = DiskFile::new(dir.path().join("cache"), u64::from(disk_chunks) * MIB);
+    let disk = CacheFiles::open(&[file], NonZeroU32::new(8).unwrap(), true).unwrap();
     let policy = Arc::new(TestPolicy::new());
     let memory = NonZeroU32::new(memory_chunks).unwrap();
     let cache =
@@ -74,17 +70,16 @@ fn key(file: &CacheableFile<'_>, index: u32) -> BlockKey {
 }
 
 /// The default policy, end to end: a stream of blocks through both full
-/// tiers, every read right, each tier full, the newest blocks in memory.
+/// tiers, the disk striped over three files, every read right, each tier
+/// full, the newest blocks in memory.
 #[test]
 fn the_default_policy_streams_blocks_through_both_tiers() {
     let dir = tempfile::tempdir().unwrap();
-    let disk = CacheFile::open(
-        &dir.path().join("cache"),
-        NonZeroU32::new(3).unwrap(),
-        NonZeroU32::new(8).unwrap(),
-        true,
-    )
-    .unwrap();
+    let files: Vec<_> = ["a", "b", "c"]
+        .iter()
+        .map(|name| DiskFile::new(dir.path().join(name), MIB))
+        .collect();
+    let disk = CacheFiles::open(&files, NonZeroU32::new(8).unwrap(), true).unwrap();
     let (memory, disk_chunks) = (NonZeroU32::new(2).unwrap(), NonZeroU32::new(3).unwrap());
     let policy = Arc::new(crate::cache::policy::ClockPolicy::new(memory, disk_chunks));
     let cache = ObjectCache::new(memory, disk, policy).unwrap();

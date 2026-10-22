@@ -9,29 +9,31 @@ use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-/// Reads the [`HostCounters`] of one drive, the block device under a
-/// directory, and of every network interface but loopback. Where `/proc`
-/// has no such counters (not Linux), it reads none.
+/// Reads the [`HostCounters`] of drives, the block devices under some
+/// directories, summed, and of every network interface but loopback. Where
+/// `/proc` has no such counters (not Linux), it reads none.
 pub struct HostProbe {
-    /// The drive's major and minor device numbers, if one is counted.
-    drive: Option<(u64, u64)>,
+    /// The drives' major and minor device numbers, each once.
+    drives: Vec<(u64, u64)>,
     /// The `memory.stat` of the cgroup v2 this process runs in, if any.
     memory_stat: Option<PathBuf>,
 }
 
 impl HostProbe {
-    /// A probe of the drive that holds `dir`, if given, and of the network.
+    /// A probe of the drives that hold `dirs`, and of the network.
     ///
     /// # Errors
     ///
-    /// If `dir` can't be read.
-    pub fn new(dir: Option<&Path>) -> io::Result<Self> {
-        let drive = match dir {
-            Some(dir) => Some(Self::device_numbers(fs::metadata(dir)?.dev())),
-            None => None,
-        };
+    /// If a directory can't be read.
+    pub fn new(dirs: &[PathBuf]) -> io::Result<Self> {
+        let mut drives = dirs
+            .iter()
+            .map(|dir| Ok(Self::device_numbers(fs::metadata(dir)?.dev())))
+            .collect::<io::Result<Vec<_>>>()?;
+        drives.sort_unstable();
+        drives.dedup();
         Ok(Self {
-            drive,
+            drives,
             memory_stat: Self::memory_stat(),
         })
     }
@@ -64,10 +66,12 @@ impl HostProbe {
     /// The counters now, or `None` where `/proc` has none.
     pub fn sample(&self) -> Option<HostCounters> {
         let network_received = Self::network_received()?;
-        let (drive_read, drive_written) = match self.drive {
-            Some(numbers) => Self::drive_bytes(numbers)?,
-            None => (0, 0),
-        };
+        let (mut drive_read, mut drive_written) = (0, 0);
+        for &numbers in &self.drives {
+            let (read, written) = Self::drive_bytes(numbers)?;
+            drive_read += read;
+            drive_written += written;
+        }
         Some(HostCounters {
             drive_read,
             drive_written,
