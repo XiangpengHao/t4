@@ -1,0 +1,23 @@
+[package]
+name = "t4-bench"
+version = "0.0.0"
+publish = false
+edition = "2024"
+description = "t4's benchmark harness: the workloads it serves, recorded and replayed, against a simulated object store."
+
+[dependencies]
+async-trait = "0.1"
+bytes = "1"
+chrono = { version = "0.4", default-features = false }
+clap = { version = "4", features = ["derive"] }
+# DataFusion 55 reads ClickBench and TPC-H, the workloads the traces come
+# from; on object_store 0.13, as t4 is.
+datafusion = "55.2.0"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+object_store = { version = "0.13.2", default-features = false, features = ["fs"] }
+t4 = { path = ".." }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }

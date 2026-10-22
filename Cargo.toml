@@ -7,7 +7,7 @@ license = "Apache-2.0"
 repository = "https://github.com/XiangpengHao/t4"
 
 [workspace]
-members = [".", "fuzz"]
+members = [".", "bench", "fuzz"]
 
 [features]
 default = ["io-uring"]

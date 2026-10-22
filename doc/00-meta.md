@@ -27,6 +27,8 @@ it misses itself. The design: `03-cache.md`.
 - `00-meta.md`: this.
 - `03-cache.md`: the cache: its design, the decisions behind it, what's
   built, and what comes later.
+- `04-benchmark.md`: the benchmark: what DataFusion asks of t4, and how
+  t4 is measured against it.
 - `98-cachefs-vs-fs.md`: how a cache's storage differs from a file
   system's.
 - `99-brainstorm.md`: open notes.
