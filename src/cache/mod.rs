@@ -7,12 +7,14 @@
 //!   (build step 2).
 //! - `cache_file`: the disk tier, its chunks in one file read and written
 //!   by direct I/O.
+//! - `policy`: what the cache asks of its policy, and the default one.
 //! - `object_cache`: reads, fills and evictions over them all.
 
 mod block_index;
 mod cache_file;
 mod chunk_pool;
 mod object_cache;
+mod policy;
 
 use std::fmt;
 

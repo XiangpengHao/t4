@@ -6,8 +6,8 @@ use crate::io::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::io::sync::{Arc, Mutex, MutexGuard};
 
 /// A tier's chunks (`doc/03-cache.md`, decisions 2 and 8): which are free,
-/// and for each, the block it holds, an access bit for the replacement
-/// policy, and the count of its holders.
+/// and for each, the block it holds and the count of its holders. What a
+/// replacement policy keeps of hits is its own (`policy`).
 ///
 /// A chunk goes round:
 /// 1. free: [`Self::allocate`] leases it to one writer, a [`ChunkLease`];
@@ -30,10 +30,8 @@ pub(super) struct ChunkTable {
 impl ChunkTable {
     /// Set while the chunk holds a published block: readers may pin it.
     const PUBLISHED: u32 = 1 << 31;
-    /// Set by reads, cleared by the replacement policy's sweep.
-    const ACCESSED: u32 = 1 << 30;
     /// The bits counting the chunk's holders.
-    const READERS: u32 = Self::ACCESSED - 1;
+    const READERS: u32 = Self::PUBLISHED - 1;
 
     /// `chunk_count` chunks, all free.
     pub(super) fn new(chunk_count: u32) -> Self {
@@ -62,20 +60,15 @@ impl ChunkTable {
         Some(ChunkLease { table: self, chunk })
     }
 
-    /// Pins `chunk` to read `block` from it, and marks it accessed. `None`
-    /// if the chunk doesn't hold `block`: the index entry that named it is
-    /// stale, and the caller looks again.
+    /// Pins `chunk` to read `block` from it. `None` if the chunk doesn't
+    /// hold `block`: the index entry that named it is stale, and the caller
+    /// looks again.
     pub(super) fn pin_block(&self, chunk: ChunkId, block: BlockKey) -> Option<ChunkPin<'_>> {
-        let pin = self.pin(chunk)?;
-        if pin.block() != block {
-            return None;
-        }
-        self.mark_accessed(chunk);
-        Some(pin)
+        self.pin(chunk).filter(|pin| pin.block() == block)
     }
 
-    /// Pins `chunk` with whatever block it holds, as eviction does: not an
-    /// access. `None` if no block is published in it.
+    /// Pins `chunk` with whatever block it holds, as eviction does. `None`
+    /// if no block is published in it.
     pub(super) fn pin(&self, chunk: ChunkId) -> Option<ChunkPin<'_>> {
         let slot = self.slot(chunk);
         let mut state = slot.state.load(Ordering::Relaxed);
@@ -106,19 +99,8 @@ impl ChunkTable {
         })
     }
 
-    /// Clears `chunk`'s access bit, and returns it: whether a read pinned
-    /// the chunk since the last call.
-    pub(super) fn take_accessed(&self, chunk: ChunkId) -> bool {
-        let state = self
-            .slot(chunk)
-            .state
-            .fetch_and(!Self::ACCESSED, Ordering::Relaxed);
-        state & Self::ACCESSED != 0
-    }
-
     /// Publishes `block` in leased `chunk`: its holders stay, the lease
-    /// going on as a reader. The chunk starts unaccessed, as `allocate` left
-    /// it.
+    /// going on as a reader.
     fn publish(&self, chunk: ChunkId, block: BlockKey) {
         let slot = self.slot(chunk);
         slot.set_owner(block);
@@ -171,15 +153,6 @@ impl ChunkTable {
         }
     }
 
-    fn mark_accessed(&self, chunk: ChunkId) {
-        let state = &self.slot(chunk).state;
-        // A hot chunk is marked already: the load spares its cache line a
-        // write per read.
-        if state.load(Ordering::Relaxed) & Self::ACCESSED == 0 {
-            state.fetch_or(Self::ACCESSED, Ordering::Relaxed);
-        }
-    }
-
     fn slot(&self, chunk: ChunkId) -> &ChunkSlot {
         &self.slots[chunk.index() as usize]
     }
@@ -193,8 +166,7 @@ impl ChunkTable {
 
 /// One chunk's entry in a [`ChunkTable`].
 struct ChunkSlot {
-    /// [`ChunkTable::PUBLISHED`], [`ChunkTable::ACCESSED`], and the count of
-    /// holders.
+    /// [`ChunkTable::PUBLISHED`], and the count of holders.
     state: AtomicU32,
     /// The block the chunk holds, as [`BlockKey::packed`] gives it: set
     /// before it is published and read under a pin, so never both at once.
@@ -390,20 +362,6 @@ mod tests {
         let reused = table.allocate().unwrap().publish(block(2));
         assert_eq!(reused.chunk(), chunk);
         assert!(table.pin_block(chunk, block(1)).is_none());
-    }
-
-    #[test]
-    fn reads_mark_the_chunk_accessed_and_eviction_pins_do_not() {
-        let table = ChunkTable::new(1);
-        let chunk = table.allocate().unwrap().publish(block(1)).chunk();
-        assert!(!table.take_accessed(chunk), "published unaccessed");
-        drop(table.pin(chunk));
-        assert!(!table.take_accessed(chunk));
-        drop(table.pin_block(chunk, block(2)));
-        assert!(!table.take_accessed(chunk), "a stale read is no access");
-        drop(table.pin_block(chunk, block(1)));
-        assert!(table.take_accessed(chunk));
-        assert!(!table.take_accessed(chunk), "taking clears it");
     }
 
     #[test]

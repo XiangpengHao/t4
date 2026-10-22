@@ -49,9 +49,9 @@ impl MemoryPool {
         })
     }
 
-    /// Holds `chunk` to copy `block` from it, and marks it accessed. `None`
-    /// if the chunk doesn't hold `block`: the index entry that named it is
-    /// stale, and the caller looks again.
+    /// Holds `chunk` to copy `block` from it. `None` if the chunk doesn't
+    /// hold `block`: the index entry that named it is stale, and the caller
+    /// looks again.
     pub(in crate::cache) fn read(
         &self,
         chunk: ChunkId,
@@ -63,8 +63,8 @@ impl MemoryPool {
         })
     }
 
-    /// Holds `chunk` with whatever block it holds, as eviction does: not an
-    /// access. `None` if no block is published in it.
+    /// Holds `chunk` with whatever block it holds, as eviction does. `None`
+    /// if no block is published in it.
     pub(in crate::cache) fn pin_for_eviction(
         &self,
         chunk: ChunkId,
@@ -73,12 +73,6 @@ impl MemoryPool {
             pin: self.table.pin(chunk)?,
             memory: &self.memory,
         })
-    }
-
-    /// Clears `chunk`'s access bit, and returns it: whether a read held the
-    /// chunk since the last call.
-    pub(in crate::cache) fn take_accessed(&self, chunk: ChunkId) -> bool {
-        self.table.take_accessed(chunk)
     }
 }
 
@@ -113,8 +107,69 @@ impl<'pool> MemoryChunkWriter<'pool> {
     }
 
     /// Publishes the chunk as holding `block`: readers may hold it from now
-    /// on, and the writer goes on as one of them. It starts unaccessed.
+    /// on, and the writer goes on as one of them.
     pub(in crate::cache) fn publish(self, block: BlockKey) -> MemoryChunkReader<'pool> {
+        MemoryChunkReader {
+            pin: self.lease.publish(block),
+            memory: self.memory,
+        }
+    }
+
+    /// The chunk's first `len` bytes, whole pages, as a buffer a direct I/O
+    /// reads into, and the writer as what can only publish the chunk once
+    /// that buffer comes back ([`LentMemoryChunk::publish`]). The buffer
+    /// holds the chunk until it drops, after the read, whatever becomes of
+    /// the caller. `pool` is the pool the chunk is in.
+    pub(in crate::cache) fn lend_for_read(
+        self,
+        pool: &Arc<MemoryPool>,
+        len: NonZeroU32,
+    ) -> (AlignedBuf, LentMemoryChunk<'pool>) {
+        let len_bytes = len.get() as usize;
+        assert!(
+            len_bytes <= BLOCK_SIZE && len_bytes.is_multiple_of(PAGE_SIZE),
+            "a read fills whole pages of one chunk"
+        );
+        let hold = self.lease.hold_owned(pool);
+        let start = self.memory.chunk_start(self.lease.chunk());
+        // SAFETY: the chunk starts on a page boundary, and its first `len`
+        // bytes lie within it. It is this writer's alone: no reader pins it
+        // before it is published, and the writer's own bytes go with it into
+        // `LentMemoryChunk`, which has none to give. So only the read writes
+        // the chunk while the buffer lives. `hold` keeps the chunk from being
+        // freed, and `pool` the mapping, as long as the buffer.
+        let buffer = unsafe { AlignedBuf::lent(start, len, Arc::new(hold)) };
+        let lent = LentMemoryChunk {
+            lease: self.lease,
+            memory: self.memory,
+        };
+        (buffer, lent)
+    }
+}
+
+/// A free chunk lent to a direct I/O that fills it: published once the
+/// buffer the I/O filled comes back.
+pub(in crate::cache) struct LentMemoryChunk<'pool> {
+    lease: ChunkLease<'pool>,
+    memory: &'pool PoolMemory,
+}
+
+impl<'pool> LentMemoryChunk<'pool> {
+    /// Publishes the chunk as holding `block`: `filled` is the buffer
+    /// [`MemoryChunkWriter::lend_for_read`] lent, back from the read that
+    /// filled it, so the read is done.
+    pub(in crate::cache) fn publish(
+        self,
+        filled: AlignedBuf,
+        block: BlockKey,
+    ) -> MemoryChunkReader<'pool> {
+        let start = self.memory.chunk_start(self.lease.chunk());
+        assert_eq!(
+            filled.as_ptr(),
+            start.as_ptr().cast_const(),
+            "a lent chunk publishes once its own buffer is back"
+        );
+        drop(filled);
         MemoryChunkReader {
             pin: self.lease.publish(block),
             memory: self.memory,
@@ -130,8 +185,6 @@ pub(in crate::cache) struct MemoryChunkReader<'pool> {
 }
 
 impl MemoryChunkReader<'_> {
-    const CHUNK_LEN: NonZeroU32 = NonZeroU32::new(BLOCK_SIZE as u32).expect("a chunk has bytes");
-
     pub(in crate::cache) fn chunk(&self) -> ChunkId {
         self.pin.chunk()
     }
@@ -156,7 +209,7 @@ impl MemoryChunkReader<'_> {
         // gets it, and `pool`, so the mapping stays: both live in the guard,
         // as long as the buffer. The I/O only reads the bytes, as readers
         // copying from the chunk meanwhile do; nothing writes them.
-        unsafe { AlignedBuf::lent(start, Self::CHUNK_LEN, Arc::new((hold, with))) }
+        unsafe { AlignedBuf::lent(start, PoolMemory::CHUNK_LEN, Arc::new((hold, with))) }
     }
 
     /// The chunk's `BLOCK_SIZE` bytes: `block`'s, within the block's length.
@@ -196,6 +249,9 @@ unsafe impl Send for PoolMemory {}
 unsafe impl Sync for PoolMemory {}
 
 impl PoolMemory {
+    /// A chunk's bytes, as a direct I/O's length.
+    const CHUNK_LEN: NonZeroU32 = NonZeroU32::new(BLOCK_SIZE as u32).expect("a chunk has bytes");
+
     fn map(chunk_count: NonZeroU32) -> Result<Self> {
         let len = Self::len_of(chunk_count.get()).ok_or(Error::InvalidArgument(
             "memory pool larger than the address space",

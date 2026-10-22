@@ -70,6 +70,16 @@ impl CacheFile {
         self.io.write(vec![write])?.await
     }
 
+    /// Reads the first pages of the chunk `reader` holds into `into`, as
+    /// many as it has room for, and gives it back once read.
+    pub(super) async fn read_chunk_start(
+        &self,
+        reader: &DiskChunkReader<'_>,
+        into: AlignedBuf,
+    ) -> Result<AlignedBuf> {
+        self.io.read_exact_at(into, reader.offset()).await
+    }
+
     /// Reads `pages`, offsets in the chunk `reader` holds, into a buffer of
     /// their own. The read is submitted now, so reads started together run
     /// at once, and the future gives its buffer when it lands.

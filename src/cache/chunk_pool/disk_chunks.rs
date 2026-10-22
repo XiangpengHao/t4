@@ -57,9 +57,9 @@ impl DiskChunks {
         })
     }
 
-    /// Holds `chunk` to read `block` from it, and marks it accessed. `None`
-    /// if the chunk doesn't hold `block`: the index entry that named it is
-    /// stale, and the caller looks again.
+    /// Holds `chunk` to read `block` from it. `None` if the chunk doesn't
+    /// hold `block`: the index entry that named it is stale, and the caller
+    /// looks again.
     pub(in crate::cache) fn read(
         &self,
         chunk: ChunkId,
@@ -71,19 +71,13 @@ impl DiskChunks {
         })
     }
 
-    /// Holds `chunk` with whatever block it holds, as eviction does: not an
-    /// access. `None` if no block is published in it.
+    /// Holds `chunk` with whatever block it holds, as eviction does. `None`
+    /// if no block is published in it.
     pub(in crate::cache) fn pin_for_eviction(&self, chunk: ChunkId) -> Option<DiskChunkReader<'_>> {
         Some(DiskChunkReader {
             pin: self.table.pin(chunk)?,
             offset: self.offset(chunk),
         })
-    }
-
-    /// Clears `chunk`'s access bit, and returns it: whether a read held the
-    /// chunk since the last call.
-    pub(in crate::cache) fn take_accessed(&self, chunk: ChunkId) -> bool {
-        self.table.take_accessed(chunk)
     }
 
     /// Where `chunk` starts in the file. Only for a chunk the table has
@@ -128,7 +122,7 @@ impl<'chunks> DiskChunkWriter<'chunks> {
 
     /// Publishes the chunk as holding `block`, once its write is done:
     /// readers may hold it from now on, and the writer goes on as one of
-    /// them. It starts unaccessed.
+    /// them.
     pub(in crate::cache) fn publish(self, block: BlockKey) -> DiskChunkReader<'chunks> {
         DiskChunkReader {
             pin: self.lease.publish(block),

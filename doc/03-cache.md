@@ -2,9 +2,10 @@
 
 Status: design (2026-10-21). Built: the chunk pool
 (`src/cache/chunk_pool/`), the block index (`src/cache/block_index/`), the
-disk tier (`src/cache/cache_file.rs`), and reads, fills, moves to disk and
-evictions over them (`src/cache/object_cache.rs`). Not yet: the eviction
-policy, request coalescing, the front end.
+disk tier (`src/cache/cache_file.rs`), the policy and its default
+(`src/cache/policy/`), and reads, fills, promotions and evictions over them
+(`src/cache/object_cache.rs`). Not yet: request coalescing, the front
+end.
 The decisions behind the pivot in `00-meta.md`, worked out from the notes
 in `99-brainstorm.md`.
 
@@ -101,14 +102,43 @@ chunk table the frame table.
 
 ### Eviction
 
-7. **The replacement policy is a trait,** one for each tier, which the user
-   can supply.
-8. **A chunk table, indexed by chunk number,** holds each chunk's owner
-   (its block's key), an access bit for the policy, and a count of the
-   readers using it: copying from a memory chunk, or reading a disk chunk
-   with `O_DIRECT`. A chunk goes free only once no reader holds it.
-   Evicting a chunk changes its block entry only if the entry still points
-   at that chunk (`update`, `remove_if`).
+7. **The policy is a trait the user can supply** (`src/cache/policy/`),
+   one for both tiers, every hook `&self`: the cache keeps no access state
+   of its own, so a policy keeps what it wants, with what concurrency it
+   wants. Its hooks:
+   - `on_memory_hit(chunk, read)`;
+   - `on_disk_hit(chunk, read)`, which says whether the block stays on disk
+     or moves to memory: asked before the read, so a move reads the block's
+     pages straight into a memory chunk, one I/O for both;
+   - `on_miss(read)`, which says where the block goes once fetched: memory,
+     disk, or nowhere. Asked as the read plans its fetches, so a policy
+     hears every miss, those it doesn't cache too, and the read carries the
+     answer to the fill;
+   - `on_admit(tier, chunk, block)`: a chunk took a block;
+   - `pick_memory_victims(count)`, each moved to disk or dropped, and
+     `pick_disk_victims(count)`, dropped.
+
+   Every hook on the read path gets the block, the file's size and path,
+   and the range the read asked for. A victim the cache gives back, for
+   want of room on disk or a failed write, goes back through `on_admit`;
+   so a policy that forgets a chunk as it picks it never loses one. The
+   default is a lock-free CLOCK for each tier: misses go to memory, memory
+   victims to disk, and a disk hit moves to memory on its second hit since
+   the hand passed.
+8. **Tiers are exclusive, and eviction runs at insertion.** A block is in
+   one tier, which the index names. A fill, a move or a promotion that
+   finds its tier full evicts a batch of the policy's victims first (up to
+   eight, never more than a sixteenth of the tier, so a small tier isn't
+   emptied for one block; up to four rounds, as a victim's chunk goes free
+   only once its readers leave); a block that still finds no room isn't
+   cached.
+   Memory's moves to disk write at once, and may make the disk evict; disk
+   victims are dropped, so it ends there. A chunk table, indexed by chunk
+   number, holds each chunk's owner (its block's key) and a count of its
+   holders: readers copying from a memory chunk or reading a disk chunk,
+   a writer, an I/O in flight. A chunk goes free only once nothing holds
+   it. Evicting a chunk changes its block's entry only if the entry still
+   names that chunk (`update`, `remove_if`).
 
 ### Persistence
 
@@ -156,6 +186,14 @@ chunk table the frame table.
   the pages a short block uses.** Only a file's last block is short: for
   files of 100 MB and more it saves a fraction of a percent of the writes.
   It would save more on many objects under a block.
+- **An access bit in each chunk's state word, the cache's own.** It fits
+  one policy, CLOCK; a policy that counts, or keeps queues, needs its own
+  state anyway. So the policy hears every hit and keeps what it wants.
+- **Inclusive tiers: a block in memory and on disk at once.** Moving a
+  memory victim to disk would cost nothing when a disk copy exists, and a
+  promotion would leave the disk copy; but the index would name two chunks
+  a block, and every eviction change half an entry. Naming only the fast
+  copy, the slow one remembered elsewhere, lets the two disagree.
 - **A WAL, so that the disk tier survives a crash.** Every eviction batch
   logs its blocks, with `O_DSYNC`. A freed disk chunk can't be reused until
   a tombstone naming its old block is durable, else replay maps the old
@@ -165,14 +203,10 @@ chunk table the frame table.
 
 ## Later
 
-- **The eviction policy.** Eviction sweeps the chunks (decision 8); the
-  policy and its trait come later.
 - **Two readers missing one block:** the second waits on the first's GET
   through `Fetching` (request coalescing, `00-meta.md`).
-- **Who evicts:** the request that finds no free chunk, or a background
-  thread keeping free chunks between two watermarks.
-- **A disk hit:** whether the block comes back into memory, and what
-  memory admits.
+- **Eviction off the insertion path:** a background thread keeping free
+  chunks between two watermarks, if evicting at insertion costs too much.
 - **The drive's own garbage collection:** a file kept full leaves the SSD
   no spare room. Leave part of the drive unwritten, or discard freed
   chunks.

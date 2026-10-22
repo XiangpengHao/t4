@@ -1,6 +1,5 @@
 //! The memory pool under shuttle: readers racing the eviction and reuse of
-//! the chunk they read, and the replacement policy's sweep, on one chunk's
-//! state word.
+//! the chunk they read.
 
 use std::num::NonZeroU32;
 
@@ -61,46 +60,6 @@ fn a_reader_racing_reuse_reads_its_block_or_nothing() {
             let reused = evictor.join().unwrap();
             assert!(pool.read(chunk, block(1)).is_none());
             assert_eq!(pool.free_count(), u32::from(reused.is_none()));
-        },
-        1000,
-        3,
-    );
-}
-
-/// The access bit shares the state word with the open bit and the reader
-/// count: setting and taking it, between pins and unpins and the close,
-/// changes neither.
-#[test]
-fn access_bits_never_disturb_the_readers() {
-    shuttle::check_pct(
-        || {
-            let (pool, chunk) = pool_holding(block(1));
-            let mut handles: Vec<_> = (0..2)
-                .map(|_| {
-                    let pool = Arc::clone(&pool);
-                    thread::spawn(move || read(&pool, chunk, block(1)))
-                })
-                .collect();
-            handles.push({
-                let pool = Arc::clone(&pool);
-                thread::spawn(move || {
-                    pool.take_accessed(chunk);
-                    pool.take_accessed(chunk);
-                })
-            });
-            handles.push({
-                let pool = Arc::clone(&pool);
-                thread::spawn(move || {
-                    assert!(pool.pin_for_eviction(chunk).unwrap().unpublish());
-                })
-            });
-            for handle in handles {
-                handle.join().unwrap();
-            }
-            // Freed once every reader left: the count came back to zero, and
-            // the close held.
-            assert_eq!(pool.free_count(), 1);
-            assert!(pool.read(chunk, block(1)).is_none());
         },
         1000,
         3,

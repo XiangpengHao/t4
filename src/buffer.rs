@@ -185,6 +185,9 @@ pub struct AlignedBuf {
     ptr: NonNull<u8>,
     len_u32: NonZeroU32,
     memory: BufMemory,
+    /// What the buffer keeps alive besides its bytes, until it drops: what
+    /// the I/O it goes to holds ([`Self::holding`]).
+    held: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 /// Where an [`AlignedBuf`]'s bytes live.
@@ -218,6 +221,7 @@ impl AlignedBuf {
             ptr,
             len_u32,
             memory: BufMemory::Owned(layout),
+            held: None,
         })
     }
 
@@ -242,6 +246,7 @@ impl AlignedBuf {
             ptr,
             len_u32,
             memory: BufMemory::Lent { _guard: guard },
+            held: None,
         }
     }
 
@@ -297,6 +302,14 @@ impl AlignedBuf {
         unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), self.len()) }
     }
 
+    /// The buffer, keeping `held` alive too until it drops: so an I/O it
+    /// goes to holds what the I/O needs, after the caller gave up on it.
+    pub(crate) fn holding(mut self, held: Arc<dyn Any + Send + Sync>) -> Self {
+        assert!(self.held.is_none(), "a buffer holds one thing");
+        self.held = Some(held);
+        self
+    }
+
     fn is_owned(&self) -> bool {
         matches!(self.memory, BufMemory::Owned(_))
     }
@@ -311,7 +324,8 @@ impl AlignedBuf {
     }
 
     pub fn try_into_boxed_array(self) -> Result<Box<[u8; PAGE_SIZE]>> {
-        if self.len() != PAGE_SIZE {
+        // The conversion forgets the buffer, and would leak what it holds.
+        if self.len() != PAGE_SIZE || self.held.is_some() {
             return Err(Error::InvalidArgument("invalid aligned buffer layout"));
         }
         let BufMemory::Owned(layout) = &self.memory else {

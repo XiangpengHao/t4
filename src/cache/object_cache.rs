@@ -1,128 +1,183 @@
 //! [`ObjectCache`]: reads, fills and evictions over the index and the two
-//! tiers (`doc/03-cache.md`). A read copies the blocks memory holds, reads
-//! those on disk, and names the rest; the caller fetches those from the
-//! object store and hands them back to be cached in memory. Eviction moves
-//! a memory chunk's block to disk, or drops a chunk's block from its tier.
+//! tiers, as its policy decides (`doc/03-cache.md`).
 //!
-//! The eviction policy and request coalescing come later: until then a
-//! chunk is evicted only when the caller names it.
+//! - **A read** copies the blocks memory holds, and reads those on disk,
+//!   moving one to memory if the policy says so. It names the rest, each
+//!   with where the policy said it goes.
+//! - **A fill** takes the caller's fetch of those blocks, and puts each where
+//!   the read said.
+//! - **A tier with no free chunk** for a block evicts the victims the policy
+//!   picks: memory moves its victims to disk or drops them, the disk drops
+//!   its own.
+//!
+//! Tiers are exclusive: a block is in one at a time, and the index names it
+//! there. Request coalescing comes later.
 
 use std::num::NonZeroU32;
 use std::ops::Range;
 
-use super::block_index::{BlockTable, FileVersion, Location, PathTable, UncacheableObject};
+use futures_util::future::join_all;
+
+use super::block_index::{
+    BlockTable, FileVersion, Location, PathTable, PlannedBlock, UncacheableObject,
+};
 use super::cache_file::CacheFile;
-use super::chunk_pool::disk_chunks::DiskChunkReader;
-use super::chunk_pool::memory_pool::{MemoryChunkReader, MemoryPool};
+use super::chunk_pool::disk_chunks::{DiskChunkReader, DiskChunkWriter};
+use super::chunk_pool::memory_pool::{MemoryChunkReader, MemoryChunkWriter, MemoryPool};
+use super::policy::{
+    Admit, BlockRead, CachePolicy, ClockPolicy, DiskHit, MemoryVictim, Tier, VictimAction,
+};
 use super::{BLOCK_SIZE, BLOCK_SIZE_U64, BlockKey, ChunkId};
+use crate::PAGE_SIZE_U32;
+use crate::buffer::AlignedBuf;
 use crate::io::error::Result;
 use crate::io::sync::Arc;
 
 /// A cache of file versions' blocks in memory and disk chunks, found
-/// through the index.
+/// through the index, placed and evicted by its policy.
 pub(super) struct ObjectCache {
     paths: PathTable,
     blocks: BlockTable,
-    /// Shared with the writes in flight that lend its chunks.
+    /// Shared with the I/O in flight that lends its chunks.
     memory: Arc<MemoryPool>,
     disk: CacheFile,
+    policy: Arc<dyn CachePolicy>,
 }
 
 impl ObjectCache {
+    /// The most victims a full tier gives up at once: one eviction makes
+    /// room for the insertions after it too.
+    const EVICTION_BATCH: usize = 8;
+
+    /// How many times a full tier evicts for one insertion before the block
+    /// goes uncached: a victim's chunk goes free only once its readers have
+    /// left.
+    const EVICTION_ROUNDS: usize = 4;
+
     /// A cache of `memory_chunks` chunks of memory and the chunks of
-    /// `disk`, all free, holding nothing.
-    pub(super) fn new(memory_chunks: NonZeroU32, disk: CacheFile) -> Result<Self> {
+    /// `disk`, all free, holding nothing, run by `policy`, which is built
+    /// for both counts.
+    pub(super) fn new(
+        memory_chunks: NonZeroU32,
+        disk: CacheFile,
+        policy: Arc<dyn CachePolicy>,
+    ) -> Result<Self> {
         Ok(Self {
             paths: PathTable::new(),
             blocks: BlockTable::new(),
             memory: Arc::new(MemoryPool::new(memory_chunks)?),
             disk,
+            policy,
         })
     }
 
-    /// The version of the file at `path` with `e_tag` and `size`, which
-    /// reads and fills name; or why the cache can't hold the file, whose
-    /// reads then go to the object store alone.
-    pub(super) fn resolve(
-        &self,
-        path: &[u8],
-        e_tag: Option<&str>,
-        size: u64,
-    ) -> std::result::Result<FileVersion, UncacheableObject> {
-        self.paths.resolve(path, e_tag, size)
+    /// [`Self::new`] run by the default policy, a CLOCK for each tier.
+    pub(super) fn with_default_policy(memory_chunks: NonZeroU32, disk: CacheFile) -> Result<Self> {
+        let disk_chunks =
+            NonZeroU32::new(disk.chunks().chunk_count()).expect("a cache file has a chunk");
+        let policy = Arc::new(ClockPolicy::new(memory_chunks, disk_chunks));
+        Self::new(memory_chunks, disk, policy)
     }
 
-    /// Reads `range` of `version` into `out`, which it sets to the bytes the
+    /// The file at `path`, the version of it with `e_tag` and `size`, as
+    /// reads name it; or why the cache can't hold the file, whose reads then
+    /// go to the object store alone.
+    pub(super) fn resolve<'p>(
+        &self,
+        path: &'p [u8],
+        e_tag: Option<&str>,
+        size: u64,
+    ) -> std::result::Result<CacheableFile<'p>, UncacheableObject> {
+        let version = self.paths.resolve(path, e_tag, size)?;
+        Ok(CacheableFile { path, version })
+    }
+
+    /// Reads `range` of `file` into `out`, which it sets to the bytes the
     /// read takes, the range clamped to the file: those of blocks memory
     /// holds copied in, those of blocks on disk read in, the rest zeros. The
     /// [`PartialRead`] names what the caller fetches for the rest.
+    ///
+    /// The policy hears of every block: a hit in either tier, where a disk
+    /// hit goes, a miss and where its block goes once fetched.
     ///
     /// # Errors
     ///
     /// If a read from the cache file fails.
     pub(super) async fn read(
         &self,
-        version: FileVersion,
+        file: &CacheableFile<'_>,
         range: Range<u64>,
         out: &mut Vec<u8>,
     ) -> Result<PartialRead> {
-        let plan = self.blocks.plan_read(version, range);
-        let bytes = plan.bytes();
+        let plan = self.blocks.plan_read(file.version, range.clone());
+        let mut read = PartialRead::new(file.version, plan.bytes());
         out.clear();
-        out.resize(PartialRead::offset(bytes.end - bytes.start), 0);
-        let mut fetches: Vec<Range<u64>> = Vec::new();
-        let mut disk_reads = Vec::new();
-        for block in plan.blocks() {
-            let window = block.window();
-            let wanted = window.bytes();
-            let start = block.object_range().start + u64::from(wanted.start);
-            let at = PartialRead::offset(start - bytes.start);
+        out.resize(PartialRead::offset(read.bytes.end - read.bytes.start), 0);
+        let mut page_reads = Vec::new();
+        let mut promotions = Vec::new();
+        for &block in plan.blocks() {
+            let context =
+                BlockRead::new(block.key(), file.version.size(), range.clone(), file.path);
             match self.hold(block.key(), block.location()) {
                 HeldBlock::Memory(reader) => {
-                    let wanted = wanted.start as usize..wanted.end as usize;
-                    out[at..at + wanted.len()].copy_from_slice(&reader.bytes()[wanted]);
+                    self.policy.on_memory_hit(reader.chunk(), &context);
+                    read.place_from_chunk(out, &block, reader.bytes());
                 }
                 HeldBlock::Disk(reader) => {
-                    let pages = self.disk.read_pages(&reader, window.pages())?;
-                    disk_reads.push((reader, pages, at, window.bytes_in_pages()));
-                }
-                HeldBlock::Missing => {
-                    let missing = block.object_range();
-                    match fetches.last_mut() {
-                        Some(run) if run.end == missing.start => run.end = missing.end,
-                        _ => fetches.push(missing),
+                    match self.policy.on_disk_hit(reader.chunk(), &context) {
+                        DiskHit::Stay => {
+                            let pages = self.disk.read_pages(&reader, block.window().pages())?;
+                            page_reads.push((reader, pages, block));
+                        }
+                        DiskHit::Promote => promotions.push((reader, block)),
                     }
+                }
+                HeldBlock::Missing => read.miss(&block, self.policy.on_miss(&context)),
+            }
+        }
+        // Every page read was submitted above, so they run at once. Each
+        // keeps its chunk held until its bytes land.
+        for (_held, pages, block) in page_reads {
+            read.place_from_pages(out, &block, pages.await?.as_slice());
+        }
+        let promoted =
+            join_all(promotions.into_iter().map(|(on_disk, block)| async move {
+                (self.promote(on_disk, &block).await, block)
+            }))
+            .await;
+        for (promotion, block) in promoted {
+            match promotion? {
+                Promotion::InMemory(reader) => read.place_from_chunk(out, &block, reader.bytes()),
+                // No room in memory: the block stays, and the read takes its
+                // pages after all.
+                Promotion::NoRoom(on_disk) => {
+                    let pages = self.disk.read_pages(&on_disk, block.window().pages())?;
+                    read.place_from_pages(out, &block, pages.await?.as_slice());
                 }
             }
         }
-        // Every disk read was submitted above, so they run at once. Each
-        // keeps its chunk held until its bytes land.
-        for (_held, pages, at, wanted) in disk_reads {
-            let pages = pages.await?;
-            let wanted = wanted.start as usize..wanted.end as usize;
-            out[at..at + wanted.len()].copy_from_slice(&pages.as_slice()[wanted]);
-        }
-        Ok(PartialRead { bytes, fetches })
+        Ok(read)
     }
 
-    /// Caches the blocks of `version` that `fetched` holds: the file's bytes
-    /// from `start`, whole blocks, as a [`PartialRead`]'s fetches name them.
-    /// A block a tier holds already stays as it is.
+    /// Caches the blocks that `fetched` holds, the file's bytes from
+    /// `start`, each where `read`, which missed it, said it goes: whole
+    /// blocks, as the read's fetches name them. A tier with no free chunk
+    /// evicts for it; a block that still finds no room, or that a tier holds
+    /// already, isn't cached.
     ///
     /// # Errors
     ///
-    /// [`MemoryFull`], if no memory chunk is free for a block: the blocks
-    /// before it are cached, and the rest aren't.
+    /// If a write to the cache file fails, the block's or an eviction's.
     ///
     /// # Panics
     ///
-    /// If `fetched` isn't whole blocks of the file from a block's start.
-    pub(super) fn cache_fetched(
+    /// If `fetched` isn't whole blocks the read missed, from a block's start.
+    pub(super) async fn cache_fetched(
         &self,
-        version: FileVersion,
+        read: &PartialRead,
         start: u64,
         fetched: &[u8],
-    ) -> std::result::Result<(), MemoryFull> {
+    ) -> Result<()> {
         assert!(
             start.is_multiple_of(BLOCK_SIZE_U64),
             "a fetch starts at a block"
@@ -130,41 +185,198 @@ impl ObjectCache {
         let first =
             u32::try_from(start / BLOCK_SIZE_U64).expect("a file's block numbers fit a u32");
         for (index, block_bytes) in (first..).zip(fetched.chunks(BLOCK_SIZE)) {
-            let block = version.block_range(index);
+            let block = read.version.block_range(index);
             assert_eq!(
                 block_bytes.len() as u64,
                 block.end - block.start,
                 "a fetch holds whole blocks"
             );
-            self.cache_block(BlockKey::new(version.id(), index), block_bytes)?;
+            let key = BlockKey::new(read.version.id(), index);
+            match read.admission(index) {
+                Admit::Memory => self.cache_in_memory(key, block_bytes).await?,
+                Admit::Disk => self.cache_on_disk(key, block_bytes).await?,
+                Admit::Discard => {}
+            }
         }
         Ok(())
     }
 
-    /// Moves the block in memory chunk `chunk` to a free disk chunk, as
-    /// eviction does once its policy picks the chunk: writes the whole chunk
-    /// there, a short block's slack too (reads never look past a block's
-    /// bytes, and the file's last block is the only short one), then
-    /// points its entry at the disk chunk, and closes the memory chunk,
-    /// which goes free when its last reader leaves. Readers go on finding
-    /// the block in memory until the entry moves.
+    /// Caches `bytes`, the whole of `key`'s block, in a memory chunk, unless
+    /// a tier holds the block already or memory has no room even after
+    /// evicting.
+    async fn cache_in_memory(&self, key: BlockKey, bytes: &[u8]) -> Result<()> {
+        if self.blocks.get(key).is_some() {
+            return Ok(());
+        }
+        let Some(mut writer) = self.allocate_memory().await? else {
+            return Ok(());
+        };
+        // A short block leaves the rest of the chunk as its last block did:
+        // no read looks there.
+        writer.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
+        // Published before the index names it, so that a read that finds the
+        // entry finds the chunk open.
+        let reader = writer.publish(key);
+        let in_memory = Location::Memory(reader.chunk());
+        if self.blocks.insert_if_absent(key, in_memory) {
+            self.policy.on_admit(Tier::Memory, reader.chunk(), key);
+        } else {
+            // Another fetch of the block cached it first. No entry names
+            // this chunk: it goes back when `reader` drops.
+            reader.unpublish();
+        }
+        Ok(())
+    }
+
+    /// [`Self::cache_in_memory`] for a disk chunk: the block is written from
+    /// a copy, which holds the chunk until the write is done.
+    async fn cache_on_disk(&self, key: BlockKey, bytes: &[u8]) -> Result<()> {
+        if self.blocks.get(key).is_some() {
+            return Ok(());
+        }
+        let Some(writer) = self.allocate_disk() else {
+            return Ok(());
+        };
+        let hold = writer.hold_for_write(self.disk.chunks());
+        let pages = AlignedBuf::from_padded_slice(bytes)?.holding(Arc::new(hold));
+        self.disk.write(&writer, pages).await?;
+        let on_disk = writer.publish(key);
+        if self
+            .blocks
+            .insert_if_absent(key, Location::Disk(on_disk.chunk()))
+        {
+            self.policy.on_admit(Tier::Disk, on_disk.chunk(), key);
+        } else {
+            on_disk.unpublish();
+        }
+        Ok(())
+    }
+
+    /// Moves `block`, in disk chunk `on_disk`, to a memory chunk: reads its
+    /// pages into one, then points its entry at it, and closes the disk
+    /// chunk, which goes free when its last reader leaves. Gives the disk
+    /// chunk back if memory has no room even after evicting.
+    ///
+    /// The read fills a lent memory chunk, which no reader sees until it is
+    /// done. If the block left disk another way meanwhile, the memory copy
+    /// still serves the caller, and goes back after it.
+    async fn promote<'c>(
+        &'c self,
+        on_disk: DiskChunkReader<'c>,
+        block: &PlannedBlock,
+    ) -> Result<Promotion<'c>> {
+        let Some(writer) = self.allocate_memory().await? else {
+            return Ok(Promotion::NoRoom(on_disk));
+        };
+        let range = block.object_range();
+        let pages = u32::try_from(range.end - range.start)
+            .ok()
+            .and_then(|len| NonZeroU32::new(len.next_multiple_of(PAGE_SIZE_U32)))
+            .expect("a block is a chunk's bytes or fewer, one or more");
+        let (buffer, lent) = writer.lend_for_read(&self.memory, pages);
+        let filled = self.disk.read_chunk_start(&on_disk, buffer).await?;
+        let block = on_disk.block();
+        let in_memory = lent.publish(filled, block);
+        let (from, to) = (
+            Location::Disk(on_disk.chunk()),
+            Location::Memory(in_memory.chunk()),
+        );
+        if self.blocks.replace_if(block, from, to) {
+            on_disk.unpublish();
+            self.policy.on_admit(Tier::Memory, in_memory.chunk(), block);
+        } else {
+            in_memory.unpublish();
+        }
+        Ok(Promotion::InMemory(in_memory))
+    }
+
+    /// A free memory chunk, evicting the policy's victims for one if memory
+    /// is full; `None` if none goes free, or the policy picks none.
+    async fn allocate_memory(&self) -> Result<Option<MemoryChunkWriter<'_>>> {
+        for _ in 0..Self::EVICTION_ROUNDS {
+            if let Some(writer) = self.memory.allocate() {
+                return Ok(Some(writer));
+            }
+            let batch = Self::eviction_batch(self.memory.chunk_count());
+            let victims = self.policy.pick_memory_victims(batch);
+            if victims.is_empty() {
+                return Ok(None);
+            }
+            self.evict_memory_victims(&victims).await?;
+        }
+        Ok(self.memory.allocate())
+    }
+
+    /// [`Self::allocate_memory`] for a disk chunk. Disk victims are dropped:
+    /// no I/O.
+    fn allocate_disk(&self) -> Option<DiskChunkWriter<'_>> {
+        for _ in 0..Self::EVICTION_ROUNDS {
+            if let Some(writer) = self.disk.chunks().allocate() {
+                return Some(writer);
+            }
+            let batch = Self::eviction_batch(self.disk.chunks().chunk_count());
+            let victims = self.policy.pick_disk_victims(batch);
+            if victims.is_empty() {
+                return None;
+            }
+            for chunk in victims {
+                self.evict_from_disk(chunk);
+            }
+        }
+        self.disk.chunks().allocate()
+    }
+
+    /// The victims a full tier of `chunk_count` chunks gives up at once:
+    /// [`Self::EVICTION_BATCH`], but never more than a sixteenth of the tier,
+    /// so a small one isn't emptied for one block.
+    fn eviction_batch(chunk_count: u32) -> usize {
+        (chunk_count as usize / 16).clamp(1, Self::EVICTION_BATCH)
+    }
+
+    /// Drops or moves each of `victims` as the policy said. The moves' writes
+    /// run at once.
+    async fn evict_memory_victims(&self, victims: &[MemoryVictim]) -> Result<()> {
+        let mut moves = Vec::new();
+        for victim in victims {
+            match victim.action() {
+                VictimAction::Drop => {
+                    self.evict_from_memory(victim.chunk());
+                }
+                VictimAction::ToDisk => moves.push(self.move_to_disk(victim.chunk())),
+            }
+        }
+        for moved in join_all(moves).await {
+            moved?;
+        }
+        Ok(())
+    }
+
+    /// Moves the block in memory chunk `chunk` to a disk chunk, evicting the
+    /// disk's victims for one if the disk is full: writes the whole chunk
+    /// there, a short block's slack too (no read looks past a block's
+    /// bytes), then points the block's entry at the disk chunk, and closes
+    /// the memory chunk, which goes free when its last reader leaves.
+    /// Readers find the block in memory until the entry moves. A block that
+    /// stays, for want of room on disk or a failed write, goes back to the
+    /// policy.
     ///
     /// The write lends the memory chunk's pages, not a copy, and holds both
     /// chunks until it is done, even if this future is dropped first.
-    ///
-    /// # Errors
-    ///
-    /// If the write fails; the block stays in memory.
-    pub(super) async fn move_to_disk(&self, chunk: ChunkId) -> Result<MoveToDisk> {
+    async fn move_to_disk(&self, chunk: ChunkId) -> Result<MoveToDisk> {
         let Some(victim) = self.memory.pin_for_eviction(chunk) else {
             return Ok(MoveToDisk::NoBlock);
         };
-        let Some(writer) = self.disk.chunks().allocate() else {
+        let block = victim.block();
+        let Some(writer) = self.allocate_disk() else {
+            self.policy.on_admit(Tier::Memory, chunk, block);
             return Ok(MoveToDisk::DiskFull);
         };
-        let block = victim.block();
-        let pages = victim.lend_for_write(&self.memory, writer.hold_for_write(self.disk.chunks()));
-        self.disk.write(&writer, pages).await?;
+        let hold = writer.hold_for_write(self.disk.chunks());
+        let pages = victim.lend_for_write(&self.memory, hold);
+        if let Err(error) = self.disk.write(&writer, pages).await {
+            self.policy.on_admit(Tier::Memory, chunk, block);
+            return Err(error);
+        }
         let on_disk = writer.publish(block);
         let to_disk = Location::Disk(on_disk.chunk());
         if self
@@ -174,6 +386,7 @@ impl ObjectCache {
             // New reads go to disk. Those that found the old entry finish in
             // memory, and the chunk goes free after them.
             victim.unpublish();
+            self.policy.on_admit(Tier::Disk, on_disk.chunk(), block);
             Ok(MoveToDisk::Moved)
         } else {
             // The block left memory another way while it was written: the
@@ -183,12 +396,12 @@ impl ObjectCache {
         }
     }
 
-    /// Drops the block in memory chunk `chunk` from the cache, as eviction
-    /// does once its policy picks the chunk: closes the chunk to new
-    /// readers, then drops the index entry that names it. The chunk goes free
-    /// when its last reader leaves. Whether this call evicted the block: of
-    /// two evictions of one chunk, one does, and a free chunk has none.
-    pub(super) fn evict_from_memory(&self, chunk: ChunkId) -> bool {
+    /// Drops the block in memory chunk `chunk` from the cache: closes the
+    /// chunk to new readers, then drops the index entry that names it. The
+    /// chunk goes free when its last reader leaves. Whether this call
+    /// evicted the block: of two evictions of one chunk, one does, and a
+    /// free chunk has none.
+    fn evict_from_memory(&self, chunk: ChunkId) -> bool {
         let Some(victim) = self.memory.pin_for_eviction(chunk) else {
             return false;
         };
@@ -197,7 +410,7 @@ impl ObjectCache {
 
     /// [`Self::evict_from_memory`] for disk chunk `chunk`: the chunk goes
     /// free once the reads in flight from it are done.
-    pub(super) fn evict_from_disk(&self, chunk: ChunkId) -> bool {
+    fn evict_from_disk(&self, chunk: ChunkId) -> bool {
         let Some(victim) = self.disk.chunks().pin_for_eviction(chunk) else {
             return false;
         };
@@ -213,30 +426,6 @@ impl ObjectCache {
             self.blocks.remove_if(block, location);
         }
         closed
-    }
-
-    /// Caches `bytes`, the whole of `key`'s block, in a memory chunk, unless
-    /// a tier holds the block already.
-    fn cache_block(&self, key: BlockKey, bytes: &[u8]) -> std::result::Result<(), MemoryFull> {
-        if self.blocks.get(key).is_some() {
-            return Ok(());
-        }
-        let mut writer = self.memory.allocate().ok_or(MemoryFull)?;
-        // A short block leaves the rest of the chunk as its last block did:
-        // no read looks there.
-        writer.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
-        // Published before the index names it, so that a read that finds the
-        // entry finds the chunk open.
-        let reader = writer.publish(key);
-        if !self
-            .blocks
-            .insert_if_absent(key, Location::Memory(reader.chunk()))
-        {
-            // Another fetch of the block cached it first. No entry names
-            // this chunk: it goes back when `reader` drops.
-            reader.unpublish();
-        }
-        Ok(())
     }
 
     /// Holds the chunk with `key`'s block, the index having said it is at
@@ -271,6 +460,19 @@ impl ObjectCache {
     }
 }
 
+/// A file the cache can hold: its path, and the version of it reads name.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CacheableFile<'p> {
+    path: &'p [u8],
+    version: FileVersion,
+}
+
+impl CacheableFile<'_> {
+    pub(super) fn version(&self) -> FileVersion {
+        self.version
+    }
+}
+
 /// A block a read holds while it takes its bytes, or found missing.
 enum HeldBlock<'cache> {
     Memory(MemoryChunkReader<'cache>),
@@ -278,29 +480,51 @@ enum HeldBlock<'cache> {
     Missing,
 }
 
-/// What [`ObjectCache::move_to_disk`] did.
+/// What became of a promotion.
+enum Promotion<'cache> {
+    /// The block is in this memory chunk, which holds it for the read.
+    InMemory(MemoryChunkReader<'cache>),
+    /// Memory had no room: the block is in this disk chunk still.
+    NoRoom(DiskChunkReader<'cache>),
+}
+
+/// What became of a move to disk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum MoveToDisk {
+enum MoveToDisk {
     /// The block is on disk, and its memory chunk goes free.
     Moved,
     /// The memory chunk held no block, or another eviction had closed it.
     NoBlock,
-    /// No disk chunk was free: the block stays in memory.
+    /// No disk chunk went free: the block stays in memory.
     DiskFull,
     /// The block left memory another way while it was written, and the
     /// copy on disk went back.
     Superseded,
 }
 
-/// A read that the cache served in part: the bytes it takes, and the ranges
-/// of the file to fetch for the rest, whole blocks, adjacent ones in one.
+/// A read that the cache served in part: the bytes it takes, the ranges of
+/// the file to fetch for the rest, whole blocks, adjacent ones in one, and
+/// where each block fetched goes.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct PartialRead {
+    version: FileVersion,
     bytes: Range<u64>,
     fetches: Vec<Range<u64>>,
+    /// The blocks the read missed, by number, in order, and where each goes
+    /// once fetched, as the policy said.
+    missed: Vec<(u32, Admit)>,
 }
 
 impl PartialRead {
+    fn new(version: FileVersion, bytes: Range<u64>) -> Self {
+        Self {
+            version,
+            bytes,
+            fetches: Vec::new(),
+            missed: Vec::new(),
+        }
+    }
+
     /// The file's bytes the read takes, which `out` holds.
     pub(super) fn bytes(&self) -> Range<u64> {
         self.bytes.clone()
@@ -325,6 +549,55 @@ impl PartialRead {
         out[at..at + len].copy_from_slice(&fetched[from..from + len]);
     }
 
+    /// Notes that the read missed `block`, which goes where `admit` says
+    /// once fetched: it joins the fetch before it if they're adjacent.
+    fn miss(&mut self, block: &PlannedBlock, admit: Admit) {
+        self.missed.push((block.key().index(), admit));
+        let missing = block.object_range();
+        match self.fetches.last_mut() {
+            Some(run) if run.end == missing.start => run.end = missing.end,
+            _ => self.fetches.push(missing),
+        }
+    }
+
+    /// Where block `index`, which the read missed, goes once fetched.
+    fn admission(&self, index: u32) -> Admit {
+        let at = self
+            .missed
+            .binary_search_by_key(&index, |&(missed, _)| missed)
+            .expect("a fetch holds blocks the read missed");
+        self.missed[at].1
+    }
+
+    /// Copies the part of `block` the read takes from `chunk`, the whole of
+    /// the chunk that holds it, into `out`.
+    fn place_from_chunk(&self, out: &mut [u8], block: &PlannedBlock, chunk: &[u8]) {
+        let wanted = block.window().bytes();
+        self.place(
+            out,
+            block,
+            &chunk[wanted.start as usize..wanted.end as usize],
+        );
+    }
+
+    /// Copies the part of `block` the read takes from `pages`, the block's
+    /// pages around it, into `out`.
+    fn place_from_pages(&self, out: &mut [u8], block: &PlannedBlock, pages: &[u8]) {
+        let wanted = block.window().bytes_in_pages();
+        self.place(
+            out,
+            block,
+            &pages[wanted.start as usize..wanted.end as usize],
+        );
+    }
+
+    /// Copies `wanted`, the bytes of `block` the read takes, into `out`.
+    fn place(&self, out: &mut [u8], block: &PlannedBlock, wanted: &[u8]) {
+        let start = block.object_range().start + u64::from(block.window().bytes().start);
+        let at = Self::offset(start - self.bytes.start);
+        out[at..at + wanted.len()].copy_from_slice(wanted);
+    }
+
     /// A length or an offset within a read's bytes, as a `usize`: the
     /// bytes are in memory, so it fits.
     fn offset(within_read: u64) -> usize {
@@ -332,10 +605,8 @@ impl PartialRead {
     }
 }
 
-/// No memory chunk was free for a block. Until the eviction policy is
-/// built, the cache holds what fits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct MemoryFull;
+#[cfg(test)]
+mod test_policy;
 
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests;
@@ -343,350 +614,4 @@ mod shuttle_tests;
 // `[0..MIB]` is a list of one fetch, not the range's offsets.
 #[allow(clippy::single_range_in_vec_init)]
 #[cfg(all(test, not(feature = "shuttle")))]
-mod tests {
-    use pollster::block_on;
-    use tempfile::TempDir;
-
-    use super::*;
-
-    const MIB: u64 = BLOCK_SIZE_U64;
-
-    /// A cache of `memory_chunks` chunks of memory and `disk_chunks` on
-    /// disk, in a directory of its own that lives as long as the cache.
-    fn cache(memory_chunks: u32, disk_chunks: u32) -> (TempDir, ObjectCache) {
-        let dir = tempfile::tempdir().unwrap();
-        let disk = CacheFile::open(
-            &dir.path().join("cache"),
-            NonZeroU32::new(disk_chunks).unwrap(),
-            NonZeroU32::new(8).unwrap(),
-            true,
-        )
-        .unwrap();
-        let cache = ObjectCache::new(NonZeroU32::new(memory_chunks).unwrap(), disk).unwrap();
-        (dir, cache)
-    }
-
-    /// A file's bytes: each byte a function of its offset.
-    fn file_bytes(size: u64) -> Vec<u8> {
-        (0..size).map(|offset| (offset % 251) as u8).collect()
-    }
-
-    /// Reads `range`, then fetches and caches what the read names, from
-    /// `file`, as the front end will; returns what the caller got, and the
-    /// fetches the read named.
-    fn read_through(
-        cache: &ObjectCache,
-        version: FileVersion,
-        file: &[u8],
-        range: Range<u64>,
-    ) -> (Vec<u8>, Vec<Range<u64>>) {
-        let mut out = Vec::new();
-        let read = block_on(cache.read(version, range, &mut out)).unwrap();
-        for fetch in read.fetches() {
-            let fetched = &file[fetch.start as usize..fetch.end as usize];
-            read.fill(&mut out, fetch.start, fetched);
-            let _ = cache.cache_fetched(version, fetch.start, fetched);
-        }
-        (out, read.fetches().to_vec())
-    }
-
-    fn location(cache: &ObjectCache, version: FileVersion, index: u32) -> Option<Location> {
-        cache.blocks.get(BlockKey::new(version.id(), index))
-    }
-
-    fn memory_chunk(cache: &ObjectCache, version: FileVersion, index: u32) -> ChunkId {
-        let Some(Location::Memory(chunk)) = location(cache, version, index) else {
-            panic!("block {index} is in memory");
-        };
-        chunk
-    }
-
-    fn move_to_disk(cache: &ObjectCache, chunk: ChunkId) -> MoveToDisk {
-        block_on(cache.move_to_disk(chunk)).unwrap()
-    }
-
-    #[test]
-    fn a_miss_fetches_whole_blocks_and_then_hits() {
-        let (_dir, cache) = cache(4, 1);
-        let file = file_bytes(2 * MIB + MIB / 2);
-        let version = cache
-            .resolve(b"a.parquet", Some("v1"), 2 * MIB + MIB / 2)
-            .unwrap();
-
-        let range = 100..2 * MIB + 10;
-        let (out, fetches) = read_through(&cache, version, &file, range.clone());
-        assert_eq!(
-            fetches,
-            [0..2 * MIB + MIB / 2],
-            "all three blocks in one GET"
-        );
-        assert_eq!(out, file[100..2 * MIB as usize + 10]);
-        assert_eq!(cache.memory.free_count(), 1);
-
-        let (out, fetches) = read_through(&cache, version, &file, range);
-        assert!(fetches.is_empty());
-        assert_eq!(out, file[100..2 * MIB as usize + 10]);
-
-        // Past the end, the read is clamped to the file.
-        let (out, fetches) = read_through(&cache, version, &file, 2 * MIB..u64::MAX);
-        assert!(fetches.is_empty());
-        assert_eq!(out, file[2 * MIB as usize..]);
-    }
-
-    #[test]
-    fn a_read_fetches_only_the_blocks_memory_lacks() {
-        let (_dir, cache) = cache(4, 1);
-        let file = file_bytes(4 * MIB);
-        let version = cache.resolve(b"a", Some("v1"), 4 * MIB).unwrap();
-        cache
-            .cache_fetched(version, MIB, &file[MIB as usize..2 * MIB as usize])
-            .unwrap();
-        cache
-            .cache_fetched(version, 3 * MIB, &file[3 * MIB as usize..])
-            .unwrap();
-
-        let mut out = Vec::new();
-        let read = block_on(cache.read(version, 10..4 * MIB - 10, &mut out)).unwrap();
-        assert_eq!(read.bytes(), 10..4 * MIB - 10);
-        assert_eq!(read.fetches(), [0..MIB, 2 * MIB..3 * MIB]);
-        // The cached blocks are in, the missing ones zeros until filled.
-        assert_eq!(
-            out[MIB as usize - 10..2 * MIB as usize - 10],
-            file[MIB as usize..2 * MIB as usize]
-        );
-        assert!(out[..MIB as usize - 10].iter().all(|&byte| byte == 0));
-        for fetch in read.fetches() {
-            read.fill(
-                &mut out,
-                fetch.start,
-                &file[fetch.start as usize..fetch.end as usize],
-            );
-        }
-        assert_eq!(out, file[10..4 * MIB as usize - 10]);
-    }
-
-    #[test]
-    fn a_full_pool_caches_what_fits() {
-        let (_dir, cache) = cache(1, 1);
-        let file = file_bytes(2 * MIB);
-        let version = cache.resolve(b"a", Some("v1"), 2 * MIB).unwrap();
-        assert_eq!(cache.cache_fetched(version, 0, &file), Err(MemoryFull));
-
-        let mut out = Vec::new();
-        let read = block_on(cache.read(version, 0..2 * MIB, &mut out)).unwrap();
-        assert_eq!(read.fetches(), [MIB..2 * MIB]);
-        assert_eq!(out[..MIB as usize], file[..MIB as usize]);
-    }
-
-    #[test]
-    fn a_block_fetched_twice_takes_one_chunk() {
-        let (_dir, cache) = cache(4, 1);
-        let file = file_bytes(MIB);
-        let version = cache.resolve(b"a", Some("v1"), MIB).unwrap();
-        cache.cache_fetched(version, 0, &file).unwrap();
-        cache.cache_fetched(version, 0, &file).unwrap();
-        assert_eq!(cache.memory.free_count(), 3);
-    }
-
-    #[test]
-    fn racing_fetches_of_one_block_take_one_chunk() {
-        const THREADS: usize = 8;
-        let (_dir, cache) = cache(THREADS as u32, 1);
-        let file = file_bytes(MIB);
-        let version = cache.resolve(b"a", Some("v1"), MIB).unwrap();
-        let barrier = std::sync::Barrier::new(THREADS);
-        std::thread::scope(|scope| {
-            for _ in 0..THREADS {
-                scope.spawn(|| {
-                    barrier.wait();
-                    cache.cache_fetched(version, 0, &file).unwrap();
-                });
-            }
-        });
-        assert_eq!(cache.memory.free_count(), THREADS as u32 - 1);
-        let (out, fetches) = read_through(&cache, version, &file, 0..MIB);
-        assert!(fetches.is_empty());
-        assert_eq!(out, file);
-    }
-
-    #[test]
-    fn a_stale_entry_reads_as_a_miss() {
-        let (_dir, cache) = cache(1, 1);
-        let file = file_bytes(MIB);
-        let old = cache.resolve(b"old", Some("v1"), MIB).unwrap();
-        cache.cache_fetched(old, 0, &file).unwrap();
-        let key = BlockKey::new(old.id(), 0);
-        let chunk = memory_chunk(&cache, old, 0);
-
-        // Evicted, as eviction does: closed, but its entry not yet dropped.
-        assert!(cache.memory.pin_for_eviction(chunk).unwrap().unpublish());
-        let (_, fetches) = read_through(&cache, old, &file, 0..MIB);
-        assert_eq!(fetches, [0..MIB]);
-
-        // Dropped, and the chunk reused for another file's block while a
-        // read still holds the old entry.
-        assert!(cache.blocks.remove_if(key, Location::Memory(chunk)));
-        let other = cache.resolve(b"other", Some("v1"), MIB).unwrap();
-        cache.cache_fetched(other, 0, &file_bytes(MIB)).unwrap();
-        assert_eq!(location(&cache, other, 0), Some(Location::Memory(chunk)));
-        assert!(matches!(
-            cache.hold(key, Some(Location::Memory(chunk))),
-            HeldBlock::Missing
-        ));
-    }
-
-    #[test]
-    fn an_evicted_block_misses_and_its_chunk_goes_free() {
-        let (_dir, cache) = cache(1, 1);
-        let file = file_bytes(MIB);
-        let version = cache.resolve(b"a", Some("v1"), MIB).unwrap();
-        cache.cache_fetched(version, 0, &file).unwrap();
-        let chunk = memory_chunk(&cache, version, 0);
-
-        // A read in flight keeps the chunk, not the block.
-        let reader = cache.memory.read(chunk, BlockKey::new(version.id(), 0));
-        assert!(cache.evict_from_memory(chunk));
-        assert!(!cache.evict_from_memory(chunk), "one eviction of a chunk");
-        assert_eq!(location(&cache, version, 0), None);
-        assert_eq!(cache.memory.free_count(), 0, "the read is still in it");
-        drop(reader);
-        assert_eq!(cache.memory.free_count(), 1);
-
-        let (out, fetches) = read_through(&cache, version, &file, 0..MIB);
-        assert_eq!(fetches, [0..MIB]);
-        assert_eq!(out, file);
-    }
-
-    #[test]
-    fn blocks_moved_to_disk_read_back_from_disk() {
-        let (_dir, cache) = cache(4, 4);
-        let size = 2 * MIB + 5000;
-        let file = file_bytes(size);
-        let version = cache.resolve(b"a", Some("v1"), size).unwrap();
-        cache.cache_fetched(version, 0, &file).unwrap();
-        for index in 0..3 {
-            let chunk = memory_chunk(&cache, version, index);
-            assert_eq!(move_to_disk(&cache, chunk), MoveToDisk::Moved);
-            assert!(matches!(
-                location(&cache, version, index),
-                Some(Location::Disk(_))
-            ));
-        }
-        assert_eq!(cache.memory.free_count(), 4);
-        assert_eq!(cache.disk.chunks().free_count(), 1);
-
-        // Whole, within a page, across pages and blocks, and the short last
-        // block: every read from disk, none fetched.
-        for range in [0..size, 5000..5001, 4095..MIB + 4097, 2 * MIB + 10..size] {
-            let (out, fetches) = read_through(&cache, version, &file, range.clone());
-            assert!(fetches.is_empty(), "{range:?}");
-            assert_eq!(out, file[range.start as usize..range.end as usize]);
-        }
-    }
-
-    #[test]
-    fn a_read_takes_each_block_from_where_it_is() {
-        let (_dir, cache) = cache(4, 4);
-        let file = file_bytes(4 * MIB);
-        let version = cache.resolve(b"a", Some("v1"), 4 * MIB).unwrap();
-        cache
-            .cache_fetched(version, 0, &file[..2 * MIB as usize])
-            .unwrap();
-        cache
-            .cache_fetched(version, 3 * MIB, &file[3 * MIB as usize..])
-            .unwrap();
-        // Block 0 in memory, 1 and 3 on disk, 2 missing.
-        for index in [1, 3] {
-            let chunk = memory_chunk(&cache, version, index);
-            assert_eq!(move_to_disk(&cache, chunk), MoveToDisk::Moved);
-        }
-        let (out, fetches) = read_through(&cache, version, &file, 100..4 * MIB - 100);
-        assert_eq!(fetches, [2 * MIB..3 * MIB]);
-        assert_eq!(out, file[100..4 * MIB as usize - 100]);
-    }
-
-    #[test]
-    fn a_full_disk_keeps_the_block_in_memory() {
-        let (_dir, cache) = cache(2, 1);
-        let file = file_bytes(2 * MIB);
-        let version = cache.resolve(b"a", Some("v1"), 2 * MIB).unwrap();
-        cache.cache_fetched(version, 0, &file).unwrap();
-        let (first, second) = (
-            memory_chunk(&cache, version, 0),
-            memory_chunk(&cache, version, 1),
-        );
-        assert_eq!(move_to_disk(&cache, first), MoveToDisk::Moved);
-        assert_eq!(move_to_disk(&cache, second), MoveToDisk::DiskFull);
-        assert_eq!(location(&cache, version, 1), Some(Location::Memory(second)));
-        let (out, fetches) = read_through(&cache, version, &file, 0..2 * MIB);
-        assert!(fetches.is_empty());
-        assert_eq!(out, file);
-    }
-
-    #[test]
-    fn a_free_chunk_has_no_block_to_move_or_evict() {
-        let (_dir, cache) = cache(1, 1);
-        assert_eq!(move_to_disk(&cache, ChunkId::new(0)), MoveToDisk::NoBlock);
-        assert!(!cache.evict_from_memory(ChunkId::new(0)));
-        assert!(!cache.evict_from_disk(ChunkId::new(0)));
-        assert_eq!(cache.disk.chunks().free_count(), 1);
-    }
-
-    #[test]
-    fn a_block_evicted_from_disk_misses_and_its_chunk_goes_free() {
-        let (_dir, cache) = cache(1, 1);
-        let file = file_bytes(MIB);
-        let version = cache.resolve(b"a", Some("v1"), MIB).unwrap();
-        cache.cache_fetched(version, 0, &file).unwrap();
-        let chunk = memory_chunk(&cache, version, 0);
-        assert_eq!(move_to_disk(&cache, chunk), MoveToDisk::Moved);
-        let Some(Location::Disk(on_disk)) = location(&cache, version, 0) else {
-            panic!("the block is on disk");
-        };
-
-        assert!(cache.evict_from_disk(on_disk));
-        assert!(!cache.evict_from_disk(on_disk), "one eviction of a chunk");
-        assert_eq!(location(&cache, version, 0), None);
-        assert_eq!(cache.disk.chunks().free_count(), 1);
-        let (out, fetches) = read_through(&cache, version, &file, 0..MIB);
-        assert_eq!(fetches, [0..MIB]);
-        assert_eq!(out, file);
-    }
-
-    #[test]
-    fn a_new_version_misses_the_old_ones_blocks() {
-        let (_dir, cache) = cache(4, 1);
-        let file = file_bytes(MIB);
-        let v1 = cache.resolve(b"a", Some("v1"), MIB).unwrap();
-        cache.cache_fetched(v1, 0, &file).unwrap();
-        let v2 = cache.resolve(b"a", Some("v2"), MIB).unwrap();
-        let (_, fetches) = read_through(&cache, v2, &file, 0..MIB);
-        assert_eq!(fetches, [0..MIB]);
-    }
-
-    #[test]
-    fn fill_copies_only_the_overlap() {
-        let read = PartialRead {
-            bytes: 100..200,
-            fetches: Vec::new(),
-        };
-        let mut out = vec![0; 100];
-        read.fill(&mut out, 150, &[7; 100]);
-        assert!(out[..50].iter().all(|&byte| byte == 0));
-        assert!(out[50..].iter().all(|&byte| byte == 7));
-        read.fill(&mut out, 0, &[9; 120]);
-        assert!(out[..20].iter().all(|&byte| byte == 9));
-        assert_eq!(out[20], 0);
-        read.fill(&mut out, 300, &[1; 10]);
-        read.fill(&mut out, 0, &[1; 100]);
-        assert!(out[..20].iter().all(|&byte| byte == 9));
-    }
-
-    #[test]
-    #[should_panic(expected = "a fetch holds whole blocks")]
-    fn a_fetch_of_part_of_a_block_is_refused() {
-        let (_dir, cache) = cache(1, 1);
-        let version = cache.resolve(b"a", Some("v1"), MIB).unwrap();
-        let _ = cache.cache_fetched(version, 0, &file_bytes(MIB / 2));
-    }
-}
+mod tests;
