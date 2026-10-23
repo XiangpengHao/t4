@@ -33,7 +33,7 @@ pub trait ReadPolicy: Send + Sync {
     /// blocks, or span runs (merged, the memory and disk blocks between
     /// fetched and their bytes dropped). Asked of every read with a remote
     /// block.
-    fn plan(&self, read: &PlannedRead<'_>) -> ReadPlan;
+    fn plan(&self, read: &LocatedRead<'_>) -> ReadPlan;
 
     /// An I/O the cache made started, was answered, finished, failed or
     /// was given up on.
@@ -43,7 +43,7 @@ pub trait ReadPolicy: Send + Sync {
 /// A read, each of its blocks in memory, on disk or remote: what a
 /// [`ReadPolicy`] plans by.
 #[derive(Clone, Debug)]
-pub struct PlannedRead<'r> {
+pub struct LocatedRead<'r> {
     path: &'r [u8],
     file_size: u64,
     asked: Range<u64>,
@@ -54,7 +54,7 @@ pub struct PlannedRead<'r> {
     sources: &'r [BlockSource],
 }
 
-impl<'r> PlannedRead<'r> {
+impl<'r> LocatedRead<'r> {
     pub(in crate::cache) fn new(
         path: &'r [u8],
         file_size: u64,
@@ -211,7 +211,7 @@ impl PlannedGet {
 pub struct FetchRuns;
 
 impl ReadPolicy for FetchRuns {
-    fn plan(&self, read: &PlannedRead<'_>) -> ReadPlan {
+    fn plan(&self, read: &LocatedRead<'_>) -> ReadPlan {
         ReadPlan::new(read.remote_runs().map(PlannedGet::once).collect())
     }
 
@@ -291,9 +291,9 @@ mod tests {
 
     const MIB: u64 = BLOCK_SIZE_U64;
 
-    fn read(sources: &[BlockSource], first: u32) -> PlannedRead<'_> {
+    fn read(sources: &[BlockSource], first: u32) -> LocatedRead<'_> {
         let size = 10 * MIB + MIB / 2;
-        PlannedRead::new(b"f", size, 0..size, None, first, sources)
+        LocatedRead::new(b"f", size, 0..size, None, first, sources)
     }
 
     #[test]
@@ -324,10 +324,10 @@ mod tests {
     fn a_plan_must_cover_every_remote_block_once_within_the_file() {
         use BlockSource::{Memory, Remote};
         let sources = [Remote, Memory, Remote];
-        let planned = read(&sources, 4);
+        let located = read(&sources, 4);
         let accepts = |gets: &[Range<u32>]| {
             let gets = gets.iter().cloned().map(PlannedGet::once).collect();
-            planned.accepts(&ReadPlan::new(gets))
+            located.accepts(&ReadPlan::new(gets))
         };
         assert!(accepts(&[4..5, 6..7]), "the runs");
         assert!(accepts(&[4..7]), "merged over the hit");
@@ -341,10 +341,10 @@ mod tests {
 
     #[test]
     fn the_last_block_is_the_files_rest() {
-        let planned = read(&[BlockSource::Remote], 10);
-        assert_eq!(planned.file_blocks(), 11);
-        assert_eq!(planned.block_bytes(10), 10 * MIB..10 * MIB + MIB / 2);
-        assert_eq!(planned.source(10), Some(BlockSource::Remote));
-        assert_eq!(planned.source(9), None);
+        let located = read(&[BlockSource::Remote], 10);
+        assert_eq!(located.file_blocks(), 11);
+        assert_eq!(located.block_bytes(10), 10 * MIB..10 * MIB + MIB / 2);
+        assert_eq!(located.source(10), Some(BlockSource::Remote));
+        assert_eq!(located.source(9), None);
     }
 }

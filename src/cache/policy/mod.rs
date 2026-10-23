@@ -19,7 +19,7 @@ mod read;
 pub use super::{BlockKey, ChunkId, FileVersionId};
 pub use clock::ClockPolicy;
 pub use read::{
-    BlockSource, FetchRuns, Io, IoEvent, IoPhase, PlannedGet, PlannedRead, ReadIntent, ReadPlan,
+    BlockSource, FetchRuns, Io, IoEvent, IoPhase, LocatedRead, PlannedGet, ReadIntent, ReadPlan,
     ReadPolicy,
 };
 

@@ -11,8 +11,8 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::cache::policy::{
-    Admit, BlockKey, BlockRead, ChunkId, DiskHit, IoEvent, IoPhase, MemoryVictim, PlannedGet,
-    PlannedRead, ReadPlan, Tier,
+    Admit, BlockKey, BlockRead, ChunkId, DiskHit, IoEvent, IoPhase, LocatedRead, MemoryVictim,
+    PlannedGet, ReadPlan, Tier,
 };
 
 const MIB: u64 = BLOCK_SIZE_U64;
@@ -596,13 +596,13 @@ impl Heard {
 /// of each read it planned and every event it heard. Its clones share them.
 #[derive(Clone)]
 struct ScriptedReads {
-    script: Arc<dyn Fn(&PlannedRead<'_>) -> ReadPlan + Send + Sync>,
+    script: Arc<dyn Fn(&LocatedRead<'_>) -> ReadPlan + Send + Sync>,
     intents: Arc<Mutex<Vec<Option<ReadIntent>>>>,
     heard: Arc<Mutex<Vec<Heard>>>,
 }
 
 impl ScriptedReads {
-    fn new(script: impl Fn(&PlannedRead<'_>) -> ReadPlan + Send + Sync + 'static) -> Self {
+    fn new(script: impl Fn(&LocatedRead<'_>) -> ReadPlan + Send + Sync + 'static) -> Self {
         Self {
             script: Arc::new(script),
             intents: Arc::default(),
@@ -616,7 +616,7 @@ impl ScriptedReads {
 }
 
 impl ReadPolicy for ScriptedReads {
-    fn plan(&self, read: &PlannedRead<'_>) -> ReadPlan {
+    fn plan(&self, read: &LocatedRead<'_>) -> ReadPlan {
         self.intents.lock().unwrap().push(read.intent());
         (self.script)(read)
     }
@@ -885,4 +885,33 @@ fn the_read_policy_hears_reads_from_disk() {
         phase,
     };
     assert_eq!(reads.heard(), [read("started"), read("finished")]);
+}
+
+/// A read's GETs go out before its work on the drives is waited on: the
+/// read policy hears the GET start before the disk read finishes.
+#[test]
+fn a_reads_gets_go_out_before_its_disk_reads_are_waited_on() {
+    let reads = ScriptedReads::new(|read| FetchRuns.plan(read));
+    let (_dir, store, _inner, _, data) = planned_by(&reads, Admit::Disk);
+    let path = Path::from("a");
+    get_range(&store, &path, 0..MIB);
+    reads.heard.lock().unwrap().clear();
+
+    assert_eq!(
+        get_range(&store, &path, 0..2 * MIB),
+        data.slice(0..2 * MIB as usize)
+    );
+    let heard = reads.heard();
+    let at = |wanted: &Heard| heard.iter().position(|heard| heard == wanted).unwrap();
+    let get_started = at(&Heard::Get {
+        bytes: MIB..2 * MIB,
+        racer: 0,
+        phase: "started",
+    });
+    let disk_read_finished = at(&Heard::DiskRead {
+        drive: 0,
+        bytes: MIB as u32,
+        phase: "finished",
+    });
+    assert!(get_started < disk_read_finished, "{heard:?}");
 }

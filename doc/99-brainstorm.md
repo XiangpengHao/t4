@@ -51,3 +51,6 @@ Basically, how much does it cost to run a query, maybe?
 
 
 - [ ] Next, we need to make sure we saturate network bandwidth with minimal threads, which is very hard.
+
+- [ ] split long runs into GETs of 8 MiB or more while the NIC has room, merge once it’s full. Measure on the S3 replay’s cold pass (time, p50/p99/max, GET count).
+

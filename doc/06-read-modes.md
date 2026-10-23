@@ -2,8 +2,9 @@
 
 Status: the mechanism built with default policies (2026-10-23): the two
 traits, plans carried out (split, merged, widened, raced), the intent,
-the events. Single-flight, and the plan's disk choices, which come with
-mirroring, are not built yet; the defaults change nothing (decision 10).
+the events, a read's GETs overlapping its work on the drives.
+Single-flight, and the plan's disk choices, which come with mirroring,
+are not built yet; the defaults change nothing (decision 10).
 
 A read wants one of three things (`99-brainstorm.md`):
 
@@ -65,6 +66,10 @@ High-Performance Analytics", PVLDB 16(11), 2023):
    every fetch; a plan carried out as given, or refused if it doesn't cover
    the read's remote blocks; a block in flight fetched once, its other
    readers waiting on it; every GET and disk read reported to the policy.
+   And a read's GETs sent before its work on the drives is waited on: its
+   page reads, its promotions and the evictions they make overlap its time
+   on the network, not add to it (`ObjectCache::start_read` returns the
+   read and its `DiskWork`, which the front end awaits beside the GETs).
 
 3. **A plan per read.** `ReadPolicy::plan` sees the whole read: every block,
    where each is (memory, disk with the drives holding a copy, or remote),
@@ -131,11 +136,11 @@ pub trait PlacementPolicy: Send + Sync {
 
 /// How a read is served, from the drives and the object store (decision 3).
 pub trait ReadPolicy: Send + Sync {
-    fn plan(&self, read: &PlannedRead<'_>) -> ReadPlan;
+    fn plan(&self, read: &LocatedRead<'_>) -> ReadPlan;
     fn on_io(&self, event: &IoEvent);
 }
 
-pub struct PlannedRead<'r> {
+pub struct LocatedRead<'r> {
     file: FileInfo<'r>,             // path, size, version
     asked: Range<u64>,
     intent: Option<ReadIntent>,     // decision 6
@@ -170,7 +175,7 @@ whether the read asked for the block or a widened GET brought it.
 ## The plan
 
 1. **The mechanism, the defaults doing what t4 does now:** the two traits,
-   `PlannedRead` built from the read's plan, the GETs carried out as
+   `LocatedRead` built from the read's plan, the GETs carried out as
    planned, single-flight, the events. No change measured.
 2. **Throughput:** split a run into GETs of 8 MiB or more while what is in
    flight can't fill the NIC; merge once it can. Measured with the replay
@@ -217,9 +222,10 @@ them (decision 9).
 | Path | What | Built |
 |---|---|---|
 | `src/cache/policy/mod.rs` | `PlacementPolicy`, which was `CachePolicy`; `BlockRead`'s intent, and whether a block was asked for | yes |
-| `src/cache/policy/read.rs` | `ReadPolicy`, `PlannedRead`, `ReadPlan`, `ReadIntent`, `IoEvent`; the default `FetchRuns`; whether a plan can be carried out | yes |
-| `src/cache/object_cache.rs` | `PlannedRead` built from a read's blocks; each fetched block's fate (asked, widened, cached); fetched bytes landed | yes |
+| `src/cache/policy/read.rs` | `ReadPolicy`, `LocatedRead`, `ReadPlan`, `ReadIntent`, `IoEvent`; the default `FetchRuns`; whether a plan can be carried out | yes |
+| `src/cache/object_cache.rs` | `LocatedRead` built from a read's blocks; each fetched block's fate (asked, widened, cached); fetched bytes landed | yes |
 | `src/cache/t4_caching.rs` | the intent from `GetOptions::extensions`; racing GETs, the first answer taken | yes |
 | `src/cache/io_report.rs` | `IoReport`: an I/O told to the read policy, started to finished, failed or given up on | yes |
+| `src/cache/object_cache.rs` | `start_read` and `DiskWork`: the drives' work awaited beside the GETs | yes |
 | single-flight | a block in flight fetched once, its other readers waiting | next |
 | `src/cache/block_index/` | an entry naming several chunks, for mirrors | with mirroring |

@@ -20,7 +20,8 @@ use std::num::{NonZeroU8, NonZeroU32};
 use std::ops::Range;
 
 use bytes::Bytes;
-use futures_util::future::join_all;
+use futures_util::FutureExt;
+use futures_util::future::{BoxFuture, join_all};
 
 use super::block_index::{
     BlockTable, FileVersion, Location, PathTable, PlannedBlock, UncacheableObject,
@@ -32,8 +33,8 @@ use super::chunk_pool::memory_pool::{
 };
 use super::io_report::IoReport;
 use super::policy::{
-    Admit, BlockRead, BlockSource, DiskHit, FetchRuns, Io, MemoryVictim, PlacementPolicy,
-    PlannedGet, PlannedRead, ReadIntent, ReadPolicy, Tier, VictimAction,
+    Admit, BlockRead, BlockSource, DiskHit, FetchRuns, Io, LocatedRead, MemoryVictim,
+    PlacementPolicy, PlannedGet, ReadIntent, ReadPolicy, Tier, VictimAction,
 };
 use super::read_output::ReadOutput;
 use super::{BLOCK_SIZE_U64, BlockKey, ChunkId};
@@ -102,33 +103,39 @@ impl ObjectCache {
         Ok(CacheableFile { path, version })
     }
 
-    /// Reads `range` of `file`, clamped to the file, into the output of the
-    /// [`PartialRead`] it returns: the bytes of blocks memory holds copied
-    /// in, those of blocks on disk read straight in. The read names the GETs
-    /// the caller makes for the rest, as the read policy planned them, and
-    /// takes their bytes ([`Self::receive`]).
+    /// Starts a read of `range` of `file`, clamped to the file: the bytes
+    /// of blocks memory holds copied into the read's output now, the pages
+    /// of blocks on disk submitted to be read straight into it, and the
+    /// GETs for the remote blocks planned, which the caller makes and the
+    /// read takes ([`Self::receive`]). Returns the read, and the disk work
+    /// left ([`DiskWork`]), which the caller awaits beside its GETs: a
+    /// read's time on the network overlaps its time on the drives, and the
+    /// evictions its promotions make.
     ///
     /// The placement policy hears of every block: a hit in either tier,
     /// where a disk hit goes, a remote read and where its block goes once
-    /// fetched,
-    /// and where each block a GET fetches past the read goes. The read
-    /// policy plans the GETs, and hears of every read from disk.
+    /// fetched, and where each block a GET fetches past the read goes. The
+    /// read policy plans the GETs, and hears of every read from disk.
     ///
     /// # Errors
     ///
-    /// If a read from the cache file fails.
-    pub(super) async fn read(
+    /// If the read's output can't be made, or a read from the cache file
+    /// can't be submitted.
+    pub(super) fn start_read(
         &self,
         file: &CacheableFile<'_>,
         range: Range<u64>,
         intent: Option<ReadIntent>,
-    ) -> Result<PartialRead> {
+    ) -> Result<(PartialRead, DiskWork<'_>)> {
         let plan = self.blocks.plan_read(file.version, range.clone());
         let mut read = PartialRead::new(file.version, plan.bytes())?;
+        let mut disk = DiskWork {
+            cache: self,
+            page_reads: Vec::new(),
+            promotions: Vec::new(),
+        };
         let mut sources = Vec::with_capacity(plan.blocks().len());
         let mut admissions = Vec::with_capacity(plan.blocks().len());
-        let mut page_reads = Vec::new();
-        let mut promotions = Vec::new();
         for &block in plan.blocks() {
             let context = BlockRead::new(
                 block.key(),
@@ -149,9 +156,10 @@ impl ObjectCache {
                         DiskHit::Stay => {
                             let report = self.report_disk_read(&reader, &block);
                             let pages = self.read_pages(&mut read, &reader, &block)?;
-                            page_reads.push((reader, report.awaiting(pages)));
+                            disk.page_reads
+                                .push((reader, report.awaiting(pages).boxed()));
                         }
-                        DiskHit::Promote => promotions.push((reader, block)),
+                        DiskHit::Promote => disk.promotions.push((reader, block)),
                     }
                     (BlockSource::Disk, None)
                 }
@@ -163,32 +171,9 @@ impl ObjectCache {
             sources.push(source);
             admissions.push(admit);
         }
-        // Every page read was submitted above, so they run at once, each
-        // straight into the read's output. Each keeps its chunk held until
-        // its bytes land.
-        for (_held, pages) in page_reads {
-            pages.await?;
-        }
-        let promoted =
-            join_all(promotions.into_iter().map(|(on_disk, block)| async move {
-                (self.promote(on_disk, &block).await, block)
-            }))
-            .await;
-        for (promotion, block) in promoted {
-            match promotion? {
-                Promotion::InMemory(reader) => read.place_from_chunk(&block, reader.bytes()),
-                // No room in memory: the block stays, and the read takes its
-                // pages after all.
-                Promotion::NoRoom(on_disk) => {
-                    let report = self.report_disk_read(&on_disk, &block);
-                    let pages = self.read_pages(&mut read, &on_disk, &block)?;
-                    report.awaiting(pages).await?;
-                }
-            }
-        }
         if sources.contains(&BlockSource::Remote) {
             let first = plan.blocks()[0].key().index();
-            let planned = PlannedRead::new(
+            let located = LocatedRead::new(
                 file.path,
                 file.version.size(),
                 plan.bytes(),
@@ -196,16 +181,16 @@ impl ObjectCache {
                 first,
                 &sources,
             );
-            let mut gets = self.reads.plan(&planned);
+            let mut gets = self.reads.plan(&located);
             // A plan the cache can't carry out fetches the read as the
             // default does: a policy's mistake costs a read nothing.
-            if !planned.accepts(&gets) {
-                gets = FetchRuns.plan(&planned);
+            if !located.accepts(&gets) {
+                gets = FetchRuns.plan(&located);
             }
             for get in gets.gets() {
                 let fates = get
                     .blocks()
-                    .map(|index| match planned.source(index) {
+                    .map(|index| match located.source(index) {
                         Some(BlockSource::Remote) => {
                             let admit = admissions[(index - first) as usize]
                                 .expect("a remote block was admitted");
@@ -219,6 +204,20 @@ impl ObjectCache {
                     .push(PlannedFetch::new(&read.version, get, fates));
             }
         }
+        Ok((read, disk))
+    }
+
+    /// [`Self::start_read`] and its disk work, one after the other: for
+    /// tests, whose fetches come after.
+    #[cfg(test)]
+    pub(super) async fn read(
+        &self,
+        file: &CacheableFile<'_>,
+        range: Range<u64>,
+        intent: Option<ReadIntent>,
+    ) -> Result<PartialRead> {
+        let (mut read, disk) = self.start_read(file, range, intent)?;
+        disk.finish(&mut read).await?;
         Ok(read)
     }
 
@@ -757,6 +756,57 @@ enum MoveToDisk {
     /// The block left memory another way while it was written, and the
     /// copy on disk went back.
     Superseded,
+}
+
+/// A read's work on the drives once it is started
+/// ([`ObjectCache::start_read`]): its page reads, submitted already, and the
+/// blocks it moves to memory. Its caller awaits it beside the read's GETs.
+pub(super) struct DiskWork<'c> {
+    cache: &'c ObjectCache,
+    /// Each read of a disk chunk's pages into the read's output, the chunk
+    /// held until its bytes land.
+    page_reads: Vec<(DiskChunkReader<'c>, BoxFuture<'c, Result<()>>)>,
+    /// The blocks the placement policy moves to memory.
+    promotions: Vec<(DiskChunkReader<'c>, PlannedBlock)>,
+}
+
+impl DiskWork<'_> {
+    /// Waits for the page reads, then moves each block promoted to memory
+    /// and copies its part of `read`'s output from there; a block that
+    /// finds no room in memory stays, and the read takes its pages from
+    /// disk after all.
+    ///
+    /// # Errors
+    ///
+    /// If a read from the cache file fails.
+    pub(super) async fn finish(self, read: &mut PartialRead) -> Result<()> {
+        let Self {
+            cache,
+            page_reads,
+            promotions,
+        } = self;
+        // Every page read was submitted when the read started, so they run
+        // at once, each straight into the read's output.
+        for (_held, pages) in page_reads {
+            pages.await?;
+        }
+        let promoted =
+            join_all(promotions.into_iter().map(|(on_disk, block)| async move {
+                (cache.promote(on_disk, &block).await, block)
+            }))
+            .await;
+        for (promotion, block) in promoted {
+            match promotion? {
+                Promotion::InMemory(reader) => read.place_from_chunk(&block, reader.bytes()),
+                Promotion::NoRoom(on_disk) => {
+                    let report = cache.report_disk_read(&on_disk, &block);
+                    let pages = cache.read_pages(read, &on_disk, &block)?;
+                    report.awaiting(pages).await?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A read that the cache served in part: the bytes it takes, the output they

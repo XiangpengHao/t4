@@ -26,7 +26,7 @@ use std::sync::PoisonError;
 use async_trait::async_trait;
 use bbtree::BBTreeMap;
 use bytes::Bytes;
-use futures_util::future::{FutureExt, join_all, ready, select_ok};
+use futures_util::future::{FutureExt, join, join_all, ready, select_ok};
 use futures_util::stream::{self, BoxStream, StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::{
@@ -228,22 +228,26 @@ impl T4Caching {
         extensions: &Extensions,
     ) -> object_store::Result<Option<Bytes>> {
         let intent = extensions.get::<ReadIntent>().copied();
-        let Ok(mut read) = self.cache.read(file, range, intent).await else {
+        let Ok((mut read, disk)) = self.cache.start_read(file, range, intent) else {
             return Ok(None);
         };
         let mut receivers = Vec::new();
-        for fetch in read.fetches().to_vec() {
+        for fetch in read.fetches() {
             let Ok(blocks) = self.cache.receive(&mut read, fetch) else {
                 return Ok(None);
             };
             receivers.push(blocks);
         }
-        // Every fetch is in flight at once: a read's remote blocks keep the NIC
-        // busy.
-        let fetched = receivers
-            .into_iter()
-            .map(|blocks| self.fetch(location, e_tag, blocks, extensions));
-        for fetched in join_all(fetched).await {
+        // Every fetch is in flight at once, a read's remote blocks keeping the
+        // NIC busy, and beside the read's work on the drives. The GETs are
+        // polled first, so they are sent before any of it is waited on.
+        let fetches = join_all(
+            receivers
+                .into_iter()
+                .map(|blocks| self.fetch(location, e_tag, blocks, extensions)),
+        );
+        let (fetched, on_disk) = join(fetches, disk.finish(&mut read)).await;
+        for fetched in fetched {
             match fetched {
                 Ok(()) => {}
                 Err(object_store::Error::Precondition { .. }) => {
@@ -252,6 +256,9 @@ impl T4Caching {
                 }
                 Err(error) => return Err(error),
             }
+        }
+        if on_disk.is_err() {
+            return Ok(None);
         }
         Ok(read.into_bytes())
     }
