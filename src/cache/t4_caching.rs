@@ -4,8 +4,8 @@
 //! one.
 //!
 //! - **What a file is,** the inner store says once: its first answer for the
-//!   path, a HEAD, which the cache trusts (decision 11). A hit asks the store
-//!   nothing. A remote read fetches with `If-Match` on that answer's e_tag, so a file
+//!   path, a list through the cache that named it or else a HEAD, which the
+//!   cache trusts (decision 11). A hit asks the store nothing. A remote read fetches with `If-Match` on that answer's e_tag, so a file
 //!   changed since is caught there: the cache forgets the path, and the read
 //!   goes to the inner store.
 //! - **Writes,** puts, copies, renames and deletes, go to the inner store,
@@ -448,7 +448,7 @@ impl ObjectStore for T4Caching {
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-        self.inner.list(prefix)
+        self.known.remembering(self.inner.list(prefix))
     }
 
     fn list_with_offset(
@@ -456,11 +456,16 @@ impl ObjectStore for T4Caching {
         prefix: Option<&Path>,
         offset: &Path,
     ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-        self.inner.list_with_offset(prefix, offset)
+        self.known
+            .remembering(self.inner.list_with_offset(prefix, offset))
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
-        self.inner.list_with_delimiter(prefix).await
+        let listed = self.inner.list_with_delimiter(prefix).await?;
+        for meta in &listed.objects {
+            self.known.remember(&meta.location, Arc::new(meta.clone()));
+        }
+        Ok(listed)
     }
 
     async fn copy_opts(
@@ -525,6 +530,23 @@ impl KnownFiles {
 
     fn forget(&self, location: &Path) {
         self.metas.remove(Self::key(location));
+    }
+
+    /// `listed`, a list of the inner store's, each file it names kept as the
+    /// store's answer for that path, unless one was kept first: a read of a
+    /// listed file asks for no HEAD.
+    fn remembering(
+        self: &Arc<Self>,
+        listed: BoxStream<'static, object_store::Result<ObjectMeta>>,
+    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        let known = Arc::clone(self);
+        listed
+            .inspect(move |listed| {
+                if let Ok(meta) = listed {
+                    known.remember(&meta.location, Arc::new(meta.clone()));
+                }
+            })
+            .boxed()
     }
 
     fn key(location: &Path) -> &[u8] {

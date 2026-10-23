@@ -70,8 +70,9 @@ defaults `ClockPolicy` and `FetchRuns`, and the types a policy works with.
  1 MiB chunks           1 MiB chunks         GET with If-Match, then cache
 ```
 
-- **A path's first read** asks the inner store what the file is (a HEAD).
-  The cache trusts that answer from then on.
+- **A path's first read** asks the inner store what the file is (a HEAD),
+  unless a list through the cache named it. The cache trusts that answer
+  from then on.
 - **Each block of a read** is found in memory, on disk, or only in the
   remote. Remote blocks are fetched together and cached where the policy
   says.
@@ -88,10 +89,8 @@ The design and every decision behind it: [doc/03-cache.md](doc/03-cache.md).
 - **The cache trusts the store's first answer for a path.** A file changed
   behind it reads as it was until a remote read notices. That's right for
   files that don't change in place, like a data lake's Parquet files.
-- **Not yet:**
-  - request coalescing: two readers of one remote block both fetch it;
-  - the read policies that split, merge, widen or race GETs (the
-    mechanism is built; the defaults fetch each run once).
+- **Not yet: the read policies** that split, merge, widen or race GETs.
+  The mechanism is built; the defaults fetch each run once.
 - **A read returns its whole range as one buffer,** and a cached read
   doesn't keep the object's attributes.
 

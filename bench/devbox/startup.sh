@@ -16,9 +16,12 @@ if [ "${#gcp[@]}" -gt 0 ]; then
 else
     mapfile -t ssds < <(lsblk -dpno NAME,MODEL | awk '/Amazon EC2 NVMe Instance Storage/ {print $1}')
 fi
+# A box without them, a network-optimized one, still gets its idle stop and
+# packages: /mnt/t4/0 is then a directory on the boot disk.
 if [ "${#ssds[@]}" -eq 0 ]; then
-    echo "t4 devbox: no local SSDs" >&2
-    exit 1
+    echo "t4 devbox: no local SSDs, /mnt/t4/0 on the boot disk" >&2
+    mkdir -p "$MOUNTS/0"
+    chmod 1777 "$MOUNTS/0"
 fi
 if ! command -v mkfs.xfs >/dev/null; then
     apt-get update
@@ -79,4 +82,8 @@ if [ ! -e /var/lib/t4-devbox-packages ]; then
     echo "experimental-features = nix-command flakes" >> /etc/nix/nix.conf
     systemctl restart nix-daemon
     touch /var/lib/t4-devbox-packages
+fi
+# The daemon admits the nix-users group alone: AWS's login, ubuntu, joins it.
+if id ubuntu >/dev/null 2>&1; then
+    usermod -aG nix-users ubuntu
 fi

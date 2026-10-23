@@ -1,30 +1,32 @@
-//! [`PinnedTierPolicy`]: a cache policy that keeps every block in one
-//! tier, so that a warm pass measures that tier's hits alone.
+//! [`FixedPlacementPolicy`]: a cache policy that places every fetched block
+//! alike, in memory, on disk or nowhere, so that a pass measures one tier's
+//! hits alone, or t4 with no tier at all.
 
 use t4::policy::{
     Admit, BlockKey, BlockRead, ChunkId, ClockPolicy, DiskHit, MemoryVictim, PlacementPolicy, Tier,
     TierSizes,
 };
 
-/// A [`ClockPolicy`] that admits every fetched block to one tier, and never
-/// moves a disk hit to memory. Once its tier holds the working set, every
-/// read is a hit there: all memory hits, or all disk hits.
-pub struct PinnedTierPolicy {
+/// A [`ClockPolicy`] that admits every fetched block as one [`Admit`] says,
+/// and never moves a disk hit to memory. Once its tier holds the working
+/// set, every read is a hit there: all memory hits, or all disk hits. With
+/// [`Admit::Discard`], every read goes to the remote, through t4.
+pub struct FixedPlacementPolicy {
     clock: ClockPolicy,
-    tier: Tier,
+    admit: Admit,
 }
 
-impl PinnedTierPolicy {
-    /// Keeps every block in `tier`, over tiers of `sizes`.
-    pub fn new(sizes: TierSizes, tier: Tier) -> Self {
+impl FixedPlacementPolicy {
+    /// Places every block as `admit` says, over tiers of `sizes`.
+    pub fn new(sizes: TierSizes, admit: Admit) -> Self {
         Self {
             clock: ClockPolicy::new(sizes.memory_chunks(), sizes.disk_chunks()),
-            tier,
+            admit,
         }
     }
 }
 
-impl PlacementPolicy for PinnedTierPolicy {
+impl PlacementPolicy for FixedPlacementPolicy {
     fn on_memory_hit(&self, chunk: ChunkId, read: &BlockRead<'_>) {
         self.clock.on_memory_hit(chunk, read);
     }
@@ -36,10 +38,7 @@ impl PlacementPolicy for PinnedTierPolicy {
     }
 
     fn on_remote_read(&self, _read: &BlockRead<'_>) -> Admit {
-        match self.tier {
-            Tier::Memory => Admit::Memory,
-            Tier::Disk => Admit::Disk,
-        }
+        self.admit
     }
 
     fn on_admit(&self, tier: Tier, chunk: ChunkId, block: BlockKey) {

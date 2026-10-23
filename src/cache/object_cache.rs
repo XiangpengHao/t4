@@ -13,7 +13,8 @@
 //!   its own.
 //!
 //! Tiers are exclusive: a block is in one at a time, and the index names it
-//! there. Request coalescing comes later.
+//! there. Two reads of one remote block each fetch it: the first fetch done
+//! caches it, and the other's copy goes back.
 
 use std::future::Future;
 use std::num::{NonZeroU8, NonZeroU32};
@@ -786,10 +787,16 @@ impl DiskWork<'_> {
             promotions,
         } = self;
         // Every page read was submitted when the read started, so they run
-        // at once, each straight into the read's output.
-        for (_held, pages) in page_reads {
-            pages.await?;
-        }
+        // at once, each straight into the read's output. Awaited together,
+        // each reports its end as its bytes land, not once those before it
+        // have.
+        join_all(page_reads.into_iter().map(|(held, pages)| async move {
+            let _held = held;
+            pages.await
+        }))
+        .await
+        .into_iter()
+        .collect::<Result<()>>()?;
         let promoted =
             join_all(promotions.into_iter().map(|(on_disk, block)| async move {
                 (cache.promote(on_disk, &block).await, block)

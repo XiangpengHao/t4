@@ -360,6 +360,11 @@ pub struct LatencySummary {
 }
 
 impl LatencySummary {
+    /// A summary read off elsewhere, as from a histogram.
+    pub(crate) fn new(p50: Duration, p99: Duration, max: Duration) -> Self {
+        Self { p50, p99, max }
+    }
+
     /// `latencies` summed up, or `None` if there are none. A percentile is
     /// the nearest rank's latency: the smallest that `p`% of the calls take
     /// at most.

@@ -538,6 +538,24 @@ fn conditional_reads_go_to_the_store() {
     assert_eq!(inner.take_asked(), []);
 }
 
+/// A list through the cache tells it what each file it names is, as a
+/// HEAD would: a read of one fetches at once.
+#[test]
+fn a_listed_file_is_read_without_a_head() {
+    let (_dir, store, inner) = t4_caching();
+    let data = file_bytes(2 * MIB, 0);
+    for name in ["x/1", "x/2", "y/3"] {
+        put(inner.as_ref(), &Path::from(name), &data);
+    }
+    block_on(store.list(Some(&Path::from("x"))).try_collect::<Vec<_>>()).unwrap();
+    block_on(store.list_with_delimiter(Some(&Path::from("y")))).unwrap();
+    for name in ["x/1", "x/2", "y/3"] {
+        let bytes = get_range(&store, &Path::from(name), 10..20);
+        assert_eq!(bytes, data.slice(10..20));
+        assert_eq!(inner.take_asked(), [bounded(0..MIB)], "{name}");
+    }
+}
+
 #[test]
 fn listing_passes_through() {
     let (_dir, store, inner) = t4_caching();

@@ -2,11 +2,16 @@
 //!
 //! - [`table_store`]: the store a table is read through, a local file, GCS
 //!   or S3, with t4 in front if asked.
-//! - [`pinned_tier_policy`]: a cache policy that keeps every block in one
-//!   tier, so that a warm run measures memory hits or disk hits alone.
+//! - [`fixed_placement_policy`]: a cache policy that places every block
+//!   alike, in one tier, so that a warm run measures memory hits or disk
+//!   hits alone, or nowhere, so that a run measures t4 caching nothing.
 //! - [`request_trace`]: an object store that records every call made of
 //!   it, so a workload's reads (ClickBench's, TPC-H's) can be studied and
 //!   replayed.
+//! - [`request_cost`]: an object store that counts the requests made of it
+//!   as they are billed, and what they cost.
+//! - [`io_latency`]: a read policy that times every I/O t4 makes, its GETs
+//!   and its disk reads.
 //! - [`replay`]: a trace's calls made again of another store, with nothing
 //!   between them.
 //! - [`host_counters`]: the bytes a drive and the network moved during a
@@ -19,13 +24,15 @@
 //! - [`synthetic_objects`]: an object store whose objects' bytes are
 //!   computed, not stored, for the simulated store to serve.
 
+pub mod fixed_placement_policy;
 pub mod host_counters;
+pub mod io_latency;
 // Only Linux builds `ktls_transport`, its user; it is tested everywhere.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod http1_connection;
 pub mod ktls_transport;
-pub mod pinned_tier_policy;
 pub mod replay;
+pub mod request_cost;
 pub mod request_trace;
 pub mod simulated_store;
 pub mod synthetic_objects;

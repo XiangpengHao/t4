@@ -1,9 +1,9 @@
 # 03 — Object store cache
 
 Status: built (2026-10-21), as `t4::T4Caching`: every decision below
-but those under "Later", the first of which is request coalescing. Where
-each part is: "Code map". The decisions behind the pivot in `00-meta.md`,
-worked out from the notes in `99-brainstorm.md`.
+but those under "Later". Where each part is: "Code map". The decisions
+behind the pivot in `00-meta.md`, worked out from the notes in
+`99-brainstorm.md`.
 
 t4 caches the bytes of files from an object store in two tiers, memory and
 disk, each of a fixed size it never exceeds. The object store holds the true
@@ -70,8 +70,8 @@ chunk table the frame table.
 4. **bbtree is the page table:** two stock `BBTreeMap`s, not bbtree-store.
    - `paths`: path → `file_version_id`, e_tag, size.
    - `blocks`: (`file_version_id`, block) → a memory chunk or a disk
-     chunk. A third state, a block being fetched, comes with request
-     coalescing ("Later").
+     chunk. A block being fetched has no entry until it is cached: each
+     read of it fetches it (decision 10).
 
    A read looks up its path, then scans its blocks in order. Keys and
    values are fixed size, inline in the leaves: a sparse file and a fully
@@ -159,18 +159,25 @@ chunk table the frame table.
     counts, are not. A read names a path and a range, and t4 turns the
     blocks only the remote holds into GETs, all in flight at once. So t4
     decides how they are split and merged into requests, and can keep the
-    NIC busy (`00-meta.md`). Writes, copies, renames, deletes and lists go
-    to the inner store, and the cache forgets the paths they change. A file
-    with no e_tag is read from the store each time, never cached (decision
-    5); so are conditional reads, and reads of a named version.
-11. **The cache trusts the store's first answer for a path.** A path's first
-    read asks the inner store for its e_tag and size (a HEAD), and the cache
-    keeps them: a hit asks the store nothing. A remote read fetches with
-    `If-Match` on that e_tag, so a file changed since is caught there: the
-    cache forgets the path, the read goes to the inner store, and the next
-    read asks again. Until a remote read, a file changed behind the cache
-    reads as it was: right for files that don't change in place, as a data
-    lake's Parquet files don't.
+    NIC busy (`00-meta.md`). Two reads of one remote block each fetch it,
+    neither waiting on the other's GET: the first fetch done caches the
+    block, and the other's copy goes back. Writes, copies, renames,
+    deletes and lists go to the inner store, and the cache forgets the
+    paths they change. A file with no e_tag is read from the store each
+    time, never cached (decision 5); so are conditional reads, and reads of
+    a named version.
+11. **The cache trusts the store's first answer for a path.** A list
+    through the cache answers for each file it names, its e_tag and size;
+    a path's first read that no list named asks the inner store (a HEAD).
+    The cache keeps the first answer: a hit asks the store nothing, and a
+    reader that lists a table's files first, as DataFusion does, sends no
+    HEAD. Every answer kept costs memory until a write forgets it, so
+    listing a large bucket through the cache keeps each object's. A remote
+    read fetches with `If-Match` on that e_tag, so a file changed since is
+    caught there: the cache forgets the path, the read goes to the inner
+    store, and the next read asks again. Until a remote read, a file changed
+    behind the cache reads as it was: right for files that don't change in
+    place, as a data lake's Parquet files don't.
 
 ## Rejected
 
@@ -215,9 +222,6 @@ chunk table the frame table.
 
 ## Later
 
-- **Two readers of one remote block:** the second waits on the first's GET,
-  through a third state of a block's entry, being fetched (request
-  coalescing, `00-meta.md`). Today both fetch it, and one copy goes back.
 - **A long remote read split into parallel GETs,** to keep the NIC busy on
   one large read (request splits, `00-meta.md`).
 - **Fewer copies on the I/O path:** a disk hit reads straight into the

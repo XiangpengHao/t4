@@ -6,7 +6,9 @@ through object_store's own HTTP transport and through one whose TLS the
 kernel decrypts (kTLS), straight from S3 and through t4 ("Measured"). t4
 then stopped faulting its memory tier in 4 KiB at a time, and takes a
 fetch's bytes as they come ("t4's remote reads"): through it, remote blocks
-come at 9.6 to 9.9 GiB/s, within 7% of straight from S3.
+come at 9.6 to 9.9 GiB/s, within 7% of straight from S3. On a 300 Gbps
+box, S3 gave one machine 26.8 GiB/s, most of its hosts in jumbo frames
+("On a 300 Gbps box").
 
 `00-meta.md`'s first goal: saturate the NIC when blocks come from the
 remote.
@@ -151,6 +153,89 @@ the whole 8 MiB body, read before t4 sees a byte, so t4's copies still
 read it from memory: its runs moved within their noise (8% from run to
 run). Through t4 it now costs more than the stock transport.
 
+## On a 300 Gbps box
+
+`m8in.48xlarge` (Xeon 6975P-C, 192 vCPUs, a 300 Gbps ENA NIC with 32
+queues, MTU 9001, no header split; Linux 7.0), Spot in us-east-1a, 23 Oct
+2026; object_store's stock transport; through t4, a 96 GiB memory tier that
+never evicts, its chunks fresh (the box has no SSDs).
+
+| | In flight | GiB/s | Fetch p50 / p99 / max | CPU-s a GiB |
+|---|---|---|---|---|
+| straight from S3 | 256 | 9.70 | 183 / 432 / 1,382 ms | 1.01 |
+| straight from S3 | 768 | 26.76 | 178 / 427 / 936 ms | 0.94 |
+| through t4 | 256 | 12.11 | 135 / 343 / 813 ms | 1.39 |
+| through t4 | 768 | 25.79 | 161 / 507 / 1,493 ms | 1.37 |
+
+- **S3 fills a bigger NIC.** 768 in flight read 26.8 GiB/s, an 8 MiB GET
+  still taking about 180 ms. The box went past its inbound allowance (ENA's
+  `bw_in_allowance_exceeded`: 0.48 M packets queued or dropped), so the NIC
+  was the limit, not S3; what slowed the i7i past 256 was likely the same.
+- **Most S3 hosts take jumbo frames.** Of the 32 addresses the runs
+  reached, the 26 in 16.15.0.0/16 send 8,228-byte segments, the 6 others
+  (in 52.216, 52.217, 54.231 and 16.182) 1,432; between 9 and 36% of a run's
+  connections went to those. None answered a ping of 8,400 bytes, the
+  paper's size. Pinned to one host of each (`/etc/hosts`, 64 GiB at 256 in
+  flight, both 11.2 GiB/s): 0.95 CPU-s a GiB on jumbo frames, 1.08 on
+  1,500-byte packets, the difference TCP/IP and the driver (0.22 against
+  0.31) and the kernel's copy (0.07 against 0.12). GRO merges a flow's
+  packets before TCP sees them, so larger frames save less than their
+  count suggests: steering every connection to a jumbo host would save 0.01
+  to 0.05 a GiB on the runs' mix.
+- **Through t4, a fresh tier is zeroed.** t4 added 0.38 CPU-s a GiB at 256:
+  0.17 the kernel zeroing the memory tier's pages as each is first touched
+  (`kernel_init_pages`), paid once in the tier's life; 0.09 t4's copies;
+  the rest more packets and kernel copying, as more of its connections went
+  to 1,500-byte hosts.
+
+Where it goes straight from S3, pinned to a jumbo host (CPU-s a GiB):
+
+| | |
+|---|---|
+| TCP/IP, the ENA driver | 0.22 |
+| copies in user space (rustls, hyper, `bytes()`) | 0.15 |
+| other kernel (hardened usercopy's checks 0.03 of it) | 0.15 |
+| scheduling, locks, wakeups | 0.10 |
+| other user space (HTTP, tokio, object_store) | 0.10 |
+| TLS decryption (ring) | 0.08 |
+| the kernel's copy to user space | 0.07 |
+| page allocation and zeroing | 0.06 |
+| syscalls, epoll | 0.02 |
+| **all** | **0.95** |
+
+The transport's own work in user space, copies, tokio and hyper, and the
+wakeups between them, is about 0.35 of it: what a transport of t4's could
+remove. The kernel's receive path, 0.45 or so, stays.
+
+## A transport of t4's own, tried and removed
+
+Built and measured on the 300 Gbps box (23 Oct 2026), then removed, not
+worth its 3,400 lines: object_store's `HttpService` on a few io_uring
+threads, each owning its connections and doing their I/O, rustls's
+unbuffered API decrypting, the body handed over in 256 KiB pieces; no tokio,
+no hyper.
+
+| | object_store's | t4's |
+|---|---|---|
+| direct, 256 in flight, one jumbo-frame host | 11.6 GiB/s, 0.90 CPU-s a GiB | 10.9, 0.81 (8 threads) |
+| through t4, 256, one jumbo-frame host | 10.2, 1.40 | 10.6, 1.25 (8 threads) |
+| direct, 768 | 29.6, 1.08 | 28.1, 1.01 (24 threads) |
+| through t4, 768 | 24.7, 1.70 | 20.3, 1.71 (24 threads) |
+
+- **It saved what sat between the kernel and the bytes,** about 0.1 CPU-s a
+  GiB: tokio, hyper and object_store's HTTP, wakeups, syscalls. The copies
+  in user space stayed at 0.15: rustls 0.23 copies a record's plaintext out
+  of the buffer it decrypts in, its unbuffered API too; the pieces replaced
+  hyper's buffer; `bytes()` still joins a body.
+- **A thread received only 1.5 to 2 GiB/s.** The kernel's copy and the
+  decryption cost it 1.5 to 2 times what they cost spread over tokio's 192
+  workers, whatever a receive's size; through t4 at 768, with t4's copies
+  and a fresh tier's zeroing sharing the memory, the kernel's copy was 40%
+  of its time, and the threads ran out.
+- **What was left to try:** the thread copying rustls's plaintext straight
+  into the block's chunk, two passes over memory fewer a byte through t4;
+  a TLS record layer of our own, one copy fewer.
+
 ## Later
 
 - **A transport that lands a fetched block in its chunk:** the kernel
@@ -162,9 +247,12 @@ run). Through t4 it now costs more than the stock transport.
   each while cached.
 - **kTLS decrypting straight into the reader's buffer:** TLS 1.3 needs
   `TLS_RX_EXPECT_NO_PAD`, which the `ktls` crate doesn't set.
-- **The kernel's receive path:** `init_on_alloc=0` (a hardening setting,
-  the operator's call), receive ring sizes, busy polling.
-- **Past 256 in flight:** what slows both transports.
+- **The kernel's receive path:** `init_on_alloc=0` and
+  `hardened_usercopy=off` (hardening settings, the operator's call),
+  receive ring sizes, busy polling.
+- **Connections only to jumbo hosts:** a transport can read a new
+  connection's MSS (`TCP_MAXSEG`) and keep the 16.15.0.0/16 kind; worth
+  0.01 to 0.05 CPU-s a GiB on the mix measured.
 - **Plain HTTP to S3 inside a VPC** removes decryption, the operator's call.
 
 ## Code map

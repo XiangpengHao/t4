@@ -12,12 +12,13 @@ use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path;
 use t4::T4Caching;
-use t4::policy::Tier;
+use t4::policy::{Admit, FetchRuns};
 use url::Url;
 
 use crate::Error;
+use crate::fixed_placement_policy::FixedPlacementPolicy;
+use crate::io_latency::{IoLatencies, TimedReads};
 use crate::ktls_transport::KtlsConnector;
-use crate::pinned_tier_policy::PinnedTierPolicy;
 
 /// Where a table's files are, as a URL: one file, or a directory of them,
 /// whose URL ends in `/`, as DataFusion reads a table's URL.
@@ -162,10 +163,13 @@ enum CachePolicyChoice {
     /// t4's default, a CLOCK for each tier: fetched blocks go to memory,
     /// memory's victims to disk.
     Clock,
-    /// Every block in memory ([`PinnedTierPolicy`]): memory hits alone.
+    /// Every block in memory ([`FixedPlacementPolicy`]): memory hits alone.
     Memory,
-    /// Every block on disk ([`PinnedTierPolicy`]): disk hits alone.
+    /// Every block on disk ([`FixedPlacementPolicy`]): disk hits alone.
     Disk,
+    /// No block kept ([`FixedPlacementPolicy`]): every read from the
+    /// remote through t4, what it costs to go through t4 at all.
+    None,
 }
 
 impl CacheOptions {
@@ -174,13 +178,18 @@ impl CacheOptions {
         self.policy.is_some()
     }
 
-    /// `origin` read through t4, if asked; else `origin` itself.
+    /// `origin` read through t4, if asked, every I/O t4 makes timed in
+    /// `latencies`; else `origin` itself.
     ///
     /// # Errors
     ///
     /// If a policy is given without the capacities and path, or t4 can't be
     /// built.
-    pub fn in_front_of(&self, origin: Arc<dyn ObjectStore>) -> Result<Arc<dyn ObjectStore>, Error> {
+    pub fn in_front_of(
+        &self,
+        origin: Arc<dyn ObjectStore>,
+        latencies: &Arc<IoLatencies>,
+    ) -> Result<Arc<dyn ObjectStore>, Error> {
         let Some(policy) = self.policy else {
             return Ok(origin);
         };
@@ -197,19 +206,21 @@ impl CacheOptions {
             .fold(T4Caching::builder(origin), |builder, path| {
                 builder.with_disk_file(path, disk_gib << 30)
             })
-            .with_memory_capacity(memory_mib << 20);
+            .with_memory_capacity(memory_mib << 20)
+            .with_read_policy(TimedReads::new(FetchRuns, Arc::clone(latencies)));
         let builder = match self.queue_depth {
             Some(queue_depth) => builder.with_queue_depth(queue_depth),
             None => builder,
         };
         let builder = match policy {
             CachePolicyChoice::Clock => builder,
-            CachePolicyChoice::Memory => {
-                builder.with_placement_policy(|sizes| PinnedTierPolicy::new(sizes, Tier::Memory))
-            }
+            CachePolicyChoice::Memory => builder
+                .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Memory)),
             CachePolicyChoice::Disk => {
-                builder.with_placement_policy(|sizes| PinnedTierPolicy::new(sizes, Tier::Disk))
+                builder.with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
             }
+            CachePolicyChoice::None => builder
+                .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Discard)),
         };
         Ok(Arc::new(builder.build()?))
     }

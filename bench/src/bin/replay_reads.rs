@@ -24,6 +24,7 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
@@ -193,7 +194,10 @@ async fn main() -> Result<(), Error> {
     let args = Args::parse();
     let trace = RecordedRequest::read_csv(BufReader::new(File::open(&args.trace)?))?;
     let plan = ReplayPlan::new(&trace, &args.location)?;
-    let store = args.cache.in_front_of(args.location.origin(args.http)?)?;
+    // t4's own I/O goes untimed: this tool times the calls made of it.
+    let store = args
+        .cache
+        .in_front_of(args.location.origin(args.http)?, &Arc::default())?;
     let replayer = Replayer::new(store, args.copies);
     let probe = HostProbe::new(&args.drive_dirs)?;
 

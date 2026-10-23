@@ -3,7 +3,7 @@ name = "t4-bench"
 version = "0.0.0"
 publish = false
 edition = "2024"
-description = "t4's benchmark harness: DataFusion queries over Parquet in GCS or on a local drive, read directly or through t4."
+description = "t4's benchmark harness: DataFusion queries over Parquet or Vortex, on a local drive, in GCS or in S3, read directly or through t4."
 
 [dependencies]
 async-trait = "0.1"
@@ -29,6 +29,10 @@ t4 = { path = ".." }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 url = "2"
+# Vortex tables (`run_queries --format vortex`, `to_vortex`): 0.90 is on
+# DataFusion 55 and object_store 0.13, as the rest of the harness is.
+vortex = "0.90.0"
+vortex-datafusion = "0.90.0"
 
 # kTLS, the kernel decrypting TLS, for the `ktls` HTTP transport
 # (`ktls_transport`): Linux only.

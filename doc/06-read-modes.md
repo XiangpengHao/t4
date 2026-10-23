@@ -2,9 +2,9 @@
 
 Status: the mechanism built with default policies (2026-10-23): the two
 traits, plans carried out (split, merged, widened, raced), the intent,
-the events, a read's GETs overlapping its work on the drives.
-Single-flight, and the plan's disk choices, which come with mirroring,
-are not built yet; the defaults change nothing (decision 10).
+the events, a read's GETs overlapping its work on the drives. The plan's
+disk choices, which come with mirroring, are not built yet; the defaults
+change nothing (decision 10).
 
 A read wants one of three things (`99-brainstorm.md`):
 
@@ -31,7 +31,8 @@ High-Performance Analytics", PVLDB 16(11), 2023):
   a MiB at the median (the paper's model). So a rate needs many in flight:
   in flight = rate × time of one / its size. 256 GETs of 8 MiB in flight
   read 10.3 GiB/s, 89% of a 100 Gbit/s NIC; 512 and 1,024 read less, their
-  tails seconds long (the paper: 200–250 for the same NIC).
+  tails seconds long (the paper: 200–250 for the same NIC). On a 300
+  Gbit/s NIC, 768 read 26.8 GiB/s, a GET as quick as at 256.
 - **Requests cost, bytes don't.** $0.0004 a 1,000 GETs, S3 and GCS alike,
   traffic in the region free: $0.42 a TiB in 1 MiB GETs, $0.05 in 8 MiB,
   $0.007 in 64 MiB. 8 to 16 MiB is where cost and rate both flatten (the
@@ -64,12 +65,14 @@ High-Performance Analytics", PVLDB 16(11), 2023):
 2. **The mechanism guarantees, and decides none of it:** blocks of a size,
    from a block's start; exclusive tiers; chunk lifetimes; `If-Match` on
    every fetch; a plan carried out as given, or refused if it doesn't cover
-   the read's remote blocks; a block in flight fetched once, its other
-   readers waiting on it; every GET and disk read reported to the policy.
-   And a read's GETs sent before its work on the drives is waited on: its
-   page reads, its promotions and the evictions they make overlap its time
-   on the network, not add to it (`ObjectCache::start_read` returns the
-   read and its `DiskWork`, which the front end awaits beside the GETs).
+   the read's remote blocks; every GET and disk read reported to the
+   policy. And a read's GETs sent before its work on the drives is waited
+   on: its page reads, its promotions and the evictions they make overlap
+   its time on the network, not add to it (`ObjectCache::start_read`
+   returns the read and its `DiskWork`, which the front end awaits beside
+   the GETs). Two reads of one remote block each fetch it, as each one's
+   plan says, neither waiting on the other's GET: the first fetch done
+   caches the block, and the other's copy goes back.
 
 3. **A plan per read.** `ReadPolicy::plan` sees the whole read: every block,
    where each is (memory, disk with the drives holding a copy, or remote),
@@ -176,7 +179,7 @@ whether the read asked for the block or a widened GET brought it.
 
 1. **The mechanism, the defaults doing what t4 does now:** the two traits,
    `LocatedRead` built from the read's plan, the GETs carried out as
-   planned, single-flight, the events. No change measured.
+   planned, the events. No change measured.
 2. **Throughput:** split a run into GETs of 8 MiB or more while what is in
    flight can't fill the NIC; merge once it can. Measured with the replay
    of ClickBench's cold pass against S3: its time, a call's p50, p99 and
@@ -206,10 +209,11 @@ them (decision 9).
   byte, not two (`05-network.md`); AnyBlob, the paper's library, receives
   straight into its buffer manager's pages, leaving room for the HTTP
   header.
-- **Choosing S3's endpoints:** the paper finds some take jumbo frames
-  (8,400-byte packets, where most take 1,500), which cuts the kernel's
-  work a byte, and replaces endpoints slower than the rest. The
-  transport's to do, not t4's.
+- **Choosing S3's endpoints:** the paper finds some take jumbo frames,
+  which cuts the kernel's work a byte, and replaces endpoints slower than
+  the rest. In us-east-1 most now do (`05-network.md`, "On a 300 Gbps
+  box"): 0.13 CPU-s a GiB less than a 1,500-byte host, 0.01 to 0.05 on the
+  mix a run gets. The transport's to do, not t4's.
 - **Plain HTTP inside the VPC,** which the paper measures at less than
   half the CPU of HTTPS, with encryption at rest instead: the operator's
   call.
@@ -227,5 +231,4 @@ them (decision 9).
 | `src/cache/t4_caching.rs` | the intent from `GetOptions::extensions`; racing GETs, the first answer taken | yes |
 | `src/cache/io_report.rs` | `IoReport`: an I/O told to the read policy, started to finished, failed or given up on | yes |
 | `src/cache/object_cache.rs` | `start_read` and `DiskWork`: the drives' work awaited beside the GETs | yes |
-| single-flight | a block in flight fetched once, its other readers waiting | next |
 | `src/cache/block_index/` | an entry naming several chunks, for mirrors | with mirroring |

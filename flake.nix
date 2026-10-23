@@ -153,6 +153,9 @@
               (pkgs.python3.withPackages (ps: [ ps.matplotlib ]))
             ];
             ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
+            # bindgen's libclang: the bench's Vortex needs it on Linux
+            # (vortex-io's custom-labels), and the system's won't load here.
+            LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
           };
         }
       );
