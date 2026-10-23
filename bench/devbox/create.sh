@@ -6,7 +6,10 @@
 # On-demand by default: a Z3 with up to 18 TB of local SSD must
 # live-migrate through host maintenance, which Spot VMs can't. SPOT=1 makes
 # a Spot VM, stopped on preemption, for a Z3 with more, which maintenance
-# stops instead (z3-highmem-88-highlssd, twelve SSDs). Stop it when idle.
+# stops instead (z3-highmem-88-highlssd, twelve SSDs), or a Z4D
+# (z4d-highmem-192-highlssd, 24 SSDs at 75,600 MiB/s together), whose
+# quotas, local SSD and CPUs per VM family, the project needed raised from
+# 0. startup.sh stops the box once idle for 30 minutes.
 #
 # A stop wipes the local SSDs but keeps the boot disk. So the repo, the
 # toolchain and target/ live on the boot disk, and startup.sh formats each

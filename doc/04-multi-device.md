@@ -215,6 +215,36 @@ block"); the first write done takes the block's entry, and the others'
 chunks go free. File 0's drive also holds the local copy the cold pass
 fetches from, so its writes finish later, and it wins fewer blocks.
 
+### Twelve faster drives, on AWS
+
+An `i7i.48xlarge` (us-east-1, Spot; `bench/devbox/aws-create.sh`): 192
+vCPUs, 1.5 TiB, twelve 3.75 TB instance-store SSDs, 23 Oct 2026. fio, 1
+MiB direct reads at queue depth 32 on every drive at once: 4.48 GB/s a
+drive, 53.8 GB/s (50.1 GiB/s) together, sequential or random. The replay,
+warm pass:
+
+| Read through | 14 streams | 56 streams | 112 streams |
+|---|---|---|---|
+| the page cache | 30.8 GiB/s | 67.8 GiB/s | 78.2 GiB/s |
+| t4, queue depth 256 | 40.1 GiB/s | 47.8 GiB/s | 47.5 GiB/s |
+| the drives under t4 | 39,004 MiB/s | 48,475 MiB/s | 48,417 MiB/s |
+
+At 14 streams t4 passes the page cache by 30%. From 56 it stops at 94% of
+the drives' fio rate, while the page cache, with 192 vCPUs to copy on,
+goes on to 78 GiB/s.
+
+The one I/O worker has run out of room: 93% of its samples are in
+`io_uring_enter`, about 1% spinning, where on the Z3's slower drives a
+third was spare. A queue of 512 reads slower than one of 256, 45.3 GiB/s.
+Inside `io_uring_enter`: pinning the output's pages (`gup`) 31%, the
+block layer 27%, the NVMe driver 21%, iomap's direct I/O 10%, marking
+pages dirty 3%. One worker submits about 48 GiB/s of these reads and no
+more: the measurement decision 4 waits for. File 0's drive, which holds
+the origin copy, again reads least at 112 streams ("At 56 streams").
+
+End to end (ClickBench, 192 partitions, as below), the warm pass takes
+11.99 s from the page cache and 12.19 s from t4's disk tier.
+
 ### End to end
 
 ClickBench's 43 queries in DataFusion (`run_queries`, 88 partitions) over

@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
-# Runs as root on every boot of the dev box (create.sh). A stop wipes the
-# local SSDs, so this formats each again when its filesystem is gone, and
-# mounts local SSD n at /mnt/t4/<n>: a cache file on each, the datasets on
-# the first.
+# Runs as root on every boot of the dev box, on GCP (create.sh) or AWS
+# (aws-create.sh). A stop wipes the local SSDs, so this formats each again
+# when its filesystem is gone, and mounts local SSD n at /mnt/t4/<n>: a
+# cache file on each, the datasets on the first.
 set -euo pipefail
 
 MOUNTS=/mnt/t4
 
+# GCP names local SSD n google-local-nvme-ssd-<n>; on AWS an instance-store
+# volume is known by its model.
 shopt -s nullglob
-ssds=(/dev/disk/by-id/google-local-nvme-ssd-*)
+gcp=(/dev/disk/by-id/google-local-nvme-ssd-*)
+if [ "${#gcp[@]}" -gt 0 ]; then
+    mapfile -t ssds < <(printf '%s\n' "${gcp[@]}" | sort -V)
+else
+    mapfile -t ssds < <(lsblk -dpno NAME,MODEL | awk '/Amazon EC2 NVMe Instance Storage/ {print $1}')
+fi
 if [ "${#ssds[@]}" -eq 0 ]; then
     echo "t4 devbox: no local SSDs" >&2
     exit 1
@@ -17,11 +24,12 @@ if ! command -v mkfs.xfs >/dev/null; then
     apt-get update
     apt-get install -y xfsprogs
 fi
-for ssd in "${ssds[@]}"; do
-    mount=$MOUNTS/${ssd##*-}
+for n in "${!ssds[@]}"; do
+    ssd=${ssds[$n]}
+    mount=$MOUNTS/$n
     mountpoint -q "$mount" && continue
     # After a reboot an SSD keeps its filesystem; after a stop it is blank.
-    blkid "$ssd" >/dev/null || mkfs.xfs -f "$ssd"
+    blkid "$ssd" >/dev/null || mkfs.xfs -f -K "$ssd"
     mkdir -p "$mount"
     mount -o noatime "$ssd" "$mount"
     chmod 1777 "$mount"
