@@ -1,7 +1,9 @@
 //! [`HostProbe`]: the bytes a drive and the network moved, read from
-//! Linux's `/proc`, so that a run can be set against either's bandwidth;
-//! and the memory of the process's cgroup, so that a run held to a memory
-//! budget can show what it cached.
+//! Linux's `/proc`, so that a run can be set against either's bandwidth,
+//! and the CPU time spent moving them, the process's and the machine's (the
+//! kernel takes in packets wherever their interrupts land, not always on
+//! the process's time); and the memory of the process's cgroup, so that a
+//! run held to a memory budget can show what it cached.
 
 use std::fmt;
 use std::fs;
@@ -66,7 +68,8 @@ impl HostProbe {
     /// The counters now, or `None` where `/proc` has none.
     pub fn sample(&self) -> Option<HostCounters> {
         let network_received = Self::network_received()?;
-        let minor_faults = Self::minor_faults()?;
+        let process = Self::process_stat()?;
+        let machine = Self::machine_cpu()?;
         let (mut drive_read, mut drive_written) = (0, 0);
         for &numbers in &self.drives {
             let (read, written) = Self::drive_bytes(numbers)?;
@@ -77,7 +80,11 @@ impl HostProbe {
             drive_read,
             drive_written,
             network_received,
-            minor_faults,
+            minor_faults: process.minor_faults,
+            user_cpu_ms: process.user_cpu_ms,
+            system_cpu_ms: process.system_cpu_ms,
+            machine_busy_ms: machine.busy_ms,
+            machine_softirq_ms: machine.softirq_ms,
         })
     }
 
@@ -104,14 +111,44 @@ impl HostProbe {
         })
     }
 
-    /// The page faults this process took since it started that found the
-    /// page in memory, or made it there: each a fresh page faulted in.
-    /// `/proc/self/stat`'s 10th field, `minflt`, the 8th after the
-    /// command's name, which ends in the last `)`.
-    fn minor_faults() -> Option<u64> {
+    /// This process's page faults and CPU time since it started, from
+    /// `/proc/self/stat`, whose fields after the command's name (which ends
+    /// in the last `)`) start with the 3rd: `minflt`, the 10th, counts the
+    /// faults that found the page in memory or made it there, each a fresh
+    /// page faulted in; `utime` and `stime`, the 14th and 15th, the CPU time
+    /// in user space and in the kernel, in clock ticks, which Linux fixes at
+    /// 100 a second for `/proc`.
+    fn process_stat() -> Option<ProcessStat> {
         let stat = fs::read_to_string("/proc/self/stat").ok()?;
         let (_, after_name) = stat.rsplit_once(')')?;
-        after_name.split_whitespace().nth(7)?.parse().ok()
+        let fields: Vec<&str> = after_name.split_whitespace().collect();
+        let field = |number: usize| fields.get(number - 3)?.parse::<u64>().ok();
+        Some(ProcessStat {
+            minor_faults: field(10)?,
+            user_cpu_ms: field(14)? * MS_PER_TICK,
+            system_cpu_ms: field(15)? * MS_PER_TICK,
+        })
+    }
+
+    /// Every CPU's time since boot, summed, from `/proc/stat`'s first line,
+    /// `cpu user nice system idle iowait irq softirq steal ...` in clock
+    /// ticks: busy is all but idle and iowait.
+    fn machine_cpu() -> Option<MachineCpu> {
+        let stat = fs::read_to_string("/proc/stat").ok()?;
+        let ticks: Vec<u64> = stat
+            .lines()
+            .next()?
+            .strip_prefix("cpu ")?
+            .split_whitespace()
+            .map(|field| field.parse().ok())
+            .collect::<Option<_>>()?;
+        let [user, nice, system, _idle, _iowait, irq, softirq, steal, ..] = ticks[..] else {
+            return None;
+        };
+        Some(MachineCpu {
+            busy_ms: (user + nice + system + irq + softirq + steal) * MS_PER_TICK,
+            softirq_ms: softirq * MS_PER_TICK,
+        })
     }
 
     /// The bytes every interface but loopback received since boot, from
@@ -128,33 +165,60 @@ impl HostProbe {
     }
 }
 
+/// Linux's clock ticks in `/proc`, fixed at 100 a second, in milliseconds.
+const MS_PER_TICK: u64 = 10;
+
+/// What [`HostProbe::machine_cpu`] reads of every CPU.
+struct MachineCpu {
+    busy_ms: u64,
+    softirq_ms: u64,
+}
+
+/// What [`HostProbe::process_stat`] reads of this process.
+struct ProcessStat {
+    minor_faults: u64,
+    user_cpu_ms: u64,
+    system_cpu_ms: u64,
+}
+
 /// Bytes moved: by the probed drive, read and written, and received by the
-/// network; and the page faults the process took.
+/// network; the page faults the process took, and its CPU time, in user
+/// space and in the kernel; and every CPU's busy time, in all and in
+/// softirqs, where the kernel takes in packets.
 #[derive(Clone, Copy, Debug)]
 pub struct HostCounters {
     drive_read: u64,
     drive_written: u64,
     network_received: u64,
     minor_faults: u64,
+    user_cpu_ms: u64,
+    system_cpu_ms: u64,
+    machine_busy_ms: u64,
+    machine_softirq_ms: u64,
 }
 
 impl HostCounters {
     /// The CSV columns [`Self::csv_fields`] fills.
-    pub const CSV_COLUMNS: &str =
-        "drive_read_bytes,drive_written_bytes,network_received_bytes,minor_faults";
+    pub const CSV_COLUMNS: &str = "drive_read_bytes,drive_written_bytes,network_received_bytes,\
+                                   minor_faults,user_cpu_ms,system_cpu_ms,\
+                                   machine_busy_ms,machine_softirq_ms";
 
     /// `counters` as the fields of [`Self::CSV_COLUMNS`], empty where none
     /// were counted.
     pub fn csv_fields(counters: Option<&Self>) -> String {
         counters.map_or_else(
-            || ",,,".to_owned(),
+            || ",,,,,,,".to_owned(),
             |moved| {
                 format!(
-                    "{},{},{},{}",
+                    "{},{},{},{},{},{},{},{}",
                     moved.drive_read,
                     moved.drive_written,
                     moved.network_received,
-                    moved.minor_faults
+                    moved.minor_faults,
+                    moved.user_cpu_ms,
+                    moved.system_cpu_ms,
+                    moved.machine_busy_ms,
+                    moved.machine_softirq_ms
                 )
             },
         )
@@ -169,6 +233,12 @@ impl HostCounters {
                 .network_received
                 .saturating_sub(earlier.network_received),
             minor_faults: self.minor_faults.saturating_sub(earlier.minor_faults),
+            user_cpu_ms: self.user_cpu_ms.saturating_sub(earlier.user_cpu_ms),
+            system_cpu_ms: self.system_cpu_ms.saturating_sub(earlier.system_cpu_ms),
+            machine_busy_ms: self.machine_busy_ms.saturating_sub(earlier.machine_busy_ms),
+            machine_softirq_ms: self
+                .machine_softirq_ms
+                .saturating_sub(earlier.machine_softirq_ms),
         }
     }
 
@@ -187,6 +257,28 @@ impl HostCounters {
     pub fn minor_faults(&self) -> u64 {
         self.minor_faults
     }
+
+    /// The CPU time the process spent in user space, in milliseconds.
+    pub fn user_cpu_ms(&self) -> u64 {
+        self.user_cpu_ms
+    }
+
+    /// The CPU time the process spent in the kernel, in milliseconds.
+    pub fn system_cpu_ms(&self) -> u64 {
+        self.system_cpu_ms
+    }
+
+    /// Every CPU's busy time, summed, in milliseconds: the process's, the
+    /// kernel's for it wherever it ran, and anything else running.
+    pub fn machine_busy_ms(&self) -> u64 {
+        self.machine_busy_ms
+    }
+
+    /// Every CPU's time in softirqs, summed, in milliseconds: where the
+    /// kernel takes in packets.
+    pub fn machine_softirq_ms(&self) -> u64 {
+        self.machine_softirq_ms
+    }
 }
 
 impl fmt::Display for HostCounters {
@@ -194,11 +286,14 @@ impl fmt::Display for HostCounters {
         let mib = |bytes: u64| bytes as f64 / f64::from(1 << 20);
         write!(
             f,
-            "drive read {:.0} MiB, written {:.0} MiB, network {:.0} MiB, {} page faults",
+            "drive read {:.0} MiB, written {:.0} MiB, network {:.0} MiB, {} page faults, \
+             CPU {:.1} s user + {:.1} s kernel",
             mib(self.drive_read),
             mib(self.drive_written),
             mib(self.network_received),
-            self.minor_faults
+            self.minor_faults,
+            self.user_cpu_ms as f64 / 1e3,
+            self.system_cpu_ms as f64 / 1e3
         )
     }
 }

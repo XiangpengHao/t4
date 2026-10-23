@@ -220,11 +220,11 @@ chunk table the frame table.
   coalescing, `00-meta.md`). Today both fetch it, and one copy goes back.
 - **A long miss split into parallel GETs,** to keep the NIC busy on one
   large read (request splits, `00-meta.md`).
-- **Fewer copies on the I/O path:** register the memory pool with io_uring
-  once, and read a disk hit straight into the caller's buffer, not a page
-  buffer copied out (`99-brainstorm.md`). Measure first: hit and miss
-  throughput on the target drive, which also settles the block size
-  (decision 1).
+- **Fewer copies on the I/O path:** a disk hit reads straight into the
+  caller's buffer (`04-multi-device.md`), and a miss's bytes are copied as
+  they come, into the output and the cache (`05-network.md`). Left: a
+  transport that lands a fetched block in its chunk, one copy fewer;
+  registering the memory pool with io_uring once (`99-brainstorm.md`).
 - **Eviction off the insertion path:** a background thread keeping free
   chunks between two watermarks, if evicting at insertion costs too much.
 - **The drive's own garbage collection:** a file kept full leaves the SSD

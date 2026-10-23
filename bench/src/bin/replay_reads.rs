@@ -31,7 +31,7 @@ use t4_bench::Error;
 use t4_bench::host_counters::{CgroupMemory, HostCounters, HostProbe};
 use t4_bench::replay::{CallSize, LatencySummary, QueryReplay, ReplayPlan, Replayer};
 use t4_bench::request_trace::RecordedRequest;
-use t4_bench::table_store::{CacheOptions, TableLocation};
+use t4_bench::table_store::{CacheOptions, HttpTransport, TableLocation};
 
 /// The allocator: mimalloc unless built `--no-default-features`, as the
 /// `mimalloc` feature in `bench/Cargo.toml` explains. A static, as Rust takes
@@ -46,11 +46,15 @@ struct Args {
     #[arg(long)]
     trace: PathBuf,
     /// The table to read: a Parquet file, or a directory of them, at a local
-    /// path or a `gs://bucket/path` URL, a directory's ending in `/`. The
-    /// trace's files are read here: a file stands for the trace's one file,
-    /// a directory holds files of the same names.
+    /// path or a `gs://bucket/path` or `s3://bucket/path` URL, a
+    /// directory's ending in `/`. The trace's files are read here: a file
+    /// stands for the trace's one file, a directory holds files of the same
+    /// names.
     #[arg(long, value_parser = TableLocation::parse)]
     location: TableLocation,
+    /// How a cloud store moves its HTTP.
+    #[arg(long, value_enum, default_value_t)]
+    http: HttpTransport,
     #[command(flatten)]
     cache: CacheOptions,
     /// Passes over the queries, in one process: the first cold, the rest
@@ -189,7 +193,7 @@ async fn main() -> Result<(), Error> {
     let args = Args::parse();
     let trace = RecordedRequest::read_csv(BufReader::new(File::open(&args.trace)?))?;
     let plan = ReplayPlan::new(&trace, &args.location)?;
-    let store = args.cache.in_front_of(args.location.origin()?)?;
+    let store = args.cache.in_front_of(args.location.origin(args.http)?)?;
     let replayer = Replayer::new(store, args.copies);
     let probe = HostProbe::new(&args.drive_dirs)?;
 

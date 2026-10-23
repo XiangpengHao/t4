@@ -48,3 +48,6 @@ How do we know which part are latency critical? 1. parquet's foot, 2. similar re
 Basically, how much does it cost to run a query, maybe?
 
 - [ ] We need to measure the p-max, because it's very important to demonstrate the effect of racing reads.
+
+
+- [ ] Next, we need to make sure we saturate network bandwidth with minimal threads, which is very hard.

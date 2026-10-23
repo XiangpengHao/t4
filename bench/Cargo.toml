@@ -14,15 +14,26 @@ clap = { version = "4", features = ["derive"] }
 # from; on object_store 0.13, as t4 is.
 datafusion = "55.2.0"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+http = "1"
+http-body-util = "0.1"
+httparse = "1"
 # The bench binaries' allocator (`mimalloc` feature, on unless
 # `--no-default-features`): it keeps freed memory mapped and reuses it, as
 # DataFusion deployments run, where glibc's hands each read fresh pages to
 # fault in (doc/04-multi-device.md, "Reading straight into the output").
 mimalloc = { version = "0.1", default-features = false, optional = true }
-object_store = { version = "0.13.2", default-features = false, features = ["fs", "gcp"] }
+object_store = { version = "0.13.2", default-features = false, features = ["aws", "fs", "gcp"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
 t4 = { path = ".." }
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 url = "2"
+
+# kTLS, the kernel decrypting TLS, for the `ktls` HTTP transport
+# (`ktls_transport`): Linux only.
+[target.'cfg(target_os = "linux")'.dependencies]
+ktls = { version = "6.0.2", default-features = false, features = ["ring", "tls12"] }
 
 [features]
 default = ["mimalloc"]

@@ -41,8 +41,7 @@ fn read_through(
     let fetches = read.fetches().to_vec();
     for fetch in &fetches {
         let fetched = &data[fetch.start as usize..fetch.end as usize];
-        read.fill(fetch.start, fetched);
-        block_on(cache.cache_fetched(&read, fetch.start, fetched)).unwrap();
+        block_on(cache.take_fetched(&mut read, fetch.clone(), fetched)).unwrap();
     }
     (read.into_bytes().unwrap().to_vec(), fetches)
 }
@@ -141,9 +140,10 @@ fn a_read_fetches_only_the_blocks_memory_lacks() {
     assert_eq!(read.bytes(), 10..4 * MIB - 10);
     assert_eq!(read.fetches(), [0..MIB, 2 * MIB..3 * MIB]);
     for fetch in read.fetches().to_vec() {
-        read.fill(fetch.start, &data[fetch.start as usize..fetch.end as usize]);
+        let fetched = &data[fetch.start as usize..fetch.end as usize];
+        block_on(cache.take_fetched(&mut read, fetch, fetched)).unwrap();
     }
-    // The cached blocks came from memory, the missing ones from the fills.
+    // The cached blocks came from memory, the missing ones from the fetches.
     assert_eq!(read.into_bytes().unwrap(), data[10..4 * MIB as usize - 10]);
 }
 
@@ -179,10 +179,10 @@ fn racing_fetches_of_one_block_take_one_chunk() {
     std::thread::scope(|scope| {
         for _ in 0..THREADS {
             scope.spawn(|| {
-                let read = block_on(cache.read(&file, 0..MIB)).unwrap();
+                let mut read = block_on(cache.read(&file, 0..MIB)).unwrap();
                 barrier.wait();
-                for fetch in read.fetches() {
-                    block_on(cache.cache_fetched(&read, fetch.start, &data)).unwrap();
+                for fetch in read.fetches().to_vec() {
+                    block_on(cache.take_fetched(&mut read, fetch, &data)).unwrap();
                 }
             });
         }
@@ -509,26 +509,58 @@ fn the_check_at_rest_finds_held_free_and_unnamed_chunks() {
     assert!(unnamed.contains("which no entry names"), "{unnamed}");
 }
 
+/// However the answer is cut, each byte lands where it goes: the read's
+/// part of it in the output, each block whole in the cache.
 #[test]
-fn fill_copies_only_the_overlap() {
-    let (_dir, cache, _policy) = cache(1, 1);
-    let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
-    let mut read = PartialRead::new(file.version(), 100..200).unwrap();
-    read.fill(150, &[7; 100]);
-    // Past the read, and up to its start: nothing.
-    read.fill(300, &[1; 10]);
-    read.fill(0, &[1; 100]);
-    read.fill(0, &[9; 150]);
-    let bytes = read.into_bytes().unwrap();
-    assert_eq!(bytes[..50], [9; 50]);
-    assert_eq!(bytes[50..], [7; 50]);
+fn fetched_bytes_land_in_pieces_of_any_size() {
+    let (_dir, cache, _policy) = cache(4, 1);
+    let size = 2 * MIB + MIB / 2;
+    let data = file_bytes(size);
+    let file = cache.resolve(b"a", Some("v1"), size).unwrap();
+    let mut read = block_on(cache.read(&file, 100..size - 100)).unwrap();
+    assert_eq!(read.fetches(), [0..size]);
+    let mut blocks = cache.receive(&mut read, 0..size).unwrap();
+    let mut at: usize = 0;
+    for len in [1, 4095, 100_000, MIB as usize, usize::MAX] {
+        let end = at.saturating_add(len).min(data.len());
+        block_on(blocks.land(&data[at..end])).unwrap();
+        at = end;
+    }
+    block_on(blocks.finish()).unwrap();
+    assert_eq!(read.into_bytes().unwrap(), data[100..size as usize - 100]);
+    let (out, fetches) = read_through(&cache, &file, &data, 0..size);
+    assert!(fetches.is_empty(), "every block cached");
+    assert_eq!(out, data);
 }
 
 #[test]
-#[should_panic(expected = "a fetch holds whole blocks")]
-fn a_fetch_of_part_of_a_block_is_refused() {
+fn a_fetch_bringing_more_than_it_holds_is_refused() {
     let (_dir, cache, _policy) = cache(1, 1);
     let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
-    let read = block_on(cache.read(&file, 0..MIB)).unwrap();
-    let _ = block_on(cache.cache_fetched(&read, 0, &file_bytes(MIB / 2)));
+    let mut read = block_on(cache.read(&file, 0..MIB)).unwrap();
+    let mut blocks = cache.receive(&mut read, 0..MIB).unwrap();
+    assert!(block_on(blocks.land(&file_bytes(MIB + 1))).is_err());
+}
+
+/// Neither a fetch that ends short nor one given up on halfway caches its
+/// block, and both give back the chunk it took.
+#[test]
+fn a_fetch_cut_short_caches_nothing() {
+    let (_dir, cache, _policy) = cache(1, 1);
+    let data = file_bytes(MIB);
+    let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
+
+    let mut read = block_on(cache.read(&file, 0..MIB)).unwrap();
+    let mut blocks = cache.receive(&mut read, 0..MIB).unwrap();
+    block_on(blocks.land(&data[..MIB as usize / 2])).unwrap();
+    assert!(block_on(blocks.finish()).is_err());
+    assert!(location(&cache, &file, 0).is_none());
+
+    let mut read = block_on(cache.read(&file, 0..MIB)).unwrap();
+    let mut blocks = cache.receive(&mut read, 0..MIB).unwrap();
+    block_on(blocks.land(&data[..MIB as usize / 2])).unwrap();
+    drop(blocks);
+    assert!(location(&cache, &file, 0).is_none());
+    assert_eq!(cache.memory.free_count(), 1);
+    cache.check_at_rest().unwrap();
 }

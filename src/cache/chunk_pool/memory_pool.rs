@@ -103,6 +103,7 @@ impl<'pool> MemoryChunkWriter<'pool> {
     /// The chunk's `BLOCK_SIZE` bytes, as its last block left them: the
     /// writer writes what the new block needs, and readers read only within
     /// the block's length.
+    #[cfg(test)]
     pub(in crate::cache) fn bytes_mut(&mut self) -> &mut [u8] {
         let start = self.memory.chunk_start(self.lease.chunk());
         // SAFETY: the chunk is this writer's alone. The free bitmap leased it
@@ -114,6 +115,7 @@ impl<'pool> MemoryChunkWriter<'pool> {
 
     /// Publishes the chunk as holding `block`: readers may hold it from now
     /// on, and the writer goes on as one of them.
+    #[cfg(test)]
     pub(in crate::cache) fn publish(self, block: BlockKey) -> MemoryChunkReader<'pool> {
         MemoryChunkReader {
             pin: self.lease.publish(block),
@@ -243,7 +245,18 @@ impl MemoryChunkReader<'_> {
 /// tens of GB at startup. A mapping's pages are zeros the kernel supplies on
 /// first touch, it is page-aligned, so every chunk is, as `O_DIRECT` needs,
 /// and it goes back to the kernel on drop, whatever the global allocator.
+///
+/// On Linux the chunks start at a huge page's boundary and ask for
+/// transparent huge pages: a first write faults in 2 MiB, two chunks, at
+/// once, where 4 KiB pages fault 512 times. A cold pool filling at the
+/// network's rate otherwise faults on every page it takes in, 17 million
+/// times in 64 GiB (`doc/05-network.md`). Where the kernel gives no huge
+/// page, or none is free, a chunk takes 4 KiB pages as before.
 struct PoolMemory {
+    /// The mapping, as the kernel placed it: a huge page larger than the
+    /// chunks, so that they can start at a huge page's boundary.
+    mapping: NonNull<u8>,
+    /// The first chunk's first byte.
     start: NonNull<u8>,
     chunk_count: u32,
 }
@@ -258,33 +271,69 @@ impl PoolMemory {
     /// A chunk's bytes, as a direct I/O's length.
     const CHUNK_LEN: NonZeroU32 = NonZeroU32::new(BLOCK_SIZE as u32).expect("a chunk has bytes");
 
+    /// A transparent huge page's bytes, x86-64's and arm64's with 4 KiB
+    /// pages.
+    const HUGE_PAGE: usize = 2 << 20;
+
     fn map(chunk_count: NonZeroU32) -> Result<Self> {
-        let len = Self::len_of(chunk_count.get()).ok_or(Error::InvalidArgument(
+        let mapping_len = Self::mapping_len(chunk_count.get()).ok_or(Error::InvalidArgument(
             "memory pool larger than the address space",
         ))?;
         // SAFETY: a new private mapping, at an address the kernel picks: it
         // aliases nothing.
-        let start = unsafe {
+        let mapping = unsafe {
             rustix::mm::mmap_anonymous(
                 std::ptr::null_mut(),
-                len,
+                mapping_len,
                 ProtFlags::READ | ProtFlags::WRITE,
                 MapFlags::PRIVATE,
             )
         }
         .map_err(std::io::Error::from)?;
-        let start = NonNull::new(start.cast::<u8>()).expect("a mapping is never at address 0");
-        debug_assert!((start.as_ptr() as usize).is_multiple_of(PAGE_SIZE));
-        Ok(Self {
+        let mapping = NonNull::new(mapping.cast::<u8>()).expect("a mapping is never at address 0");
+        let skip = mapping.as_ptr().align_offset(Self::HUGE_PAGE);
+        // SAFETY: the mapping is a huge page longer than the chunks, and
+        // `skip` is less than one.
+        let start = unsafe { mapping.add(skip) };
+        let memory = Self {
+            mapping,
             start,
             chunk_count: chunk_count.get(),
-        })
+        };
+        memory.ask_for_huge_pages();
+        Ok(memory)
     }
+
+    /// Asks the kernel to back the chunks with transparent huge pages, as
+    /// they fault in. Advice only: refused, as where they are switched off,
+    /// the chunks take small pages.
+    #[cfg(target_os = "linux")]
+    fn ask_for_huge_pages(&self) {
+        let len = Self::len_of(self.chunk_count).expect("`map` checked the length");
+        // SAFETY: the range is the chunks', within this mapping; the advice
+        // changes no byte, only the pages that will hold them.
+        let _ = unsafe {
+            rustix::mm::madvise(
+                self.start.as_ptr().cast(),
+                len,
+                rustix::mm::Advice::LinuxHugepage,
+            )
+        };
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn ask_for_huge_pages(&self) {}
 
     /// The bytes `chunk_count` chunks take; `None` if no mapping can be that
     /// large.
     fn len_of(chunk_count: u32) -> Option<usize> {
         usize::try_from(chunk_count).ok()?.checked_mul(BLOCK_SIZE)
+    }
+
+    /// The bytes mapped for `chunk_count` chunks: theirs and a huge page,
+    /// to start them at one's boundary.
+    fn mapping_len(chunk_count: u32) -> Option<usize> {
+        Self::len_of(chunk_count)?.checked_add(Self::HUGE_PAGE)
     }
 
     /// Where `chunk` starts: page-aligned, `BLOCK_SIZE` bytes before the
@@ -302,10 +351,10 @@ impl PoolMemory {
 
 impl Drop for PoolMemory {
     fn drop(&mut self) {
-        let len = Self::len_of(self.chunk_count).expect("`map` checked the length");
+        let len = Self::mapping_len(self.chunk_count).expect("`map` checked the length");
         // SAFETY: the mapping is this struct's, and nothing uses it any more:
         // every writer and reader borrows the pool.
-        let _ = unsafe { rustix::mm::munmap(self.start.as_ptr().cast(), len) };
+        let _ = unsafe { rustix::mm::munmap(self.mapping.as_ptr().cast(), len) };
     }
 }
 
@@ -344,6 +393,15 @@ mod tests {
         let mut writer = pool.allocate().unwrap();
         fill(&mut writer, block);
         writer.publish(block).chunk()
+    }
+
+    /// So that each huge page holds whole chunks, and the first holds the
+    /// first.
+    #[test]
+    fn the_chunks_start_at_a_huge_pages_boundary() {
+        let pool = pool(3);
+        let first = pool.memory.chunk_start(ChunkId::new(0)).as_ptr() as usize;
+        assert!(first.is_multiple_of(PoolMemory::HUGE_PAGE));
     }
 
     #[test]

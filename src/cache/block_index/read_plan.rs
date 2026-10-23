@@ -100,7 +100,7 @@ impl BlockWindow {
     }
 
     /// Where the bytes asked for lie in a buffer that holds [`Self::pages`].
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "shuttle")))]
     pub(in crate::cache) fn bytes_in_pages(&self) -> Range<u32> {
         self.pages.start()..self.pages.start() + self.pages.len()
     }

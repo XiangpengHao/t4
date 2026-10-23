@@ -242,6 +242,16 @@ pages dirty 3%. One worker submits about 48 GiB/s of these reads and no
 more: the measurement decision 4 waits for. File 0's drive, which holds
 the origin copy, again reads least at 112 streams ("At 56 streams").
 
+Huge pages don't lift the worker. With mimalloc's arenas on transparent
+huge pages (`MIMALLOC_ALLOW_LARGE_OS_PAGES=1`; 7.2 of the process's 8.0
+GiB in huge pages mid-pass), t4 reads 48.4 GiB/s at 56 streams and 46.2
+at 112, and pinning still takes a third of the worker, its time in the
+same per-page work (`try_get_folio`, `get_contig_folio_len`). The drives
+take at most 128 KiB a command and no scatter-gather lists, so a MiB is
+eight commands of 32 pages each, splitting it 16% of the worker. What the
+worker spends follows the bytes it submits, not the size of the pages
+under them.
+
 End to end (ClickBench, 192 partitions, as below), the warm pass takes
 11.99 s from the page cache and 12.19 s from t4's disk tier.
 
@@ -284,7 +294,9 @@ reading nothing off the drives differ by up to a third between runs (7,
 - **Mirrored chunks,** a block on two drives: a read goes to the drive
   less busy, and a latency-critical one races both, the first answer
   taken (`00-meta.md`: "racing read for latency critical request").
-- **A worker per drive,** if one can't keep up.
+- **More than one I/O worker,** for drives past about 48 GiB/s, what one
+  submits ("Twelve faster drives, on AWS"); or reads into buffers
+  registered with io_uring, which skip pinning, a third of the worker.
 - **Drives of unequal size or speed:** placement weighted by each, chosen
   at fill time.
 - **A failed drive dropped alone:** its chunks forgotten, the rest of the

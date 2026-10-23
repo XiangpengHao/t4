@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use bbtree::BBTreeMap;
 use bytes::Bytes;
 use futures_util::future::{join_all, ready};
-use futures_util::stream::{self, BoxStream, StreamExt};
+use futures_util::stream::{self, BoxStream, StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::{
     Attributes, CopyOptions, Extensions, GetOptions, GetRange, GetResult, GetResultPayload,
@@ -37,7 +37,7 @@ use object_store::{
 #[cfg(feature = "__fuzz")]
 use super::ChunkId;
 use super::cache_files::{CacheFiles, DiskFile};
-use super::object_cache::{CacheableFile, ObjectCache};
+use super::object_cache::{CacheableFile, FetchedBlocks, ObjectCache};
 #[cfg(feature = "__fuzz")]
 use super::policy::Tier;
 use super::policy::{CachePolicy, ClockPolicy, TierSizes};
@@ -199,9 +199,10 @@ impl T4Caching {
     }
 
     /// `range` of `file`, from the cache and fetches of what it misses, each
-    /// cached as the policy says. `None` if the cache can't serve it: a read
-    /// of the cache file failed, or a fetch found the file changed, which
-    /// the cache forgets then.
+    /// fetch's bytes put into the read's output and cached as the policy
+    /// says as they come in. `None` if the cache can't serve it: a read of
+    /// the cache file failed, or a fetch found the file changed, which the
+    /// cache forgets then.
     async fn read_through(
         &self,
         location: &Path,
@@ -213,56 +214,55 @@ impl T4Caching {
         let Ok(mut read) = self.cache.read(file, range).await else {
             return Ok(None);
         };
+        let mut receivers = Vec::new();
+        for fetch in read.fetches().to_vec() {
+            let Ok(blocks) = self.cache.receive(&mut read, fetch) else {
+                return Ok(None);
+            };
+            receivers.push(blocks);
+        }
         // Every fetch is in flight at once: a read's misses keep the NIC busy.
-        let fetches = read.fetches().to_vec();
-        let fetched = fetches
-            .iter()
-            .map(|fetch| self.fetch(location, e_tag, fetch.clone(), extensions));
-        for (fetch, fetched) in fetches.iter().zip(join_all(fetched).await) {
-            let bytes = match fetched {
-                Ok(bytes) => bytes,
+        let fetched = receivers
+            .into_iter()
+            .map(|blocks| self.fetch(location, e_tag, blocks, extensions));
+        for fetched in join_all(fetched).await {
+            match fetched {
+                Ok(()) => {}
                 Err(object_store::Error::Precondition { .. }) => {
                     self.known.forget(location);
                     return Ok(None);
                 }
                 Err(error) => return Err(error),
-            };
-            read.fill(fetch.start, &bytes);
-            // A block the cache fails to keep is fetched again next time: this
-            // read has its bytes either way.
-            let _ = self.cache.cache_fetched(&read, fetch.start, &bytes).await;
+            }
         }
         Ok(read.into_bytes())
     }
 
-    /// `range` of the file at `location` from the inner store, if it is still
-    /// the version with `e_tag`.
+    /// Fetches the bytes `blocks` holds from the inner store, if the file is
+    /// still the version with `e_tag`, and hands each piece of the answer to
+    /// `blocks` as it comes in.
     async fn fetch(
         &self,
         location: &Path,
         e_tag: &str,
-        range: Range<u64>,
+        mut blocks: FetchedBlocks<'_>,
         extensions: &Extensions,
-    ) -> object_store::Result<Bytes> {
+    ) -> object_store::Result<()> {
         let options = GetOptions {
-            range: Some(GetRange::Bounded(range.clone())),
+            range: Some(GetRange::Bounded(blocks.range())),
             if_match: Some(e_tag.to_owned()),
             extensions: extensions.clone(),
             ..GetOptions::default()
         };
-        let bytes = self
-            .inner
-            .get_opts(location, options)
-            .await?
-            .bytes()
-            .await?;
-        if bytes.len() as u64 != range.end - range.start {
-            return Err(object_store::Error::Generic {
-                store: STORE,
-                source: format!("{location}: fetched {} bytes of {range:?}", bytes.len()).into(),
-            });
+        let cache_error = |error: crate::io::error::Error| object_store::Error::Generic {
+            store: STORE,
+            source: Box::new(error),
+        };
+        let mut body = self.inner.get_opts(location, options).await?.into_stream();
+        while let Some(piece) = body.try_next().await? {
+            blocks.land(&piece).await.map_err(cache_error)?;
         }
-        Ok(bytes)
+        blocks.finish().await.map_err(cache_error)
     }
 
     /// Whether the cache may serve a read with `options`: no condition on

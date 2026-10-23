@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use vstd::prelude::*;
 
+use crate::PAGE_SIZE;
 use crate::io::error::{Error, Result};
-use crate::{PAGE_SIZE, PAGE_SIZE_NZ_U32};
 
 verus! {
 
@@ -114,70 +114,7 @@ pub fn align_up_u64(value: u64, alignment: u64) -> (result: Option<u64>)
     Some(result)
 }
 
-/// Rounds `value` up to the nearest multiple of `alignment`.
-/// Returns `None` on overflow.
-/// `alignment` must be a power of two.
-fn checked_align_up_u32(value: u32, alignment: u32) -> (result: Option<u32>)
-    requires
-        alignment > 0,
-        alignment & sub(alignment, 1) == 0,
-    ensures
-        result.is_some() ==> result.unwrap() >= value,
-        result.is_some() ==> result.unwrap() & sub(alignment, 1) == 0,
-        result.is_some() ==> result.unwrap() - value < alignment,
-        result.is_some() ==> (value & sub(alignment, 1) == 0 ==> result.unwrap() == value),
-{
-    let mask = alignment - 1;
-    let sum = value.checked_add(mask)?;
-    let result = sum & !mask;
-
-    proof {
-        assert(result >= value) by (bit_vector)
-            requires
-                alignment > 0,
-                alignment & sub(alignment, 1) == 0,
-                sum == add(value, sub(alignment, 1)),
-                sum >= value,
-                result == sum & !sub(alignment, 1),
-        ;
-        assert(result & sub(alignment, 1) == 0u32) by (bit_vector)
-            requires
-                alignment > 0,
-                alignment & sub(alignment, 1) == 0,
-                result == sum & !sub(alignment, 1),
-        ;
-        assert(result - value < alignment) by (bit_vector)
-            requires
-                alignment > 0,
-                alignment & sub(alignment, 1) == 0,
-                sum == add(value, sub(alignment, 1)),
-                sum >= value,
-                result == sum & !sub(alignment, 1),
-                result >= value,
-        ;
-        assert(value & sub(alignment, 1) == 0 ==> result == value) by (bit_vector)
-            requires
-                alignment > 0,
-                alignment & sub(alignment, 1) == 0,
-                sum == add(value, sub(alignment, 1)),
-                sum >= value,
-                result == sum & !sub(alignment, 1),
-        ;
-    }
-
-    Some(result)
-}
-
 } // verus!
-
-pub fn align_up_u32(value: NonZeroU32, alignment: NonZeroU32) -> Result<NonZeroU32> {
-    let value = value.get();
-    let alignment = alignment.get();
-    debug_assert!(alignment.is_power_of_two());
-    let aligned = checked_align_up_u32(value, alignment)
-        .ok_or(Error::InvalidArgument("value overflow while aligning"))?;
-    NonZeroU32::new(aligned).ok_or(Error::InvalidArgument("aligned value unexpectedly zero"))
-}
 
 /// A page-aligned buffer: what direct I/O reads into and writes from.
 #[derive(Debug)]
@@ -250,25 +187,6 @@ impl AlignedBuf {
         }
     }
 
-    pub fn from_padded_slice(src: &[u8]) -> Result<Self> {
-        if src.is_empty() {
-            return Err(Error::InvalidArgument(
-                "padded buffer source must be non-empty",
-            ));
-        }
-        let src_len_u32: u32 = src
-            .len()
-            .try_into()
-            .map_err(|_| Error::InvalidArgument("aligned buffer length exceeds u32"))?;
-        let src_len_u32 = NonZeroU32::new(src_len_u32)
-            .ok_or(Error::InvalidArgument("aligned buffer length must be > 0"))?;
-        let padded_len_u32 = align_up_u32(src_len_u32, PAGE_SIZE_NZ_U32)?;
-        let mut buf = Self::new_zeroed(padded_len_u32)?;
-        let src_len = src_len_u32.get() as usize;
-        buf.as_mut_slice()[..src_len].copy_from_slice(src);
-        Ok(buf)
-    }
-
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.len_u32.get() as usize
@@ -295,12 +213,38 @@ impl AlignedBuf {
         unsafe { std::slice::from_raw_parts(self.as_ptr(), self.len()) }
     }
 
+    #[cfg(test)]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         debug_assert!(
             self.is_owned(),
             "a lent buffer is only touched by raw pointers"
         );
         unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), self.len()) }
+    }
+
+    /// Copies `bytes` into the buffer from its byte `at`, through raw
+    /// pointers, as the I/O a lent buffer goes to writes it: what the buffer
+    /// held before need not be initialized, and nothing of it is read.
+    ///
+    /// # Panics
+    ///
+    /// If `bytes` run past the buffer's end.
+    pub(crate) fn copy_in(&mut self, at: usize, bytes: &[u8]) {
+        assert!(
+            at.checked_add(bytes.len())
+                .is_some_and(|end| end <= self.len()),
+            "{} bytes at {at} fit in {}",
+            bytes.len(),
+            self.len()
+        );
+        // SAFETY: the bytes lie within the buffer, as asserted, and `&mut
+        // self` makes this the buffer's one writer; a lent buffer's lender
+        // promises no one else writes them meanwhile ([`Self::lent`]).
+        unsafe {
+            self.as_mut_ptr()
+                .add(at)
+                .copy_from_nonoverlapping(bytes.as_ptr(), bytes.len());
+        }
     }
 
     /// The buffer, keeping `held` alive too until it drops: so an I/O it
@@ -311,6 +255,7 @@ impl AlignedBuf {
         self
     }
 
+    #[cfg(test)]
     fn is_owned(&self) -> bool {
         matches!(self.memory, BufMemory::Owned(_))
     }

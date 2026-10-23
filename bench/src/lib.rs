@@ -1,7 +1,7 @@
 //! t4's benchmark harness. Its parts:
 //!
-//! - [`table_store`]: the store a table is read through, a local file or
-//!   GCS, with t4 in front if asked.
+//! - [`table_store`]: the store a table is read through, a local file, GCS
+//!   or S3, with t4 in front if asked.
 //! - [`pinned_tier_policy`]: a cache policy that keeps every block in one
 //!   tier, so that a warm run measures memory hits or disk hits alone.
 //! - [`request_trace`]: an object store that records every call made of
@@ -10,13 +10,20 @@
 //! - [`replay`]: a trace's calls made again of another store, with nothing
 //!   between them.
 //! - [`host_counters`]: the bytes a drive and the network moved during a
-//!   query, read from `/proc`.
+//!   query, and the CPU time the process spent, read from `/proc`.
+//! - [`ktls_transport`]: an HTTP transport for object_store whose TLS the
+//!   kernel decrypts straight into a response body's buffer, over
+//!   `http1_connection`'s HTTP/1.1.
 //! - [`simulated_store`]: an object store over another that answers like a
 //!   remote one, after a first-byte latency and at a bandwidth.
 //! - [`synthetic_objects`]: an object store whose objects' bytes are
 //!   computed, not stored, for the simulated store to serve.
 
 pub mod host_counters;
+// Only Linux builds `ktls_transport`, its user; it is tested everywhere.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod http1_connection;
+pub mod ktls_transport;
 pub mod pinned_tier_policy;
 pub mod replay;
 pub mod request_trace;

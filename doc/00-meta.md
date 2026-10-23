@@ -31,6 +31,8 @@ it misses itself. The design: `03-cache.md`.
   built, and what comes later.
 - `04-multi-device.md`: the disk tier over several devices: chunks
   striped over the cache files by number, one I/O worker for all.
+- `05-network.md`: what a miss's bytes cost over HTTPS, object_store's
+  HTTP transport against one over kTLS, measured against S3.
 - `98-cachefs-vs-fs.md`: how a cache's storage differs from a file
   system's.
 - `99-brainstorm.md`: open notes.

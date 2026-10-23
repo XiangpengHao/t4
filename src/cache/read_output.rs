@@ -65,9 +65,9 @@ impl ReadOutput {
     }
 
     /// A buffer over `pages`, the file's bytes a direct read of a disk chunk
-    /// fills: whole pages, within the output. It holds the output's memory
-    /// until it drops, however long the read takes, whatever becomes of the
-    /// output meanwhile.
+    /// or a fetch fills: whole pages, within the output. It holds the
+    /// output's memory until it drops, however long the read or the fetch
+    /// takes, whatever becomes of the output meanwhile.
     pub(super) fn lend(&mut self, pages: Range<u64>) -> Result<AlignedBuf> {
         let len = u32::try_from(pages.end - pages.start)
             .ok()
@@ -90,6 +90,19 @@ impl ReadOutput {
             AlignedBuf::lent(at, len, Arc::clone(&self.memory) as _)
         };
         Ok(buffer)
+    }
+
+    /// The output's pages over `bytes`, the file's from a page boundary, as
+    /// [`Self::lend`] takes them: the pages they share with the output;
+    /// `None` if none.
+    pub(super) fn pages_over(&self, bytes: Range<u64>) -> Option<Range<u64>> {
+        assert!(
+            bytes.start.is_multiple_of(PAGE_SIZE_U64),
+            "{bytes:?} start on a page"
+        );
+        let start = bytes.start.max(self.start);
+        let end = bytes.end.next_multiple_of(PAGE_SIZE_U64).min(self.end());
+        (start < end).then_some(start..end)
     }
 
     /// Copies `bytes`, the file's from `at`, into the output.
@@ -118,6 +131,12 @@ impl ReadOutput {
         let len = Self::index(self.asked.end - self.asked.start);
         let memory = Arc::try_unwrap(self.memory).ok()?;
         Some(Bytes::from_owner(FilledOutput(memory)).slice(at..at + len))
+    }
+
+    /// The file's bytes the read asked for.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(super) fn asked(&self) -> Range<u64> {
+        self.asked.clone()
     }
 
     fn end(&self) -> u64 {

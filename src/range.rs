@@ -129,8 +129,9 @@ impl PageWindow {
         self.buffer_len
     }
 
-    /// Where the bytes asked for start in the window.
-    #[cfg(test)]
+    /// Where the bytes asked for start in the window: for the read plan's
+    /// tests, which `shuttle` builds leave out.
+    #[cfg(all(test, not(feature = "shuttle")))]
     pub(crate) fn start(&self) -> u32 {
         self.start
     }

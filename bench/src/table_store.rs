@@ -1,12 +1,13 @@
 //! The store a benchmark reads a table through: the table's location, a
-//! file or a directory of files on the local file system or in GCS, and t4
-//! in front of it if asked.
+//! file or a directory of files on the local file system, in GCS or in S3,
+//! moving its HTTP as asked, and t4 in front of it if asked.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::ValueEnum;
 use object_store::ObjectStore;
+use object_store::aws::AmazonS3Builder;
 use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path;
@@ -15,6 +16,7 @@ use t4::policy::Tier;
 use url::Url;
 
 use crate::Error;
+use crate::ktls_transport::KtlsConnector;
 use crate::pinned_tier_policy::PinnedTierPolicy;
 
 /// Where a table's files are, as a URL: one file, or a directory of them,
@@ -25,14 +27,14 @@ pub struct TableLocation {
 }
 
 impl TableLocation {
-    /// A `gs://bucket/path` URL as given, or a local path: a directory's
-    /// URL gets its `/`.
+    /// A `gs://bucket/path` or `s3://bucket/path` URL as given, or a local
+    /// path: a directory's URL gets its `/`.
     ///
     /// # Errors
     ///
     /// If `location` isn't a URL, or a local path that exists.
     pub fn parse(location: &str) -> Result<Self, String> {
-        let url = if location.starts_with("gs://") {
+        let url = if location.starts_with("gs://") || location.starts_with("s3://") {
             Url::parse(location).map_err(|error| format!("{location}: {error}"))?
         } else {
             let path =
@@ -57,21 +59,33 @@ impl TableLocation {
             .expect("a URL's scheme and host are a URL")
     }
 
-    /// The store that holds the table's files.
+    /// The store that holds the table's files, a cloud one moving its HTTP
+    /// through `transport`, configured from the environment (GCS's
+    /// `GOOGLE_*`, S3's `AWS_*` variables).
     ///
     /// # Errors
     ///
     /// If the URL names no store this harness knows, or the store can't be
     /// made.
-    pub fn origin(&self) -> object_store::Result<Arc<dyn ObjectStore>> {
+    pub fn origin(&self, transport: HttpTransport) -> object_store::Result<Arc<dyn ObjectStore>> {
+        let bucket = self.url.host_str().unwrap_or_default();
         match self.url.scheme() {
             "file" => Ok(Arc::new(LocalFileSystem::new())),
             "gs" => {
-                let bucket = self.url.host_str().unwrap_or_default();
-                let store = GoogleCloudStorageBuilder::from_env()
-                    .with_bucket_name(bucket)
-                    .build()?;
-                Ok(Arc::new(store))
+                let builder = GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket);
+                let builder = match transport {
+                    HttpTransport::Reqwest => builder,
+                    HttpTransport::Ktls => builder.with_http_connector(KtlsConnector),
+                };
+                Ok(Arc::new(builder.build()?))
+            }
+            "s3" => {
+                let builder = AmazonS3Builder::from_env().with_bucket_name(bucket);
+                let builder = match transport {
+                    HttpTransport::Reqwest => builder,
+                    HttpTransport::Ktls => builder.with_http_connector(KtlsConnector),
+                };
+                Ok(Arc::new(builder.build()?))
             }
             scheme => Err(object_store::Error::NotSupported {
                 source: format!("{}: no store for {scheme}://", self.url).into(),
@@ -108,6 +122,17 @@ impl TableLocation {
             })?;
         Ok(path.join(name))
     }
+}
+
+/// How a cloud store moves its HTTP.
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum HttpTransport {
+    /// object_store's own: reqwest over hyper and rustls.
+    #[default]
+    Reqwest,
+    /// [`KtlsConnector`]: the kernel decrypts, into the body's own buffer
+    /// (Linux only).
+    Ktls,
 }
 
 /// t4 in front of a table's store, if `--cache-policy` is given.

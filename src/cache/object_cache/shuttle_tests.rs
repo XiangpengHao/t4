@@ -47,7 +47,7 @@ fn cache(memory_chunks: u32, disk_chunks: u32) -> (Arc<ObjectCache>, Arc<TestPol
     let disks = (0..files).map(|_| SimDisk::new()).collect();
     let io = IoWorker::simulated(NonZeroU32::new(4).unwrap(), disks).unwrap();
     let files = NonZeroU32::new(files).unwrap();
-    let disk = CacheFiles::on(io, files, disk_chunks / files.get()).unwrap();
+    let disk = CacheFiles::on(io, files, disk_chunks / files).unwrap();
     let policy = Arc::new(TestPolicy::new());
     let memory = NonZeroU32::new(memory_chunks).unwrap();
     let cache = ObjectCache::new(memory, disk, Arc::clone(&policy) as Arc<dyn CachePolicy>);
@@ -68,7 +68,7 @@ fn contents(path: &[u8]) -> Vec<u8> {
 /// a tier, or nothing and a fetch of the file; then, if `fill`, caches what
 /// it fetched.
 fn read(cache: &ObjectCache, file: &CacheableFile<'static>, fill: bool) {
-    let read = block_on(cache.read(file, 0..FILE_SIZE)).unwrap();
+    let mut read = block_on(cache.read(file, 0..FILE_SIZE)).unwrap();
     if read.fetches().is_empty() {
         assert_eq!(
             read.into_bytes().unwrap(),
@@ -80,7 +80,7 @@ fn read(cache: &ObjectCache, file: &CacheableFile<'static>, fill: bool) {
     assert_eq!(read.fetches().len(), 1);
     assert_eq!(read.fetches()[0], 0..FILE_SIZE, "a miss fetches the file");
     if fill {
-        block_on(cache.cache_fetched(&read, 0, &contents(file.path))).unwrap();
+        block_on(cache.take_fetched(&mut read, 0..FILE_SIZE, &contents(file.path))).unwrap();
     }
 }
 
@@ -339,9 +339,9 @@ fn a_dropped_eviction_gives_its_victim_back() {
         // `b`'s fill picks `a` and writes it to disk. One poll submits the
         // write; dropping the fill then is a caller giving up on it, unless
         // that poll finished it.
-        let missed = block_on(cache.read(&b, 0..FILE_SIZE)).unwrap();
+        let mut missed = block_on(cache.read(&b, 0..FILE_SIZE)).unwrap();
         let _ = cache
-            .cache_fetched(&missed, 0, &contents(b.path))
+            .take_fetched(&mut missed, 0..FILE_SIZE, &contents(b.path))
             .now_or_never();
         let mut waits = 0;
         while cache.check_at_rest().is_err() {

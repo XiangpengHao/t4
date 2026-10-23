@@ -4,8 +4,8 @@
 //! - **A read** copies the blocks memory holds, and reads those on disk,
 //!   moving one to memory if the policy says so. It names the rest, each
 //!   with where the policy said it goes.
-//! - **A fill** takes the caller's fetch of those blocks, and puts each where
-//!   the read said.
+//! - **A fill** takes the caller's fetch of those blocks as its bytes come
+//!   in, into the read's output and each block where the read said.
 //! - **A tier with no free chunk** for a block evicts the victims the policy
 //!   picks: memory moves its victims to disk or drops them, the disk drops
 //!   its own.
@@ -25,13 +25,15 @@ use super::block_index::{
 };
 use super::cache_files::CacheFiles;
 use super::chunk_pool::disk_chunks::{DiskChunkReader, DiskChunkWriter};
-use super::chunk_pool::memory_pool::{MemoryChunkReader, MemoryChunkWriter, MemoryPool};
+use super::chunk_pool::memory_pool::{
+    LentMemoryChunk, MemoryChunkReader, MemoryChunkWriter, MemoryPool,
+};
 use super::policy::{Admit, BlockRead, CachePolicy, DiskHit, MemoryVictim, Tier, VictimAction};
 use super::read_output::ReadOutput;
-use super::{BLOCK_SIZE, BLOCK_SIZE_U64, BlockKey, ChunkId};
+use super::{BLOCK_SIZE_U64, BlockKey, ChunkId};
 use crate::PAGE_SIZE_U32;
 use crate::buffer::AlignedBuf;
-use crate::io::error::Result;
+use crate::io::error::{Error, Result};
 use crate::io::sync::Arc;
 
 /// A cache of file versions' blocks in memory and disk chunks, found
@@ -164,97 +166,136 @@ impl ObjectCache {
         self.disk.read_into(on_disk, pages.start, into)
     }
 
-    /// Caches the blocks that `fetched` holds, the file's bytes from
-    /// `start`, each where `read`, which missed it, said it goes: whole
-    /// blocks, as the read's fetches name them. A tier with no free chunk
-    /// evicts for it; a block that still finds no room, or that a tier holds
-    /// already, isn't cached.
+    /// Takes `fetch`, one of `read`'s fetches, as its bytes come in
+    /// ([`FetchedBlocks`]): each into the read's output, over the pages of
+    /// it the fetch covers, and each block whole into its place in the
+    /// cache, where the read said it goes.
     ///
     /// # Errors
     ///
-    /// If a write to the cache file fails, the block's or an eviction's.
+    /// If the output's pages can't be lent.
     ///
     /// # Panics
     ///
-    /// If `fetched` isn't whole blocks the read missed, from a block's start.
-    pub(super) async fn cache_fetched(
+    /// If `fetch` isn't blocks the read missed, from a block's start.
+    pub(super) fn receive(
         &self,
-        read: &PartialRead,
-        start: u64,
-        fetched: &[u8],
-    ) -> Result<()> {
+        read: &mut PartialRead,
+        fetch: Range<u64>,
+    ) -> Result<FetchedBlocks<'_>> {
         assert!(
-            start.is_multiple_of(BLOCK_SIZE_U64),
+            fetch.start.is_multiple_of(BLOCK_SIZE_U64),
             "a fetch starts at a block"
         );
         let first =
-            u32::try_from(start / BLOCK_SIZE_U64).expect("a file's block numbers fit a u32");
-        for (index, block_bytes) in (first..).zip(fetched.chunks(BLOCK_SIZE)) {
-            let block = read.version.block_range(index);
-            assert_eq!(
-                block_bytes.len() as u64,
-                block.end - block.start,
-                "a fetch holds whole blocks"
-            );
-            let key = BlockKey::new(read.version.id(), index);
-            match read.admission(index) {
-                Admit::Memory => self.cache_in_memory(key, block_bytes).await?,
-                Admit::Disk => self.cache_on_disk(key, block_bytes).await?,
-                Admit::Discard => {}
+            u32::try_from(fetch.start / BLOCK_SIZE_U64).expect("a file's block numbers fit a u32");
+        let count = u32::try_from((fetch.end - fetch.start).div_ceil(BLOCK_SIZE_U64))
+            .expect("a file's block numbers fit a u32");
+        let landings = (first..first + count)
+            .map(|index| Landing::Due(read.admission(index)))
+            .collect();
+        Ok(FetchedBlocks {
+            cache: self,
+            version: read.version,
+            output: read.lend_for_fetch(&fetch)?,
+            range: fetch,
+            received: 0,
+            first,
+            landings,
+        })
+    }
+
+    /// Takes `fetched`, the file's bytes of `fetch`, in one piece, as a
+    /// fetch whose answer comes in one does: for tests, which have the
+    /// bytes at hand.
+    #[cfg(test)]
+    pub(super) async fn take_fetched(
+        &self,
+        read: &mut PartialRead,
+        fetch: Range<u64>,
+        fetched: &[u8],
+    ) -> Result<()> {
+        let mut blocks = self.receive(read, fetch)?;
+        blocks.land(fetched).await?;
+        blocks.finish().await
+    }
+
+    /// Where `key`'s block, `len` bytes, lands as it is fetched: a chunk of
+    /// the tier `admit` names, lent to take its bytes. Nowhere if the policy
+    /// discards it, a tier holds it already, or that tier has no room even
+    /// after evicting.
+    async fn landing(&self, key: BlockKey, admit: Admit, len: usize) -> Landing<'_> {
+        if self.blocks.get(key).is_some() {
+            return Landing::Nowhere;
+        }
+        let pages = u32::try_from(len.next_multiple_of(PAGE_SIZE_U32 as usize))
+            .ok()
+            .and_then(NonZeroU32::new)
+            .expect("a block is a chunk's bytes or fewer, one or more");
+        match admit {
+            Admit::Memory => match self.allocate_memory().await {
+                Ok(Some(writer)) => {
+                    let (chunk, lent) = writer.lend_for_read(&self.memory, pages);
+                    Landing::Memory { chunk, lent }
+                }
+                // No room, or an eviction's write failed: the block goes
+                // uncached, as one the cache fails to keep.
+                Ok(None) | Err(_) => Landing::Nowhere,
+            },
+            Admit::Disk => {
+                let Some(writer) = self.allocate_disk() else {
+                    return Landing::Nowhere;
+                };
+                let hold = writer.hold_for_write(self.disk.chunks());
+                match AlignedBuf::new_zeroed(pages) {
+                    Ok(pages) => Landing::Disk {
+                        pages: pages.holding(Arc::new(hold)),
+                        writer,
+                    },
+                    Err(_) => Landing::Nowhere,
+                }
             }
+            Admit::Discard => Landing::Nowhere,
         }
-        Ok(())
     }
 
-    /// Caches `bytes`, the whole of `key`'s block, in a memory chunk, unless
-    /// a tier holds the block already or memory has no room even after
-    /// evicting.
-    async fn cache_in_memory(&self, key: BlockKey, bytes: &[u8]) -> Result<()> {
-        if self.blocks.get(key).is_some() {
-            return Ok(());
+    /// Caches `key`'s block where it landed, all of it in: publishes its
+    /// memory chunk, or writes its disk chunk and then publishes that. A
+    /// block that a tier came to hold meanwhile, or whose write fails, goes
+    /// uncached.
+    async fn cache_landed(&self, key: BlockKey, landing: Landing<'_>) {
+        match landing {
+            Landing::Memory { chunk, lent } => {
+                // Published before the index names it, so that a read that
+                // finds the entry finds the chunk open.
+                let reader = lent.publish(chunk, key);
+                if self
+                    .blocks
+                    .insert_if_absent(key, Location::Memory(reader.chunk()))
+                {
+                    self.policy.on_admit(Tier::Memory, reader.chunk(), key);
+                } else {
+                    // Another fetch of the block cached it first. No entry
+                    // names this chunk: it goes back when `reader` drops.
+                    reader.unpublish();
+                }
+            }
+            Landing::Disk { pages, writer } => {
+                if self.disk.write(&writer, pages).await.is_err() {
+                    return;
+                }
+                let reader = writer.publish(key);
+                if self
+                    .blocks
+                    .insert_if_absent(key, Location::Disk(reader.chunk()))
+                {
+                    self.policy.on_admit(Tier::Disk, reader.chunk(), key);
+                } else {
+                    reader.unpublish();
+                }
+            }
+            Landing::Due(_) | Landing::Nowhere => {}
         }
-        let Some(mut writer) = self.allocate_memory().await? else {
-            return Ok(());
-        };
-        // A short block leaves the rest of the chunk as its last block did:
-        // no read looks there.
-        writer.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
-        // Published before the index names it, so that a read that finds the
-        // entry finds the chunk open.
-        let reader = writer.publish(key);
-        let in_memory = Location::Memory(reader.chunk());
-        if self.blocks.insert_if_absent(key, in_memory) {
-            self.policy.on_admit(Tier::Memory, reader.chunk(), key);
-        } else {
-            // Another fetch of the block cached it first. No entry names
-            // this chunk: it goes back when `reader` drops.
-            reader.unpublish();
-        }
-        Ok(())
-    }
-
-    /// [`Self::cache_in_memory`] for a disk chunk: the block is written from
-    /// a copy, which holds the chunk until the write is done.
-    async fn cache_on_disk(&self, key: BlockKey, bytes: &[u8]) -> Result<()> {
-        if self.blocks.get(key).is_some() {
-            return Ok(());
-        }
-        let Some(writer) = self.allocate_disk() else {
-            return Ok(());
-        };
-        let hold = writer.hold_for_write(self.disk.chunks());
-        let pages = AlignedBuf::from_padded_slice(bytes)?.holding(Arc::new(hold));
-        self.disk.write(&writer, pages).await?;
-        let on_disk = writer.publish(key);
-        if self
-            .blocks
-            .insert_if_absent(key, Location::Disk(on_disk.chunk()))
-        {
-            self.policy.on_admit(Tier::Disk, on_disk.chunk(), key);
-        } else {
-            on_disk.unpublish();
-        }
-        Ok(())
     }
 
     /// Moves `block`, in disk chunk `on_disk`, to a memory chunk: reads its
@@ -590,7 +631,6 @@ enum MoveToDisk {
 #[derive(Debug)]
 pub(super) struct PartialRead {
     version: FileVersion,
-    bytes: Range<u64>,
     /// Where the read's bytes land, the caller's once filled.
     output: ReadOutput,
     fetches: Vec<Range<u64>>,
@@ -603,8 +643,7 @@ impl PartialRead {
     fn new(version: FileVersion, bytes: Range<u64>) -> Result<Self> {
         Ok(Self {
             version,
-            output: ReadOutput::new(bytes.clone())?,
-            bytes,
+            output: ReadOutput::new(bytes)?,
             fetches: Vec::new(),
             missed: Vec::new(),
         })
@@ -613,7 +652,7 @@ impl PartialRead {
     /// The file's bytes the read takes, which its output holds.
     #[cfg(all(test, not(feature = "shuttle")))]
     pub(super) fn bytes(&self) -> Range<u64> {
-        self.bytes.clone()
+        self.output.asked()
     }
 
     /// The ranges of the file to fetch, one GET each, in order.
@@ -621,18 +660,16 @@ impl PartialRead {
         &self.fetches
     }
 
-    /// Copies the part of `fetched`, the file's bytes from `start`, that the
-    /// read takes into its output.
-    pub(super) fn fill(&mut self, start: u64, fetched: &[u8]) {
-        let fetched_end = start + fetched.len() as u64;
-        let overlap = self.bytes.start.max(start)..self.bytes.end.min(fetched_end);
-        if overlap.is_empty() {
-            return;
-        }
-        let from = Self::offset(overlap.start - start);
-        let len = Self::offset(overlap.end - overlap.start);
-        self.output
-            .copy_in(overlap.start, &fetched[from..from + len]);
+    /// The read's output over the pages `fetch` covers, lent for the
+    /// fetch's bytes to land in; `None` if it covers none.
+    fn lend_for_fetch(&mut self, fetch: &Range<u64>) -> Result<Option<FetchedOutput>> {
+        let Some(pages) = self.output.pages_over(fetch.clone()) else {
+            return Ok(None);
+        };
+        Ok(Some(FetchedOutput {
+            start: pages.start,
+            pages: self.output.lend(pages)?,
+        }))
     }
 
     /// The read's bytes, once the caller has filled what it missed: `None`
@@ -671,10 +708,170 @@ impl PartialRead {
             .copy_in(at, &chunk[wanted.start as usize..wanted.end as usize]);
     }
 
-    /// A length or an offset within a read's bytes, as a `usize`: the
-    /// bytes are in memory, so it fits.
+    /// A length or an offset within a read's bytes, or a fetch's, as a
+    /// `usize`: the bytes are in memory, so it fits.
     fn offset(within_read: u64) -> usize {
         usize::try_from(within_read).expect("a read's bytes fit in memory")
+    }
+}
+
+/// A fetch's bytes as they come in ([`ObjectCache::receive`]), each put
+/// where it goes: into the read's output, over the pages of it the fetch
+/// covers; and each block's into its place in the cache, which it takes as
+/// the block's first byte comes. [`Self::finish`] caches the blocks once
+/// every byte is in. Dropped before, as when the fetch fails, it caches
+/// nothing, and gives the chunks it took back.
+///
+/// Each byte is copied twice: into the output, and into the cache. The
+/// output is the caller's, never the cache's memory.
+pub(super) struct FetchedBlocks<'c> {
+    cache: &'c ObjectCache,
+    version: FileVersion,
+    /// The file's bytes the fetch holds: whole blocks, from a block's start.
+    range: Range<u64>,
+    /// How many of them have come in.
+    received: u64,
+    /// The read's output over the pages the fetch covers, lent.
+    output: Option<FetchedOutput>,
+    /// The first block's number.
+    first: u32,
+    /// Where each block's bytes land, the first block's first.
+    landings: Vec<Landing<'c>>,
+}
+
+impl FetchedBlocks<'_> {
+    /// The file's bytes the fetch holds.
+    pub(super) fn range(&self) -> Range<u64> {
+        self.range.clone()
+    }
+
+    /// Takes `piece`, the fetch's next bytes.
+    ///
+    /// # Errors
+    ///
+    /// If the fetch brings more bytes than it holds.
+    pub(super) async fn land(&mut self, mut piece: &[u8]) -> Result<()> {
+        let len = self.range.end - self.range.start;
+        if self.received + piece.len() as u64 > len {
+            return Err(Self::wrong_length(&self.range, "more"));
+        }
+        if let Some(output) = &mut self.output {
+            output.copy_in(self.range.start + self.received, piece);
+        }
+        while !piece.is_empty() {
+            let index = PartialRead::offset(self.received / BLOCK_SIZE_U64);
+            let within = PartialRead::offset(self.received % BLOCK_SIZE_U64);
+            if within == 0 {
+                self.decide_landing(index).await;
+            }
+            let taken = piece.len().min(self.block_len(index) - within);
+            self.landings[index].copy_in(within, &piece[..taken]);
+            piece = &piece[taken..];
+            self.received += taken as u64;
+        }
+        Ok(())
+    }
+
+    /// Caches the blocks where they landed, once every byte is in.
+    ///
+    /// # Errors
+    ///
+    /// If the fetch brought fewer bytes than it holds: nothing is cached.
+    pub(super) async fn finish(self) -> Result<()> {
+        if self.received != self.range.end - self.range.start {
+            return Err(Self::wrong_length(&self.range, "fewer"));
+        }
+        let Self {
+            cache,
+            version,
+            first,
+            landings,
+            output,
+            ..
+        } = self;
+        // The read's output is whole: the read may take its bytes.
+        drop(output);
+        let cached = (first..).zip(landings).map(|(index, landing)| {
+            cache.cache_landed(BlockKey::new(version.id(), index), landing)
+        });
+        join_all(cached).await;
+        Ok(())
+    }
+
+    /// Decides where block `index`, its first byte come, lands.
+    async fn decide_landing(&mut self, index: usize) {
+        if let Landing::Due(admit) = self.landings[index] {
+            let number = self.first + u32::try_from(index).expect("a fetch's blocks fit a u32");
+            let key = BlockKey::new(self.version.id(), number);
+            self.landings[index] = self.cache.landing(key, admit, self.block_len(index)).await;
+        }
+    }
+
+    /// Block `index`'s bytes: a block's, but for the file's last, which may
+    /// be shorter.
+    fn block_len(&self, index: usize) -> usize {
+        let start = index as u64 * BLOCK_SIZE_U64;
+        PartialRead::offset((self.range.end - self.range.start - start).min(BLOCK_SIZE_U64))
+    }
+
+    fn wrong_length(range: &Range<u64>, more_or_fewer: &str) -> Error {
+        Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("the fetch of {range:?} brought {more_or_fewer} bytes than it holds"),
+        ))
+    }
+}
+
+/// The pages of a read's output a fetch covers, lent to it, and the file's
+/// byte they start at.
+struct FetchedOutput {
+    pages: AlignedBuf,
+    start: u64,
+}
+
+impl FetchedOutput {
+    /// Copies what of `bytes`, the file's from `at`, falls in these pages.
+    fn copy_in(&mut self, at: u64, bytes: &[u8]) {
+        let end = self.start + self.pages.len() as u64;
+        let overlap = at.max(self.start)..(at + bytes.len() as u64).min(end);
+        if overlap.is_empty() {
+            return;
+        }
+        let from = PartialRead::offset(overlap.start - at);
+        let len = PartialRead::offset(overlap.end - overlap.start);
+        self.pages.copy_in(
+            PartialRead::offset(overlap.start - self.start),
+            &bytes[from..from + len],
+        );
+    }
+}
+
+/// Where one fetched block's bytes land.
+enum Landing<'c> {
+    /// Not yet decided: where the read said the block goes.
+    Due(Admit),
+    /// A memory chunk, lent as a buffer until the block is in.
+    Memory {
+        chunk: AlignedBuf,
+        lent: LentMemoryChunk<'c>,
+    },
+    /// A buffer the write to a disk chunk takes once the block is in.
+    Disk {
+        pages: AlignedBuf,
+        writer: DiskChunkWriter<'c>,
+    },
+    /// Nowhere: the block goes uncached.
+    Nowhere,
+}
+
+impl Landing<'_> {
+    /// Copies `bytes` into the block's place from its byte `at`.
+    fn copy_in(&mut self, at: usize, bytes: &[u8]) {
+        match self {
+            Self::Memory { chunk, .. } => chunk.copy_in(at, bytes),
+            Self::Disk { pages, .. } => pages.copy_in(at, bytes),
+            Self::Due(_) | Self::Nowhere => {}
+        }
     }
 }
 

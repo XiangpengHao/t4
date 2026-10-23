@@ -29,7 +29,7 @@ use datafusion::error::{DataFusionError, Result};
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use t4_bench::host_counters::{CgroupMemory, HostCounters, HostProbe};
 use t4_bench::request_trace::{RequestTrace, TracedStore};
-use t4_bench::table_store::{CacheOptions, TableLocation};
+use t4_bench::table_store::{CacheOptions, HttpTransport, TableLocation};
 
 /// The allocator: mimalloc unless built `--no-default-features`, as the
 /// `mimalloc` feature in `bench/Cargo.toml` explains. A static, as Rust takes
@@ -41,9 +41,13 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[derive(Parser)]
 struct Args {
     /// A table, `name=location`: a Parquet file, or a directory of them, at
-    /// a local path or a `gs://bucket/path` URL, a directory's ending in `/`.
+    /// a local path or a `gs://bucket/path` or `s3://bucket/path` URL, a
+    /// directory's ending in `/`.
     #[arg(long = "table", value_parser = TableArg::parse, required = true)]
     tables: Vec<TableArg>,
+    /// How a cloud store moves its HTTP.
+    #[arg(long, value_enum, default_value_t)]
+    http: HttpTransport,
     /// The queries, one a line; query `n` is line `n`, from 0.
     #[arg(long)]
     queries: PathBuf,
@@ -130,7 +134,7 @@ impl QuerySession {
         for (url, location) in stores {
             let mut store = args
                 .cache
-                .in_front_of(location.origin()?)
+                .in_front_of(location.origin(args.http)?)
                 .map_err(DataFusionError::External)?;
             if let Some(trace) = &trace {
                 store = Arc::new(TracedStore::new(store, Arc::clone(trace)));
