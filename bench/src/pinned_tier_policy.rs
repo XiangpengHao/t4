@@ -2,7 +2,7 @@
 //! tier, so that a warm pass measures that tier's hits alone.
 
 use t4::policy::{
-    Admit, BlockKey, BlockRead, CachePolicy, ChunkId, ClockPolicy, DiskHit, MemoryVictim, Tier,
+    Admit, BlockKey, BlockRead, ChunkId, ClockPolicy, DiskHit, MemoryVictim, PlacementPolicy, Tier,
     TierSizes,
 };
 
@@ -24,7 +24,7 @@ impl PinnedTierPolicy {
     }
 }
 
-impl CachePolicy for PinnedTierPolicy {
+impl PlacementPolicy for PinnedTierPolicy {
     fn on_memory_hit(&self, chunk: ChunkId, read: &BlockRead<'_>) {
         self.clock.on_memory_hit(chunk, read);
     }
@@ -35,7 +35,7 @@ impl CachePolicy for PinnedTierPolicy {
         DiskHit::Stay
     }
 
-    fn on_miss(&self, _read: &BlockRead<'_>) -> Admit {
+    fn on_remote_read(&self, _read: &BlockRead<'_>) -> Admit {
         match self.tier {
             Tier::Memory => Admit::Memory,
             Tier::Disk => Admit::Disk,

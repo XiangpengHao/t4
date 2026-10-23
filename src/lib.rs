@@ -2,8 +2,8 @@
 //!
 //! [`T4Caching`] is an [`object_store::ObjectStore`] over another, which
 //! [`T4Caching::builder`] makes: it keeps what is read in two tiers of fixed
-//! size, and fetches what it misses itself. [`policy`] holds what decides
-//! what it keeps: the [`policy::CachePolicy`] trait, and its default, a
+//! size, and fetches what only the remote holds itself. [`policy`] holds what decides
+//! what it keeps: the [`policy::PlacementPolicy`] trait, and its default, a
 //! lock-free CLOCK.
 
 mod buffer;

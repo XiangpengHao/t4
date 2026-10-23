@@ -4,7 +4,7 @@
 use std::num::NonZeroU32;
 
 use super::ClockPolicy;
-use crate::cache::policy::{BlockRead, CachePolicy, DiskHit, Tier};
+use crate::cache::policy::{BlockRead, DiskHit, PlacementPolicy, Tier};
 use crate::cache::{BlockKey, ChunkId, FileVersionId};
 use crate::io::sync::{Arc, thread};
 
@@ -13,7 +13,7 @@ fn block() -> BlockKey {
 }
 
 fn read() -> BlockRead<'static> {
-    BlockRead::new(block(), 1, 0..1, b"a")
+    BlockRead::new(block(), 1, 0..1, b"a", None, true)
 }
 
 fn admit(policy: &ClockPolicy, tier: Tier, chunk: u32) {

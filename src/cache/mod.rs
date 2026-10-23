@@ -16,6 +16,7 @@
 mod block_index;
 mod cache_files;
 mod chunk_pool;
+mod io_report;
 mod object_cache;
 pub mod policy;
 mod read_output;

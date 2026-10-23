@@ -1,31 +1,40 @@
-//! [`CachePolicy`]: what the cache asks of its policy (`doc/03-cache.md`,
-//! decisions 7 and 8): where a fetched block goes, whether a block read
-//! from disk moves to memory, and which chunks a full tier gives up.
+//! What the cache asks of its policies (`doc/06-read-modes.md`), which a
+//! user may replace, each apart:
+//!
+//! - [`PlacementPolicy`], where blocks live (`doc/03-cache.md`, decisions 7
+//!   and 8): where a fetched block goes, whether a block read from disk
+//!   moves to memory, and which chunks a full tier gives up. The default,
+//!   `clock`, a lock-free CLOCK for each tier.
+//! - [`ReadPolicy`], how a read is served (`read`): which GETs fetch what
+//!   only the remote holds, how many race. The default, [`FetchRuns`].
 //!
 //! Tiers are exclusive: a block is in one tier at a time, and the index
 //! names it there. The cache keeps no access state of its own: a policy
 //! hears every hit, and keeps what it wants, with what concurrency it wants,
 //! as every hook takes `&self`.
-//!
-//! - `clock`: the default, a lock-free CLOCK for each tier.
 
 mod clock;
+mod read;
 
 pub use super::{BlockKey, ChunkId, FileVersionId};
 pub use clock::ClockPolicy;
+pub use read::{
+    BlockSource, FetchRuns, Io, IoEvent, IoPhase, PlannedGet, PlannedRead, ReadIntent, ReadPlan,
+    ReadPolicy,
+};
 
 use std::num::NonZeroU32;
 use std::ops::Range;
 
-/// The cache's policy. One serves both tiers, built for their chunk counts:
-/// every chunk it hears of or picks is below its tier's count.
+/// Where blocks live. One policy serves both tiers, built for their chunk
+/// counts: every chunk it hears of or picks is below its tier's count.
 ///
 /// Every chunk the policy picks as a victim, the cache frees, or gives back
 /// with [`Self::on_admit`], even if the read that evicts it is given up on
 /// midway: so a policy that forgets a chunk when it picks it never loses one
 /// that still holds a block. A chunk it picks may hold no block by then; the
 /// cache skips it.
-pub trait CachePolicy: Send + Sync {
+pub trait PlacementPolicy: Send + Sync {
     /// A read found its block in memory chunk `chunk`. On the hit path:
     /// keep it cheap.
     fn on_memory_hit(&self, chunk: ChunkId, read: &BlockRead<'_>);
@@ -35,10 +44,12 @@ pub trait CachePolicy: Send + Sync {
     /// whole chunk straight into memory, one I/O for both.
     fn on_disk_hit(&self, chunk: ChunkId, read: &BlockRead<'_>) -> DiskHit;
 
-    /// A read found its block in neither tier: where the block goes once
-    /// fetched. Asked as the read plans its fetches, so a policy hears every
-    /// miss, those it doesn't cache too.
-    fn on_miss(&self, read: &BlockRead<'_>) -> Admit;
+    /// A read found its block in neither memory nor disk, so the remote
+    /// serves it, or a GET fetches it past what the read asked for
+    /// ([`BlockRead::asked`]): where the block goes once fetched. Asked as
+    /// the read plans its fetches, so a policy hears of every block read
+    /// from the remote, those it doesn't cache too.
+    fn on_remote_read(&self, read: &BlockRead<'_>) -> Admit;
 
     /// `chunk` of `tier` took `block`: a fill, a move, a block given back.
     fn on_admit(&self, tier: Tier, chunk: ChunkId, block: BlockKey);
@@ -76,14 +87,16 @@ impl TierSizes {
     }
 }
 
-/// A block a read takes bytes of, and the read around it: what a policy
-/// decides by.
+/// A block a read takes bytes of, or that a GET of it fetches past them,
+/// and the read around it: what a policy decides by.
 #[derive(Clone, Debug)]
 pub struct BlockRead<'a> {
     block: BlockKey,
     file_size: u64,
     read: Range<u64>,
     path: &'a [u8],
+    intent: Option<ReadIntent>,
+    asked: bool,
 }
 
 impl<'a> BlockRead<'a> {
@@ -92,13 +105,28 @@ impl<'a> BlockRead<'a> {
         file_size: u64,
         read: Range<u64>,
         path: &'a [u8],
+        intent: Option<ReadIntent>,
+        asked: bool,
     ) -> Self {
         Self {
             block,
             file_size,
             read,
             path,
+            intent,
+            asked,
         }
+    }
+
+    /// What the read is for, if its caller said.
+    pub fn intent(&self) -> Option<ReadIntent> {
+        self.intent
+    }
+
+    /// Whether the read takes bytes of the block; not, if a GET of the read
+    /// fetches it past them, widened.
+    pub fn asked(&self) -> bool {
+        self.asked
     }
 
     /// The block: its file version and its number.

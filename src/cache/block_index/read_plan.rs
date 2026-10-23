@@ -107,7 +107,7 @@ impl BlockWindow {
 }
 
 /// A plan being made. Told a read's cached blocks in order, it takes the
-/// blocks between them as missing.
+/// blocks between them as remote.
 pub(super) struct ReadPlanner {
     version: FileVersion,
     /// The bytes the read takes: the range asked for, clamped to the object.
@@ -145,23 +145,23 @@ impl ReadPlanner {
     }
 
     /// Takes `key`'s block, found at `location`, and the blocks before it
-    /// that were not found, as missing. Blocks are found in key order, within
+    /// that were not found, as remote. Blocks are found in key order, within
     /// [`Self::keys`].
     pub(super) fn found(&mut self, key: BlockKey, location: Location) {
         let index = key.index();
         debug_assert!(key.file_version() == self.version.id() && self.unplanned.contains(&index));
-        for missing in self.unplanned.start..index {
-            self.plan(missing, None);
+        for remote in self.unplanned.start..index {
+            self.plan(remote, None);
         }
         self.plan(index, Some(location));
         // Below `unplanned.end`, a `u32`: no overflow.
         self.unplanned.start = index + 1;
     }
 
-    /// The plan, the blocks not found taken as missing.
+    /// The plan, the blocks not found taken as remote.
     pub(super) fn finish(mut self) -> ReadPlan {
-        for missing in self.unplanned.clone() {
-            self.plan(missing, None);
+        for remote in self.unplanned.clone() {
+            self.plan(remote, None);
         }
         ReadPlan {
             bytes: self.bytes,
@@ -225,7 +225,7 @@ mod tests {
     }
 
     /// The bytes of each block no tier held: what fetching it takes.
-    fn missing(plan: &ReadPlan) -> Vec<Range<u64>> {
+    fn remote(plan: &ReadPlan) -> Vec<Range<u64>> {
         plan.blocks()
             .iter()
             .filter(|block| block.location().is_none())
@@ -247,7 +247,7 @@ mod tests {
         let plan = blocks.plan_read(file(3 * MIB), MIB + 100..MIB + 200);
         assert_eq!(plan.bytes(), MIB + 100..MIB + 200);
         assert_eq!(summary(&plan), [(1, None, 100..200)]);
-        assert_eq!(missing(&plan), [MIB..2 * MIB]);
+        assert_eq!(remote(&plan), [MIB..2 * MIB]);
     }
 
     #[test]
@@ -264,7 +264,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            missing(&plan),
+            remote(&plan),
             [0..MIB, MIB..2 * MIB, 2 * MIB..3 * MIB, 3 * MIB..4 * MIB]
         );
     }
@@ -289,7 +289,7 @@ mod tests {
         // An object smaller than a block is one short block.
         let plan = blocks.plan_read(file(10), 0..10);
         assert_eq!(summary(&plan), [(0, None, 0..10)]);
-        assert_eq!(missing(&plan), [0..10]);
+        assert_eq!(remote(&plan), [0..10]);
     }
 
     #[test]
@@ -361,7 +361,7 @@ mod tests {
             [None, None, Some(memory(7)), None, Some(disk(9)), None]
         );
         assert_eq!(
-            missing(&plan),
+            remote(&plan),
             [0..MIB, MIB..2 * MIB, 3 * MIB..4 * MIB, 5 * MIB..6 * MIB]
         );
 
@@ -375,7 +375,7 @@ mod tests {
                 (4, Some(disk(9)), 0..MIB_U32),
             ]
         );
-        assert_eq!(missing(&plan), [3 * MIB..4 * MIB]);
+        assert_eq!(remote(&plan), [3 * MIB..4 * MIB]);
     }
 
     #[test]

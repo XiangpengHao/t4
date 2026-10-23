@@ -2,7 +2,7 @@
 
 use std::num::NonZeroU32;
 
-use super::{Admit, BlockRead, CachePolicy, DiskHit, MemoryVictim, Tier, VictimAction};
+use super::{Admit, BlockRead, DiskHit, MemoryVictim, PlacementPolicy, Tier, VictimAction};
 use crate::cache::{BlockKey, ChunkId};
 use crate::io::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -33,7 +33,7 @@ impl ClockPolicy {
     }
 }
 
-impl CachePolicy for ClockPolicy {
+impl PlacementPolicy for ClockPolicy {
     fn on_memory_hit(&self, chunk: ChunkId, _read: &BlockRead<'_>) {
         self.memory.mark_referenced(chunk);
     }
@@ -46,7 +46,7 @@ impl CachePolicy for ClockPolicy {
         }
     }
 
-    fn on_miss(&self, _read: &BlockRead<'_>) -> Admit {
+    fn on_remote_read(&self, _read: &BlockRead<'_>) -> Admit {
         Admit::Memory
     }
 
@@ -211,7 +211,7 @@ mod tests {
     }
 
     fn read() -> BlockRead<'static> {
-        BlockRead::new(block(), 1, 0..1, b"a")
+        BlockRead::new(block(), 1, 0..1, b"a", None, true)
     }
 
     fn admit(policy: &ClockPolicy, tier: Tier, chunks: impl IntoIterator<Item = u32>) {
@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn a_fetched_block_goes_to_memory_and_picks_take_admitted_chunks_only() {
         let policy = policy(200);
-        assert_eq!(policy.on_miss(&read()), Admit::Memory);
+        assert_eq!(policy.on_remote_read(&read()), Admit::Memory);
         admit(&policy, Tier::Memory, [3, 64, 130, 199]);
         assert_eq!(pick(&policy, 10), [3, 64, 130, 199]);
         assert!(policy.pick_disk_victims(10).is_empty(), "nothing on disk");

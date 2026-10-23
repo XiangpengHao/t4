@@ -20,7 +20,7 @@ use super::test_policy::TestPolicy;
 use super::{CacheableFile, MoveToDisk, ObjectCache};
 use crate::cache::block_index::Location;
 use crate::cache::cache_files::CacheFiles;
-use crate::cache::policy::{Admit, CachePolicy, DiskHit};
+use crate::cache::policy::{Admit, DiskHit, FetchRuns, PlacementPolicy};
 use crate::cache::{BlockKey, ChunkId};
 use crate::io::io_worker::IoWorker;
 use crate::io::simulated::SimDisk;
@@ -50,7 +50,12 @@ fn cache(memory_chunks: u32, disk_chunks: u32) -> (Arc<ObjectCache>, Arc<TestPol
     let disk = CacheFiles::on(io, files, disk_chunks / files).unwrap();
     let policy = Arc::new(TestPolicy::new());
     let memory = NonZeroU32::new(memory_chunks).unwrap();
-    let cache = ObjectCache::new(memory, disk, Arc::clone(&policy) as Arc<dyn CachePolicy>);
+    let cache = ObjectCache::new(
+        memory,
+        disk,
+        Arc::clone(&policy) as Arc<dyn PlacementPolicy>,
+        Arc::new(FetchRuns),
+    );
     (Arc::new(cache.unwrap()), policy)
 }
 
@@ -68,7 +73,7 @@ fn contents(path: &[u8]) -> Vec<u8> {
 /// a tier, or nothing and a fetch of the file; then, if `fill`, caches what
 /// it fetched.
 fn read(cache: &ObjectCache, file: &CacheableFile<'static>, fill: bool) {
-    let mut read = block_on(cache.read(file, 0..FILE_SIZE)).unwrap();
+    let mut read = block_on(cache.read(file, 0..FILE_SIZE, None)).unwrap();
     if read.fetches().is_empty() {
         assert_eq!(
             read.into_bytes().unwrap(),
@@ -78,7 +83,11 @@ fn read(cache: &ObjectCache, file: &CacheableFile<'static>, fill: bool) {
         return;
     }
     assert_eq!(read.fetches().len(), 1);
-    assert_eq!(read.fetches()[0], 0..FILE_SIZE, "a miss fetches the file");
+    assert_eq!(
+        read.fetches()[0],
+        0..FILE_SIZE,
+        "a remote read fetches the file"
+    );
     if fill {
         block_on(cache.take_fetched(&mut read, 0..FILE_SIZE, &contents(file.path))).unwrap();
     }
@@ -134,7 +143,7 @@ fn racing_fills_of_one_block_take_one_chunk() {
 /// The race the chunk table's owner check is for: a read that found the
 /// entry before eviction, its chunk then reused for another file.
 #[test]
-fn a_read_racing_eviction_and_reuse_reads_its_bytes_or_misses() {
+fn a_read_racing_eviction_and_reuse_reads_its_bytes_or_reads_remote() {
     explore(|| {
         let (cache, _policy) = cache(1, 1);
         let (a, b) = (resolve(&cache, b"a"), resolve(&cache, b"b"));
@@ -263,7 +272,7 @@ fn of_two_moves_of_one_chunk_one_moves() {
 /// The owner check for disk chunks: a read that found the disk entry, the
 /// chunk then evicted and written with another file's block.
 #[test]
-fn a_read_racing_eviction_from_disk_and_reuse_reads_its_bytes_or_misses() {
+fn a_read_racing_eviction_from_disk_and_reuse_reads_its_bytes_or_reads_remote() {
     explore(|| {
         let (cache, policy) = cache(1, 1);
         let (a, b) = (resolve(&cache, b"a"), resolve(&cache, b"b"));
@@ -339,9 +348,9 @@ fn a_dropped_eviction_gives_its_victim_back() {
         // `b`'s fill picks `a` and writes it to disk. One poll submits the
         // write; dropping the fill then is a caller giving up on it, unless
         // that poll finished it.
-        let mut missed = block_on(cache.read(&b, 0..FILE_SIZE)).unwrap();
+        let mut remote = block_on(cache.read(&b, 0..FILE_SIZE, None)).unwrap();
         let _ = cache
-            .take_fetched(&mut missed, 0..FILE_SIZE, &contents(b.path))
+            .take_fetched(&mut remote, 0..FILE_SIZE, &contents(b.path))
             .now_or_never();
         let mut waits = 0;
         while cache.check_at_rest().is_err() {

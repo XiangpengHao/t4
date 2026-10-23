@@ -46,12 +46,12 @@ chunk table the frame table.
 ### Blocks and chunks
 
 1. **The cache unit is an aligned 1 MB block of an object:** block `k` is
-   bytes `[k MB, (k+1) MB)`. A miss fetches whole blocks, so a 100 KB read
-   fetches 1 MB: on an object store the time to first byte dominates, and a
-   1 MB GET costs about what a small one does. Blocks never overlap, so no
-   ranges merge. 512 KB is the smallest block considered; the size is to be
-   confirmed against the I/O size where the drive's bandwidth saturates,
-   measured at a few sizes on the target drive.
+   bytes `[k MB, (k+1) MB)`. A remote read fetches whole blocks, so a 100 KB
+   read fetches 1 MB: on an object store the time to first byte dominates,
+   and a 1 MB GET costs about what a small one does. Blocks never overlap,
+   so no ranges merge. 512 KB is the smallest block considered; the size is
+   to be confirmed against the I/O size where the drive's bandwidth
+   saturates, measured at a few sizes on the target drive.
 2. **Memory and disk are both arrays of 1 MB chunks,** a block in one chunk.
    A 1 MB I/O already reaches the drive's bandwidth, so contiguity past a
    chunk buys nothing. Free chunks are a bitmap: any free chunk serves any
@@ -108,21 +108,21 @@ chunk table the frame table.
    - `on_disk_hit(chunk, read)`, which says whether the block stays on disk
      or moves to memory: asked before the read, so a move reads the block's
      pages straight into a memory chunk, one I/O for both;
-   - `on_miss(read)`, which says where the block goes once fetched: memory,
-     disk, or nowhere. Asked as the read plans its fetches, so a policy
-     hears every miss, those it doesn't cache too, and the read carries the
-     answer to the fill;
+   - `on_remote_read(read)`, which says where a block neither memory nor
+     disk holds goes once fetched: memory, disk, or nowhere. Asked as the
+     read plans its fetches, so a policy hears of every remote read, those
+     it doesn't cache too, and the read carries the answer to the fill;
    - `on_admit(tier, chunk, block)`: a chunk took a block;
    - `pick_memory_victims(count)`, each moved to disk or dropped, and
      `pick_disk_victims(count)`, dropped.
 
-   Every hook on the read path gets the block, the file's size and path,
-   and the range the read asked for. A victim the cache gives back, for
-   want of room on disk or a failed write, goes back through `on_admit`;
-   so a policy that forgets a chunk as it picks it never loses one. The
-   default is a lock-free CLOCK for each tier: misses go to memory, memory
-   victims to disk, and a disk hit moves to memory on its second hit since
-   the hand passed.
+   Every hook on the read path gets the block, the file's size and path, and
+   the range the read asked for. A victim the cache gives back, for want of
+   room on disk or a failed write, goes back through `on_admit`; so a policy
+   that forgets a chunk as it picks it never loses one. The default is a
+   lock-free CLOCK for each tier: remote blocks go to memory, memory victims
+   to disk, and a disk hit moves to memory on its second hit since the hand
+   passed.
 8. **Tiers are exclusive, and eviction runs at insertion.** A block is in
    one tier, which the index names. A fill, a move or a promotion that
    finds its tier full evicts a batch of the policy's victims first (up to
@@ -153,24 +153,24 @@ chunk table the frame table.
 
 10. **t4 fetches from the object store itself.** `T4Caching`
     (`src/cache/t4_caching.rs`) is an `object_store::ObjectStore` (0.13, as
-    DataFusion 55 uses) over another, made by a builder: the memory
-    capacity and a cache file or more, each a path and a size, are
-    required; the queue depth,
-    direct I/O and the policy, built for the tiers' chunk counts, are not.
-    A read names a path and a range, and t4 turns the blocks it misses into
-    GETs, all in flight at once. So t4 decides how misses are split and
-    merged into requests, and can keep the NIC busy (`00-meta.md`). Writes, copies, renames, deletes and lists
-    go to the inner store, and the cache forgets the paths they change. A
-    file with no e_tag is read from the store each time, never cached
-    (decision 5); so are conditional reads, and reads of a named version.
-11. **The cache trusts the store's first answer for a path.** A path's
-    first read asks the inner store for its e_tag and size (a HEAD), and
-    the cache keeps them: a hit asks the store nothing. A miss fetches with
+    DataFusion 55 uses) over another, made by a builder: the memory capacity
+    and a cache file or more, each a path and a size, are required; the
+    queue depth, direct I/O and the policy, built for the tiers' chunk
+    counts, are not. A read names a path and a range, and t4 turns the
+    blocks only the remote holds into GETs, all in flight at once. So t4
+    decides how they are split and merged into requests, and can keep the
+    NIC busy (`00-meta.md`). Writes, copies, renames, deletes and lists go
+    to the inner store, and the cache forgets the paths they change. A file
+    with no e_tag is read from the store each time, never cached (decision
+    5); so are conditional reads, and reads of a named version.
+11. **The cache trusts the store's first answer for a path.** A path's first
+    read asks the inner store for its e_tag and size (a HEAD), and the cache
+    keeps them: a hit asks the store nothing. A remote read fetches with
     `If-Match` on that e_tag, so a file changed since is caught there: the
     cache forgets the path, the read goes to the inner store, and the next
-    read asks again. Until a miss, a file changed behind the cache reads as
-    it was: right for files that don't change in place, as a data lake's
-    Parquet files don't.
+    read asks again. Until a remote read, a file changed behind the cache
+    reads as it was: right for files that don't change in place, as a data
+    lake's Parquet files don't.
 
 ## Rejected
 
@@ -215,15 +215,15 @@ chunk table the frame table.
 
 ## Later
 
-- **Two readers missing one block:** the second waits on the first's GET,
+- **Two readers of one remote block:** the second waits on the first's GET,
   through a third state of a block's entry, being fetched (request
   coalescing, `00-meta.md`). Today both fetch it, and one copy goes back.
-- **A long miss split into parallel GETs,** to keep the NIC busy on one
-  large read (request splits, `00-meta.md`).
+- **A long remote read split into parallel GETs,** to keep the NIC busy on
+  one large read (request splits, `00-meta.md`).
 - **Fewer copies on the I/O path:** a disk hit reads straight into the
-  caller's buffer (`04-multi-device.md`), and a miss's bytes are copied as
-  they come, into the output and the cache (`05-network.md`). Left: a
-  transport that lands a fetched block in its chunk, one copy fewer;
+  caller's buffer (`04-multi-device.md`), and a remote block's bytes are
+  copied as they come, into the output and the cache (`05-network.md`).
+  Left: a transport that lands a fetched block in its chunk, one copy fewer;
   registering the memory pool with io_uring once (`99-brainstorm.md`).
 - **Eviction off the insertion path:** a background thread keeping free
   chunks between two watermarks, if evicting at insertion costs too much.
@@ -254,7 +254,7 @@ chunk table the frame table.
 |---|---|---|
 | `src/cache/t4_caching.rs` | `T4Caching` and its builder: the `ObjectStore` front end | 10, 11 |
 | `src/cache/object_cache.rs` | reads, fills, promotions and evictions over the index and the tiers | 3, 7, 8 |
-| `src/cache/policy/` | the `CachePolicy` trait, and `ClockPolicy`, the default | 7 |
+| `src/cache/policy/` | the `PlacementPolicy` trait, and `ClockPolicy`, the default | 7 |
 | `src/cache/block_index/` | `paths` and `blocks` on bbtree, and planning a read's blocks | 1, 4, 5, 6 |
 | `src/cache/chunk_pool/` | each tier's chunks: the free bitmap, the chunk table, the memory pool, the disk chunks | 2, 8 |
 | `src/cache/cache_files.rs` | the cache files and the I/O worker that reads and writes them | 2, 9 |

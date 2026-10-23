@@ -1,11 +1,13 @@
 //! Fetches a table's files from their store in ranges, many at once, as
-//! fast as it can, straight from the store or through t4 missing each
-//! time: how fast misses come in, how long a fetch takes (p50, p99, max),
+//! fast as it can, straight from the store or through t4 reading every
+//! block from the remote: how fast those come in, how long a fetch takes
+//! (p50, p99, max),
 //! and the CPU time a GiB costs, for each HTTP transport (`--http`).
 //!
 //! The files are cut into `--range-mib` pieces, ordered by a hash of each
 //! (the same order every run), and fetched `--in-flight` at a time until
-//! `--gib` are in. Nothing is fetched twice, so t4 misses every time: its
+//! `--gib` are in. Nothing is fetched twice, so t4 reads every block from
+//! the remote: its
 //! memory tier fills, then evicts. The table must hold `--gib`.
 //!
 //! ```text

@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 
 use crate::cache::policy::{
-    Admit, BlockRead, CachePolicy, DiskHit, MemoryVictim, Tier, VictimAction,
+    Admit, BlockRead, DiskHit, MemoryVictim, PlacementPolicy, Tier, VictimAction,
 };
 use crate::cache::{BlockKey, ChunkId};
 use crate::io::sync::Mutex;
@@ -15,7 +15,7 @@ use crate::io::sync::Mutex;
 pub(super) enum Heard {
     MemoryHit(ChunkId),
     DiskHit(ChunkId),
-    Miss(BlockKey),
+    Remote(BlockKey),
     Admit(Tier, ChunkId, BlockKey),
 }
 
@@ -30,7 +30,7 @@ pub(super) struct TestPolicy {
 }
 
 impl TestPolicy {
-    /// Misses go to memory, disk hits stay, memory victims go to disk.
+    /// Remote reads go to memory, disk hits stay, memory victims go to disk.
     pub(super) fn new() -> Self {
         Self {
             admit: Mutex::new(Admit::Memory),
@@ -88,7 +88,7 @@ impl TestPolicy {
     }
 }
 
-impl CachePolicy for TestPolicy {
+impl PlacementPolicy for TestPolicy {
     fn on_memory_hit(&self, chunk: ChunkId, _read: &BlockRead<'_>) {
         self.hear(Heard::MemoryHit(chunk));
     }
@@ -98,8 +98,8 @@ impl CachePolicy for TestPolicy {
         *self.disk_hit.lock().unwrap()
     }
 
-    fn on_miss(&self, read: &BlockRead<'_>) -> Admit {
-        self.hear(Heard::Miss(read.block()));
+    fn on_remote_read(&self, read: &BlockRead<'_>) -> Admit {
+        self.hear(Heard::Remote(read.block()));
         *self.admit.lock().unwrap()
     }
 

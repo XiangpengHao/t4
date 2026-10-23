@@ -1,14 +1,15 @@
 # 05 — The network
 
-Status: measured, and t4's miss path made cheaper (2026-10-23). A miss's
-bytes come over HTTPS from the object store; this is what they cost,
+Status: measured, and t4's remote reads made cheaper (2026-10-23). A remote
+block's bytes come over HTTPS from the object store; this is what they cost,
 through object_store's own HTTP transport and through one whose TLS the
 kernel decrypts (kTLS), straight from S3 and through t4 ("Measured"). t4
 then stopped faulting its memory tier in 4 KiB at a time, and takes a
-fetch's bytes as they come ("t4's miss path"): through it, misses come
-at 9.6 to 9.9 GiB/s, within 7% of straight from S3.
+fetch's bytes as they come ("t4's remote reads"): through it, remote blocks
+come at 9.6 to 9.9 GiB/s, within 7% of straight from S3.
 
-`00-meta.md`'s first goal: saturate the NIC when the cache misses.
+`00-meta.md`'s first goal: saturate the NIC when blocks come from the
+remote.
 
 ## How a fetched byte travels
 
@@ -69,9 +70,9 @@ included; the box ran nothing else.
 | kTLS, through t4 | 256 | 5.59 | 197 / 1,120 / 1,819 ms | 1.47 |
 
 (Through t4: `--cache-policy memory`, a 32 GiB memory tier, every block
-admitted to it, missing every time. The rows through t4 are from the
-profiled runs below, whose direct runs land within 5% of the table's
-rates and 10% of its CPU.)
+admitted to it, every block read from the remote. The rows through t4 are
+from the profiled runs below, whose direct runs land within 5% of the
+table's rates and 10% of its CPU.)
 
 - **Requests in flight set the rate.** An 8 MiB GET takes about 170 ms
   whatever else is in flight: S3 gives a connection about 47 MiB/s. 64 in
@@ -83,7 +84,7 @@ rates and 10% of its CPU.)
   profiled runs), its user-space time nearly gone (2.6 s against 30.2 s),
   its kernel time up (35.9 s against 19.3 s): the kernel decrypts.
 - **t4 halved the rate and added 0.7 CPU-s a GiB** at 256 in flight,
-  whatever the transport ("t4's miss path" says why, and what fixed it).
+  whatever the transport ("t4's remote reads" says why, and what fixed it).
 
 Where the CPU goes, straight from S3 at 256 in flight (every CPU sampled
 by `perf`; CPU-s a GiB):
@@ -100,31 +101,32 @@ by `perf`; CPU-s a GiB):
 | other user space (HTTP, tokio, object_store) | 0.10 | 0.02 |
 | **all** | **0.97** | **0.77** |
 
-The copies were the cheap part: about 0.2 CPU-s a GiB went with them.
-Two thirds of what is left is the kernel taking packets in, the same
-under either transport. And kTLS on this kernel decrypts into its own buffer and
+The copies were the cheap part: about 0.2 CPU-s a GiB went with them. Two
+thirds of what is left is the kernel taking packets in, the same under
+either transport. And kTLS on this kernel decrypts into its own buffer and
 then copies, not straight into ours. The kernel zeroes every page it
 allocates (`init_on_alloc`, Ubuntu's default: `mem auto-init: heap
 alloc:on`), the NIC's receive buffers included.
 
-## t4's miss path
+## t4's remote reads
 
-The rows through t4 above mixed three costs: the miss path, eviction
-(memory's victims go to disk, so once the 32 GiB tier filled each miss
-also wrote a block to a 1 GiB disk tier, itself evicting), and the pool's
-first touch. Apart, at 256 in flight, on the stock transport and kTLS:
+The rows through t4 above mixed three costs: the remote reads themselves,
+eviction (memory's victims go to disk, so once the 32 GiB tier filled each
+remote block also wrote a block to a 1 GiB disk tier, itself evicting), and
+the pool's first touch. Apart, at 256 in flight, on the stock transport and
+kTLS:
 
 | Through t4 | GiB/s | page faults | CPU-s a GiB |
 |---|---|---|---|
 | no eviction (a 96 GiB memory tier, every chunk fresh) | 6.99 / 7.47 | 17.1 M / 16.9 M | 1.99 / 1.77 |
 | demoting (8 GiB of memory over twelve SSDs of 16 GiB, warm) | 9.05 / 9.59 | 2.4 M / 2.2 M | 1.69 / 1.28 |
 
-**The pool's first touch cost most.** 17 million faults is 64 GiB of 4
-KiB pages: every page of the memory tier faulted, and the kernel zeroed
-it, as the cache first filled, when misses matter most. The pool now asks
-for transparent huge pages (`MADV_HUGEPAGE`, its chunks from a 2 MiB
-boundary): a first write faults in two chunks at once. Where the kernel
-gives none, chunks take 4 KiB pages as before.
+**The pool's first touch cost most.** 17 million faults is 64 GiB of 4 KiB
+pages: every page of the memory tier faulted, and the kernel zeroed it, as
+the cache first filled, when remote reads matter most. The pool now asks for
+transparent huge pages (`MADV_HUGEPAGE`, its chunks from a 2 MiB boundary):
+a first write faults in two chunks at once. Where the kernel gives none,
+chunks take 4 KiB pages as before.
 
 **Then the copies.** A quarter of the busy time through t4 was `memmove`:
 `bytes()` joining the body, then t4 copying it into the output and again

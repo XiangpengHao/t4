@@ -22,7 +22,7 @@ reads.
 read in two tiers of fixed size: memory, and a file on each local NVMe
 drive it is given, chunks striped over them, read and written with
 `O_DIRECT` through io_uring (`04-multi-device.md`). It fetches what
-it misses itself. The design: `03-cache.md`.
+only the remote holds itself. The design: `03-cache.md`.
 
 ## The docs
 
@@ -31,8 +31,11 @@ it misses itself. The design: `03-cache.md`.
   built, and what comes later.
 - `04-multi-device.md`: the disk tier over several devices: chunks
   striped over the cache files by number, one I/O worker for all.
-- `05-network.md`: what a miss's bytes cost over HTTPS, object_store's
+- `05-network.md`: what a remote block's bytes cost over HTTPS, object_store's
   HTTP transport against one over kTLS, measured against S3.
+- `06-read-modes.md`: cost, throughput and latency reads; what t4
+  guarantees (mechanism) and what a placement policy and a read policy
+  decide.
 - `98-cachefs-vs-fs.md`: how a cache's storage differs from a file
   system's.
 - `99-brainstorm.md`: open notes.

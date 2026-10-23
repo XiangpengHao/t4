@@ -42,13 +42,13 @@ drives, and t4 drives them itself, not through md RAID (`00-meta.md`:
    2), so the index (`Disk(chunk)`), the policy, eviction and the check at
    rest don't change; only where a chunk's bytes are does.
 
-   A chunk is a block, 1 MiB: a block never spans two files, so reading
-   it is one I/O on one drive. Adjacent chunk numbers sit on different
-   files, and the free bitmap hands out adjacent numbers: it allocates the
-   lowest clear bit of the 64-chunk word it last touched, and the CLOCK
-   takes a batch of victims from the word its hand sweeps. So a miss of
-   several blocks fills chunks on several drives, and a later read of
-   them reads from all of them at once.
+   A chunk is a block, 1 MiB: a block never spans two files, so reading it
+   is one I/O on one drive. Adjacent chunk numbers sit on different files,
+   and the free bitmap hands out adjacent numbers: it allocates the lowest
+   clear bit of the 64-chunk word it last touched, and the CLOCK takes a
+   batch of victims from the word its hand sweeps. So a remote read of
+   several blocks fills chunks on several drives, and a later read of them
+   reads from all of them at once.
 
 3. **Every file holds as many chunks as the smallest can:** the tier is
    `n` times that. Drives are taken to be equally fast, and the stripe
@@ -193,24 +193,24 @@ memory, its rate set by the threads copying out of it, and at 56 it passes
 what twelve drives can read; matching it takes fifteen or sixteen. At 14
 streams it is under the drives' cap, and t4 passes it.
 
-The page cache is read through object_store's `LocalFileSystem`: a call
-runs on a thread of tokio's blocking pool, which zeroes a buffer for each
-range and `pread`s into it, the ranges one after another. A stream keeps
-one call in flight, so 14 streams copy on 14 threads, of 88 vCPUs, each
-writing every byte twice. A t4 call costs its task no work a byte: the
-drives write the output, a call's blocks from several drives at once. A deeper queue
-fills the drives a little more: 64 in flight is about five a drive.
+The page cache is read through object_store's `LocalFileSystem`: a call runs
+on a thread of tokio's blocking pool, which zeroes a buffer for each range
+and `pread`s into it, the ranges one after another. A stream keeps one call
+in flight, so 14 streams copy on 14 threads, of 88 vCPUs, each writing every
+byte twice. A t4 call costs its task no work a byte: the drives write the
+output, a call's blocks from several drives at once. A deeper queue fills
+the drives a little more: 64 in flight is about five a drive.
 
 (The 14-stream runs here are lower than in "Reading straight into the
 output", 25.2 against 30.1 and 31.4 against 34.6, on a box five minutes up;
 not yet explained.)
 
 One drive reads less, and at 56 streams only: file 0's, about 2,000 MiB/s
-and 70% busy, 6% of the bytes where the stripe would give it 8%. The
-others then hold the pass about 3% longer than balanced drives would. A
-guess, not yet checked by counting each file's chunks: four copies miss
-each block at once in the cold pass, and each fetches it and writes it to
-a chunk of its own (`03-cache.md`, "Later": "Two readers missing one
+and 70% busy, 6% of the bytes where the stripe would give it 8%. The others
+then hold the pass about 3% longer than balanced drives would. A guess, not
+yet checked by counting each file's chunks: four copies read each block from
+the remote at once in the cold pass, and each fetches it and writes it to a
+chunk of its own (`03-cache.md`, "Later": "Two readers of one remote
 block"); the first write done takes the block's entry, and the others'
 chunks go free. File 0's drive also holds the local copy the cold pass
 fetches from, so its writes finish later, and it wins fewer blocks.

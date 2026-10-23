@@ -10,6 +10,10 @@ use pollster::block_on;
 use tempfile::TempDir;
 
 use super::*;
+use crate::cache::policy::{
+    Admit, BlockKey, BlockRead, ChunkId, DiskHit, IoEvent, IoPhase, MemoryVictim, PlannedGet,
+    PlannedRead, ReadPlan, Tier,
+};
 
 const MIB: u64 = BLOCK_SIZE_U64;
 
@@ -240,7 +244,7 @@ fn the_disk_tier_stripes_over_its_files() {
         .with_memory_capacity(MIB)
         .with_disk_file(&small, 3 * MIB)
         .with_disk_file(&large, 5 * MIB)
-        .with_policy(move |tiers: TierSizes| {
+        .with_placement_policy(move |tiers: TierSizes| {
             *seen.lock().unwrap() = Some(tiers);
             ClockPolicy::new(tiers.memory_chunks(), tiers.disk_chunks())
         })
@@ -272,7 +276,7 @@ fn a_custom_policy_is_built_for_the_tiers() {
     let sizes = Arc::new(Mutex::new(None));
     let seen = Arc::clone(&sizes);
     let store = builder(&inner, &dir)
-        .with_policy(move |tiers: TierSizes| {
+        .with_placement_policy(move |tiers: TierSizes| {
             *seen.lock().unwrap() = Some(tiers);
             ClockPolicy::new(tiers.memory_chunks(), tiers.disk_chunks())
         })
@@ -386,9 +390,9 @@ fn a_write_through_the_cache_is_read_back() {
 }
 
 /// The cache trusts the store's first answer: a hit asks nothing, so a file
-/// changed behind it reads as it was, until a miss catches the change.
+/// changed behind it reads as it was, until a remote read catches the change.
 #[test]
-fn a_file_changed_behind_the_cache_is_caught_by_a_miss() {
+fn a_file_changed_behind_the_cache_is_caught_by_a_remote_read() {
     let (_dir, store, inner) = t4_caching();
     let path = Path::from("a");
     let old = file_bytes(2 * MIB, 0);
@@ -398,7 +402,7 @@ fn a_file_changed_behind_the_cache_is_caught_by_a_miss() {
     let new = file_bytes(2 * MIB, 1);
     put(inner.as_ref(), &path, &new);
     assert_eq!(get_range(&store, &path, 0..10), old.slice(0..10), "a hit");
-    // Block 1 is missing: its fetch, on the old e_tag, finds the new file.
+    // Block 1 is remote: its fetch, on the old e_tag, finds the new file.
     let bytes = get_range(&store, &path, MIB..MIB + 10);
     assert_eq!(bytes, new.slice(MIB as usize..MIB as usize + 10));
     // The cache forgot the path: the next read asks again, and caches anew.
@@ -547,4 +551,338 @@ fn listing_passes_through() {
         .collect();
     names.sort();
     assert_eq!(names, ["x/1", "x/2"]);
+}
+
+/// What a read policy heard of an I/O, its timings dropped.
+#[derive(Clone, Debug, PartialEq)]
+enum Heard {
+    Get {
+        bytes: Range<u64>,
+        racer: u8,
+        phase: &'static str,
+    },
+    DiskRead {
+        drive: u32,
+        bytes: u32,
+        phase: &'static str,
+    },
+}
+
+impl Heard {
+    fn of(event: &IoEvent<'_>) -> Self {
+        let phase = match event.phase() {
+            IoPhase::Started => "started",
+            IoPhase::Answered { .. } => "answered",
+            IoPhase::Finished { .. } => "finished",
+            IoPhase::Failed { .. } => "failed",
+            IoPhase::Cancelled { .. } => "cancelled",
+        };
+        match event.io() {
+            Io::Get { bytes, racer, .. } => Self::Get {
+                bytes: bytes.clone(),
+                racer: *racer,
+                phase,
+            },
+            Io::DiskRead { drive, bytes } => Self::DiskRead {
+                drive: *drive,
+                bytes: *bytes,
+                phase,
+            },
+        }
+    }
+}
+
+/// A read policy that plans each read with a script, and keeps the intent
+/// of each read it planned and every event it heard. Its clones share them.
+#[derive(Clone)]
+struct ScriptedReads {
+    script: Arc<dyn Fn(&PlannedRead<'_>) -> ReadPlan + Send + Sync>,
+    intents: Arc<Mutex<Vec<Option<ReadIntent>>>>,
+    heard: Arc<Mutex<Vec<Heard>>>,
+}
+
+impl ScriptedReads {
+    fn new(script: impl Fn(&PlannedRead<'_>) -> ReadPlan + Send + Sync + 'static) -> Self {
+        Self {
+            script: Arc::new(script),
+            intents: Arc::default(),
+            heard: Arc::default(),
+        }
+    }
+
+    fn heard(&self) -> Vec<Heard> {
+        self.heard.lock().unwrap().clone()
+    }
+}
+
+impl ReadPolicy for ScriptedReads {
+    fn plan(&self, read: &PlannedRead<'_>) -> ReadPlan {
+        self.intents.lock().unwrap().push(read.intent());
+        (self.script)(read)
+    }
+
+    fn on_io(&self, event: &IoEvent<'_>) {
+        self.heard.lock().unwrap().push(Heard::of(event));
+    }
+}
+
+/// Each block a placement policy was asked where to put: its number, the
+/// read's intent, and whether the read asked for it.
+type RemoteReads = Arc<Mutex<Vec<(u32, Option<ReadIntent>, bool)>>>;
+
+/// A CLOCK that puts every block it is asked about where `admit` says, and
+/// keeps what it was asked.
+struct RecordingPlacement {
+    clock: ClockPolicy,
+    admit: Admit,
+    remote_reads: RemoteReads,
+}
+
+impl PlacementPolicy for RecordingPlacement {
+    fn on_memory_hit(&self, chunk: ChunkId, read: &BlockRead<'_>) {
+        self.clock.on_memory_hit(chunk, read);
+    }
+
+    fn on_disk_hit(&self, chunk: ChunkId, read: &BlockRead<'_>) -> DiskHit {
+        self.clock.on_disk_hit(chunk, read)
+    }
+
+    fn on_remote_read(&self, read: &BlockRead<'_>) -> Admit {
+        self.remote_reads
+            .lock()
+            .unwrap()
+            .push((read.block().index(), read.intent(), read.asked()));
+        self.admit
+    }
+
+    fn on_admit(&self, tier: Tier, chunk: ChunkId, block: BlockKey) {
+        self.clock.on_admit(tier, chunk, block);
+    }
+
+    fn pick_memory_victims(&self, count: usize) -> Vec<MemoryVictim> {
+        self.clock.pick_memory_victims(count)
+    }
+
+    fn pick_disk_victims(&self, count: usize) -> Vec<ChunkId> {
+        self.clock.pick_disk_victims(count)
+    }
+}
+
+/// A cache over a [`CountingStore`] holding a 3 MiB file at `a`, its reads
+/// planned by `reads`, its blocks put where `admit` says; what the store was
+/// asked so far forgotten.
+fn planned_by(
+    reads: &ScriptedReads,
+    admit: Admit,
+) -> (TempDir, T4Caching, Arc<CountingStore>, RemoteReads, Bytes) {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(CountingStore::default());
+    let remote_reads = RemoteReads::default();
+    let recorded = Arc::clone(&remote_reads);
+    let store = builder(&inner, &dir)
+        .with_placement_policy(move |tiers: TierSizes| RecordingPlacement {
+            clock: ClockPolicy::new(tiers.memory_chunks(), tiers.disk_chunks()),
+            admit,
+            remote_reads: recorded,
+        })
+        .with_read_policy(reads.clone())
+        .build()
+        .unwrap();
+    let data = file_bytes(3 * MIB, 7);
+    put(inner.as_ref(), &Path::from("a"), &data);
+    inner.take_asked();
+    (dir, store, inner, remote_reads, data)
+}
+
+#[test]
+fn a_read_policy_splits_a_run_into_gets() {
+    let reads = ScriptedReads::new(|read| {
+        let blocks = read.remote_runs().flatten();
+        ReadPlan::new(
+            blocks
+                .map(|block| PlannedGet::once(block..block + 1))
+                .collect(),
+        )
+    });
+    let (_dir, store, inner, _, data) = planned_by(&reads, Admit::Memory);
+    let path = Path::from("a");
+    assert_eq!(get_range(&store, &path, 0..3 * MIB), data);
+    assert_eq!(
+        inner.take_asked(),
+        [
+            Asked::Head,
+            bounded(0..MIB),
+            bounded(MIB..2 * MIB),
+            bounded(2 * MIB..3 * MIB)
+        ]
+    );
+    assert_eq!(get_range(&store, &path, 0..3 * MIB), data);
+    assert_eq!(inner.take_asked(), [], "every block cached");
+}
+
+/// One GET over a read's blocks, the hit between its remote blocks too: the hit's
+/// bytes fetched are dropped, its block left where it is.
+#[test]
+fn a_get_merged_over_a_hit_drops_its_bytes() {
+    let reads = ScriptedReads::new(|read| ReadPlan::new(vec![PlannedGet::once(read.blocks())]));
+    let (_dir, store, inner, remote_reads, data) = planned_by(&reads, Admit::Memory);
+    let path = Path::from("a");
+    get_range(&store, &path, MIB..2 * MIB);
+    inner.take_asked();
+    remote_reads.lock().unwrap().clear();
+
+    assert_eq!(
+        get_range(&store, &path, 10..3 * MIB - 10),
+        data.slice(10..3 * MIB as usize - 10)
+    );
+    assert_eq!(inner.take_asked(), [bounded(0..3 * MIB)]);
+    assert_eq!(
+        *remote_reads.lock().unwrap(),
+        [(0, None, true), (2, None, true)],
+        "the hit asked about nothing"
+    );
+    assert_eq!(get_range(&store, &path, 0..3 * MIB), data);
+    assert_eq!(inner.take_asked(), []);
+    store.cache.check_at_rest().unwrap();
+}
+
+/// A GET widened past the read caches the blocks it brings, where the
+/// placement policy says, told they weren't asked for.
+#[test]
+fn a_widened_get_caches_past_the_read() {
+    let reads = ScriptedReads::new(|read| {
+        ReadPlan::new(vec![PlannedGet::once(
+            read.blocks().start..read.file_blocks(),
+        )])
+    });
+    let (_dir, store, inner, remote_reads, data) = planned_by(&reads, Admit::Memory);
+    let path = Path::from("a");
+    assert_eq!(
+        get_range(&store, &path, 0..MIB),
+        data.slice(0..MIB as usize)
+    );
+    assert_eq!(inner.take_asked(), [Asked::Head, bounded(0..3 * MIB)]);
+    assert_eq!(
+        *remote_reads.lock().unwrap(),
+        [(0, None, true), (1, None, false), (2, None, false)]
+    );
+    assert_eq!(
+        get_range(&store, &path, MIB..3 * MIB),
+        data.slice(MIB as usize..)
+    );
+    assert_eq!(inner.take_asked(), [], "the widened blocks were cached");
+}
+
+/// Three requests race for a run: the first answer takes its bytes, and the
+/// others are given up on.
+#[test]
+fn racing_gets_take_the_first_answer() {
+    let three = std::num::NonZeroU8::new(3).unwrap();
+    let reads = ScriptedReads::new(move |read| {
+        ReadPlan::new(
+            read.remote_runs()
+                .map(|run| PlannedGet::new(run, three))
+                .collect(),
+        )
+    });
+    let (_dir, store, _inner, _, data) = planned_by(&reads, Admit::Memory);
+    assert_eq!(
+        get_range(&store, &Path::from("a"), 0..MIB),
+        data.slice(0..MIB as usize)
+    );
+    let get = |racer, phase| Heard::Get {
+        bytes: 0..MIB,
+        racer,
+        phase,
+    };
+    let heard = reads.heard();
+    for racer in 0..3 {
+        assert!(heard.contains(&get(racer, "started")), "{heard:?}");
+    }
+    let ended: Vec<_> = heard
+        .iter()
+        .filter(|heard| {
+            matches!(
+                heard,
+                Heard::Get {
+                    phase: "finished" | "cancelled",
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(ended.len(), 3, "each racer ended once: {heard:?}");
+    assert_eq!(
+        ended
+            .iter()
+            .filter(|heard| matches!(
+                heard,
+                Heard::Get {
+                    phase: "finished",
+                    ..
+                }
+            ))
+            .count(),
+        1,
+        "one answer taken: {heard:?}"
+    );
+}
+
+/// A plan that leaves a remote block out can't be carried out: the read fetches its
+/// runs, as the default does.
+#[test]
+fn a_plan_the_cache_cant_carry_out_fetches_the_runs() {
+    let reads = ScriptedReads::new(|_| ReadPlan::default());
+    let (_dir, store, inner, _, data) = planned_by(&reads, Admit::Memory);
+    assert_eq!(
+        get_range(&store, &Path::from("a"), 0..2 * MIB),
+        data.slice(0..2 * MIB as usize)
+    );
+    assert_eq!(inner.take_asked(), [Asked::Head, bounded(0..2 * MIB)]);
+}
+
+#[test]
+fn the_callers_intent_reaches_both_policies() {
+    let reads = ScriptedReads::new(|read| FetchRuns.plan(read));
+    let (_dir, store, _inner, remote_reads, data) = planned_by(&reads, Admit::Memory);
+    let mut options = GetOptions {
+        range: Some(GetRange::Bounded(0..MIB)),
+        ..GetOptions::default()
+    };
+    options.extensions.insert(ReadIntent::Latency);
+    let bytes = block_on(async {
+        store
+            .get_opts(&Path::from("a"), options)
+            .await?
+            .bytes()
+            .await
+    });
+    assert_eq!(bytes.unwrap(), data.slice(0..MIB as usize));
+    assert_eq!(*reads.intents.lock().unwrap(), [Some(ReadIntent::Latency)]);
+    assert_eq!(
+        *remote_reads.lock().unwrap(),
+        [(0, Some(ReadIntent::Latency), true)]
+    );
+}
+
+/// The read policy hears each read of the disk tier: which drive, how many
+/// bytes, started and finished.
+#[test]
+fn the_read_policy_hears_reads_from_disk() {
+    let reads = ScriptedReads::new(|read| FetchRuns.plan(read));
+    let (_dir, store, _inner, _, data) = planned_by(&reads, Admit::Disk);
+    let path = Path::from("a");
+    get_range(&store, &path, 0..MIB);
+    reads.heard.lock().unwrap().clear();
+
+    assert_eq!(
+        get_range(&store, &path, 0..MIB),
+        data.slice(0..MIB as usize)
+    );
+    let read = |phase| Heard::DiskRead {
+        drive: 0,
+        bytes: MIB as u32,
+        phase,
+    };
+    assert_eq!(reads.heard(), [read("started"), read("finished")]);
 }

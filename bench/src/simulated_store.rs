@@ -1,5 +1,5 @@
 //! [`SimulatedStore`]: an object store over another that answers like a
-//! remote one, as its [`NetworkModel`] says, so t4's misses can be
+//! remote one, as its [`NetworkModel`] says, so t4's remote reads can be
 //! measured without a cloud. Writes, lists, copies and deletes pass
 //! through at once: t4 only reads.
 

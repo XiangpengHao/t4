@@ -205,10 +205,10 @@ impl CacheOptions {
         let builder = match policy {
             CachePolicyChoice::Clock => builder,
             CachePolicyChoice::Memory => {
-                builder.with_policy(|sizes| PinnedTierPolicy::new(sizes, Tier::Memory))
+                builder.with_placement_policy(|sizes| PinnedTierPolicy::new(sizes, Tier::Memory))
             }
             CachePolicyChoice::Disk => {
-                builder.with_policy(|sizes| PinnedTierPolicy::new(sizes, Tier::Disk))
+                builder.with_placement_policy(|sizes| PinnedTierPolicy::new(sizes, Tier::Disk))
             }
         };
         Ok(Arc::new(builder.build()?))

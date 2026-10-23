@@ -1,10 +1,11 @@
 //! [`T4Caching`]: the cache's front end (`doc/03-cache.md`, decision 10),
 //! an [`ObjectStore`] over another, whose reads the cache serves, and which
-//! fetches what the cache misses itself. [`T4CachingBuilder`] makes one.
+//! fetches what only the remote holds itself. [`T4CachingBuilder`] makes
+//! one.
 //!
 //! - **What a file is,** the inner store says once: its first answer for the
 //!   path, a HEAD, which the cache trusts (decision 11). A hit asks the store
-//!   nothing. A miss fetches with `If-Match` on that answer's e_tag, so a file
+//!   nothing. A remote read fetches with `If-Match` on that answer's e_tag, so a file
 //!   changed since is caught there: the cache forgets the path, and the read
 //!   goes to the inner store.
 //! - **Writes,** puts, copies, renames and deletes, go to the inner store,
@@ -25,7 +26,7 @@ use std::sync::PoisonError;
 use async_trait::async_trait;
 use bbtree::BBTreeMap;
 use bytes::Bytes;
-use futures_util::future::{join_all, ready};
+use futures_util::future::{FutureExt, join_all, ready, select_ok};
 use futures_util::stream::{self, BoxStream, StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::{
@@ -37,10 +38,13 @@ use object_store::{
 #[cfg(feature = "__fuzz")]
 use super::ChunkId;
 use super::cache_files::{CacheFiles, DiskFile};
+use super::io_report::IoReport;
 use super::object_cache::{CacheableFile, FetchedBlocks, ObjectCache};
 #[cfg(feature = "__fuzz")]
 use super::policy::Tier;
-use super::policy::{CachePolicy, ClockPolicy, TierSizes};
+use super::policy::{
+    ClockPolicy, FetchRuns, Io, PlacementPolicy, ReadIntent, ReadPolicy, TierSizes,
+};
 use super::{BLOCK_SIZE_U64, InsertOrAbort};
 use crate::io::sync::{Arc, Mutex, MutexGuard};
 
@@ -48,7 +52,7 @@ use crate::io::sync::{Arc, Mutex, MutexGuard};
 const STORE: &str = "t4";
 
 /// What makes a policy, once the tiers' chunk counts are known.
-type PolicyMaker = Box<dyn FnOnce(TierSizes) -> Arc<dyn CachePolicy>>;
+type PlacementMaker = Box<dyn FnOnce(TierSizes) -> Arc<dyn PlacementPolicy>>;
 
 /// An [`ObjectStore`] that caches the reads of another, in memory and on
 /// disk. [`Self::builder`] makes one.
@@ -60,7 +64,7 @@ pub struct T4Caching {
     known: Arc<KnownFiles>,
 }
 
-/// Makes a [`T4Caching`]: where it caches, how much, and by what policy.
+/// Makes a [`T4Caching`]: where it caches, how much, and by what policies.
 ///
 /// ```no_run
 /// # fn example(s3: std::sync::Arc<dyn object_store::ObjectStore>) -> t4::Result<()> {
@@ -78,7 +82,8 @@ pub struct T4CachingBuilder {
     disk_files: Vec<DiskFile>,
     queue_depth: u32,
     direct_io: bool,
-    policy: Option<PolicyMaker>,
+    placement: Option<PlacementMaker>,
+    reads: Option<Arc<dyn ReadPolicy>>,
 }
 
 impl T4CachingBuilder {
@@ -113,13 +118,22 @@ impl T4CachingBuilder {
         self
     }
 
-    /// The policy, which `build` makes for the tiers' chunk counts, once it
-    /// knows them; a CLOCK for each tier ([`ClockPolicy`]) unless set.
-    pub fn with_policy<P: CachePolicy + 'static>(
+    /// The placement policy, where blocks live, which `build` makes for the
+    /// tiers' chunk counts, once it knows them; a CLOCK for each tier
+    /// ([`ClockPolicy`]) unless set.
+    pub fn with_placement_policy<P: PlacementPolicy + 'static>(
         mut self,
         build: impl FnOnce(TierSizes) -> P + 'static,
     ) -> Self {
-        self.policy = Some(Box::new(move |sizes| Arc::new(build(sizes))));
+        self.placement = Some(Box::new(move |sizes| Arc::new(build(sizes))));
+        self
+    }
+
+    /// The read policy, how reads are served: which GETs fetch what they
+    /// only the remote holds, how many race; each run of remote blocks fetched once
+    /// ([`FetchRuns`]) unless set.
+    pub fn with_read_policy(mut self, policy: impl ReadPolicy + 'static) -> Self {
+        self.reads = Some(Arc::new(policy));
         self
     }
 
@@ -143,13 +157,14 @@ impl T4CachingBuilder {
         let disk_chunks = NonZeroU32::new(disk.chunks().chunk_count())
             .expect("a disk file holds a chunk at least");
         let sizes = TierSizes::new(memory_chunks, disk_chunks);
-        let policy = match self.policy {
+        let placement = match self.placement {
             Some(build) => build(sizes),
             None => Arc::new(ClockPolicy::new(memory_chunks, disk_chunks)),
         };
+        let reads = self.reads.unwrap_or_else(|| Arc::new(FetchRuns));
         Ok(T4Caching {
             inner: self.inner,
-            cache: ObjectCache::new(memory_chunks, disk, policy)?,
+            cache: ObjectCache::new(memory_chunks, disk, placement, reads)?,
             known: Arc::new(KnownFiles::new()),
         })
     }
@@ -184,7 +199,8 @@ impl T4Caching {
             disk_files: Vec::new(),
             queue_depth: 64,
             direct_io: true,
-            policy: None,
+            placement: None,
+            reads: None,
         }
     }
 
@@ -198,7 +214,7 @@ impl T4Caching {
         Ok(self.known.remember(location, meta))
     }
 
-    /// `range` of `file`, from the cache and fetches of what it misses, each
+    /// `range` of `file`, from memory, disk and fetches of what only the remote holds, each
     /// fetch's bytes put into the read's output and cached as the policy
     /// says as they come in. `None` if the cache can't serve it: a read of
     /// the cache file failed, or a fetch found the file changed, which the
@@ -211,7 +227,8 @@ impl T4Caching {
         range: Range<u64>,
         extensions: &Extensions,
     ) -> object_store::Result<Option<Bytes>> {
-        let Ok(mut read) = self.cache.read(file, range).await else {
+        let intent = extensions.get::<ReadIntent>().copied();
+        let Ok(mut read) = self.cache.read(file, range, intent).await else {
             return Ok(None);
         };
         let mut receivers = Vec::new();
@@ -221,7 +238,8 @@ impl T4Caching {
             };
             receivers.push(blocks);
         }
-        // Every fetch is in flight at once: a read's misses keep the NIC busy.
+        // Every fetch is in flight at once: a read's remote blocks keep the NIC
+        // busy.
         let fetched = receivers
             .into_iter()
             .map(|blocks| self.fetch(location, e_tag, blocks, extensions));
@@ -240,7 +258,9 @@ impl T4Caching {
 
     /// Fetches the bytes `blocks` holds from the inner store, if the file is
     /// still the version with `e_tag`, and hands each piece of the answer to
-    /// `blocks` as it comes in.
+    /// `blocks` as it comes in. As many identical GETs as the plan says race
+    /// for them, sent at once: the first answer takes the bytes, and the
+    /// others are dropped, their requests with them.
     async fn fetch(
         &self,
         location: &Path,
@@ -248,21 +268,54 @@ impl T4Caching {
         mut blocks: FetchedBlocks<'_>,
         extensions: &Extensions,
     ) -> object_store::Result<()> {
+        let bytes = blocks.range();
         let options = GetOptions {
-            range: Some(GetRange::Bounded(blocks.range())),
+            range: Some(GetRange::Bounded(bytes.clone())),
             if_match: Some(e_tag.to_owned()),
             extensions: extensions.clone(),
             ..GetOptions::default()
         };
-        let cache_error = |error: crate::io::error::Error| object_store::Error::Generic {
+        let path = location.as_ref().as_bytes();
+        let racers = (0..blocks.race().get()).map(|racer| {
+            let get = Io::Get {
+                path,
+                bytes: bytes.clone(),
+                racer,
+            };
+            let report = IoReport::start(self.cache.read_policy(), get);
+            let get = self.inner.get_opts(location, options.clone());
+            async move {
+                match get.await {
+                    Ok(answer) => {
+                        report.answered();
+                        Ok((answer, report))
+                    }
+                    Err(error) => {
+                        report.failed();
+                        Err(error)
+                    }
+                }
+            }
+            .boxed()
+        });
+        let ((answer, report), _losers) = select_ok(racers).await?;
+        let landed = async {
+            let mut body = answer.into_stream();
+            while let Some(piece) = body.try_next().await? {
+                blocks.land(&piece).await.map_err(Self::cache_error)?;
+            }
+            Ok::<_, object_store::Error>(())
+        };
+        report.awaiting(landed).await?;
+        blocks.finish().await.map_err(Self::cache_error)
+    }
+
+    /// A failure of the cache's, as the store's error.
+    fn cache_error(error: crate::io::error::Error) -> object_store::Error {
+        object_store::Error::Generic {
             store: STORE,
             source: Box::new(error),
-        };
-        let mut body = self.inner.get_opts(location, options).await?.into_stream();
-        while let Some(piece) = body.try_next().await? {
-            blocks.land(&piece).await.map_err(cache_error)?;
         }
-        blocks.finish().await.map_err(cache_error)
     }
 
     /// Whether the cache may serve a read with `options`: no condition on

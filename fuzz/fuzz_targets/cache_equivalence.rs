@@ -31,7 +31,7 @@ use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload
 use pollster::block_on;
 use t4::T4Caching;
 use t4::policy::{
-    Admit, BlockKey, BlockRead, CachePolicy, ChunkId, DiskHit, MemoryVictim, Tier, TierSizes,
+    Admit, BlockKey, BlockRead, ChunkId, DiskHit, MemoryVictim, PlacementPolicy, Tier, TierSizes,
     VictimAction,
 };
 use tempfile::TempDir;
@@ -433,8 +433,8 @@ impl Harness {
                 let script = script.clone();
                 let pickable = Arc::new(PickableChunks::default());
                 let shared = Arc::clone(&pickable);
-                let builder =
-                    builder.with_policy(move |sizes| ScriptedPolicy::new(sizes, script, shared));
+                let builder = builder
+                    .with_placement_policy(move |sizes| ScriptedPolicy::new(sizes, script, shared));
                 (builder, Some(pickable))
             }
         };
@@ -707,7 +707,7 @@ impl ScriptedPolicy {
     }
 }
 
-impl CachePolicy for ScriptedPolicy {
+impl PlacementPolicy for ScriptedPolicy {
     fn on_memory_hit(&self, chunk: ChunkId, _read: &BlockRead<'_>) {
         self.heard(Tier::Memory, chunk);
     }
@@ -721,7 +721,7 @@ impl CachePolicy for ScriptedPolicy {
         }
     }
 
-    fn on_miss(&self, _read: &BlockRead<'_>) -> Admit {
+    fn on_remote_read(&self, _read: &BlockRead<'_>) -> Admit {
         match self.next_byte() % 3 {
             0 => Admit::Memory,
             1 => Admit::Disk,

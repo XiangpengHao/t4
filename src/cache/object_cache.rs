@@ -1,9 +1,11 @@
 //! [`ObjectCache`]: reads, fills and evictions over the index and the two
-//! tiers, as its policy decides (`doc/03-cache.md`).
+//! tiers, as its policies decide (`doc/03-cache.md`, `doc/06-read-modes.md`).
 //!
 //! - **A read** copies the blocks memory holds, and reads those on disk,
-//!   moving one to memory if the policy says so. It names the rest, each
-//!   with where the policy said it goes.
+//!   moving one to memory if the placement policy says so. For the rest it
+//!   names the GETs the read policy plans, and what becomes of each block
+//!   they fetch: where the placement policy said it goes, the read's part
+//!   into its output, a block a tier holds already dropped.
 //! - **A fill** takes the caller's fetch of those blocks as its bytes come
 //!   in, into the read's output and each block where the read said.
 //! - **A tier with no free chunk** for a block evicts the victims the policy
@@ -14,7 +16,7 @@
 //! there. Request coalescing comes later.
 
 use std::future::Future;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU8, NonZeroU32};
 use std::ops::Range;
 
 use bytes::Bytes;
@@ -28,7 +30,11 @@ use super::chunk_pool::disk_chunks::{DiskChunkReader, DiskChunkWriter};
 use super::chunk_pool::memory_pool::{
     LentMemoryChunk, MemoryChunkReader, MemoryChunkWriter, MemoryPool,
 };
-use super::policy::{Admit, BlockRead, CachePolicy, DiskHit, MemoryVictim, Tier, VictimAction};
+use super::io_report::IoReport;
+use super::policy::{
+    Admit, BlockRead, BlockSource, DiskHit, FetchRuns, Io, MemoryVictim, PlacementPolicy,
+    PlannedGet, PlannedRead, ReadIntent, ReadPolicy, Tier, VictimAction,
+};
 use super::read_output::ReadOutput;
 use super::{BLOCK_SIZE_U64, BlockKey, ChunkId};
 use crate::PAGE_SIZE_U32;
@@ -44,7 +50,8 @@ pub(super) struct ObjectCache {
     /// Shared with the I/O in flight that lends its chunks.
     memory: Arc<MemoryPool>,
     disk: CacheFiles,
-    policy: Arc<dyn CachePolicy>,
+    placement: Arc<dyn PlacementPolicy>,
+    reads: Arc<dyn ReadPolicy>,
 }
 
 impl ObjectCache {
@@ -58,20 +65,28 @@ impl ObjectCache {
     const EVICTION_ROUNDS: usize = 4;
 
     /// A cache of `memory_chunks` chunks of memory and the chunks of
-    /// `disk`, all free, holding nothing, run by `policy`, which is built
-    /// for both counts.
+    /// `disk`, all free, holding nothing: its blocks placed by `placement`,
+    /// which is built for both counts, and its reads served as `reads`
+    /// plans them.
     pub(super) fn new(
         memory_chunks: NonZeroU32,
         disk: CacheFiles,
-        policy: Arc<dyn CachePolicy>,
+        placement: Arc<dyn PlacementPolicy>,
+        reads: Arc<dyn ReadPolicy>,
     ) -> Result<Self> {
         Ok(Self {
             paths: PathTable::new(),
             blocks: BlockTable::new(),
             memory: Arc::new(MemoryPool::new(memory_chunks)?),
             disk,
-            policy,
+            placement,
+            reads,
         })
+    }
+
+    /// The policy the cache's reads are served by, which hears their I/O.
+    pub(super) fn read_policy(&self) -> &dyn ReadPolicy {
+        &*self.reads
     }
 
     /// The file at `path`, the version of it with `e_tag` and `size`, as
@@ -89,11 +104,15 @@ impl ObjectCache {
 
     /// Reads `range` of `file`, clamped to the file, into the output of the
     /// [`PartialRead`] it returns: the bytes of blocks memory holds copied
-    /// in, those of blocks on disk read straight in. The read names what the
-    /// caller fetches for the rest, and takes it ([`PartialRead::fill`]).
+    /// in, those of blocks on disk read straight in. The read names the GETs
+    /// the caller makes for the rest, as the read policy planned them, and
+    /// takes their bytes ([`Self::receive`]).
     ///
-    /// The policy hears of every block: a hit in either tier, where a disk
-    /// hit goes, a miss and where its block goes once fetched.
+    /// The placement policy hears of every block: a hit in either tier,
+    /// where a disk hit goes, a remote read and where its block goes once
+    /// fetched,
+    /// and where each block a GET fetches past the read goes. The read
+    /// policy plans the GETs, and hears of every read from disk.
     ///
     /// # Errors
     ///
@@ -102,30 +121,47 @@ impl ObjectCache {
         &self,
         file: &CacheableFile<'_>,
         range: Range<u64>,
+        intent: Option<ReadIntent>,
     ) -> Result<PartialRead> {
         let plan = self.blocks.plan_read(file.version, range.clone());
         let mut read = PartialRead::new(file.version, plan.bytes())?;
+        let mut sources = Vec::with_capacity(plan.blocks().len());
+        let mut admissions = Vec::with_capacity(plan.blocks().len());
         let mut page_reads = Vec::new();
         let mut promotions = Vec::new();
         for &block in plan.blocks() {
-            let context =
-                BlockRead::new(block.key(), file.version.size(), range.clone(), file.path);
-            match self.hold(block.key(), block.location()) {
+            let context = BlockRead::new(
+                block.key(),
+                file.version.size(),
+                range.clone(),
+                file.path,
+                intent,
+                true,
+            );
+            let (source, admit) = match self.hold(block.key(), block.location()) {
                 HeldBlock::Memory(reader) => {
-                    self.policy.on_memory_hit(reader.chunk(), &context);
+                    self.placement.on_memory_hit(reader.chunk(), &context);
                     read.place_from_chunk(&block, reader.bytes());
+                    (BlockSource::Memory, None)
                 }
                 HeldBlock::Disk(reader) => {
-                    match self.policy.on_disk_hit(reader.chunk(), &context) {
+                    match self.placement.on_disk_hit(reader.chunk(), &context) {
                         DiskHit::Stay => {
+                            let report = self.report_disk_read(&reader, &block);
                             let pages = self.read_pages(&mut read, &reader, &block)?;
-                            page_reads.push((reader, pages));
+                            page_reads.push((reader, report.awaiting(pages)));
                         }
                         DiskHit::Promote => promotions.push((reader, block)),
                     }
+                    (BlockSource::Disk, None)
                 }
-                HeldBlock::Missing => read.miss(&block, self.policy.on_miss(&context)),
-            }
+                HeldBlock::Remote => (
+                    BlockSource::Remote,
+                    Some(self.placement.on_remote_read(&context)),
+                ),
+            };
+            sources.push(source);
+            admissions.push(admit);
         }
         // Every page read was submitted above, so they run at once, each
         // straight into the read's output. Each keeps its chunk held until
@@ -143,10 +179,89 @@ impl ObjectCache {
                 Promotion::InMemory(reader) => read.place_from_chunk(&block, reader.bytes()),
                 // No room in memory: the block stays, and the read takes its
                 // pages after all.
-                Promotion::NoRoom(on_disk) => self.read_pages(&mut read, &on_disk, &block)?.await?,
+                Promotion::NoRoom(on_disk) => {
+                    let report = self.report_disk_read(&on_disk, &block);
+                    let pages = self.read_pages(&mut read, &on_disk, &block)?;
+                    report.awaiting(pages).await?;
+                }
+            }
+        }
+        if sources.contains(&BlockSource::Remote) {
+            let first = plan.blocks()[0].key().index();
+            let planned = PlannedRead::new(
+                file.path,
+                file.version.size(),
+                plan.bytes(),
+                intent,
+                first,
+                &sources,
+            );
+            let mut gets = self.reads.plan(&planned);
+            // A plan the cache can't carry out fetches the read as the
+            // default does: a policy's mistake costs a read nothing.
+            if !planned.accepts(&gets) {
+                gets = FetchRuns.plan(&planned);
+            }
+            for get in gets.gets() {
+                let fates = get
+                    .blocks()
+                    .map(|index| match planned.source(index) {
+                        Some(BlockSource::Remote) => {
+                            let admit = admissions[(index - first) as usize]
+                                .expect("a remote block was admitted");
+                            BlockFate::Asked(admit)
+                        }
+                        Some(BlockSource::Memory | BlockSource::Disk) => BlockFate::Cached,
+                        None => self.widened_fate(file, &range, intent, index),
+                    })
+                    .collect();
+                read.fetches
+                    .push(PlannedFetch::new(&read.version, get, fates));
             }
         }
         Ok(read)
+    }
+
+    /// What becomes of block `index` of `file`, fetched by a GET widened
+    /// past the read of `range`: dropped if a tier holds it, else placed as
+    /// the placement policy says.
+    fn widened_fate(
+        &self,
+        file: &CacheableFile<'_>,
+        range: &Range<u64>,
+        intent: Option<ReadIntent>,
+        index: u32,
+    ) -> BlockFate {
+        let key = BlockKey::new(file.version.id(), index);
+        if self.blocks.get(key).is_some() {
+            return BlockFate::Cached;
+        }
+        let context = BlockRead::new(
+            key,
+            file.version.size(),
+            range.clone(),
+            file.path,
+            intent,
+            false,
+        );
+        BlockFate::Widened(self.placement.on_remote_read(&context))
+    }
+
+    /// Reports a read of `block`'s pages from the disk chunk `on_disk`
+    /// holds, started.
+    fn report_disk_read(
+        &self,
+        on_disk: &DiskChunkReader<'_>,
+        block: &PlannedBlock,
+    ) -> IoReport<'_> {
+        let pages = block.window().pages();
+        IoReport::start(
+            &*self.reads,
+            Io::DiskRead {
+                drive: on_disk.position().file(),
+                bytes: pages.end - pages.start,
+            },
+        )
     }
 
     /// Reads the pages of `block` that `read` needs from the disk chunk
@@ -166,10 +281,11 @@ impl ObjectCache {
         self.disk.read_into(on_disk, pages.start, into)
     }
 
-    /// Takes `fetch`, one of `read`'s fetches, as its bytes come in
-    /// ([`FetchedBlocks`]): each into the read's output, over the pages of
-    /// it the fetch covers, and each block whole into its place in the
-    /// cache, where the read said it goes.
+    /// Takes `fetch`, the bytes of one of `read`'s GETs, as they come in
+    /// ([`FetchedBlocks`]): each block the read asked for into its output,
+    /// over the pages of it the block covers, and each block whole into its
+    /// place in the cache, where the placement policy said it goes; the
+    /// bytes of blocks the cache holds already dropped.
     ///
     /// # Errors
     ///
@@ -177,31 +293,38 @@ impl ObjectCache {
     ///
     /// # Panics
     ///
-    /// If `fetch` isn't blocks the read missed, from a block's start.
+    /// If `fetch` isn't the bytes of one of the read's GETs.
     pub(super) fn receive(
         &self,
         read: &mut PartialRead,
         fetch: Range<u64>,
     ) -> Result<FetchedBlocks<'_>> {
-        assert!(
-            fetch.start.is_multiple_of(BLOCK_SIZE_U64),
-            "a fetch starts at a block"
-        );
-        let first =
-            u32::try_from(fetch.start / BLOCK_SIZE_U64).expect("a file's block numbers fit a u32");
-        let count = u32::try_from((fetch.end - fetch.start).div_ceil(BLOCK_SIZE_U64))
-            .expect("a file's block numbers fit a u32");
-        let landings = (first..first + count)
-            .map(|index| Landing::Due(read.admission(index)))
-            .collect();
+        let planned = read
+            .fetches
+            .iter()
+            .find(|planned| planned.bytes == fetch)
+            .expect("a fetch is one the read planned");
+        let (first, race, fates) = (planned.first, planned.race, planned.fates.clone());
+        let mut blocks = Vec::with_capacity(fates.len());
+        for (index, fate) in (first..).zip(fates) {
+            let (landing, output) = match fate {
+                BlockFate::Asked(admit) => (
+                    Landing::Due(admit),
+                    read.lend_for_block(read.version.block_range(index))?,
+                ),
+                BlockFate::Widened(admit) => (Landing::Due(admit), None),
+                BlockFate::Cached => (Landing::Nowhere, None),
+            };
+            blocks.push(FetchedBlock { landing, output });
+        }
         Ok(FetchedBlocks {
             cache: self,
             version: read.version,
-            output: read.lend_for_fetch(&fetch)?,
             range: fetch,
+            race,
             received: 0,
             first,
-            landings,
+            blocks,
         })
     }
 
@@ -273,7 +396,7 @@ impl ObjectCache {
                     .blocks
                     .insert_if_absent(key, Location::Memory(reader.chunk()))
                 {
-                    self.policy.on_admit(Tier::Memory, reader.chunk(), key);
+                    self.placement.on_admit(Tier::Memory, reader.chunk(), key);
                 } else {
                     // Another fetch of the block cached it first. No entry
                     // names this chunk: it goes back when `reader` drops.
@@ -289,7 +412,7 @@ impl ObjectCache {
                     .blocks
                     .insert_if_absent(key, Location::Disk(reader.chunk()))
                 {
-                    self.policy.on_admit(Tier::Disk, reader.chunk(), key);
+                    self.placement.on_admit(Tier::Disk, reader.chunk(), key);
                 } else {
                     reader.unpublish();
                 }
@@ -320,7 +443,16 @@ impl ObjectCache {
             .and_then(|len| NonZeroU32::new(len.next_multiple_of(PAGE_SIZE_U32)))
             .expect("a block is a chunk's bytes or fewer, one or more");
         let (buffer, lent) = writer.lend_for_read(&self.memory, pages);
-        let filled = self.disk.read_chunk_start(&on_disk, buffer).await?;
+        let report = IoReport::start(
+            &*self.reads,
+            Io::DiskRead {
+                drive: on_disk.position().file(),
+                bytes: pages.get(),
+            },
+        );
+        let filled = report
+            .awaiting(self.disk.read_chunk_start(&on_disk, buffer))
+            .await?;
         let block = on_disk.block();
         let in_memory = lent.publish(filled, block);
         let (from, to) = (
@@ -329,7 +461,8 @@ impl ObjectCache {
         );
         if self.blocks.replace_if(block, from, to) {
             on_disk.unpublish();
-            self.policy.on_admit(Tier::Memory, in_memory.chunk(), block);
+            self.placement
+                .on_admit(Tier::Memory, in_memory.chunk(), block);
         } else {
             in_memory.unpublish();
         }
@@ -344,7 +477,7 @@ impl ObjectCache {
                 return Ok(Some(writer));
             }
             let batch = Self::eviction_batch(self.memory.chunk_count());
-            let victims = self.policy.pick_memory_victims(batch);
+            let victims = self.placement.pick_memory_victims(batch);
             if victims.is_empty() {
                 return Ok(None);
             }
@@ -361,7 +494,7 @@ impl ObjectCache {
                 return Some(writer);
             }
             let batch = Self::eviction_batch(self.disk.chunks().chunk_count());
-            let victims = self.policy.pick_disk_victims(batch);
+            let victims = self.placement.pick_disk_victims(batch);
             if victims.is_empty() {
                 return None;
             }
@@ -413,7 +546,7 @@ impl ObjectCache {
             return Ok(MoveToDisk::NoBlock);
         };
         let block = victim.block();
-        let picked = PickedVictim::new(self.policy.as_ref(), chunk, block);
+        let picked = PickedVictim::new(self.placement.as_ref(), chunk, block);
         let Some(writer) = self.allocate_disk() else {
             return Ok(MoveToDisk::DiskFull);
         };
@@ -430,7 +563,7 @@ impl ObjectCache {
             // New reads go to disk. Those that found the old entry finish in
             // memory, and the chunk goes free after them.
             victim.unpublish();
-            self.policy.on_admit(Tier::Disk, on_disk.chunk(), block);
+            self.placement.on_admit(Tier::Disk, on_disk.chunk(), block);
             Ok(MoveToDisk::Moved)
         } else {
             // The block left memory another way while it was written: the
@@ -464,7 +597,7 @@ impl ObjectCache {
     /// Drops `block`'s entry if it names `location`, the chunk there just
     /// `closed` by this eviction; whether it was. Closed first, so a read
     /// that finds the entry from then on finds the chunk closed, and takes
-    /// the block as missing.
+    /// the block as remote.
     fn forget_if_closed(&self, closed: bool, block: BlockKey, location: Location) -> bool {
         if closed {
             self.blocks.remove_if(block, location);
@@ -530,14 +663,14 @@ impl ObjectCache {
                 Some(Location::Disk(chunk)) => {
                     self.disk.chunks().read(chunk, key).map(HeldBlock::Disk)
                 }
-                None => return HeldBlock::Missing,
+                None => return HeldBlock::Remote,
             };
             if let Some(held) = held {
                 return held;
             }
             let again = self.blocks.get(key);
             if again == location {
-                return HeldBlock::Missing;
+                return HeldBlock::Remote;
             }
             location = again;
         }
@@ -558,11 +691,12 @@ impl CacheableFile<'_> {
     }
 }
 
-/// A block a read holds while it takes its bytes, or found missing.
+/// A block a read holds while it takes its bytes, or found remote: in
+/// neither memory nor disk.
 enum HeldBlock<'cache> {
     Memory(MemoryChunkReader<'cache>),
     Disk(DiskChunkReader<'cache>),
-    Missing,
+    Remote,
 }
 
 /// What became of a promotion.
@@ -579,14 +713,14 @@ enum Promotion<'cache> {
 /// or the policy never picks it again. Dropping this gives it back, unless
 /// the move [settled](Self::settle) first.
 struct PickedVictim<'c> {
-    policy: &'c dyn CachePolicy,
+    policy: &'c dyn PlacementPolicy,
     chunk: ChunkId,
     block: BlockKey,
     settled: bool,
 }
 
 impl<'c> PickedVictim<'c> {
-    fn new(policy: &'c dyn CachePolicy, chunk: ChunkId, block: BlockKey) -> Self {
+    fn new(policy: &'c dyn PlacementPolicy, chunk: ChunkId, block: BlockKey) -> Self {
         Self {
             policy,
             chunk,
@@ -626,17 +760,14 @@ enum MoveToDisk {
 }
 
 /// A read that the cache served in part: the bytes it takes, the output they
-/// land in, the ranges of the file to fetch for the rest, whole blocks,
-/// adjacent ones in one, and where each block fetched goes.
+/// land in, and the GETs that fetch the rest, as the read policy planned
+/// them, with what becomes of each block they fetch.
 #[derive(Debug)]
 pub(super) struct PartialRead {
     version: FileVersion,
     /// Where the read's bytes land, the caller's once filled.
     output: ReadOutput,
-    fetches: Vec<Range<u64>>,
-    /// The blocks the read missed, by number, in order, and where each goes
-    /// once fetched, as the policy said.
-    missed: Vec<(u32, Admit)>,
+    fetches: Vec<PlannedFetch>,
 }
 
 impl PartialRead {
@@ -645,7 +776,6 @@ impl PartialRead {
             version,
             output: ReadOutput::new(bytes)?,
             fetches: Vec::new(),
-            missed: Vec::new(),
         })
     }
 
@@ -655,15 +785,19 @@ impl PartialRead {
         self.output.asked()
     }
 
-    /// The ranges of the file to fetch, one GET each, in order.
-    pub(super) fn fetches(&self) -> &[Range<u64>] {
-        &self.fetches
+    /// The file's bytes each GET fetches, in the order planned.
+    pub(super) fn fetches(&self) -> Vec<Range<u64>> {
+        self.fetches
+            .iter()
+            .map(|planned| planned.bytes.clone())
+            .collect()
     }
 
-    /// The read's output over the pages `fetch` covers, lent for the
-    /// fetch's bytes to land in; `None` if it covers none.
-    fn lend_for_fetch(&mut self, fetch: &Range<u64>) -> Result<Option<FetchedOutput>> {
-        let Some(pages) = self.output.pages_over(fetch.clone()) else {
+    /// The read's output over the pages of `block`, the file's bytes of a
+    /// block it asked for, lent for the block's fetched bytes to land in;
+    /// `None` if the output covers none of them.
+    fn lend_for_block(&mut self, block: Range<u64>) -> Result<Option<FetchedOutput>> {
+        let Some(pages) = self.output.pages_over(block) else {
             return Ok(None);
         };
         Ok(Some(FetchedOutput {
@@ -672,31 +806,11 @@ impl PartialRead {
         }))
     }
 
-    /// The read's bytes, once the caller has filled what it missed: `None`
+    /// The read's bytes, once the caller has filled what came remote: `None`
     /// if a read from disk it started is still writing them, as after one
     /// failed.
     pub(super) fn into_bytes(self) -> Option<Bytes> {
         self.output.into_bytes()
-    }
-
-    /// Notes that the read missed `block`, which goes where `admit` says
-    /// once fetched: it joins the fetch before it if they're adjacent.
-    fn miss(&mut self, block: &PlannedBlock, admit: Admit) {
-        self.missed.push((block.key().index(), admit));
-        let missing = block.object_range();
-        match self.fetches.last_mut() {
-            Some(run) if run.end == missing.start => run.end = missing.end,
-            _ => self.fetches.push(missing),
-        }
-    }
-
-    /// Where block `index`, which the read missed, goes once fetched.
-    fn admission(&self, index: u32) -> Admit {
-        let at = self
-            .missed
-            .binary_search_by_key(&index, |&(missed, _)| missed)
-            .expect("a fetch holds blocks the read missed");
-        self.missed[at].1
     }
 
     /// Copies the part of `block` the read takes from `chunk`, the whole of
@@ -715,6 +829,42 @@ impl PartialRead {
     }
 }
 
+/// One GET of a read's plan: the file's bytes it fetches, whole blocks,
+/// how many requests race for them, and what becomes of each block.
+#[derive(Debug)]
+struct PlannedFetch {
+    bytes: Range<u64>,
+    race: NonZeroU8,
+    first: u32,
+    fates: Vec<BlockFate>,
+}
+
+impl PlannedFetch {
+    /// `get` of `version`, its blocks' fates `fates`, the first block's
+    /// first.
+    fn new(version: &FileVersion, get: &PlannedGet, fates: Vec<BlockFate>) -> Self {
+        let blocks = get.blocks();
+        Self {
+            bytes: version.block_range(blocks.start).start..version.block_range(blocks.end - 1).end,
+            race: get.race(),
+            first: blocks.start,
+            fates,
+        }
+    }
+}
+
+/// What becomes of a block a GET fetches.
+#[derive(Clone, Copy, Debug)]
+enum BlockFate {
+    /// The read asked for it: into the read's output, and the cache, where
+    /// the placement policy said.
+    Asked(Admit),
+    /// A GET widened past the read fetched it: into the cache alone.
+    Widened(Admit),
+    /// A tier holds it already: its bytes dropped.
+    Cached,
+}
+
 /// A fetch's bytes as they come in ([`ObjectCache::receive`]), each put
 /// where it goes: into the read's output, over the pages of it the fetch
 /// covers; and each block's into its place in the cache, which it takes as
@@ -729,20 +879,31 @@ pub(super) struct FetchedBlocks<'c> {
     version: FileVersion,
     /// The file's bytes the fetch holds: whole blocks, from a block's start.
     range: Range<u64>,
+    race: NonZeroU8,
     /// How many of them have come in.
     received: u64,
-    /// The read's output over the pages the fetch covers, lent.
-    output: Option<FetchedOutput>,
     /// The first block's number.
     first: u32,
-    /// Where each block's bytes land, the first block's first.
-    landings: Vec<Landing<'c>>,
+    /// Where each block's bytes go, the first block's first.
+    blocks: Vec<FetchedBlock<'c>>,
+}
+
+/// Where one fetched block's bytes go: its place in the cache, and the
+/// read's output over its pages, if the read asked for it.
+struct FetchedBlock<'c> {
+    landing: Landing<'c>,
+    output: Option<FetchedOutput>,
 }
 
 impl FetchedBlocks<'_> {
     /// The file's bytes the fetch holds.
     pub(super) fn range(&self) -> Range<u64> {
         self.range.clone()
+    }
+
+    /// How many identical requests race for them.
+    pub(super) fn race(&self) -> NonZeroU8 {
+        self.race
     }
 
     /// Takes `piece`, the fetch's next bytes.
@@ -755,9 +916,6 @@ impl FetchedBlocks<'_> {
         if self.received + piece.len() as u64 > len {
             return Err(Self::wrong_length(&self.range, "more"));
         }
-        if let Some(output) = &mut self.output {
-            output.copy_in(self.range.start + self.received, piece);
-        }
         while !piece.is_empty() {
             let index = PartialRead::offset(self.received / BLOCK_SIZE_U64);
             let within = PartialRead::offset(self.received % BLOCK_SIZE_U64);
@@ -765,7 +923,12 @@ impl FetchedBlocks<'_> {
                 self.decide_landing(index).await;
             }
             let taken = piece.len().min(self.block_len(index) - within);
-            self.landings[index].copy_in(within, &piece[..taken]);
+            let at = self.range.start + self.received;
+            let block = &mut self.blocks[index];
+            if let Some(output) = &mut block.output {
+                output.copy_in(at, &piece[..taken]);
+            }
+            block.landing.copy_in(within, &piece[..taken]);
             piece = &piece[taken..];
             self.received += taken as u64;
         }
@@ -785,14 +948,14 @@ impl FetchedBlocks<'_> {
             cache,
             version,
             first,
-            landings,
-            output,
+            blocks,
             ..
         } = self;
-        // The read's output is whole: the read may take its bytes.
-        drop(output);
-        let cached = (first..).zip(landings).map(|(index, landing)| {
-            cache.cache_landed(BlockKey::new(version.id(), index), landing)
+        let cached = (first..).zip(blocks).map(|(index, block)| {
+            // The read's output over the block is whole: the read may take
+            // its bytes.
+            drop(block.output);
+            cache.cache_landed(BlockKey::new(version.id(), index), block.landing)
         });
         join_all(cached).await;
         Ok(())
@@ -800,10 +963,11 @@ impl FetchedBlocks<'_> {
 
     /// Decides where block `index`, its first byte come, lands.
     async fn decide_landing(&mut self, index: usize) {
-        if let Landing::Due(admit) = self.landings[index] {
+        if let Landing::Due(admit) = self.blocks[index].landing {
             let number = self.first + u32::try_from(index).expect("a fetch's blocks fit a u32");
             let key = BlockKey::new(self.version.id(), number);
-            self.landings[index] = self.cache.landing(key, admit, self.block_len(index)).await;
+            let landing = self.cache.landing(key, admit, self.block_len(index)).await;
+            self.blocks[index].landing = landing;
         }
     }
 
