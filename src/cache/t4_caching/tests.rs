@@ -592,6 +592,7 @@ impl Heard {
             IoPhase::Started => "started",
             IoPhase::Answered { .. } => "answered",
             IoPhase::Finished { .. } => "finished",
+            IoPhase::Landed { .. } => "landed",
             IoPhase::Failed { .. } => "failed",
             IoPhase::Cancelled { .. } => "cancelled",
         };
@@ -844,6 +845,27 @@ fn racing_gets_take_the_first_answer() {
         1,
         "one answer taken: {heard:?}"
     );
+}
+
+/// A GET is heard finished once its body is in, and landed once its blocks
+/// are cached, here written to disk.
+#[test]
+fn a_get_is_heard_landed_after_it_finished() {
+    let reads = ScriptedReads::new(|read| FetchRuns.plan(read));
+    let (_dir, store, _inner, _, data) = planned_by(&reads, Admit::Disk);
+    assert_eq!(
+        get_range(&store, &Path::from("a"), 0..MIB),
+        data.slice(0..MIB as usize)
+    );
+    let phases: Vec<_> = reads
+        .heard()
+        .into_iter()
+        .filter_map(|heard| match heard {
+            Heard::Get { phase, .. } => Some(phase),
+            Heard::DiskRead { .. } => None,
+        })
+        .collect();
+    assert_eq!(phases, ["started", "answered", "finished", "landed"]);
 }
 
 /// A plan that leaves a remote block out can't be carried out: the read fetches its

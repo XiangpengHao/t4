@@ -23,8 +23,6 @@
 //!   remote one, after a first-byte latency and at a bandwidth.
 //! - [`synthetic_objects`]: an object store whose objects' bytes are
 //!   computed, not stored, for the simulated store to serve.
-//! - [`raw_vortex_reads`]: Vortex tables whose segment reads reach the
-//!   store unmerged, each its own range, as Parquet's reads do.
 
 pub mod fixed_placement_policy;
 pub mod host_counters;
@@ -33,7 +31,6 @@ pub mod io_latency;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod http1_connection;
 pub mod ktls_transport;
-pub mod raw_vortex_reads;
 pub mod replay;
 pub mod request_cost;
 pub mod request_trace;

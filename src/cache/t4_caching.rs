@@ -22,6 +22,7 @@ use std::num::NonZeroU32;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::PoisonError;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bbtree::BBTreeMap;
@@ -267,7 +268,9 @@ impl T4Caching {
     /// still the version with `e_tag`, and hands each piece of the answer to
     /// `blocks` as it comes in. As many identical GETs as the plan says race
     /// for them, sent at once: the first answer takes the bytes, and the
-    /// others are dropped, their requests with them.
+    /// others are dropped, their requests with them. The read policy hears
+    /// the GET finished once its body is in, and landed once its blocks are
+    /// cached.
     async fn fetch(
         &self,
         location: &Path,
@@ -289,7 +292,7 @@ impl T4Caching {
                 bytes: bytes.clone(),
                 racer,
             };
-            let report = IoReport::start(self.cache.read_policy(), get);
+            let mut report = IoReport::start(self.cache.read_policy(), get);
             let get = self.inner.get_opts(location, options.clone());
             async move {
                 match get.await {
@@ -305,16 +308,29 @@ impl T4Caching {
             }
             .boxed()
         });
-        let ((answer, report), _losers) = select_ok(racers).await?;
-        let landed = async {
+        let ((answer, mut report), _losers) = select_ok(racers).await?;
+        // The time the body's pieces took to land, apart from the time
+        // spent waiting for them.
+        let mut landing = Duration::ZERO;
+        let received = async {
             let mut body = answer.into_stream();
             while let Some(piece) = body.try_next().await? {
+                let started = Instant::now();
                 blocks.land(&piece).await.map_err(Self::cache_error)?;
+                landing += started.elapsed();
             }
             Ok::<_, object_store::Error>(())
         };
-        report.awaiting(landed).await?;
-        blocks.finish().await.map_err(Self::cache_error)
+        match received.await {
+            Ok(()) => report.finished(bytes.end - bytes.start),
+            Err(error) => {
+                report.failed();
+                return Err(error);
+            }
+        }
+        blocks.finish().await.map_err(Self::cache_error)?;
+        report.landed(landing);
+        Ok(())
     }
 
     /// A failure of the cache's, as the store's error.

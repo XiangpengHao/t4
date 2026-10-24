@@ -276,6 +276,18 @@ pub enum IoPhase {
         bytes: u64,
         after: Duration,
     },
+    /// A GET's blocks are cached where they landed, once its body was all
+    /// in: in memory, or written to disk. How its time went, since it
+    /// started: its answer began after `answered` and was all in after
+    /// `received`, of which `landing` went to landing its pieces in the
+    /// cache as they came rather than to waiting for them; its blocks were
+    /// cached after `after`.
+    Landed {
+        answered: Duration,
+        received: Duration,
+        landing: Duration,
+        after: Duration,
+    },
     Failed {
         after: Duration,
     },

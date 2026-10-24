@@ -8,10 +8,17 @@
 //! for room included (a block bound for disk is written after); a disk
 //! read's end is when its bytes are in the read's output, or in memory for a
 //! block it moves there.
+//!
+//! Kept if asked ([`IoLatencies::keeping_gets`]), each GET's phases too, as
+//! t4 reports them once its blocks are cached: its first byte, its body in,
+//! the part of that spent landing its pieces, and its blocks cached, under
+//! the benchmark step it served.
 
 use std::fmt;
-use std::sync::Arc;
+use std::io::{self, Write};
+use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use t4::policy::{Io, IoEvent, IoPhase, LocatedRead, ReadPlan, ReadPolicy};
@@ -52,9 +59,41 @@ pub struct IoLatencies {
     /// Given up on before they ended, as a race's losers are.
     cancelled: AtomicU64,
     failed: AtomicU64,
+    /// Each GET's phases, if kept.
+    gets: Option<GetPhases>,
 }
 
 impl IoLatencies {
+    /// Latencies that keep each GET's phases as well.
+    pub fn keeping_gets() -> Self {
+        Self {
+            gets: Some(GetPhases {
+                step: Mutex::new("setup".into()),
+                rows: Mutex::default(),
+            }),
+            ..Self::default()
+        }
+    }
+
+    /// Keeps the GETs from now on under `step`, if they are kept.
+    pub fn begin_step(&self, step: &str) {
+        if let Some(gets) = &self.gets {
+            *gets.step.lock().unwrap_or_else(PoisonError::into_inner) = step.into();
+        }
+    }
+
+    /// Writes the GETs kept as CSV, a header row first, times in ms.
+    ///
+    /// # Errors
+    ///
+    /// If `out` fails.
+    pub fn write_gets_csv(&self, out: impl Write) -> io::Result<()> {
+        match &self.gets {
+            Some(gets) => gets.write_csv(out),
+            None => Ok(()),
+        }
+    }
+
     /// The latencies since they were last taken, and every count back to 0.
     pub fn take(&self) -> TakenIoLatencies {
         TakenIoLatencies {
@@ -73,6 +112,13 @@ impl IoLatencies {
             (Io::DiskRead { .. }, IoPhase::Finished { after, .. }) => {
                 Some((&self.disk_read_done, after))
             }
+            (Io::Get { path, bytes, racer }, IoPhase::Landed { .. }) => {
+                if let Some(gets) = &self.gets {
+                    gets.keep(path, bytes, *racer, event.phase());
+                }
+                None
+            }
+            (Io::DiskRead { .. }, IoPhase::Landed { .. }) => None,
             (_, IoPhase::Cancelled { .. }) => {
                 self.cancelled.fetch_add(1, Ordering::Relaxed);
                 None
@@ -86,6 +132,53 @@ impl IoLatencies {
         if let Some((histogram, after)) = histogram {
             histogram.record(after);
         }
+    }
+}
+
+/// Every GET t4 made and landed, its phases as t4 reported them, under the
+/// step it served.
+#[derive(Debug)]
+struct GetPhases {
+    step: Mutex<String>,
+    rows: Mutex<Vec<String>>,
+}
+
+impl GetPhases {
+    const CSV_COLUMNS: &str = "step,path,start,end,racer,answered_ms,received_ms,landing_ms,landed_ms";
+
+    /// Keeps the GET of `bytes` of `path`, racer `racer`, as its `landed`
+    /// phase tells: a CSV row.
+    fn keep(&self, path: &[u8], bytes: &Range<u64>, racer: u8, landed: IoPhase) {
+        let IoPhase::Landed {
+            answered,
+            received,
+            landing,
+            after,
+        } = landed
+        else {
+            return;
+        };
+        let ms = |d: Duration| d.as_secs_f64() * 1e3;
+        let step = self.step.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let row = format!(
+            "{step},{},{},{},{racer},{:.3},{:.3},{:.3},{:.3}",
+            String::from_utf8_lossy(path),
+            bytes.start,
+            bytes.end,
+            ms(answered),
+            ms(received),
+            ms(landing),
+            ms(after)
+        );
+        self.rows.lock().unwrap_or_else(PoisonError::into_inner).push(row);
+    }
+
+    fn write_csv(&self, mut out: impl Write) -> io::Result<()> {
+        writeln!(out, "{}", Self::CSV_COLUMNS)?;
+        for row in self.rows.lock().unwrap_or_else(PoisonError::into_inner).iter() {
+            writeln!(out, "{row}")?;
+        }
+        out.flush()
     }
 }
 

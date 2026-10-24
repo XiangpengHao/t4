@@ -2,18 +2,21 @@
 //! (`doc/06-read-modes.md`, decision 9).
 
 use std::future::Future;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::policy::{Io, IoEvent, IoPhase, ReadPolicy};
 
 /// An I/O, reported as it goes: started when made; then answered, and
 /// finished or failed; given up on if dropped before either, as a race's
-/// losers are.
+/// losers are. A GET is reported landed too, once its blocks are cached.
 pub(super) struct IoReport<'r> {
     policy: &'r dyn ReadPolicy,
     io: Io<'r>,
     started: Instant,
     ended: bool,
+    /// When its answer began, and when it was all in, since it started.
+    answered: Duration,
+    received: Duration,
 }
 
 impl<'r> IoReport<'r> {
@@ -25,21 +28,36 @@ impl<'r> IoReport<'r> {
             io,
             started: Instant::now(),
             ended: false,
+            answered: Duration::ZERO,
+            received: Duration::ZERO,
         }
     }
 
     /// Reports its answer begun: a GET's response come, its body to follow.
-    pub(super) fn answered(&self) {
+    pub(super) fn answered(&mut self) {
+        self.answered = self.started.elapsed();
         self.report(IoPhase::Answered {
-            after: self.started.elapsed(),
+            after: self.answered,
         });
     }
 
     /// Reports it done, `bytes` moved.
-    pub(super) fn finished(mut self, bytes: u64) {
+    pub(super) fn finished(&mut self, bytes: u64) {
         self.ended = true;
+        self.received = self.started.elapsed();
         self.report(IoPhase::Finished {
             bytes,
+            after: self.received,
+        });
+    }
+
+    /// Reports a GET's blocks cached, once it finished: `landing` of its
+    /// time went to landing its pieces in the cache as they came.
+    pub(super) fn landed(self, landing: Duration) {
+        self.report(IoPhase::Landed {
+            answered: self.answered,
+            received: self.received,
+            landing,
             after: self.started.elapsed(),
         });
     }
@@ -54,7 +72,7 @@ impl<'r> IoReport<'r> {
     /// Waits for `io`, the I/O reported, and reports it finished, its
     /// bytes moved, or failed.
     pub(super) async fn awaiting<T, E>(
-        self,
+        mut self,
         io: impl Future<Output = Result<T, E>>,
     ) -> Result<T, E> {
         let done = io.await;

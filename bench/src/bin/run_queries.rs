@@ -9,15 +9,20 @@
 //! - **Passes,** the default: one session makes `--passes` passes over the
 //!   queries. t4's cache lives as long as the session, so the first pass
 //!   runs cold and the rest warm, each query warmed by those before it too.
-//!   `--trace` records every call made of the tables' stores, for
-//!   `replay_reads`. `bench/clickbench/run.sh` runs ClickBench every way
-//!   that benchmark compares.
+//!   Its trace (`--trace`) is what `replay_reads` replays.
+//!   `bench/clickbench/run.sh` runs ClickBench every way that benchmark
+//!   compares.
 //! - **Cold runs** (`--cold-runs n`): each query in `n` sessions of its own,
 //!   one after another, each starting with t4's cache and DataFusion's
 //!   empty and running the query `--passes` times, the first cold. So each
 //!   query's cold time, its spread over the runs, and its cold time less its
 //!   warm, what it waits on the remote at most, are measured alike.
 //!   `bench/end_to_end/run.sh` runs these.
+//!
+//! Either way, `--trace` records every call made of the tables' stores,
+//! under the step it served: `setup` and `p{pass}q{query}` for passes,
+//! `r{run}q{query}setup` and `r{run}p{pass}q{query}` for cold runs; and
+//! `--get-phases` each GET t4 makes, in phases, under the same steps.
 //!
 //! A session's setup registers the tables: DataFusion lists their files and
 //! reads their footers, which it keeps for the session, so a query's cold
@@ -46,17 +51,16 @@ use std::time::{Duration, Instant};
 use clap::{Parser, ValueEnum};
 use datafusion::datasource::listing::ListingOptions;
 use datafusion::error::{DataFusionError, Result};
-use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use t4_bench::host_counters::{CgroupMemory, HostCounters, HostProbe};
 use t4_bench::io_latency::{IoLatencies, TakenIoLatencies};
-use t4_bench::raw_vortex_reads::RawVortexFormat;
 use t4_bench::replay::LatencySummary;
 use t4_bench::request_cost::{CountedStore, RequestCounter, RequestCounts, RequestPrices};
 use t4_bench::request_trace::{RequestTrace, TracedStore};
 use t4_bench::table_store::{CacheOptions, HttpTransport, TableLocation};
 use vortex::VortexSessionDefault;
 use vortex::session::VortexSession;
+use vortex_datafusion::VortexFormat;
 
 /// The allocator: mimalloc unless built `--no-default-features`, as the
 /// `mimalloc` feature in `bench/Cargo.toml` explains. A static, as Rust takes
@@ -108,10 +112,14 @@ struct Args {
     /// directory, summed over every one given (Linux only).
     #[arg(long = "drive-dir")]
     drive_dirs: Vec<PathBuf>,
-    /// Record every call made of the tables' stores, as CSV, here; passes
-    /// only, not `--cold-runs`.
+    /// Record every call made of the tables' stores, as CSV, here.
     #[arg(long)]
     trace: Option<PathBuf>,
+    /// Record each GET t4 makes in phases, as CSV, here: its first byte, its
+    /// body in, the part of that spent landing its pieces, and its blocks
+    /// cached.
+    #[arg(long)]
+    get_phases: Option<PathBuf>,
     /// Where each step's time, requests and bytes go, as CSV.
     #[arg(long)]
     out: PathBuf,
@@ -213,11 +221,7 @@ impl QuerySession {
                         .await?;
                 }
                 TableFormat::Vortex => {
-                    let store = self
-                        .context
-                        .runtime_env()
-                        .object_store(ObjectStoreUrl::parse(table.location.store_url())?)?;
-                    let format = RawVortexFormat::new(self.vortex.clone(), store);
+                    let format = VortexFormat::new(self.vortex.clone());
                     let options = ListingOptions::new(Arc::new(format));
                     self.context
                         .register_listing_table(&table.name, url, options, None, None)
@@ -375,7 +379,10 @@ impl Benchmark {
         let meters = Meters {
             probe: HostProbe::new(&args.drive_dirs)?,
             requests: Arc::default(),
-            latencies: Arc::default(),
+            latencies: Arc::new(match args.get_phases {
+                Some(_) => IoLatencies::keeping_gets(),
+                None => IoLatencies::default(),
+            }),
             cached: args.cache.is_set(),
         };
         let mut out = BufWriter::new(File::create(&args.out)?);
@@ -398,41 +405,68 @@ impl Benchmark {
     /// One session, `--passes` passes over the chosen queries; every call
     /// made of the tables' stores recorded, if `--trace` asks.
     async fn run_passes(&mut self) -> Result<()> {
-        let trace = self
-            .args
-            .trace
-            .as_ref()
-            .map(|_| Arc::new(RequestTrace::new()));
+        let trace = self.new_trace();
         let session = self.start_session(0, trace.as_ref()).await?;
         for pass in 0..self.args.passes {
             for query in self.chosen() {
-                if let Some(trace) = &trace {
-                    trace.begin_query(&format!("p{pass}q{query}"));
-                }
+                self.begin_step(trace.as_deref(), &format!("p{pass}q{query}"));
                 self.run_query(&session, 0, pass, query).await?;
             }
         }
-        if let (Some(trace), Some(path)) = (&trace, &self.args.trace) {
-            trace.write_csv(BufWriter::new(File::create(path)?))?;
-            println!("{} requests to {}", trace.len(), path.display());
-        }
-        Ok(())
+        self.write_records(trace.as_deref())
     }
 
     /// Each chosen query in `runs` sessions of its own, `--passes` runs of
-    /// it in each; and its cold and warm times summed up.
+    /// it in each; and its cold and warm times summed up. Every call made
+    /// of the tables' stores recorded, if `--trace` asks.
     async fn run_cold(&mut self, runs: NonZeroUsize) -> Result<()> {
+        let trace = self.new_trace();
         for query in self.chosen() {
             let (mut cold, mut warm) = (Vec::new(), Vec::new());
             for run in 0..runs.get() {
-                let session = self.start_session(run, None).await?;
+                self.begin_step(trace.as_deref(), &format!("r{run}q{query}setup"));
+                let session = self.start_session(run, trace.as_ref()).await?;
                 for pass in 0..self.args.passes {
+                    self.begin_step(trace.as_deref(), &format!("r{run}p{pass}q{query}"));
                     let elapsed = self.run_query(&session, run, pass, query).await?;
                     let times = if pass == 0 { &mut cold } else { &mut warm };
                     times.push(elapsed);
                 }
             }
             Self::print_spread(query, &cold, &warm);
+        }
+        self.write_records(trace.as_deref())
+    }
+
+    /// A trace to record the stores' calls in, if `--trace` asks for one.
+    fn new_trace(&self) -> Option<Arc<RequestTrace>> {
+        self.args
+            .trace
+            .as_ref()
+            .map(|_| Arc::new(RequestTrace::new()))
+    }
+
+    /// Records what follows under `step`: the calls in `trace`, and t4's
+    /// GETs, if kept.
+    fn begin_step(&self, trace: Option<&RequestTrace>, step: &str) {
+        if let Some(trace) = trace {
+            trace.begin_query(step);
+        }
+        self.meters.latencies.begin_step(step);
+    }
+
+    /// Writes `trace` where `--trace` says, and t4's GETs where
+    /// `--get-phases` says.
+    fn write_records(&self, trace: Option<&RequestTrace>) -> Result<()> {
+        if let (Some(trace), Some(path)) = (trace, &self.args.trace) {
+            trace.write_csv(BufWriter::new(File::create(path)?))?;
+            println!("{} requests to {}", trace.len(), path.display());
+        }
+        if let Some(path) = &self.args.get_phases {
+            self.meters
+                .latencies
+                .write_gets_csv(BufWriter::new(File::create(path)?))?;
+            println!("t4's GETs to {}", path.display());
         }
         Ok(())
     }
@@ -514,11 +548,6 @@ impl Benchmark {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    if args.cold_runs.is_some() && args.trace.is_some() {
-        return Err(DataFusionError::Configuration(
-            "--trace records passes, not --cold-runs".into(),
-        ));
-    }
     let cold_runs = args.cold_runs;
     let mut benchmark = Benchmark::new(args)?;
     match cold_runs {

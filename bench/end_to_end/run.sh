@@ -30,6 +30,9 @@
 #   MEMORY_GIB t4's memory tier (default 128)
 #   DISK_GIB   t4's cache file on each SSD (default 64)
 #   DOLLARS_PER_HOUR  what the box costs
+#   TRACE      if set, every call made of a store's tables, each run's apart,
+#              as CSV beside its results: <store>.trace.csv; and through t4,
+#              each GET it makes in phases: <store>.gets.csv
 #   BUCKET     where prepare.sh put the datasets
 #   MOUNTS     where the SSDs are mounted, one a directory (default
 #              /mnt/t4, as bench/devbox/startup.sh mounts them)
@@ -50,6 +53,7 @@ SF=${SF:-100}
 MEMORY_GIB=${MEMORY_GIB:-128}
 DISK_GIB=${DISK_GIB:-64}
 DOLLARS_PER_HOUR=${DOLLARS_PER_HOUR:-}
+TRACE=${TRACE:-}
 BUCKET=${BUCKET:-s3://t4-bench-xiangpeng-use1}
 MOUNTS=${MOUNTS:-/mnt/t4}
 
@@ -106,9 +110,11 @@ for store in $STORES; do
         exit 1
         ;;
     esac
+    trace=()
+    [ -z "$TRACE" ] || trace=(--trace "$OUT/$store.trace.csv" --get-phases "$OUT/$store.gets.csv")
     echo "== $store"
     started=$SECONDS
-    target/release/run_queries "${common[@]}" "${cache[@]}" "${drives[@]}" \
+    target/release/run_queries "${common[@]}" "${cache[@]}" "${drives[@]}" "${trace[@]}" \
         --out "$OUT/$store.csv" "$@" | tee "$OUT/$store.log"
     rm -f "${mounts[@]/%//t4.cache}"
     echo "== $store took $((SECONDS - started)) s"
