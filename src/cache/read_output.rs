@@ -134,7 +134,6 @@ impl ReadOutput {
     }
 
     /// The file's bytes the read asked for.
-    #[cfg(all(test, not(feature = "shuttle")))]
     pub(super) fn asked(&self) -> Range<u64> {
         self.asked.clone()
     }

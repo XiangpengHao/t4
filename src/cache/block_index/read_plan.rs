@@ -51,6 +51,11 @@ impl PlannedBlock {
         self.location
     }
 
+    /// The block as found at `location` now, the read's part of it the same.
+    pub(in crate::cache) fn relocated(&self, location: Option<Location>) -> Self {
+        Self { location, ..*self }
+    }
+
     /// The part of the block the read needs.
     pub(in crate::cache) fn window(&self) -> BlockWindow {
         self.window

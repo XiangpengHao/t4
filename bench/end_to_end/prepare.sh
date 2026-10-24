@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 # Makes run.sh's datasets on the dev box (bench/devbox/) and puts them in
-# S3, each in Parquet and in Vortex (to_vortex, a file for a file, its rows
-# in order):
+# S3: ClickBench in Parquet, TPC-H in Parquet and in Vortex (to_vortex, a
+# file for a file, its rows in order):
 #
 #   $BUCKET/clickbench/partitioned/            ClickBench's 100 files
-#   $BUCKET/clickbench/partitioned-vortex/
 #   $BUCKET/tpch/sf$SF/parquet/<table>/        TPC-H at scale factor SF,
 #   $BUCKET/tpch/sf$SF/vortex/<table>/         PARTS files a table at most
+#
+# Vortex is benched only with its dictionaries capped at 2 MiB of values.
+# Vortex 0.90 caps them at 1 MiB, and its writer can't be told otherwise
+# until vortex-data/vortex#10766 is released. So ClickBench's Vortex set,
+# $BUCKET/clickbench/partitioned-vortex-dict2m/, was written by to_vortex
+# built against a vortex-layout whose DictLayoutConstraints::default() is
+# 2 MiB, and this script doesn't make it. TPC-H's Vortex tables still have
+# the 1 MiB cap.
 #
 # ClickBench's files come from ClickHouse's public copy, TPC-H's from
 # tpchgen-cli, installed under target/ if missing. Both are made on the
@@ -56,9 +63,7 @@ for dataset in $DATASETS; do
                 mv "$file.part" "$file"
             fi
         done
-        vortex_copy "$parquet" "$DATA/clickbench/partitioned-vortex"
         aws s3 sync "$parquet" "$BUCKET/clickbench/partitioned/"
-        aws s3 sync "$DATA/clickbench/partitioned-vortex" "$BUCKET/clickbench/partitioned-vortex/"
         ;;
     tpch)
         tpch=$DATA/tpch/sf$SF

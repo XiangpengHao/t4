@@ -215,11 +215,13 @@ impl T4Caching {
         Ok(self.known.remember(location, meta))
     }
 
-    /// `range` of `file`, from memory, disk and fetches of what only the remote holds, each
-    /// fetch's bytes put into the read's output and cached as the policy
-    /// says as they come in. `None` if the cache can't serve it: a read of
-    /// the cache file failed, or a fetch found the file changed, which the
-    /// cache forgets then.
+    /// `range` of `file`, from memory, disk and fetches of what only the
+    /// remote holds, each fetch's bytes put into the read's output and cached
+    /// as the policy says as they come in; and the blocks other reads are
+    /// fetching, taken from where those fetches cache them, or fetched again
+    /// if they don't. `None` if the cache can't serve it: a read of the cache
+    /// file failed, or a fetch found the file changed, which the cache
+    /// forgets then.
     async fn read_through(
         &self,
         location: &Path,
@@ -229,39 +231,54 @@ impl T4Caching {
         extensions: &Extensions,
     ) -> object_store::Result<Option<Bytes>> {
         let intent = extensions.get::<ReadIntent>().copied();
-        let Ok((mut read, disk)) = self.cache.start_read(file, range, intent) else {
+        let Ok((mut read, mut work)) = self.cache.start_read(file, range.clone(), intent) else {
             return Ok(None);
         };
-        let mut receivers = Vec::new();
-        for fetch in read.fetches() {
-            let Ok(blocks) = self.cache.receive(&mut read, fetch) else {
+        loop {
+            let mut receivers = Vec::new();
+            for fetch in read.fetches() {
+                let Ok(blocks) = self.cache.receive(&mut read, fetch) else {
+                    return Ok(None);
+                };
+                receivers.push(blocks);
+            }
+            // Every fetch is in flight at once, a read's remote blocks keeping
+            // the NIC busy, and beside the read's work on the tiers: its disk
+            // reads, and its waits for the blocks other reads fetch. The GETs
+            // are polled first, so they are sent before any of it is waited
+            // on.
+            let fetches = join_all(
+                receivers
+                    .into_iter()
+                    .map(|blocks| self.fetch(location, e_tag, blocks, extensions)),
+            );
+            let (fetched, worked) = join(fetches, work.finish(&mut read)).await;
+            for fetched in fetched {
+                match fetched {
+                    Ok(()) => {}
+                    Err(object_store::Error::Precondition { .. }) => {
+                        self.known.forget(location);
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            let Ok(retry) = worked else {
                 return Ok(None);
             };
-            receivers.push(blocks);
-        }
-        // Every fetch is in flight at once, a read's remote blocks keeping the
-        // NIC busy, and beside the read's work on the drives. The GETs are
-        // polled first, so they are sent before any of it is waited on.
-        let fetches = join_all(
-            receivers
-                .into_iter()
-                .map(|blocks| self.fetch(location, e_tag, blocks, extensions)),
-        );
-        let (fetched, on_disk) = join(fetches, disk.finish(&mut read)).await;
-        for fetched in fetched {
-            match fetched {
-                Ok(()) => {}
-                Err(object_store::Error::Precondition { .. }) => {
-                    self.known.forget(location);
-                    return Ok(None);
-                }
-                Err(error) => return Err(error),
+            if retry.is_empty() {
+                return Ok(read.into_bytes());
             }
+            // Blocks the read waited for that no fetch cached: it fetches
+            // them itself, or waits again for a read that fetches them now.
+            let Ok(again) = self
+                .cache
+                .retry(&mut read, file, range.clone(), intent, &retry)
+            else {
+                return Ok(None);
+            };
+            work = again;
         }
-        if on_disk.is_err() {
-            return Ok(None);
-        }
-        Ok(read.into_bytes())
     }
 
     /// Fetches the bytes `blocks` holds from the inner store, if the file is

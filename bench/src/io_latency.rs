@@ -144,7 +144,8 @@ struct GetPhases {
 }
 
 impl GetPhases {
-    const CSV_COLUMNS: &str = "step,path,start,end,racer,answered_ms,received_ms,landing_ms,landed_ms";
+    const CSV_COLUMNS: &str =
+        "step,path,start,end,racer,answered_ms,received_ms,landing_ms,landed_ms";
 
     /// Keeps the GET of `bytes` of `path`, racer `racer`, as its `landed`
     /// phase tells: a CSV row.
@@ -159,7 +160,11 @@ impl GetPhases {
             return;
         };
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
-        let step = self.step.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let step = self
+            .step
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         let row = format!(
             "{step},{},{},{},{racer},{:.3},{:.3},{:.3},{:.3}",
             String::from_utf8_lossy(path),
@@ -170,12 +175,20 @@ impl GetPhases {
             ms(landing),
             ms(after)
         );
-        self.rows.lock().unwrap_or_else(PoisonError::into_inner).push(row);
+        self.rows
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(row);
     }
 
     fn write_csv(&self, mut out: impl Write) -> io::Result<()> {
         writeln!(out, "{}", Self::CSV_COLUMNS)?;
-        for row in self.rows.lock().unwrap_or_else(PoisonError::into_inner).iter() {
+        for row in self
+            .rows
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+        {
             writeln!(out, "{row}")?;
         }
         out.flush()

@@ -2,9 +2,10 @@
 
 Status: the mechanism built with default policies (2026-10-23): the two
 traits, plans carried out (split, merged, widened, raced), the intent,
-the events, a read's GETs overlapping its work on the drives. The plan's
-disk choices, which come with mirroring, are not built yet; the defaults
-change nothing (decision 10).
+the events, a read's GETs overlapping its work on the drives, a block in
+flight fetched once. The plan's disk choices, which come with mirroring,
+are not built yet. The default read policy splits a normal read's runs
+into GETs of 4 MiB at most (decision 10).
 
 A read wants one of three things (`99-brainstorm.md`):
 
@@ -69,24 +70,32 @@ High-Performance Analytics", PVLDB 16(11), 2023):
    policy. And a read's GETs sent before its work on the drives is waited
    on: its page reads, its promotions and the evictions they make overlap
    its time on the network, not add to it (`ObjectCache::start_read`
-   returns the read and its `DiskWork`, which the front end awaits beside
-   the GETs). Two reads of one remote block each fetch it, as each one's
-   plan says, neither waiting on the other's GET: the first fetch done
-   caches the block, and the other's copy goes back. Fetching a block in
-   flight once was built and taken out (23 Oct 2026): on ClickBench, 5 cold
-   runs, Parquet's GETs fetched the same bytes with it as without, and
-   Vortex's 1 to 5% fewer. Vortex's extra bytes through t4 come from whole
-   blocks: q20 fetches 4.8 GB through t4 against 2.6 GB straight from S3,
-   as its reads, about 1 MiB each, don't start on t4's block boundaries,
-   and each fetches the two blocks it spans.
+   returns the read and its `TierWork`, which the front end awaits beside
+   the GETs).
+
+   And a block in flight is fetched once (`src/cache/in_flight.rs`). A
+   read claims each remote block it will cache before its GETs go out; a
+   read that finds one claimed waits for that fetch, beside its own GETs,
+   and takes the block from where it lands. A racing read may add requests
+   for it instead, while fewer are in flight than its GET races; the first
+   to land caches it, and the others' copies go back. A fetch that ends
+   without caching the block, failed, given up on, or finding no room,
+   leaves its waiters to fetch it themselves. A block the placement policy
+   discards is never claimed, as no read could take it from the cache: two
+   reads of it each fetch it. It matters when a reader sends its ranges
+   as they are: Vortex, its own merging off, read ClickBench's 43 queries
+   in one cold session through 42.8 GB of GETs from t4, for 12.2 GB of
+   distinct blocks, as reads of one block at once each fetched it; with
+   its merging on, 1.09 times the distinct blocks, and Parquet's 1.00.
 
 3. **A plan per read.** `ReadPolicy::plan` sees the whole read: every block,
-   where each is (memory, disk with the drives holding a copy, or remote),
-   the bytes asked, the file, the intent. It answers with the GETs, which
-   must cover every remote block and may cover more (widened), split a run
-   (several GETs) or span runs (merged, fetching the hits between, as bytes
-   are free); and, for each block on disk with copies on several drives, the
-   copy to read or a race.
+   where each is (memory, disk with the drives holding a copy, remote, or
+   in flight with the requests out for it), the bytes asked, the file, the
+   intent. It answers with the GETs, which must cover every remote block
+   and may cover more (widened), split a run (several GETs) or span runs
+   (merged, fetching the hits between, as bytes are free); a block in
+   flight they cover only racing it (decision 2). And, for each block on
+   disk with copies on several drives, the copy to read or a race.
 
 4. **A race is every copy at once.** `race: n` sends n identical requests
    together, and takes the first answer: waiting to see one is slow makes
@@ -123,13 +132,18 @@ High-Performance Analytics", PVLDB 16(11), 2023):
    hedging is: object_store's timeouts and retries do it now, below t4.
 
 9. **The policies learn from events.** Every GET and disk read reports
-   its start, first byte and end, its bytes, and its drive or host;
-   policies keep what they want (latency percentiles, what is in flight,
-   each drive's queue), as `CachePolicy` keeps its own state now.
+   its start, first byte and end, its bytes, and its drive or host; a GET
+   also reports when its blocks are cached, with how its time went: its
+   first byte, its body in, the part of that spent landing the pieces
+   rather than waiting for them, and the blocks cached. Policies keep what
+   they want (latency percentiles, what is in flight, each drive's queue),
+   as `CachePolicy` keeps its own state now.
 
-10. **The defaults change nothing.** The first default policies do what t4
-    does today: one GET per run of remote blocks, no race, one copy striped.
-    Each mode then comes as a policy, measured.
+10. **The defaults are plain.** The default read policy fetches each run of
+    remote blocks in GETs of 4 MiB at most for a normal read, one whose
+    intent isn't said, so that no one GET holds the read up for long; a
+    read with an intent fetches each run in one GET. No race; one copy
+    striped. Each mode then comes as a policy, measured.
 
 ## The interfaces
 
@@ -185,7 +199,7 @@ whether the read asked for the block or a widened GET brought it.
 
 1. **The mechanism, the defaults doing what t4 does now:** the two traits,
    `LocatedRead` built from the read's plan, the GETs carried out as
-   planned, the events. No change measured.
+   planned, the events, a block in flight fetched once.
 2. **Throughput:** split a run into GETs of 8 MiB or more while what is in
    flight can't fill the NIC; merge once it can. Measured with the replay
    of ClickBench's cold pass against S3: its time, a call's p50, p99 and
@@ -233,8 +247,9 @@ them (decision 9).
 |---|---|---|
 | `src/cache/policy/mod.rs` | `PlacementPolicy`, which was `CachePolicy`; `BlockRead`'s intent, and whether a block was asked for | yes |
 | `src/cache/policy/read.rs` | `ReadPolicy`, `LocatedRead`, `ReadPlan`, `ReadIntent`, `IoEvent`; the default `FetchRuns`; whether a plan can be carried out | yes |
-| `src/cache/object_cache.rs` | `LocatedRead` built from a read's blocks; each fetched block's fate (asked, widened, cached); fetched bytes landed | yes |
+| `src/cache/object_cache.rs` | `LocatedRead` built from a read's blocks; each fetched block's fate (asked, widened, dropped); fetched bytes landed | yes |
 | `src/cache/t4_caching.rs` | the intent from `GetOptions::extensions`; racing GETs, the first answer taken | yes |
 | `src/cache/io_report.rs` | `IoReport`: an I/O told to the read policy, started to finished, failed or given up on | yes |
-| `src/cache/object_cache.rs` | `start_read` and `DiskWork`: the drives' work awaited beside the GETs | yes |
+| `src/cache/object_cache.rs` | `start_read` and `TierWork`: the drives' work and the waits for blocks in flight awaited beside the GETs; `retry`, for blocks whose fetch cached nothing | yes |
+| `src/cache/in_flight.rs` | `InFlight`: the blocks being fetched, each fetch's requests, claimed, joined by racers, ended where the block landed or abandoned | yes |
 | `src/cache/block_index/` | an entry naming several chunks, for mirrors | with mirroring |

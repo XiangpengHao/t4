@@ -52,5 +52,8 @@ Basically, how much does it cost to run a query, maybe?
 
 - [ ] Next, we need to make sure we saturate network bandwidth with minimal threads, which is very hard.
 
-- [ ] split long runs into GETs of 8 MiB or more while the NIC has room, merge once it’s full. Measure on the S3 replay’s cold pass (time, p50/p99/max, GET count).
+- [x] split long runs into GETs of 4 MiB or more while the NIC has room, merge once it’s full. Measure on the S3 replay’s cold pass (time, p50/p99/max, GET count).
 
+- [ ] Automatic racing if a request has reached p90 latency. 1. model how much extra request we'd send 2. since we know the max request from t4 is 4mb (not very large), we just take the p90 over all requests. 3. we can make it a policy: never, or max of 10, 100, 1000.
+
+- [ ] We should limit the burst network request to object store. this should cut the tail latency, esp the ones that takes longer than 1s.

@@ -70,8 +70,9 @@ chunk table the frame table.
 4. **bbtree is the page table:** two stock `BBTreeMap`s, not bbtree-store.
    - `paths`: path → `file_version_id`, e_tag, size.
    - `blocks`: (`file_version_id`, block) → a memory chunk or a disk
-     chunk. A block being fetched has no entry until it is cached: each
-     read of it fetches it (decision 10).
+     chunk. A block being fetched has no entry until it is cached: the
+     fetches in flight are a table of their own, which a read of a block
+     being fetched waits on (decision 10).
 
    A read looks up its path, then scans its blocks in order. Keys and
    values are fixed size, inline in the leaves: a sparse file and a fully
@@ -159,9 +160,9 @@ chunk table the frame table.
     counts, are not. A read names a path and a range, and t4 turns the
     blocks only the remote holds into GETs, all in flight at once. So t4
     decides how they are split and merged into requests, and can keep the
-    NIC busy (`00-meta.md`). Two reads of one remote block each fetch it,
-    neither waiting on the other's GET: the first fetch done caches the
-    block, and the other's copy goes back. Writes, copies, renames,
+    NIC busy (`00-meta.md`). A block is fetched once: a read that needs
+    one another read is fetching waits for that fetch, unless it races
+    (`06-read-modes.md`, decision 2). Writes, copies, renames,
     deletes and lists go to the inner store, and the cache forgets the
     paths they change. A file with no e_tag is read from the store each
     time, never cached (decision 5); so are conditional reads, and reads of

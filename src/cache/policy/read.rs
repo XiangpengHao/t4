@@ -28,11 +28,13 @@ pub enum ReadIntent {
 /// what state it wants, with what concurrency it wants.
 pub trait ReadPolicy: Send + Sync {
     /// The GETs that fetch `read`'s remote blocks, those neither memory nor
-    /// disk holds. They must cover every one, each block in one GET at most,
-    /// within the file; they may cover more (widened), split a run of remote
-    /// blocks, or span runs (merged, the memory and disk blocks between
-    /// fetched and their bytes dropped). Asked of every read with a remote
-    /// block.
+    /// disk holds, nor another read is fetching. They must cover every one,
+    /// each block in one GET at most, within the file; they may cover more
+    /// (widened), split a run of remote blocks, or span runs (merged, the
+    /// memory and disk blocks between fetched and their bytes dropped). A
+    /// block in flight they may cover only racing it, with more requests
+    /// than it has in flight; the read waits for one they leave out. Asked
+    /// of every read with a remote block or one in flight.
     fn plan(&self, read: &LocatedRead<'_>) -> ReadPlan;
 
     /// An I/O the cache made started, was answered, finished, failed or
@@ -118,8 +120,9 @@ impl<'r> LocatedRead<'r> {
     }
 
     /// Whether the cache can carry `plan` out for this read: every GET
-    /// within the file and of a block at least, no two sharing a block, and
-    /// together covering every remote block.
+    /// within the file and of a block at least, no two sharing a block,
+    /// together covering every remote block, and racing every block in
+    /// flight it covers with more requests than the block has in flight.
     pub(in crate::cache) fn accepts(&self, plan: &ReadPlan) -> bool {
         let mut gets: Vec<Range<u32>> = plan.gets().iter().map(PlannedGet::blocks).collect();
         gets.sort_unstable_by_key(|blocks| blocks.start);
@@ -131,7 +134,13 @@ impl<'r> LocatedRead<'r> {
             let at = gets.partition_point(|blocks| blocks.start <= block);
             at > 0 && gets[at - 1].contains(&block)
         });
-        in_file && apart && covered
+        let races_in_flight = plan.gets().iter().all(|get| {
+            get.blocks().all(|block| match self.source(block) {
+                Some(BlockSource::InFlight { requests }) => requests < u32::from(get.race().get()),
+                _ => true,
+            })
+        });
+        in_file && apart && covered && races_in_flight
     }
 
     /// The runs of the read's adjacent remote blocks, in order.
@@ -156,8 +165,14 @@ impl<'r> LocatedRead<'r> {
 pub enum BlockSource {
     Memory,
     Disk,
-    /// Neither memory nor disk holds it: the remote serves it.
+    /// Neither memory nor disk holds it, nor is another read fetching it:
+    /// the read fetches it.
     Remote,
+    /// Another read is fetching it, `requests` in flight for it: the read
+    /// waits for that fetch, unless a GET of its own races it.
+    InFlight {
+        requests: u32,
+    },
 }
 
 /// A [`ReadPolicy`]'s answer: the GETs that fetch a read's remote blocks.
@@ -206,13 +221,35 @@ impl PlannedGet {
     }
 }
 
-/// The default: each run of remote blocks fetched in one GET, sent once.
+/// The default: each run of remote blocks fetched in GETs sent once. A
+/// normal read's, one whose intent isn't said, are of
+/// [`Self::NORMAL_GET_MOST`] bytes at most, so that no one GET holds the
+/// read up for long; a read with an intent fetches each run in one GET.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FetchRuns;
 
+impl FetchRuns {
+    /// The bytes a normal read's GET holds at most.
+    pub const NORMAL_GET_MOST: u64 = 4 << 20;
+}
+
 impl ReadPolicy for FetchRuns {
     fn plan(&self, read: &LocatedRead<'_>) -> ReadPlan {
-        ReadPlan::new(read.remote_runs().map(PlannedGet::once).collect())
+        let most = match read.intent() {
+            None => u32::try_from((Self::NORMAL_GET_MOST / BLOCK_SIZE_U64).max(1))
+                .expect("a GET's blocks fit a u32"),
+            Some(_) => u32::MAX,
+        };
+        ReadPlan::new(
+            read.remote_runs()
+                .flat_map(|run| {
+                    let end = run.end;
+                    run.step_by(most as usize).map(move |start| {
+                        PlannedGet::once(start..start.saturating_add(most).min(end))
+                    })
+                })
+                .collect(),
+        )
     }
 
     fn on_io(&self, _event: &IoEvent<'_>) {}
@@ -330,6 +367,26 @@ mod tests {
         );
     }
 
+    /// A normal read's run longer than 4 MiB is fetched in GETs of 4 MiB
+    /// at most; a read warming the cache fetches it in one.
+    #[allow(clippy::single_range_in_vec_init)]
+    #[test]
+    fn the_default_splits_a_normal_reads_long_run() {
+        let sources = [BlockSource::Remote; 10];
+        let normal = FetchRuns.plan(&read(&sources, 0));
+        assert_eq!(
+            normal.gets(),
+            [
+                PlannedGet::once(0..4),
+                PlannedGet::once(4..8),
+                PlannedGet::once(8..10)
+            ]
+        );
+        let size = 10 * MIB + MIB / 2;
+        let warm = LocatedRead::new(b"f", size, 0..size, Some(ReadIntent::Warm), 0, &sources);
+        assert_eq!(FetchRuns.plan(&warm).gets(), [PlannedGet::once(0..10)]);
+    }
+
     // `[4..7]` is a plan of one GET, not the GET's blocks.
     #[allow(clippy::single_range_in_vec_init)]
     #[test]
@@ -349,6 +406,34 @@ mod tests {
         assert!(!accepts(&[4..6, 5..7]), "a block fetched twice");
         assert!(!accepts(&[4..5, 6..12]), "past the file");
         assert!(!accepts(&[4..5, 5..5, 6..7]), "an empty GET");
+    }
+
+    /// A block in flight is waited for, or raced with more requests than it
+    /// has in flight.
+    #[test]
+    fn a_plan_covers_a_block_in_flight_only_racing_it() {
+        use BlockSource::{InFlight, Remote};
+        let sources = [Remote, InFlight { requests: 1 }, Remote];
+        let located = read(&sources, 0);
+        let accepts = |gets: &[(Range<u32>, u8)]| {
+            let gets = gets
+                .iter()
+                .map(|(blocks, race)| {
+                    PlannedGet::new(blocks.clone(), NonZeroU8::new(*race).unwrap())
+                })
+                .collect();
+            located.accepts(&ReadPlan::new(gets))
+        };
+        assert!(accepts(&[(0..1, 1), (2..3, 1)]), "the remote runs, waiting");
+        assert!(!accepts(&[(0..3, 1)]), "merged over it, a second request");
+        assert!(!accepts(&[(1..2, 1)]), "a remote block left out");
+        assert!(accepts(&[(0..1, 1), (1..2, 2), (2..3, 1)]), "raced");
+        assert!(!accepts(&[(0..1, 1), (1..3, 1)]), "as many as in flight");
+        assert_eq!(
+            FetchRuns.plan(&located).gets().len(),
+            2,
+            "the default waits"
+        );
     }
 
     #[test]

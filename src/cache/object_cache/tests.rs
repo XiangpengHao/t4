@@ -6,6 +6,7 @@ use tempfile::TempDir;
 use super::test_policy::{Heard, TestPolicy};
 use super::*;
 use crate::cache::cache_files::DiskFile;
+use crate::cache::policy::{IoEvent, ReadPlan};
 
 const MIB: u64 = BLOCK_SIZE_U64;
 
@@ -13,6 +14,15 @@ const MIB: u64 = BLOCK_SIZE_U64;
 /// run by a [`TestPolicy`], in a directory of its own that lives as long as
 /// the cache.
 fn cache(memory_chunks: u32, disk_chunks: u32) -> (TempDir, ObjectCache, Arc<TestPolicy>) {
+    cache_reading_with(memory_chunks, disk_chunks, Arc::new(FetchRuns))
+}
+
+/// [`cache`], its reads planned by `reads`.
+fn cache_reading_with(
+    memory_chunks: u32,
+    disk_chunks: u32,
+    reads: Arc<dyn ReadPolicy>,
+) -> (TempDir, ObjectCache, Arc<TestPolicy>) {
     let dir = tempfile::tempdir().unwrap();
     let file = DiskFile::new(dir.path().join("cache"), u64::from(disk_chunks) * MIB);
     let disk = CacheFiles::open(&[file], NonZeroU32::new(8).unwrap(), true).unwrap();
@@ -22,7 +32,7 @@ fn cache(memory_chunks: u32, disk_chunks: u32) -> (TempDir, ObjectCache, Arc<Tes
         memory,
         disk,
         Arc::clone(&policy) as Arc<dyn PlacementPolicy>,
-        Arc::new(FetchRuns),
+        reads,
     )
     .unwrap();
     (dir, cache, policy)
@@ -174,29 +184,31 @@ fn the_policy_hears_each_block_where_it_is() {
     assert!(matches!(heard[3], Heard::Admit(Tier::Memory, _, block) if block == key(&file, 2)));
 }
 
+/// Reads of one remote block at once fetch it once: one claims it and
+/// fetches, the others wait for that fetch and take the block from where it
+/// lands.
 #[test]
-fn racing_fetches_of_one_block_take_one_chunk() {
+fn concurrent_reads_of_one_block_fetch_it_once() {
     const THREADS: usize = 8;
     let (_dir, cache, _policy) = cache(THREADS as u32, 1);
     let data = file_bytes(MIB);
     let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
-    let barrier = std::sync::Barrier::new(THREADS);
-    std::thread::scope(|scope| {
-        for _ in 0..THREADS {
-            scope.spawn(|| {
-                let mut read = block_on(cache.read(&file, 0..MIB, None)).unwrap();
-                barrier.wait();
-                for fetch in read.fetches().to_vec() {
-                    block_on(cache.take_fetched(&mut read, fetch, &data)).unwrap();
-                }
-            });
-        }
+    let fetched: Vec<_> = std::thread::scope(|scope| {
+        let readers: Vec<_> = (0..THREADS)
+            .map(|_| scope.spawn(|| read_through(&cache, &file, &data, 0..MIB)))
+            .collect();
+        readers
+            .into_iter()
+            .map(|reader| reader.join().unwrap())
+            .collect()
     });
+    for (out, _) in &fetched {
+        assert_eq!(out, &data);
+    }
+    let fetches: Vec<_> = fetched.iter().flat_map(|(_, fetches)| fetches).collect();
+    assert_eq!(fetches, [&(0..MIB)], "one fetch");
     assert_eq!(cache.memory.free_count(), THREADS as u32 - 1);
     cache.check_at_rest().unwrap();
-    let (out, fetches) = read_through(&cache, &file, &data, 0..MIB);
-    assert!(fetches.is_empty());
-    assert_eq!(out, data);
 }
 
 #[test]
@@ -567,5 +579,97 @@ fn a_fetch_cut_short_caches_nothing() {
     drop(blocks);
     assert!(location(&cache, &file, 0).is_none());
     assert_eq!(cache.memory.free_count(), 1);
+    cache.check_at_rest().unwrap();
+}
+
+/// A read that needs a block another read is fetching waits for that
+/// fetch, and takes the block from where it lands: one fetch for both.
+#[test]
+fn a_read_waits_for_a_block_another_is_fetching() {
+    let (_dir, cache, _policy) = cache(2, 1);
+    let data = file_bytes(MIB);
+    let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
+    let mut fetching = block_on(cache.read(&file, 0..MIB, None)).unwrap();
+    assert_eq!(fetching.fetches(), [0..MIB]);
+    let (mut waiting, work) = cache.start_read(&file, 10..20, None).unwrap();
+    assert_eq!(waiting.fetches(), [], "no second fetch");
+
+    block_on(cache.take_fetched(&mut fetching, 0..MIB, &data)).unwrap();
+    assert_eq!(block_on(work.finish(&mut waiting)).unwrap(), []);
+    assert_eq!(waiting.into_bytes().unwrap(), data[10..20]);
+    assert_eq!(fetching.into_bytes().unwrap(), data);
+    cache.check_at_rest().unwrap();
+}
+
+/// A read given up on before its fetch lands hands its block to the reads
+/// waiting for it: they fetch it themselves.
+#[test]
+fn a_read_waiting_for_a_fetch_given_up_on_fetches_the_block_itself() {
+    let (_dir, cache, _policy) = cache(2, 1);
+    let data = file_bytes(MIB);
+    let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
+    let given_up = block_on(cache.read(&file, 0..MIB, None)).unwrap();
+    let (mut waiting, work) = cache.start_read(&file, 0..MIB, None).unwrap();
+    drop(given_up);
+
+    let retry = block_on(work.finish(&mut waiting)).unwrap();
+    assert_eq!(retry.len(), 1, "the fetch ended without the block");
+    let work = cache
+        .retry(&mut waiting, &file, 0..MIB, None, &retry)
+        .unwrap();
+    assert_eq!(waiting.fetches(), [0..MIB]);
+    block_on(cache.take_fetched(&mut waiting, 0..MIB, &data)).unwrap();
+    assert_eq!(block_on(work.finish(&mut waiting)).unwrap(), []);
+    assert_eq!(waiting.into_bytes().unwrap(), data);
+    cache.check_at_rest().unwrap();
+}
+
+/// Fetches each run of remote blocks once, as the default does, and races
+/// each block another read is fetching with a request more than it has in
+/// flight.
+struct RacesInFlight;
+
+impl ReadPolicy for RacesInFlight {
+    fn plan(&self, read: &LocatedRead<'_>) -> ReadPlan {
+        let mut gets: Vec<_> = read.remote_runs().map(PlannedGet::once).collect();
+        for block in read.blocks() {
+            if let Some(BlockSource::InFlight { requests }) = read.source(block) {
+                let race = u8::try_from(requests + 1).unwrap();
+                gets.push(PlannedGet::new(
+                    block..block + 1,
+                    NonZeroU8::new(race).unwrap(),
+                ));
+            }
+        }
+        ReadPlan::new(gets)
+    }
+
+    fn on_io(&self, _event: &IoEvent<'_>) {}
+}
+
+/// A racing read fetches a block another read is fetching, with more
+/// requests than it has in flight: the first to land caches it, for the
+/// reads waiting, and the other's copy goes back.
+#[test]
+fn a_racing_read_joins_a_fetch_in_flight() {
+    let (_dir, cache, _policy) = cache_reading_with(2, 1, Arc::new(RacesInFlight));
+    let data = file_bytes(MIB);
+    let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
+    let mut first = block_on(cache.read(&file, 0..MIB, None)).unwrap();
+    let mut racing = block_on(cache.read(&file, 0..MIB, None)).unwrap();
+    assert_eq!(racing.fetches(), [0..MIB], "raced, not waited for");
+    let fetch = cache.in_flight.get(key(&file, 0)).unwrap();
+    assert_eq!(fetch.requests(), 3, "one in flight, two racing it");
+
+    block_on(cache.take_fetched(&mut racing, 0..MIB, &data)).unwrap();
+    assert!(
+        cache.in_flight.get(key(&file, 0)).is_none(),
+        "the first to land ends the fetch"
+    );
+    block_on(cache.take_fetched(&mut first, 0..MIB, &data)).unwrap();
+    assert_eq!(fetch.requests(), 0);
+    assert_eq!(cache.memory.free_count(), 1, "one copy cached");
+    assert_eq!(first.into_bytes().unwrap(), data);
+    assert_eq!(racing.into_bytes().unwrap(), data);
     cache.check_at_rest().unwrap();
 }

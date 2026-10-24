@@ -31,6 +31,9 @@ struct CountingStore {
     store: InMemory,
     asked: Mutex<Vec<Asked>>,
     acks: Acks,
+    /// Whether a get is answered a poll after it is asked, as across a
+    /// network: a read planned meanwhile finds its blocks in flight.
+    answers: Acks,
 }
 
 impl CountingStore {
@@ -41,6 +44,10 @@ impl CountingStore {
 
     fn ack_writes_late(&self, late: bool) {
         self.acks.0.store(late, Ordering::Relaxed);
+    }
+
+    fn answer_gets_late(&self, late: bool) {
+        self.answers.0.store(late, Ordering::Relaxed);
     }
 }
 
@@ -132,6 +139,7 @@ impl ObjectStore for CountingStore {
             Asked::Get(options.range.clone())
         };
         self.asked.lock().unwrap().push(asked);
+        self.answers.arrive().await;
         self.store.get_opts(location, options).await
     }
 
@@ -410,6 +418,27 @@ fn a_file_changed_behind_the_cache_is_caught_by_a_remote_read() {
     inner.take_asked();
     assert_eq!(get_range(&store, &path, 0..10), new.slice(0..10));
     assert_eq!(inner.take_asked(), []);
+}
+
+/// Two reads of one block at once, the first's GET still out when the
+/// second plans: the second waits for it, and the store sees one GET.
+#[test]
+fn overlapping_reads_of_a_block_send_one_get() {
+    let (_dir, store, inner) = t4_caching();
+    let path = Path::from("a");
+    let data = file_bytes(2 * MIB, 0);
+    put(inner.as_ref(), &path, &data);
+    block_on(store.head(&path)).unwrap();
+    inner.take_asked();
+
+    inner.answer_gets_late(true);
+    let (first, second) = block_on(join(
+        store.get_range(&path, 0..10),
+        store.get_range(&path, 5..MIB),
+    ));
+    assert_eq!(first.unwrap(), data.slice(0..10));
+    assert_eq!(second.unwrap(), data.slice(5..MIB as usize));
+    assert_eq!(inner.take_asked(), [bounded(0..MIB)]);
 }
 
 #[test]

@@ -73,6 +73,11 @@ fn contents(path: &[u8]) -> Vec<u8> {
 /// a tier, or nothing and a fetch of the file; then, if `fill`, caches what
 /// it fetched.
 fn read(cache: &ObjectCache, file: &CacheableFile<'static>, fill: bool) {
+    read_fetching(cache, file, fill);
+}
+
+/// [`read`], and whether the read fetched the file.
+fn read_fetching(cache: &ObjectCache, file: &CacheableFile<'static>, fill: bool) -> bool {
     let mut read = block_on(cache.read(file, 0..FILE_SIZE, None)).unwrap();
     if read.fetches().is_empty() {
         assert_eq!(
@@ -80,7 +85,7 @@ fn read(cache: &ObjectCache, file: &CacheableFile<'static>, fill: bool) {
             contents(file.path),
             "a hit reads its own block's bytes"
         );
-        return;
+        return false;
     }
     assert_eq!(read.fetches().len(), 1);
     assert_eq!(
@@ -91,6 +96,7 @@ fn read(cache: &ObjectCache, file: &CacheableFile<'static>, fill: bool) {
     if fill {
         block_on(cache.take_fetched(&mut read, 0..FILE_SIZE, &contents(file.path))).unwrap();
     }
+    true
 }
 
 /// Where the index says `file`'s block is.
@@ -125,6 +131,40 @@ fn join_all<T>(handles: impl IntoIterator<Item = thread::JoinHandle<T>>) -> Vec<
         .into_iter()
         .map(|handle| handle.join().unwrap())
         .collect()
+}
+
+/// Reads of one remote block at once fetch it once: one claims and fills
+/// it, the others wait for that fetch and take the block from memory, or
+/// hit it there.
+#[test]
+fn concurrent_reads_of_one_remote_block_fetch_it_once() {
+    explore(|| {
+        let (cache, _policy) = cache(2, 1);
+        let a = resolve(&cache, b"a");
+        let fetched =
+            join_all((0..3).map(|_| spawn(&cache, move |cache| read_fetching(cache, &a, true))));
+        assert_eq!(fetched.into_iter().filter(|&fetched| fetched).count(), 1);
+        cache.check_at_rest().unwrap();
+    });
+}
+
+/// A read given up on before it fills its fetch hands the block to the read
+/// waiting for it, which fetches it itself.
+#[test]
+fn a_read_given_up_on_hands_its_block_to_the_read_waiting() {
+    explore(|| {
+        let (cache, _policy) = cache(2, 1);
+        let a = resolve(&cache, b"a");
+        join_all([
+            spawn(&cache, move |cache| read(cache, &a, false)),
+            spawn(&cache, move |cache| read(cache, &a, true)),
+        ]);
+        assert!(
+            memory_chunk(&cache, &a).is_some(),
+            "the read that fills caches the block"
+        );
+        cache.check_at_rest().unwrap();
+    });
 }
 
 #[test]

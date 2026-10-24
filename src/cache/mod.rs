@@ -8,6 +8,8 @@
 //! - `cache_files`: the disk tier, its chunks striped over its cache files,
 //!   read and written by direct I/O (`doc/04-multi-device.md`).
 //! - `policy`: what the cache asks of its policy, and the default one.
+//! - `in_flight`: the blocks being fetched, which a read that needs one
+//!   waits for rather than fetching again.
 //! - `object_cache`: reads, fills and evictions over them all.
 //! - `read_output`: the buffer a read's bytes land in, the caller's as
 //!   `Bytes` with no copy.
@@ -16,6 +18,7 @@
 mod block_index;
 mod cache_files;
 mod chunk_pool;
+mod in_flight;
 mod io_report;
 mod object_cache;
 pub mod policy;
