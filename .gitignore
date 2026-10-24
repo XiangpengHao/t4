@@ -4,3 +4,4 @@ probex*
 fuzz/artifacts
 fuzz/corpus
 fuzz/coverage
+.DS_STORE

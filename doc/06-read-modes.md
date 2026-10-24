@@ -72,7 +72,13 @@ High-Performance Analytics", PVLDB 16(11), 2023):
    returns the read and its `DiskWork`, which the front end awaits beside
    the GETs). Two reads of one remote block each fetch it, as each one's
    plan says, neither waiting on the other's GET: the first fetch done
-   caches the block, and the other's copy goes back.
+   caches the block, and the other's copy goes back. Fetching a block in
+   flight once was built and taken out (23 Oct 2026): on ClickBench, 5 cold
+   runs, Parquet's GETs fetched the same bytes with it as without, and
+   Vortex's 1 to 5% fewer. Vortex's extra bytes through t4 come from whole
+   blocks: q20 fetches 4.8 GB through t4 against 2.6 GB straight from S3,
+   as its reads, about 1 MiB each, don't start on t4's block boundaries,
+   and each fetches the two blocks it spans.
 
 3. **A plan per read.** `ReadPolicy::plan` sees the whole read: every block,
    where each is (memory, disk with the drives holding a copy, or remote),

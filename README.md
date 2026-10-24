@@ -1,27 +1,10 @@
 # `t4`
 
-`t4` is a fast object store cache. 
-
-## Features
-
-- **Two tiers of fixed size:** memory, and a file on each local drive you
-  give it, 1 MiB chunks striped over them. The cache never grows past
-  either.
-- **`io_uring` and `O_DIRECT`** for the drive. A hit on disk reads only the
-  4 KiB pages it needs.
-- **1 MiB blocks.** A remote read fetches whole blocks, and all of a read's
-  GETs are in flight at once.
-- **Your policies, or ours.** A `PlacementPolicy` hears of every block a
-  read finds in memory, on disk or only in the remote, decides where a
-  fetched block goes and whether a disk hit moves to memory, and picks the
-  victims when a tier is full; the default is a lock-free CLOCK for each
-  tier. A `ReadPolicy` plans the GETs that fetch a read's remote blocks
-  (split, merged, widened, raced) and hears every I/O; the default fetches
-  each run of adjacent remote blocks in one GET. A caller can say what a
-  read is for, `ReadIntent` in `GetOptions::extensions`.
-- **Never the wrong bytes.** A file is cached by its e_tag, and a remote read
-  fetches with `If-Match` on it.
-- **Runtime-agnostic async**, on `object_store` 0.13, as DataFusion 55 uses.
+`t4` is a fast object store downloader and cache. 
+- Request prefetching, splitting, coalesencing, racing read; all handled automatically.
+- Hybrid memory and disk caching, customized read policy and placement policy.
+- `io_uring` for disks, multi-device stripping/racing/load-balancing.
+- Implements `object_store` trait, plug and play; async runtime agnostic. 
 
 ## Usage
 
@@ -42,82 +25,40 @@ let footer = store
     .await?;
 ```
 
-A placement policy of your own gets the tiers' sizes when the cache is
-built; a read policy is given as it is:
+
+## Customized policy
+
+`t4` is fully customizable, you can roll your own `ReadPolicy` and `PlacementPolicy`.
+The default policies are built with the same public interfaces.
 
 ```rust
 let store = T4Caching::builder(s3)
-    // ... capacities and path as above ...
-    .with_placement_policy(|tiers| MyPolicy::new(tiers.memory_chunks(), tiers.disk_chunks()))
-    .with_read_policy(MyReads::default())
+    .with_placement_policy(...)
+    .with_read_policy(...)
     .build()?;
 ```
 
-`t4::policy` holds the `PlacementPolicy` and `ReadPolicy` traits, the
-defaults `ClockPolicy` and `FetchRuns`, and the types a policy works with.
+```rust
+pub trait ReadPolicy: Send + Sync {
+    fn plan(&self, read: &LocatedRead<'_>) -> ReadPlan;
 
-## How it works
-
-```text
- get_range(path, range)
-      |
-      v
- paths:   path -> (file version, e_tag, size)            bbtree, in memory
- blocks:  (file version, block) -> memory or disk chunk  bbtree, in memory
-      |                     |                    |
-      v                     v                    v
- memory pool            cache file           inner store
- 1 MiB chunks           1 MiB chunks         GET with If-Match, then cache
+    fn on_io(&self, event: &IoEvent<'_>);
+}
 ```
 
-- **A path's first read** asks the inner store what the file is (a HEAD),
-  unless a list through the cache named it. The cache trusts that answer
-  from then on.
-- **Each block of a read** is found in memory, on disk, or only in the
-  remote. Remote blocks are fetched together and cached where the policy
-  says.
-- **A full tier evicts the policy's victims:** memory moves them to disk or
-  drops them, and the disk drops them.
-- **Writes, copies, renames and deletes** go to the inner store, and the
-  cache forgets the paths they change.
 
-The design and every decision behind it: [doc/03-cache.md](doc/03-cache.md).
+```rust
+pub trait PlacementPolicy: Send + Sync {
+    fn on_memory_hit(&self, chunk: ChunkId, read: &BlockRead<'_>);
 
-## Limitations
+    fn on_disk_hit(&self, chunk: ChunkId, read: &BlockRead<'_>) -> DiskHit;
 
-- **Cold after a restart.** The index lives in memory only.
-- **The cache trusts the store's first answer for a path.** A file changed
-  behind it reads as it was until a remote read notices. That's right for
-  files that don't change in place, like a data lake's Parquet files.
-- **Not yet: the read policies** that split, merge, widen or race GETs.
-  The mechanism is built; the defaults fetch each run once.
-- **A read returns its whole range as one buffer,** and a cached read
-  doesn't keep the object's attributes.
+    fn on_remote_read(&self, read: &BlockRead<'_>) -> Admit;
 
-## Development
+    fn on_admit(&self, tier: Tier, chunk: ChunkId, block: BlockKey);
 
-```bash
-cargo test
+    fn pick_memory_victims(&self, count: usize) -> Vec<MemoryVictim>;
+
+    fn pick_disk_victims(&self, count: usize) -> Vec<ChunkId>;
+}
 ```
-
-```bash
-cargo test --features shuttle shuttle
-```
-
-```bash
-cargo verus focus
-```
-
-```bash
-TMPDIR=/dev/shm cargo fuzz run cache_equivalence -- -timeout=10
-```
-
-These run the unit tests, the concurrency tests under
-[shuttle](https://github.com/awslabs/shuttle), the Verus proofs of the
-alignment and range arithmetic, and the fuzz target
-([fuzz/README.md](fuzz/README.md)). Where the docs start:
-[doc/00-meta.md](doc/00-meta.md).
-
-## Vision
-
-`t4` will be the ultimate and only file system you need.

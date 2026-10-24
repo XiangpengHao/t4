@@ -46,16 +46,17 @@ use std::time::{Duration, Instant};
 use clap::{Parser, ValueEnum};
 use datafusion::datasource::listing::ListingOptions;
 use datafusion::error::{DataFusionError, Result};
+use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use t4_bench::host_counters::{CgroupMemory, HostCounters, HostProbe};
 use t4_bench::io_latency::{IoLatencies, TakenIoLatencies};
+use t4_bench::raw_vortex_reads::RawVortexFormat;
 use t4_bench::replay::LatencySummary;
 use t4_bench::request_cost::{CountedStore, RequestCounter, RequestCounts, RequestPrices};
 use t4_bench::request_trace::{RequestTrace, TracedStore};
 use t4_bench::table_store::{CacheOptions, HttpTransport, TableLocation};
 use vortex::VortexSessionDefault;
 use vortex::session::VortexSession;
-use vortex_datafusion::VortexFormat;
 
 /// The allocator: mimalloc unless built `--no-default-features`, as the
 /// `mimalloc` feature in `bench/Cargo.toml` explains. A static, as Rust takes
@@ -212,7 +213,11 @@ impl QuerySession {
                         .await?;
                 }
                 TableFormat::Vortex => {
-                    let format = VortexFormat::new(self.vortex.clone());
+                    let store = self
+                        .context
+                        .runtime_env()
+                        .object_store(ObjectStoreUrl::parse(table.location.store_url())?)?;
+                    let format = RawVortexFormat::new(self.vortex.clone(), store);
                     let options = ListingOptions::new(Arc::new(format));
                     self.context
                         .register_listing_table(&table.name, url, options, None, None)
