@@ -74,19 +74,22 @@ High-Performance Analytics", PVLDB 16(11), 2023):
    the GETs).
 
    And a block in flight is fetched once (`src/cache/in_flight.rs`). A
-   read claims each remote block it will cache before its GETs go out; a
+   read claims each remote block it will fetch before its GETs go out; a
    read that finds one claimed waits for that fetch, beside its own GETs,
    and takes the block from where it lands. A racing read may add requests
    for it instead, while fewer are in flight than its GET races; the first
    to land caches it, and the others' copies go back. A fetch that ends
    without caching the block, failed, given up on, or finding no room,
    leaves its waiters to fetch it themselves. A block the placement policy
-   discards is never claimed, as no read could take it from the cache: two
-   reads of it each fetch it. It matters when a reader sends its ranges
-   as they are: Vortex, its own merging off, read ClickBench's 43 queries
-   in one cold session through 42.8 GB of GETs from t4, for 12.2 GB of
-   distinct blocks, as reads of one block at once each fetched it; with
-   its merging on, 1.09 times the distinct blocks, and Parquet's 1.00.
+   discards is claimed too: its fetch collects its bytes, which no tier
+   keeps, and its waiters take theirs from them once it has them all. It
+   matters when a reader sends its ranges as they are: Vortex, its own
+   merging off, read ClickBench's 43 queries in one cold session through
+   42.8 GB of GETs from t4, for 12.2 GB of distinct blocks, as reads of one
+   block at once each fetched it; with its merging on, 1.09 times the
+   distinct blocks, and Parquet's 1.00. Keeping no block, t4 fetched 144.8
+   GiB for 56.6 GiB of distinct blocks (24 Oct 2026, a c6in.8xlarge), before
+   reads of a discarded block shared its fetch.
 
 3. **A plan per read.** `ReadPolicy::plan` sees the whole read: every block,
    where each is (memory, disk with the drives holding a copy, remote, or
@@ -103,7 +106,8 @@ High-Performance Analytics", PVLDB 16(11), 2023):
    buffers, the others dropped before their bodies. On drives no winner is
    known before its bytes land, so each copy reads into a buffer of its
    own, and the first back is the one used. A race costs n times the
-   requests, or the drive reads: for small, latency-critical reads.
+   requests, or the drive reads: for small, latency-critical reads. A GET
+   may also be raced late, once (decision 8).
 
 5. **Racing on drives comes with mirroring, which is placement.**
    `PlacementPolicy` gives a fetched block its tier and its copies: one,
@@ -122,14 +126,28 @@ High-Performance Analytics", PVLDB 16(11), 2023):
 7. **No executor assumed.** A read awaits its whole plan: widening delays
    it by the extra bytes, which the policy weighs when it widens. A race
    needs none: the read's future polls every racer and drops the losers.
+   A late race waits on a timer, which the user gives, as
+   `T4CachingBuilder::with_sleep`; without one, no GET is raced late.
    `warm` is a future its caller awaits. Answering a read before the rest
    of a widened fetch is in would need work to go on after the read
    returns; if it ever earns its place, t4 takes a spawn function from the
    user, never a runtime of its own.
 
-8. **A request that never answers is retried, not raced.** Sending it
-   again once it has been silent too long is liveness, as the paper's
-   hedging is: object_store's timeouts and retries do it now, below t4.
+8. **A straggler is raced late, once.** A request that never answers is
+   retried, not raced: sending it again once it has been silent too long
+   is liveness, as the paper's hedging is, and object_store's timeouts and
+   retries do it, below t4. A GET that answers but is slow is raced:
+   `PlannedGet::with_late_race(after)` sends one more request if its body
+   isn't all in `after` since it went, for the bytes not in yet; the first
+   to have them all is taken, the other dropped, and the late request's
+   bytes land past the first's. `RaceStragglers` plans as `FetchRuns` does
+   and races each normal read's GETs at a quantile (p90, p99) of the latest
+   GET times it heard, from a GET's first request to its body all in. On
+   24 Oct 2026's ClickBench GETs a model gave racing at p90, uncapped, 10%
+   more GETs and 8 to 10% more bytes for a p99 of 495 ms, not 633, and a
+   max of 1.0 s, not 3.3; the slow GETs came in bursts, when bytes in
+   flight were most, which racing adds to, and the model can't say what
+   that costs.
 
 9. **The policies learn from events.** Every GET and disk read reports
    its start, first byte and end, its bytes, and its drive or host; a GET
@@ -250,6 +268,8 @@ them (decision 9).
 | `src/cache/object_cache.rs` | `LocatedRead` built from a read's blocks; each fetched block's fate (asked, widened, dropped); fetched bytes landed | yes |
 | `src/cache/t4_caching.rs` | the intent from `GetOptions::extensions`; racing GETs, the first answer taken | yes |
 | `src/cache/io_report.rs` | `IoReport`: an I/O told to the read policy, started to finished, failed or given up on | yes |
+| `src/cache/t4_caching.rs` | a GET raced late: the rest of its body asked for once it has been out too long, on the user's timer | yes |
+| `src/cache/policy/stragglers.rs` | `RaceStragglers`: GETs raced late at a quantile of the GET times heard | yes |
 | `src/cache/object_cache.rs` | `start_read` and `TierWork`: the drives' work and the waits for blocks in flight awaited beside the GETs; `retry`, for blocks whose fetch cached nothing | yes |
 | `src/cache/in_flight.rs` | `InFlight`: the blocks being fetched, each fetch's requests, claimed, joined by racers, ended where the block landed or abandoned | yes |
 | `src/cache/block_index/` | an entry naming several chunks, for mirrors | with mirroring |

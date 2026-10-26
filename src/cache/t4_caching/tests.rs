@@ -34,6 +34,11 @@ struct CountingStore {
     /// Whether a get is answered a poll after it is asked, as across a
     /// network: a read planned meanwhile finds its blocks in flight.
     answers: Acks,
+    /// The bytes the next get's body stops after, a HEAD's aside, never
+    /// sending the rest, as a straggler's does; and whether such a body was
+    /// waited on past them.
+    stall: Mutex<Option<usize>>,
+    stalled: Arc<AtomicBool>,
 }
 
 impl CountingStore {
@@ -48,6 +53,36 @@ impl CountingStore {
 
     fn answer_gets_late(&self, late: bool) {
         self.answers.0.store(late, Ordering::Relaxed);
+    }
+
+    /// Stops the next get's body after `after` bytes.
+    fn stall_next_body(&self, after: usize) {
+        *self.stall.lock().unwrap() = Some(after);
+    }
+
+    /// `answer` with its body stopped after `after` bytes: `stalled` set
+    /// once the rest is waited on.
+    async fn stalled(&self, answer: GetResult, after: usize) -> object_store::Result<GetResult> {
+        let (meta, range, attributes) = (
+            answer.meta.clone(),
+            answer.range.clone(),
+            answer.attributes.clone(),
+        );
+        let mut sent = Some(answer.bytes().await?.slice(..after));
+        let stalled = Arc::clone(&self.stalled);
+        let body = stream::poll_fn(move |_| match sent.take() {
+            Some(piece) => Poll::Ready(Some(Ok(piece))),
+            None => {
+                stalled.store(true, Ordering::Relaxed);
+                Poll::Pending
+            }
+        });
+        Ok(GetResult {
+            payload: GetResultPayload::Stream(body.boxed()),
+            meta,
+            range,
+            attributes,
+        })
     }
 }
 
@@ -138,9 +173,18 @@ impl ObjectStore for CountingStore {
         } else {
             Asked::Get(options.range.clone())
         };
+        let head = options.head;
         self.asked.lock().unwrap().push(asked);
         self.answers.arrive().await;
-        self.store.get_opts(location, options).await
+        let answer = self.store.get_opts(location, options).await?;
+        let stall = match head {
+            true => None,
+            false => self.stall.lock().unwrap().take(),
+        };
+        match stall {
+            Some(after) => self.stalled(answer, after).await,
+            None => Ok(answer),
+        }
     }
 
     fn delete_stream(
@@ -439,6 +483,32 @@ fn overlapping_reads_of_a_block_send_one_get() {
     assert_eq!(first.unwrap(), data.slice(0..10));
     assert_eq!(second.unwrap(), data.slice(5..MIB as usize));
     assert_eq!(inner.take_asked(), [bounded(0..MIB)]);
+}
+
+/// Reads of one block that no tier keeps, overlapping, send one GET too: the
+/// one waiting takes the block's bytes from the other's fetch. Nothing is
+/// cached, so a later read fetches it again.
+#[test]
+fn overlapping_reads_of_a_discarded_block_send_one_get() {
+    let reads = ScriptedReads::new(|read| FetchRuns.plan(read));
+    let (_dir, store, inner, _, data) = planned_by(&reads, Admit::Discard);
+    let path = Path::from("a");
+    block_on(store.head(&path)).unwrap();
+    inner.take_asked();
+
+    inner.answer_gets_late(true);
+    let (first, second) = block_on(join(
+        store.get_range(&path, 0..10),
+        store.get_range(&path, 5..MIB),
+    ));
+    assert_eq!(first.unwrap(), data.slice(0..10));
+    assert_eq!(second.unwrap(), data.slice(5..MIB as usize));
+    assert_eq!(inner.take_asked(), [bounded(0..MIB)]);
+    assert_eq!(
+        get_range(&store, &path, 0..MIB),
+        data.slice(0..MIB as usize)
+    );
+    assert_eq!(inner.take_asked(), [bounded(0..MIB)], "nothing cached");
 }
 
 #[test]
@@ -874,6 +944,107 @@ fn racing_gets_take_the_first_answer() {
         1,
         "one answer taken: {heard:?}"
     );
+}
+
+/// A timer a cache's late racers wait on.
+type TestSleep = Box<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>;
+
+/// A cache like [`planned_by`]'s over `inner`, its blocks put where the
+/// CLOCK says, its GETs raced late on `sleep`, if given.
+fn raced_late_by(
+    inner: &Arc<CountingStore>,
+    reads: &ScriptedReads,
+    sleep: Option<TestSleep>,
+) -> (TempDir, T4Caching, Bytes) {
+    let dir = tempfile::tempdir().unwrap();
+    let builder = builder(inner, &dir).with_read_policy(reads.clone());
+    let builder = match sleep {
+        Some(sleep) => builder.with_sleep(sleep),
+        None => builder,
+    };
+    let store = builder.build().unwrap();
+    let data = file_bytes(3 * MIB, 7);
+    put(inner.as_ref(), &Path::from("a"), &data);
+    inner.take_asked();
+    (dir, store, data)
+}
+
+/// Every run of a read's remote blocks in one GET, raced late.
+fn late_racing() -> ScriptedReads {
+    ScriptedReads::new(|read| {
+        ReadPlan::new(
+            read.remote_runs()
+                .map(|run| PlannedGet::once(run).with_late_race(Duration::from_millis(1)))
+                .collect(),
+        )
+    })
+}
+
+/// A GET whose body stalls is raced late, for the bytes not in yet: the
+/// read gets them all, its first request given up on.
+#[test]
+fn a_straggling_get_is_raced_for_the_rest_of_its_body() {
+    let reads = late_racing();
+    let inner = Arc::new(CountingStore::default());
+    // The timer is done once the store's stalled body is waited on.
+    let stalled = Arc::clone(&inner.stalled);
+    let sleep = move |_| {
+        let stalled = Arc::clone(&stalled);
+        poll_fn(move |cx| {
+            if stalled.load(Ordering::Relaxed) {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .boxed()
+    };
+    let (_dir, store, data) = raced_late_by(&inner, &reads, Some(Box::new(sleep)));
+    inner.stall_next_body((MIB / 4) as usize);
+    assert_eq!(
+        get_range(&store, &Path::from("a"), 0..MIB),
+        data.slice(0..MIB as usize)
+    );
+    assert_eq!(
+        inner.take_asked(),
+        [Asked::Head, bounded(0..MIB), bounded(MIB / 4..MIB)]
+    );
+    let heard = reads.heard();
+    let get = |bytes, racer, phase| Heard::Get {
+        bytes,
+        racer,
+        phase,
+    };
+    assert!(heard.contains(&get(0..MIB, 0, "cancelled")), "{heard:?}");
+    for phase in ["started", "answered", "finished", "landed"] {
+        assert!(heard.contains(&get(MIB / 4..MIB, 1, phase)), "{heard:?}");
+    }
+}
+
+/// Without a timer, or before its time, a GET planned to race late is sent
+/// once.
+#[test]
+fn a_late_race_waits_for_its_timer() {
+    let never = |_| pending().boxed();
+    let timers: [Option<TestSleep>; 2] = [None, Some(Box::new(never))];
+    for sleep in timers {
+        let reads = late_racing();
+        let inner = Arc::new(CountingStore::default());
+        let (_dir, store, data) = raced_late_by(&inner, &reads, sleep);
+        assert_eq!(
+            get_range(&store, &Path::from("a"), 0..MIB),
+            data.slice(0..MIB as usize)
+        );
+        assert_eq!(inner.take_asked(), [Asked::Head, bounded(0..MIB)]);
+        assert!(
+            reads
+                .heard()
+                .iter()
+                .all(|heard| !matches!(heard, Heard::Get { racer: 1, .. })),
+            "no late racer"
+        );
+    }
 }
 
 /// A GET is heard finished once its body is in, and landed once its blocks

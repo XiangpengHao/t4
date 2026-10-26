@@ -148,6 +148,22 @@ fn concurrent_reads_of_one_remote_block_fetch_it_once() {
     });
 }
 
+/// Of concurrent reads of one block the placement policy discards, those
+/// that find it in flight take its bytes from the fetch; none is cached.
+#[test]
+fn concurrent_reads_of_one_discarded_block_take_its_bytes_from_its_fetch() {
+    explore(|| {
+        let (cache, policy) = cache(2, 1);
+        policy.set_admit(Admit::Discard);
+        let a = resolve(&cache, b"a");
+        let fetched =
+            join_all((0..3).map(|_| spawn(&cache, move |cache| read_fetching(cache, &a, true))));
+        assert!(fetched.contains(&true), "one fetched it");
+        assert_eq!(location(&cache, &a), None, "nothing cached");
+        cache.check_at_rest().unwrap();
+    });
+}
+
 /// A read given up on before it fills its fetch hands the block to the read
 /// waiting for it, which fetches it itself.
 #[test]

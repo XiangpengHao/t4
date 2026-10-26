@@ -4,19 +4,22 @@
 //! add requests for a block while fewer are in flight for it than its GET
 //! races.
 //!
-//! A read claims each remote block it will fetch and cache ([`FetchClaim`]),
-//! before its GETs go out; a block the placement policy discards is never
-//! claimed, as no other read could take it from the cache. A read that finds
-//! a block claimed waits on its [`BlockFetch`], beside its own GETs, or joins
-//! it with requests of its own. The fetch ends when one of its requests
-//! caches the block, which the readers waiting then take from where it went;
-//! or when every request has ended without, failed, given up on, or the
-//! block finding no room, and the readers waiting fetch it themselves.
+//! A read claims each remote block it will fetch ([`FetchClaim`]), before its
+//! GETs go out. A read that finds a block claimed waits on its
+//! [`BlockFetch`], beside its own GETs, or joins it with requests of its own.
+//! The fetch ends when one of its requests caches the block, which the
+//! readers waiting then take from where it went; or, for a block the
+//! placement policy discards, when one has it all in, its bytes passed to
+//! the readers waiting; or when every request has ended without, failed,
+//! given up on, or the block finding no room, and the readers waiting fetch
+//! it themselves.
 
 use std::collections::HashMap;
 use std::future::poll_fn;
 use std::num::NonZeroU8;
 use std::task::{Poll, Waker};
+
+use bytes::Bytes;
 
 use super::BlockKey;
 use super::block_index::Location;
@@ -118,10 +121,13 @@ struct FetchState {
 }
 
 /// How a block's fetch ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum FetchEnd {
     /// A request cached the block, here.
     Cached(Location),
+    /// A request had the block all in, which no tier keeps: its bytes, for
+    /// the readers waiting to take theirs from.
+    Passed(Bytes),
     /// Every request ended without caching it: a reader waiting fetches it
     /// itself.
     Abandoned,
@@ -153,8 +159,8 @@ impl BlockFetch {
     pub(super) async fn ended(&self) -> FetchEnd {
         poll_fn(|cx| {
             let mut state = self.state();
-            if let Some(ended) = state.ended {
-                return Poll::Ready(ended);
+            if let Some(ended) = &state.ended {
+                return Poll::Ready(ended.clone());
             }
             if !state
                 .waiters
@@ -168,20 +174,15 @@ impl BlockFetch {
         .await
     }
 
-    /// `requests` of the fetch's ended, the block `cached` there or not.
-    /// The first to cache it ends the fetch; so does the last to end, if
-    /// none did.
-    fn end_requests(
-        self: &Arc<Self>,
-        in_flight: &InFlight,
-        requests: u32,
-        cached: Option<Location>,
-    ) {
+    /// `requests` of the fetch's ended, the block `had`, cached or passed,
+    /// or not. The first to have it ends the fetch; so does the last to end,
+    /// if none did.
+    fn end_requests(self: &Arc<Self>, in_flight: &InFlight, requests: u32, had: Option<FetchEnd>) {
         let waiters = {
             let mut state = self.state();
             state.requests -= requests;
-            let ended = match cached {
-                Some(location) => FetchEnd::Cached(location),
+            let ended = match had {
+                Some(had) => had,
                 None if state.requests == 0 => FetchEnd::Abandoned,
                 None => return,
             };
@@ -235,13 +236,19 @@ impl FetchClaim {
     /// The read's fetch of the block ended, the block cached at `location`,
     /// by this fetch or another, or nowhere.
     pub(super) fn ended(mut self, location: Option<Location>) {
-        self.end(location);
+        self.end(location.map(FetchEnd::Cached));
     }
 
-    fn end(&mut self, location: Option<Location>) {
+    /// The read's fetch of the block, which no tier keeps, has it all in:
+    /// `bytes`, for the readers waiting.
+    pub(super) fn passed(mut self, bytes: Bytes) {
+        self.end(Some(FetchEnd::Passed(bytes)));
+    }
+
+    fn end(&mut self, had: Option<FetchEnd>) {
         let requests = std::mem::take(&mut self.requests);
         if requests > 0 {
-            self.fetch.end_requests(&self.in_flight, requests, location);
+            self.fetch.end_requests(&self.in_flight, requests, had);
         }
     }
 }
@@ -300,6 +307,22 @@ mod tests {
         assert_eq!((&mut ended).now_or_never(), None);
         claim.ended(Some(memory(1)));
         assert_eq!(ended.now_or_never(), Some(FetchEnd::Cached(memory(1))));
+    }
+
+    /// A block no tier keeps ends its fetch with its bytes, which its
+    /// waiters take.
+    #[test]
+    fn a_discarded_blocks_fetch_passes_its_bytes_to_its_waiters() {
+        let in_flight = Arc::new(InFlight::default());
+        let claim = in_flight.claim(key(0), Admit::Discard).unwrap();
+        let fetch = in_flight.get(key(0)).unwrap();
+        let mut ended = Box::pin(fetch.ended());
+        assert_eq!((&mut ended).now_or_never(), None);
+        claim.passed(Bytes::from_static(b"the block"));
+        let passed = FetchEnd::Passed(Bytes::from_static(b"the block"));
+        assert_eq!(ended.now_or_never(), Some(passed.clone()));
+        assert_eq!(fetch.ended().now_or_never(), Some(passed), "every waiter");
+        assert!(in_flight.get(key(0)).is_none());
     }
 
     /// A claim dropped, as when its read is given up on, abandons the fetch

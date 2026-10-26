@@ -18,16 +18,19 @@
 //!   fails.
 
 use std::fmt;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU8, NonZeroU32};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::PoisonError;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bbtree::BBTreeMap;
 use bytes::Bytes;
-use futures_util::future::{FutureExt, join, join_all, ready, select_ok};
+use futures_util::future::{
+    BoxFuture, Either, FutureExt, join, join_all, pending, ready, select, select_ok,
+};
 use futures_util::stream::{self, BoxStream, StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::{
@@ -55,11 +58,17 @@ const STORE: &str = "t4";
 /// What makes a policy, once the tiers' chunk counts are known.
 type PlacementMaker = Box<dyn FnOnce(TierSizes) -> Arc<dyn PlacementPolicy>>;
 
+/// A timer: a future done a while from now, the caller's runtime's, as t4
+/// has none of its own.
+type Sleep = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>;
+
 /// An [`ObjectStore`] that caches the reads of another, in memory and on
 /// disk. [`Self::builder`] makes one.
 pub struct T4Caching {
     inner: Arc<dyn ObjectStore>,
     cache: ObjectCache,
+    /// What a GET's late racer waits on; none sent without it.
+    sleep: Option<Sleep>,
     /// Shared with the uploads and deletes in flight, which forget their
     /// paths once done.
     known: Arc<KnownFiles>,
@@ -85,6 +94,7 @@ pub struct T4CachingBuilder {
     direct_io: bool,
     placement: Option<PlacementMaker>,
     reads: Option<Arc<dyn ReadPolicy>>,
+    sleep: Option<Sleep>,
 }
 
 impl T4CachingBuilder {
@@ -138,6 +148,17 @@ impl T4CachingBuilder {
         self
     }
 
+    /// The timer a GET's late racer waits on (`PlannedGet::with_late_race`):
+    /// the caller's runtime's, `tokio::time::sleep` boxed, say, as t4 runs
+    /// on none of its own. Without it no GET is raced late.
+    pub fn with_sleep(
+        mut self,
+        sleep: impl Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync + 'static,
+    ) -> Self {
+        self.sleep = Some(Arc::new(sleep));
+        self
+    }
+
     /// The store: its cache files made and sized, its memory mapped, its
     /// policy built.
     ///
@@ -166,6 +187,7 @@ impl T4CachingBuilder {
         Ok(T4Caching {
             inner: self.inner,
             cache: ObjectCache::new(memory_chunks, disk, placement, reads)?,
+            sleep: self.sleep,
             known: Arc::new(KnownFiles::new()),
         })
     }
@@ -202,6 +224,7 @@ impl T4Caching {
             direct_io: true,
             placement: None,
             reads: None,
+            sleep: None,
         }
     }
 
@@ -285,7 +308,10 @@ impl T4Caching {
     /// still the version with `e_tag`, and hands each piece of the answer to
     /// `blocks` as it comes in. As many identical GETs as the plan says race
     /// for them, sent at once: the first answer takes the bytes, and the
-    /// others are dropped, their requests with them. The read policy hears
+    /// others are dropped, their requests with them. If the plan races it
+    /// late too, and the cache has a timer, one more request goes once the
+    /// GET has been out that long, for the bytes not in yet: the first to
+    /// have them all is taken, and the other dropped. The read policy hears
     /// the GET finished once its body is in, and landed once its blocks are
     /// cached.
     async fn fetch(
@@ -303,7 +329,89 @@ impl T4Caching {
             ..GetOptions::default()
         };
         let path = location.as_ref().as_bytes();
-        let racers = (0..blocks.race().get()).map(|racer| {
+        let sent = Instant::now();
+        let late = blocks.late_race().zip(self.sleep.clone());
+        let racers = blocks.race();
+        // The time the body's pieces took to land, apart from the time
+        // spent waiting for them; and how many bytes have come, for a late
+        // racer to ask for the rest.
+        let mut landing = Duration::ZERO;
+        let landed = AtomicU64::new(0);
+        let first = async {
+            let (answer, mut report) = self
+                .first_answer(location, &options, path, &bytes, racers)
+                .await?;
+            let received = async {
+                let mut body = answer.into_stream();
+                while let Some(piece) = body.try_next().await? {
+                    let started = Instant::now();
+                    blocks.land(&piece).await.map_err(Self::cache_error)?;
+                    landing += started.elapsed();
+                    landed.fetch_add(piece.len() as u64, Ordering::Relaxed);
+                }
+                Ok::<_, object_store::Error>(())
+            };
+            match received.await {
+                Ok(()) => {
+                    report.finished(bytes.end - bytes.start);
+                    Ok(report)
+                }
+                Err(error) => {
+                    report.failed();
+                    Err(error)
+                }
+            }
+        };
+        let report = match late {
+            None => first.await?,
+            Some((after, sleep)) => {
+                let rest = async {
+                    sleep(after).await;
+                    let from = bytes.start + landed.load(Ordering::Relaxed);
+                    let racer = racers.get();
+                    self.late_answer(location, &options, path, from..bytes.end, racer, sent)
+                        .await
+                };
+                // The first request, or the late racer, with the rest.
+                let won = match select(Box::pin(first), Box::pin(rest)).await {
+                    Either::Left((done, _rest)) => Either::Left(done?),
+                    Either::Right((Ok(rest), _first)) => Either::Right(rest),
+                    Either::Right((Err(_), first)) => Either::Left(first.await?),
+                };
+                match won {
+                    Either::Left(report) => report,
+                    // The first request given up on: the bytes not in yet
+                    // land from the late racer's.
+                    Either::Right((from, body, report)) => {
+                        let skip = usize::try_from(bytes.start + blocks.received() - from)
+                            .expect("a GET's bytes fit in memory");
+                        let started = Instant::now();
+                        blocks
+                            .land(&body[skip..])
+                            .await
+                            .map_err(Self::cache_error)?;
+                        landing += started.elapsed();
+                        report
+                    }
+                }
+            }
+        };
+        blocks.finish().await.map_err(Self::cache_error)?;
+        report.landed(landing);
+        Ok(())
+    }
+
+    /// The first answer of `racers` identical GETs, sent at once, the
+    /// others dropped before their bodies; and its report.
+    async fn first_answer<'a>(
+        &'a self,
+        location: &Path,
+        options: &GetOptions,
+        path: &'a [u8],
+        bytes: &Range<u64>,
+        racers: NonZeroU8,
+    ) -> object_store::Result<(GetResult, IoReport<'a>)> {
+        let racers = (0..racers.get()).map(|racer| {
             let get = Io::Get {
                 path,
                 bytes: bytes.clone(),
@@ -325,29 +433,53 @@ impl T4Caching {
             }
             .boxed()
         });
-        let ((answer, mut report), _losers) = select_ok(racers).await?;
-        // The time the body's pieces took to land, apart from the time
-        // spent waiting for them.
-        let mut landing = Duration::ZERO;
-        let received = async {
-            let mut body = answer.into_stream();
-            while let Some(piece) = body.try_next().await? {
-                let started = Instant::now();
-                blocks.land(&piece).await.map_err(Self::cache_error)?;
-                landing += started.elapsed();
-            }
-            Ok::<_, object_store::Error>(())
+        let (first, _losers) = select_ok(racers).await?;
+        Ok(first)
+    }
+
+    /// A late racer's GET of `rest`, the bytes of a GET not in yet, whole:
+    /// where they start, and its report, timed from `sent`, when the GET's
+    /// first request went. Never done if no bytes are left.
+    async fn late_answer<'a>(
+        &'a self,
+        location: &Path,
+        options: &GetOptions,
+        path: &'a [u8],
+        rest: Range<u64>,
+        racer: u8,
+        sent: Instant,
+    ) -> object_store::Result<(u64, Bytes, IoReport<'a>)> {
+        if rest.is_empty() {
+            return pending().await;
+        }
+        let get = Io::Get {
+            path,
+            bytes: rest.clone(),
+            racer,
         };
-        match received.await {
-            Ok(()) => report.finished(bytes.end - bytes.start),
+        let mut report = IoReport::start_at(self.cache.read_policy(), get, sent);
+        let options = GetOptions {
+            range: Some(GetRange::Bounded(rest.clone())),
+            ..options.clone()
+        };
+        let answer = match self.inner.get_opts(location, options).await {
+            Ok(answer) => answer,
             Err(error) => {
                 report.failed();
                 return Err(error);
             }
+        };
+        report.answered();
+        match answer.bytes().await {
+            Ok(body) => {
+                report.finished(rest.end - rest.start);
+                Ok((rest.start, body, report))
+            }
+            Err(error) => {
+                report.failed();
+                Err(error)
+            }
         }
-        blocks.finish().await.map_err(Self::cache_error)?;
-        report.landed(landing);
-        Ok(())
     }
 
     /// A failure of the cache's, as the store's error.

@@ -35,6 +35,8 @@
 #   MEMORY_GIB t4's memory tier (default 128)
 #   DISK_GIB   t4's cache file on each SSD (default 64)
 #   DOLLARS_PER_HOUR  what the box costs
+#   RACE       if p90 or p99, t4 races each GET once more if its body isn't
+#              all in by that quantile of the GET times it heard lately
 #   TRACE      if set, every call made of a store's tables, each run's apart,
 #              as CSV beside its results: <store>.trace.csv; and through t4,
 #              each GET it makes in phases: <store>.gets.csv
@@ -59,6 +61,7 @@ MEMORY_GIB=${MEMORY_GIB:-128}
 DISK_GIB=${DISK_GIB:-64}
 DOLLARS_PER_HOUR=${DOLLARS_PER_HOUR:-}
 TRACE=${TRACE:-}
+RACE=${RACE:-}
 BUCKET=${BUCKET:-s3://t4-bench-xiangpeng-use1}
 MOUNTS=${MOUNTS:-/mnt/t4}
 
@@ -117,9 +120,11 @@ for store in $STORES; do
     esac
     trace=()
     [ -z "$TRACE" ] || trace=(--trace "$OUT/$store.trace.csv" --get-phases "$OUT/$store.gets.csv")
+    race=()
+    [ -z "$RACE" ] || [ "$store" = s3 ] || race=(--race-at "$RACE")
     echo "== $store"
     started=$SECONDS
-    target/release/run_queries "${common[@]}" "${cache[@]}" "${drives[@]}" "${trace[@]}" \
+    target/release/run_queries "${common[@]}" "${cache[@]}" "${drives[@]}" "${trace[@]}" "${race[@]}" \
         --out "$OUT/$store.csv" "$@" | tee "$OUT/$store.log"
     rm -f "${mounts[@]/%//t4.cache}"
     echo "== $store took $((SECONDS - started)) s"

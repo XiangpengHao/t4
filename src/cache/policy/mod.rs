@@ -15,6 +15,7 @@
 
 mod clock;
 mod read;
+mod stragglers;
 
 pub use super::{BlockKey, ChunkId, FileVersionId};
 pub use clock::ClockPolicy;
@@ -22,6 +23,7 @@ pub use read::{
     BlockSource, FetchRuns, Io, IoEvent, IoPhase, LocatedRead, PlannedGet, ReadIntent, ReadPlan,
     ReadPolicy,
 };
+pub use stragglers::RaceStragglers;
 
 use std::num::NonZeroU32;
 use std::ops::Range;

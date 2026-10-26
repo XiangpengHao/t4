@@ -191,18 +191,36 @@ impl ReadPlan {
     }
 }
 
-/// One GET of a plan: the blocks it fetches, and how many identical
-/// requests race for them, sent at once, the first response taken and the
-/// others dropped.
+/// One GET of a plan: the blocks it fetches, how many identical requests
+/// race for them, sent at once, the first response taken and the others
+/// dropped; and whether one more races it late, if it hasn't finished.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlannedGet {
     blocks: Range<u32>,
     race: NonZeroU8,
+    late: Option<Duration>,
 }
 
 impl PlannedGet {
     pub fn new(blocks: Range<u32>, race: NonZeroU8) -> Self {
-        Self { blocks, race }
+        Self {
+            blocks,
+            race,
+            late: None,
+        }
+    }
+
+    /// The GET, raced once more if its body isn't all in `after` since it
+    /// was sent: one more request, for the bytes not in yet, the first to
+    /// have them all taken and the other dropped. The cache holds the late
+    /// request's bytes until it has them all, and sends it only if it was
+    /// given a timer (`T4CachingBuilder::with_sleep`).
+    #[must_use]
+    pub fn with_late_race(self, after: Duration) -> Self {
+        Self {
+            late: Some(after),
+            ..self
+        }
     }
 
     /// A GET of `blocks`, sent once.
@@ -218,6 +236,11 @@ impl PlannedGet {
     /// How many requests race for them.
     pub fn race(&self) -> NonZeroU8 {
         self.race
+    }
+
+    /// When one more request races it, if it hasn't finished.
+    pub fn late_race(&self) -> Option<Duration> {
+        self.late
     }
 }
 

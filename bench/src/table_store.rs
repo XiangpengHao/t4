@@ -12,7 +12,7 @@ use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path;
 use t4::T4Caching;
-use t4::policy::{Admit, FetchRuns};
+use t4::policy::{Admit, FetchRuns, RaceStragglers};
 use url::Url;
 
 use crate::Error;
@@ -155,6 +155,27 @@ pub struct CacheOptions {
     /// t4's default unless given.
     #[arg(long = "cache-queue-depth")]
     queue_depth: Option<u32>,
+    /// Race each GET of t4's once more if its body isn't all in by this
+    /// quantile of the GET times t4 heard lately ([`RaceStragglers`]);
+    /// never unless given.
+    #[arg(long = "race-at", value_enum)]
+    race_at: Option<RaceAt>,
+}
+
+/// The quantile of the GET times heard that t4 races a GET past.
+#[derive(Clone, Copy, ValueEnum)]
+enum RaceAt {
+    P90,
+    P99,
+}
+
+impl RaceAt {
+    fn quantile(self) -> f64 {
+        match self {
+            Self::P90 => 0.9,
+            Self::P99 => 0.99,
+        }
+    }
 }
 
 /// Which policy t4 runs.
@@ -206,8 +227,16 @@ impl CacheOptions {
             .fold(T4Caching::builder(origin), |builder, path| {
                 builder.with_disk_file(path, disk_gib << 30)
             })
-            .with_memory_capacity(memory_mib << 20)
-            .with_read_policy(TimedReads::new(FetchRuns, Arc::clone(latencies)));
+            .with_memory_capacity(memory_mib << 20);
+        let builder = match self.race_at {
+            None => builder.with_read_policy(TimedReads::new(FetchRuns, Arc::clone(latencies))),
+            Some(race_at) => builder
+                .with_read_policy(TimedReads::new(
+                    RaceStragglers::at(race_at.quantile()),
+                    Arc::clone(latencies),
+                ))
+                .with_sleep(|after| Box::pin(tokio::time::sleep(after))),
+        };
         let builder = match self.queue_depth {
             Some(queue_depth) => builder.with_queue_depth(queue_depth),
             None => builder,

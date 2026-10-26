@@ -22,11 +22,17 @@ pub(super) struct IoReport<'r> {
 impl<'r> IoReport<'r> {
     /// Reports `io` started.
     pub(super) fn start(policy: &'r dyn ReadPolicy, io: Io<'r>) -> Self {
+        Self::start_at(policy, io, Instant::now())
+    }
+
+    /// Reports `io` started, its times counted from `started`: a late
+    /// racer's from when its GET's first request went, as its GET's are.
+    pub(super) fn start_at(policy: &'r dyn ReadPolicy, io: Io<'r>, started: Instant) -> Self {
         policy.on_io(&IoEvent::new(io.clone(), IoPhase::Started));
         Self {
             policy,
             io,
-            started: Instant::now(),
+            started,
             ended: false,
             answered: Duration::ZERO,
             received: Duration::ZERO,

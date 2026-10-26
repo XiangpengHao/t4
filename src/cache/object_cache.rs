@@ -3,7 +3,8 @@
 //!
 //! - **A read** copies the blocks memory holds, and reads those on disk,
 //!   moving one to memory if the placement policy says so. It waits for
-//!   those another read is fetching, and takes each from where it lands.
+//!   those another read is fetching, and takes each from where it lands, or
+//!   from the fetch itself, for one no tier keeps.
 //!   For the rest it names the GETs the read policy plans, and what becomes
 //!   of each block they fetch: where the placement policy said it goes, the
 //!   read's part into its output, a block a tier holds already dropped.
@@ -21,6 +22,7 @@
 use std::future::Future;
 use std::num::{NonZeroU8, NonZeroU32};
 use std::ops::Range;
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::FutureExt;
@@ -193,8 +195,7 @@ impl ObjectCache {
     }
 
     /// Where `block` is, for a read of `context`: held in a tier, being
-    /// fetched by another read, or remote, claimed for the read's own fetch
-    /// unless the placement policy discards it.
+    /// fetched by another read, or remote, claimed for the read's own fetch.
     fn locate(&self, block: &PlannedBlock, context: &BlockRead<'_>) -> Located<'_> {
         let key = block.key();
         let mut location = block.location();
@@ -208,9 +209,6 @@ impl ObjectCache {
                 return Located::InFlight(fetch);
             }
             let admit = self.placement.on_remote_read(context);
-            if admit == Admit::Discard {
-                return Located::Remote { admit, claim: None };
-            }
             let claim = match self.in_flight.claim(key, admit) {
                 Ok(claim) => claim,
                 Err(fetch) => return Located::InFlight(fetch),
@@ -238,7 +236,7 @@ impl ObjectCache {
     /// What becomes of block `index` of `file`, fetched by a GET racing
     /// `race`, widened past the read of `range`: dropped if a tier holds it
     /// or another read is fetching it, else placed as the placement policy
-    /// says, and claimed for the GET if it is to be cached.
+    /// says, and claimed for the GET.
     fn widened_block(
         &self,
         file: &CacheableFile<'_>,
@@ -260,9 +258,6 @@ impl ObjectCache {
             false,
         );
         let admit = self.placement.on_remote_read(&context);
-        if admit == Admit::Discard {
-            return FetchBlockPlan::new(BlockFate::Widened(admit), None);
-        }
         match self.in_flight.claim(key, admit) {
             Err(_) => FetchBlockPlan::dropped(),
             Ok(mut claim) => match self.blocks.get(key) {
@@ -338,6 +333,7 @@ impl ObjectCache {
             .expect("a fetch is one the read planned, taken once");
         let PlannedFetch {
             race,
+            late,
             first,
             blocks: planned,
             ..
@@ -363,6 +359,7 @@ impl ObjectCache {
             version: read.version,
             range: fetch,
             race,
+            late,
             received: 0,
             first,
             blocks,
@@ -385,9 +382,9 @@ impl ObjectCache {
     }
 
     /// Where `key`'s block, `len` bytes, lands as it is fetched: a chunk of
-    /// the tier `admit` names, lent to take its bytes. Nowhere if the policy
-    /// discards it, a tier holds it already, or that tier has no room even
-    /// after evicting.
+    /// the tier `admit` names, lent to take its bytes; a buffer, for the
+    /// reads waiting on its fetch, if the policy discards it. Nowhere if a
+    /// tier holds it already, or that tier has no room even after evicting.
     async fn landing(&self, key: BlockKey, admit: Admit, len: usize) -> Landing<'_> {
         if self.blocks.get(key).is_some() {
             return Landing::Nowhere;
@@ -419,7 +416,7 @@ impl ObjectCache {
                     Err(_) => Landing::Nowhere,
                 }
             }
-            Admit::Discard => Landing::Nowhere,
+            Admit::Discard => Landing::Passing(Vec::with_capacity(len)),
         }
     }
 
@@ -458,7 +455,7 @@ impl ObjectCache {
                     reader.unpublish();
                 }
             }
-            Landing::Due(_) | Landing::Nowhere => {}
+            Landing::Due(_) | Landing::Passing(_) | Landing::Nowhere => {}
         }
     }
 
@@ -1001,6 +998,10 @@ impl<'c> TierWork<'c> {
         for ((block, _), end) in waits.iter().zip(ends) {
             let held = match end {
                 FetchEnd::Cached(location) => self.cache.hold(block.key(), Some(location)),
+                FetchEnd::Passed(bytes) => {
+                    read.place_from_chunk(block, &bytes);
+                    continue;
+                }
                 FetchEnd::Abandoned => HeldBlock::Remote,
             };
             match held {
@@ -1118,11 +1119,13 @@ impl PartialRead {
 }
 
 /// One GET of a read's plan: the file's bytes it fetches, whole blocks,
-/// how many requests race for them, and what becomes of each block.
+/// how many requests race for them, at once and late, and what becomes of
+/// each block.
 #[derive(Debug)]
 struct PlannedFetch {
     bytes: Range<u64>,
     race: NonZeroU8,
+    late: Option<Duration>,
     first: u32,
     blocks: Vec<FetchBlockPlan>,
 }
@@ -1135,6 +1138,7 @@ impl PlannedFetch {
         Self {
             bytes: version.block_range(range.start).start..version.block_range(range.end - 1).end,
             race: get.race(),
+            late: get.late_race(),
             first: range.start,
             blocks,
         }
@@ -1234,6 +1238,8 @@ pub(super) struct FetchedBlocks<'c> {
     /// The file's bytes the fetch holds: whole blocks, from a block's start.
     range: Range<u64>,
     race: NonZeroU8,
+    /// When one more request races the fetch, if it hasn't finished.
+    late: Option<Duration>,
     /// How many of them have come in.
     received: u64,
     /// The first block's number.
@@ -1260,6 +1266,16 @@ impl FetchedBlocks<'_> {
     /// How many identical requests race for them.
     pub(super) fn race(&self) -> NonZeroU8 {
         self.race
+    }
+
+    /// When one more request races them, if they aren't all in.
+    pub(super) fn late_race(&self) -> Option<Duration> {
+        self.late
+    }
+
+    /// How many of its bytes have come in.
+    pub(super) fn received(&self) -> u64 {
+        self.received
     }
 
     /// Takes `piece`, the fetch's next bytes.
@@ -1318,11 +1334,21 @@ impl FetchedBlocks<'_> {
             // its bytes.
             drop(output);
             let key = BlockKey::new(version.id(), index);
-            cache.cache_landed(key, landing).await;
+            let passed = match landing {
+                Landing::Passing(bytes) => Some(Bytes::from(bytes)),
+                landing => {
+                    cache.cache_landed(key, landing).await;
+                    None
+                }
+            };
             // The fetch ends with the block where a tier holds it, whether
-            // this fetch or another put it there, for the reads waiting.
+            // this fetch or another put it there, or, one no tier keeps, with
+            // its bytes, for the reads waiting.
             if let Some(claim) = claim {
-                claim.ended(cache.blocks.get(key));
+                match passed {
+                    Some(bytes) => claim.passed(bytes),
+                    None => claim.ended(cache.blocks.get(key)),
+                }
             }
         });
         join_all(cached).await;
@@ -1392,16 +1418,25 @@ enum Landing<'c> {
         pages: AlignedBuf,
         writer: DiskChunkWriter<'c>,
     },
+    /// A buffer the bytes of a block no tier keeps collect in, for the
+    /// reads waiting on its fetch to take theirs from; the block goes
+    /// uncached.
+    Passing(Vec<u8>),
     /// Nowhere: the block goes uncached.
     Nowhere,
 }
 
 impl Landing<'_> {
-    /// Copies `bytes` into the block's place from its byte `at`.
+    /// Copies `bytes` into the block's place from its byte `at`. A block's
+    /// bytes come in order.
     fn copy_in(&mut self, at: usize, bytes: &[u8]) {
         match self {
             Self::Memory { chunk, .. } => chunk.copy_in(at, bytes),
             Self::Disk { pages, .. } => pages.copy_in(at, bytes),
+            Self::Passing(passing) => {
+                debug_assert_eq!(passing.len(), at, "a block's bytes come in order");
+                passing.extend_from_slice(bytes);
+            }
             Self::Due(_) | Self::Nowhere => {}
         }
     }
