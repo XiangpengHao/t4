@@ -3,9 +3,13 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::Poll;
 
-use futures_util::{FutureExt, TryStreamExt};
+use async_trait::async_trait;
+use futures_util::{FutureExt, TryStreamExt, stream};
 use object_store::memory::InMemory;
-use object_store::{ListResult, ObjectStoreExt};
+use object_store::{
+    CopyOptions, GetResultPayload, ListResult, MultipartUpload, ObjectStoreExt,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, UploadPart,
+};
 use pollster::block_on;
 use tempfile::TempDir;
 
@@ -1338,5 +1342,132 @@ fn a_late_race_goes_beside_the_cap() {
     assert_eq!(
         inner.take_asked(),
         [Asked::Head, bounded(0..MIB), bounded(MIB / 4..MIB)]
+    );
+}
+
+/// Whether `bytes`, the file's from `offset`, lie where the file's pages
+/// would: the address and the offset agree mod a page.
+fn agrees_with_its_offset(bytes: &Bytes, offset: u64) -> bool {
+    bytes.as_ptr() as u64 % crate::PAGE_SIZE_U64 == offset % crate::PAGE_SIZE_U64
+}
+
+#[test]
+fn an_opened_file_reads_through_the_cache() {
+    let (_dir, store, inner) = t4_caching();
+    let path = Path::from("a");
+    let data = file_bytes(2 * MIB, 0);
+    put(inner.as_ref(), &path, &data);
+
+    let file = block_on(store.open(&path)).unwrap();
+    assert_eq!(file.meta().size, 2 * MIB);
+    assert_eq!(inner.take_asked(), [Asked::Head]);
+    let bytes = block_on(file.read(10..MIB + 10, None)).unwrap();
+    assert_eq!(bytes, data.slice(10..MIB as usize + 10));
+    assert_eq!(inner.take_asked(), [bounded(0..2 * MIB)]);
+    // One cache: a hit through the file, and through the store.
+    let bytes = block_on(file.read(5..2 * MIB, None)).unwrap();
+    assert_eq!(bytes, data.slice(5..));
+    assert_eq!(get_range(&store, &path, 5..15), data.slice(5..15));
+    assert_eq!(inner.take_asked(), []);
+    // As a bounded GET: clamped to the file's end, an error past it.
+    let bytes = block_on(file.read(MIB..10 * MIB, None)).unwrap();
+    assert_eq!(bytes, data.slice(MIB as usize..));
+    assert!(block_on(file.read(3 * MIB..3 * MIB + 1, None)).is_err());
+}
+
+#[test]
+fn a_listed_file_opens_without_a_head() {
+    let (_dir, store, inner) = t4_caching();
+    let path = Path::from("a");
+    let data = file_bytes(2 * MIB, 0);
+    put(inner.as_ref(), &path, &data);
+    let listed = block_on(inner.head(&path)).unwrap();
+    inner.take_asked();
+
+    let file = store.open_listed(listed);
+    assert_eq!(
+        block_on(file.read(10..20, None)).unwrap(),
+        data.slice(10..20)
+    );
+    assert_eq!(inner.take_asked(), [bounded(0..MIB)]);
+    // The store's reads know the file too.
+    assert_eq!(
+        get_range(&store, &path, MIB..MIB + 1),
+        data.slice(MIB as usize..MIB as usize + 1)
+    );
+    assert_eq!(inner.take_asked(), [bounded(MIB..2 * MIB)]);
+}
+
+#[test]
+fn an_opened_files_bytes_agree_with_their_offsets() {
+    let (_dir, store, inner) = t4_caching();
+    let path = Path::from("a");
+    let size = 3 * MIB + 7;
+    let data = file_bytes(size, 0);
+    put(inner.as_ref(), &path, &data);
+
+    let file = block_on(store.open(&path)).unwrap();
+    // Fetched, then hits in memory.
+    for _ in 0..2 {
+        for range in [0..1, 100..MIB + 100, 4095..4097, 3 * MIB + 3..size] {
+            let bytes = block_on(file.read(range.clone(), None)).unwrap();
+            assert_eq!(bytes, data.slice(range.start as usize..range.end as usize));
+            assert!(agrees_with_its_offset(&bytes, range.start), "{range:?}");
+        }
+    }
+}
+
+#[test]
+fn a_file_with_no_e_tag_is_read_from_the_store_aligned() {
+    let (_dir, store, inner) = t4_caching();
+    let path = Path::from("a");
+    let data = file_bytes(2 * MIB, 0);
+    put(inner.as_ref(), &path, &data);
+    let listed = ObjectMeta {
+        e_tag: None,
+        ..block_on(inner.head(&path)).unwrap()
+    };
+    inner.take_asked();
+
+    let file = store.open_listed(listed);
+    for _ in 0..2 {
+        let bytes = block_on(file.read(4097..MIB + 3, None)).unwrap();
+        assert_eq!(bytes, data.slice(4097..MIB as usize + 3));
+        assert!(agrees_with_its_offset(&bytes, 4097));
+        // Never cached: each read asks the store for its bytes alone.
+        assert_eq!(inner.take_asked(), [bounded(4097..MIB + 3)]);
+    }
+}
+
+#[test]
+fn an_opened_file_changed_since_fails_to_read() {
+    let (_dir, store, inner) = t4_caching();
+    let path = Path::from("a");
+    let old = file_bytes(2 * MIB, 0);
+    put(inner.as_ref(), &path, &old);
+    let file = block_on(store.open(&path)).unwrap();
+    assert_eq!(block_on(file.read(0..10, None)).unwrap(), old.slice(0..10));
+
+    put(inner.as_ref(), &path, &file_bytes(2 * MIB, 1));
+    // Block 1 is remote: its fetch, on the old e_tag, finds the new file,
+    // and so does the read from the store that follows.
+    let error = block_on(file.read(MIB..MIB + 10, None)).unwrap_err();
+    assert!(
+        matches!(error, object_store::Error::Precondition { .. }),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_opened_files_intent_reaches_both_policies() {
+    let reads = ScriptedReads::new(|read| FetchRuns::default().plan(read));
+    let (_dir, store, _inner, remote_reads, data) = planned_by(&reads, Admit::Memory);
+    let file = block_on(store.open(&Path::from("a"))).unwrap();
+    let bytes = block_on(file.read(0..MIB, Some(ReadIntent::Latency))).unwrap();
+    assert_eq!(bytes, data.slice(0..MIB as usize));
+    assert_eq!(*reads.intents.lock().unwrap(), [Some(ReadIntent::Latency)]);
+    assert_eq!(
+        *remote_reads.lock().unwrap(),
+        [(0, Some(ReadIntent::Latency), true)]
     );
 }

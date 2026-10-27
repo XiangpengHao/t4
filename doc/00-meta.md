@@ -39,6 +39,11 @@ only the remote holds itself. The design: `03-cache.md`.
 - `07-prefetch.md`: blocks moved before a read asks for them, on both
   tiers, at the lowest priority; the mechanism knows no file format, and
   the default policy predicts the next rows of the columns being read.
+- `09-vortex-integration.md`: t4 in Vortex, as a pull request for its
+  maintainers to decide: t4's own API (a file opened once, read one range
+  or many), with `ObjectStore` composed over it in t4 and Vortex's
+  `VortexReadAt` over it in Vortex; Vortex's own benchmark measures each
+  tier alone.
 - `98-cachefs-vs-fs.md`: how a cache's storage differs from a file
   system's.
 - `99-brainstorm.md`: open notes.

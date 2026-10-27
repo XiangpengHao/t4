@@ -13,7 +13,8 @@
 //! - `object_cache`: reads, fills and evictions over them all.
 //! - `read_output`: the buffer a read's bytes land in, the caller's as
 //!   `Bytes` with no copy.
-//! - `t4_caching`: the front end, an `ObjectStore` over another.
+//! - `t4_caching`: the front end over another `ObjectStore`: files opened
+//!   and read through the cache, and an `ObjectStore` itself.
 
 mod block_index;
 mod cache_files;
@@ -26,7 +27,7 @@ pub mod policy;
 mod read_output;
 mod t4_caching;
 
-pub use t4_caching::{T4Caching, T4CachingBuilder};
+pub use t4_caching::{CachedFile, T4Caching, T4CachingBuilder};
 
 use std::fmt;
 

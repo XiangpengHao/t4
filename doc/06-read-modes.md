@@ -145,8 +145,12 @@ High-Performance Analytics", PVLDB 16(11), 2023):
    to have them all is taken, the other dropped, and the late request's
    bytes land past the first's. `RaceStragglers` plans as `FetchRuns` does
    and races each normal read's GETs at a quantile (p90, p99) of the latest
-   GET times it heard, from a GET's first request to its body all in; at
-   the p90 it is the default read policy (decision 10). On
+   GET times it heard, from a GET's first request to its body all in, the
+   latest 64, and at 500 ms until it has heard that many; at the p90 it is
+   the default read policy (decision 10). It learned from 4,096 and raced
+   nothing until it had heard 256 at first, which left a fresh cache's
+   footers and first GETs unraced: on 27 Oct 2026's footer race runs, a
+   1.1 s footer GET and a 6.3 s stalled body among them. On
    24 Oct 2026's ClickBench GETs a model gave racing at p90, uncapped, 10%
    more GETs and 8 to 10% more bytes for a p99 of 495 ms, not 633, and a
    max of 1.0 s, not 3.3; the slow GETs came in bursts, when bytes in

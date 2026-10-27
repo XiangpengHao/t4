@@ -9,25 +9,27 @@ use crate::io::sync::atomic::{AtomicU64, Ordering};
 
 /// Plans as [`FetchRuns`] does, the default unless [`Self::planning_as`]
 /// says otherwise, and races each GET of a normal read once more if its
-/// body isn't all in by a quantile of the times GETs lately took, from
-/// their first request to their body all in: the last [`Self::HEARD`]
-/// heard of. It races nothing until it has heard
-/// [`Self::LEARNED`]. A read with an intent isn't raced: its GETs may be of
-/// any size, and the cache holds a late racer's bytes until it has them all.
+/// body isn't all in by a quantile of the times the last [`Self::HEARD`]
+/// GETs took, from their first request to their body all in; until it has
+/// heard that many, by [`Self::START`]. A read with an intent isn't raced:
+/// its GETs may be of any size, and the cache holds a late racer's bytes
+/// until it has them all.
 #[derive(Debug)]
 pub struct RaceStragglers {
     fetches: FetchRuns,
     quantile: f64,
     heard: Mutex<HeardTimes>,
-    /// When a GET is raced, in µs; 0 until learned.
+    /// When a GET is raced, in µs.
     trigger_us: AtomicU64,
 }
 
 impl RaceStragglers {
     /// The GET times it learns from, the latest.
-    pub const HEARD: usize = 4096;
-    /// The GET times it hears before racing any.
-    pub const LEARNED: usize = 256;
+    pub const HEARD: usize = 64;
+    /// When a GET is raced until [`Self::HEARD`] have been heard: past
+    /// almost every GET of a few MiB, so that a fresh cache, its footers
+    /// read first, races a GET that stalls before it knows the store.
+    pub const START: Duration = Duration::from_millis(500);
 
     /// Races a GET when it runs past `quantile` of the GET times heard, 0.9
     /// for the p90, say.
@@ -44,7 +46,7 @@ impl RaceStragglers {
             fetches: FetchRuns::default(),
             quantile,
             heard: Mutex::new(HeardTimes::default()),
-            trigger_us: AtomicU64::new(0),
+            trigger_us: AtomicU64::new(HeardTimes::micros(Self::START)),
         }
     }
 
@@ -54,12 +56,10 @@ impl RaceStragglers {
         Self { fetches, ..self }
     }
 
-    /// When a GET is raced, once learned.
-    pub fn trigger(&self) -> Option<Duration> {
-        match self.trigger_us.load(Ordering::Relaxed) {
-            0 => None,
-            us => Some(Duration::from_micros(us)),
-        }
+    /// When a GET is raced: the quantile of the latest GET times heard, or
+    /// [`Self::START`] until it has heard enough.
+    pub fn trigger(&self) -> Duration {
+        Duration::from_micros(self.trigger_us.load(Ordering::Relaxed))
     }
 }
 
@@ -74,14 +74,14 @@ impl Default for RaceStragglers {
 impl ReadPolicy for RaceStragglers {
     fn plan(&self, read: &LocatedRead<'_>) -> ReadPlan {
         let plan = self.fetches.plan(read);
-        match (self.trigger(), read.intent()) {
-            (Some(after), None) => ReadPlan::new(
+        match read.intent() {
+            None => ReadPlan::new(
                 plan.gets()
                     .iter()
-                    .map(|get| get.clone().with_late_race(after))
+                    .map(|get| get.clone().with_late_race(self.trigger()))
                     .collect(),
             ),
-            _ => plan,
+            Some(_) => plan,
         }
     }
 
@@ -93,8 +93,8 @@ impl ReadPolicy for RaceStragglers {
                 .expect("hearing a time doesn't panic")
                 .hear(after, self.quantile);
             if let Some(trigger) = learned {
-                let us = u64::try_from(trigger.as_micros()).unwrap_or(u64::MAX);
-                self.trigger_us.store(us.max(1), Ordering::Relaxed);
+                self.trigger_us
+                    .store(HeardTimes::micros(trigger), Ordering::Relaxed);
             }
         }
     }
@@ -106,30 +106,32 @@ struct HeardTimes {
     times: Vec<u64>,
     /// Where the next time goes, once the ring is full.
     next: usize,
-    /// Times heard since the quantile was last found.
-    since: usize,
 }
 
 impl HeardTimes {
-    /// Hears `time`; and, every [`RaceStragglers::LEARNED`] times, returns
-    /// the `quantile` of those kept.
+    /// Hears `time`; and, once the ring is full, returns the `quantile` of
+    /// the times in it.
     fn hear(&mut self, time: Duration, quantile: f64) -> Option<Duration> {
-        let us = u64::try_from(time.as_micros()).unwrap_or(u64::MAX);
+        let us = Self::micros(time);
         if self.times.len() < RaceStragglers::HEARD {
             self.times.push(us);
+            if self.times.len() < RaceStragglers::HEARD {
+                return None;
+            }
         } else {
             self.times[self.next] = us;
             self.next = (self.next + 1) % RaceStragglers::HEARD;
         }
-        self.since += 1;
-        if self.since < RaceStragglers::LEARNED {
-            return None;
-        }
-        self.since = 0;
-        let mut times = self.times.clone();
+        let mut times = [0; RaceStragglers::HEARD];
+        times.copy_from_slice(&self.times);
         let at = ((times.len() as f64 * quantile) as usize).min(times.len() - 1);
         let (_, nth, _) = times.select_nth_unstable(at);
         Some(Duration::from_micros(*nth))
+    }
+
+    /// `time` in whole µs, as the ring keeps it.
+    fn micros(time: Duration) -> u64 {
+        u64::try_from(time.as_micros()).unwrap_or(u64::MAX)
     }
 }
 
@@ -165,23 +167,24 @@ mod tests {
             .collect()
     }
 
-    /// It races nothing until it has heard enough GETs; then a normal read's
-    /// GETs at the quantile of those heard, and a read with an intent's
+    /// Until it has heard enough GETs, it races a normal read's GETs at the
+    /// start; then at the quantile of those heard; a read with an intent's
     /// never.
     #[test]
-    fn races_a_normal_reads_gets_at_the_quantile_heard() {
+    fn races_a_normal_reads_gets_at_the_start_then_the_quantile_heard() {
         let policy = RaceStragglers::at(0.9);
-        for ms in 1..RaceStragglers::LEARNED as u64 {
+        for ms in 1..RaceStragglers::HEARD as u64 {
             policy.on_io(&finished(ms));
         }
-        assert_eq!(late_races(&policy, None), [None], "not learned yet");
-        for ms in RaceStragglers::LEARNED as u64..=1000 {
-            policy.on_io(&finished(ms));
-        }
-        // 1..=1000 ms heard, the quantile found last when 768 had been:
-        // their p90.
-        let trigger = Duration::from_millis(692);
-        assert_eq!(policy.trigger(), Some(trigger));
+        assert_eq!(
+            late_races(&policy, None),
+            [Some(RaceStragglers::START)],
+            "not learned yet"
+        );
+        policy.on_io(&finished(RaceStragglers::HEARD as u64));
+        // 1..=64 ms heard: their p90, the 58th.
+        let trigger = Duration::from_millis(58);
+        assert_eq!(policy.trigger(), trigger);
         assert_eq!(late_races(&policy, None), [Some(trigger)]);
         assert_eq!(late_races(&policy, Some(ReadIntent::Warm)), [None]);
     }
@@ -196,6 +199,6 @@ mod tests {
         for _ in 0..RaceStragglers::HEARD {
             policy.on_io(&finished(10));
         }
-        assert_eq!(policy.trigger(), Some(Duration::from_millis(10)));
+        assert_eq!(policy.trigger(), Duration::from_millis(10));
     }
 }
