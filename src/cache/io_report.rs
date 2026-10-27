@@ -58,13 +58,15 @@ impl<'r> IoReport<'r> {
     }
 
     /// Reports a GET's blocks cached, once it finished: `landing` of its
-    /// time went to landing its pieces in the cache as they came.
-    pub(super) fn landed(self, landing: Duration) {
+    /// time went to landing its pieces in the cache as they came, and it
+    /// `waited` for its turn before it started.
+    pub(super) fn landed(self, landing: Duration, waited: Duration) {
         self.report(IoPhase::Landed {
             answered: self.answered,
             received: self.received,
             landing,
             after: self.started.elapsed(),
+            waited,
         });
     }
 

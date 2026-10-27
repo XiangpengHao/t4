@@ -43,7 +43,7 @@ use super::policy::{
     PlacementPolicy, PlannedGet, ReadIntent, ReadPolicy, Tier, VictimAction,
 };
 use super::read_output::ReadOutput;
-use super::{BLOCK_SIZE_U64, BlockKey, ChunkId};
+use super::{BLOCK_SIZE_U64, BlockKey, ChunkId, FileVersionId};
 use crate::PAGE_SIZE_U32;
 use crate::buffer::AlignedBuf;
 use crate::io::error::{Error, Result};
@@ -1263,6 +1263,11 @@ impl FetchedBlocks<'_> {
         self.range.clone()
     }
 
+    /// The version of the file they are of.
+    pub(super) fn file(&self) -> FileVersionId {
+        self.version.id()
+    }
+
     /// How many identical requests race for them.
     pub(super) fn race(&self) -> NonZeroU8 {
         self.race
@@ -1271,11 +1276,6 @@ impl FetchedBlocks<'_> {
     /// When one more request races them, if they aren't all in.
     pub(super) fn late_race(&self) -> Option<Duration> {
         self.late
-    }
-
-    /// How many of its bytes have come in.
-    pub(super) fn received(&self) -> u64 {
-        self.received
     }
 
     /// Takes `piece`, the fetch's next bytes.

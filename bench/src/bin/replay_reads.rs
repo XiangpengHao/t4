@@ -32,7 +32,7 @@ use t4_bench::Error;
 use t4_bench::host_counters::{CgroupMemory, HostCounters, HostProbe};
 use t4_bench::replay::{CallSize, LatencySummary, QueryReplay, ReplayPlan, Replayer};
 use t4_bench::request_trace::RecordedRequest;
-use t4_bench::table_store::{CacheOptions, HttpTransport, TableLocation};
+use t4_bench::table_store::{CacheOptions, HttpOptions, TableLocation};
 
 /// The allocator: mimalloc unless built `--no-default-features`, as the
 /// `mimalloc` feature in `bench/Cargo.toml` explains. A static, as Rust takes
@@ -53,9 +53,8 @@ struct Args {
     /// names.
     #[arg(long, value_parser = TableLocation::parse)]
     location: TableLocation,
-    /// How a cloud store moves its HTTP.
-    #[arg(long, value_enum, default_value_t)]
-    http: HttpTransport,
+    #[command(flatten)]
+    http: HttpOptions,
     #[command(flatten)]
     cache: CacheOptions,
     /// Passes over the queries, in one process: the first cold, the rest
@@ -194,10 +193,11 @@ async fn main() -> Result<(), Error> {
     let args = Args::parse();
     let trace = RecordedRequest::read_csv(BufReader::new(File::open(&args.trace)?))?;
     let plan = ReplayPlan::new(&trace, &args.location)?;
+    let http = args.http.start()?;
     // t4's own I/O goes untimed: this tool times the calls made of it.
     let store = args
         .cache
-        .in_front_of(args.location.origin(args.http)?, &Arc::default())?;
+        .in_front_of(args.location.origin(&http)?, &Arc::default())?;
     let replayer = Replayer::new(store, args.copies);
     let probe = HostProbe::new(&args.drive_dirs)?;
 

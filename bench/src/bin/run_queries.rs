@@ -53,13 +53,13 @@ use datafusion::datasource::listing::ListingOptions;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
-use t4_bench::host_counters::{CgroupMemory, HostCounters, HostProbe};
+use t4_bench::host_counters::{CgroupMemory, HostCounters, HostProbe, NicCounters, NicProbe};
 use t4_bench::io_latency::{IoLatencies, TakenIoLatencies};
 use t4_bench::raw_vortex_reads::RawVortexFormat;
 use t4_bench::replay::LatencySummary;
 use t4_bench::request_cost::{CountedStore, RequestCounter, RequestCounts, RequestPrices};
 use t4_bench::request_trace::{RequestTrace, TracedStore};
-use t4_bench::table_store::{CacheOptions, HttpTransport, TableLocation};
+use t4_bench::table_store::{CacheOptions, HttpOptions, StoreHttp, TableLocation};
 use vortex::VortexSessionDefault;
 use vortex::session::VortexSession;
 
@@ -80,9 +80,8 @@ struct Args {
     /// The tables' file format.
     #[arg(long, value_enum, default_value_t)]
     format: TableFormat,
-    /// How a cloud store moves its HTTP.
-    #[arg(long, value_enum, default_value_t)]
-    http: HttpTransport,
+    #[command(flatten)]
+    http: HttpOptions,
     /// The queries, one a line; query `n` is line `n`, from 0.
     #[arg(long)]
     queries: PathBuf,
@@ -164,6 +163,7 @@ struct QuerySession {
 impl QuerySession {
     fn new(
         args: &Args,
+        http: &StoreHttp,
         requests: &Arc<RequestCounter>,
         latencies: &Arc<IoLatencies>,
         trace: Option<&Arc<RequestTrace>>,
@@ -193,7 +193,7 @@ impl QuerySession {
         }
         for (url, location) in stores {
             let origin = Arc::new(CountedStore::new(
-                location.origin(args.http)?,
+                location.origin(http)?,
                 Arc::clone(requests),
             ));
             let mut store = args
@@ -248,6 +248,7 @@ impl QuerySession {
 /// host's counters, the requests the stores are sent, and t4's I/O.
 struct Meters {
     probe: HostProbe,
+    nic: NicProbe,
     requests: Arc<RequestCounter>,
     latencies: Arc<IoLatencies>,
     /// Whether t4 is read through, so that its I/O is timed.
@@ -257,6 +258,9 @@ struct Meters {
 impl Meters {
     /// Measures `step` as it runs.
     async fn measure<T>(&self, step: impl Future<Output = Result<T>>) -> Result<(T, Measured)> {
+        // ethtool runs before the CPU counters are read, and after: its own
+        // CPU time stays out of the step's.
+        let nic_before = self.nic.sample();
         let before = (self.probe.sample(), self.requests.counts());
         self.latencies.take();
         let start = Instant::now();
@@ -267,9 +271,15 @@ impl Meters {
             .sample()
             .zip(before.0)
             .map(|(after, before)| after.since(&before));
+        let nic = self
+            .nic
+            .sample()
+            .zip(nic_before)
+            .map(|(after, before)| after.since(&before));
         let measured = Measured {
             elapsed,
             moved,
+            nic,
             memory: self.probe.cgroup_memory(),
             requests: self.requests.counts().since(&before.1),
             io: self.cached.then(|| self.latencies.take()),
@@ -284,6 +294,7 @@ impl Meters {
 struct Measured {
     elapsed: Duration,
     moved: Option<HostCounters>,
+    nic: Option<NicCounters>,
     memory: Option<CgroupMemory>,
     requests: RequestCounts,
     io: Option<TakenIoLatencies>,
@@ -310,11 +321,12 @@ struct StepRow {
 impl StepRow {
     fn csv_header() -> String {
         format!(
-            "pass,query,run,step,ms,rows,{},{},{},machine_dollars,{}",
+            "pass,query,run,step,ms,rows,{},{},{},machine_dollars,{},{}",
             HostCounters::CSV_COLUMNS,
             CgroupMemory::CSV_COLUMNS,
             RequestCounts::CSV_COLUMNS,
-            TakenIoLatencies::CSV_COLUMNS
+            TakenIoLatencies::CSV_COLUMNS,
+            NicCounters::CSV_COLUMNS
         )
     }
 
@@ -335,14 +347,15 @@ impl StepRow {
         });
         writeln!(
             out,
-            "{pass},{query},{},{step},{:.3},{},{},{},{},{machine_dollars},{}",
+            "{pass},{query},{},{step},{:.3},{},{},{},{},{machine_dollars},{},{}",
             self.run,
             self.measured.elapsed.as_secs_f64() * 1e3,
             self.rows.map_or(String::new(), |rows| rows.to_string()),
             HostCounters::csv_fields(self.measured.moved.as_ref()),
             CgroupMemory::csv_fields(self.measured.memory.as_ref()),
             self.measured.requests.csv_fields(&RequestPrices::STANDARD),
-            TakenIoLatencies::csv_fields(self.measured.io.as_ref())
+            TakenIoLatencies::csv_fields(self.measured.io.as_ref()),
+            NicCounters::csv_fields(self.measured.nic.as_ref())
         )
     }
 
@@ -367,9 +380,11 @@ impl StepRow {
     }
 }
 
-/// The benchmark: its arguments, the queries, its meters, and the CSV.
+/// The benchmark: its arguments, the HTTP its stores share, the queries,
+/// its meters, and the CSV.
 struct Benchmark {
     args: Args,
+    http: StoreHttp,
     queries: Vec<String>,
     meters: Meters,
     out: BufWriter<File>,
@@ -383,6 +398,7 @@ impl Benchmark {
             .collect();
         let meters = Meters {
             probe: HostProbe::new(&args.drive_dirs)?,
+            nic: NicProbe::new(),
             requests: Arc::default(),
             latencies: Arc::new(match args.get_phases {
                 Some(_) => IoLatencies::keeping_gets(),
@@ -393,6 +409,7 @@ impl Benchmark {
         let mut out = BufWriter::new(File::create(&args.out)?);
         writeln!(out, "{}", StepRow::csv_header())?;
         Ok(Self {
+            http: args.http.start()?,
             args,
             queries,
             meters,
@@ -484,7 +501,13 @@ impl Benchmark {
         trace: Option<&Arc<RequestTrace>>,
     ) -> Result<QuerySession> {
         let meters = &self.meters;
-        let session = QuerySession::new(&self.args, &meters.requests, &meters.latencies, trace)?;
+        let session = QuerySession::new(
+            &self.args,
+            &self.http,
+            &meters.requests,
+            &meters.latencies,
+            trace,
+        )?;
         let ((), measured) = meters
             .measure(session.register_tables(&self.args.tables, self.args.format))
             .await?;

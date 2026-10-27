@@ -145,7 +145,7 @@ struct GetPhases {
 
 impl GetPhases {
     const CSV_COLUMNS: &str =
-        "step,path,start,end,racer,answered_ms,received_ms,landing_ms,landed_ms";
+        "step,path,start,end,racer,answered_ms,received_ms,landing_ms,landed_ms,waited_ms";
 
     /// Keeps the GET of `bytes` of `path`, racer `racer`, as its `landed`
     /// phase tells: a CSV row.
@@ -155,6 +155,7 @@ impl GetPhases {
             received,
             landing,
             after,
+            waited,
         } = landed
         else {
             return;
@@ -166,14 +167,15 @@ impl GetPhases {
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         let row = format!(
-            "{step},{},{},{},{racer},{:.3},{:.3},{:.3},{:.3}",
+            "{step},{},{},{},{racer},{:.3},{:.3},{:.3},{:.3},{:.3}",
             String::from_utf8_lossy(path),
             bytes.start,
             bytes.end,
             ms(answered),
             ms(received),
             ms(landing),
-            ms(after)
+            ms(after),
+            ms(waited)
         );
         self.rows
             .lock()

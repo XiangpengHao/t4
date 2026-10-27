@@ -4,12 +4,19 @@
 //! kernel takes in packets wherever their interrupts land, not always on
 //! the process's time); and the memory of the process's cgroup, so that a
 //! run held to a memory budget can show what it cached.
+//!
+//! [`NicProbe`]: what the network interfaces' drivers count past bytes, as
+//! `ethtool -S` prints it: on AWS's ENA, the packets the instance's limits
+//! held back, and each receive queue's bytes, so that a run shows whether
+//! AWS shaped its traffic and whether its connections spread over the
+//! queues.
 
 use std::fmt;
 use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Reads the [`HostCounters`] of drives, the block devices under some
 /// directories, summed, and of every network interface but loopback. Where
@@ -337,5 +344,238 @@ impl fmt::Display for CgroupMemory {
             mib(self.page_cache),
             mib(self.anon)
         )
+    }
+}
+
+/// Reads the [`NicCounters`] of every network interface but loopback, by
+/// running `ethtool -S` on each: its CPU time falls in the machine's, so
+/// it is sampled outside the window the CPU counters cover.
+pub struct NicProbe {
+    interfaces: Vec<String>,
+}
+
+impl NicProbe {
+    /// A probe of the interfaces `/proc/net/dev` names, but loopback; none
+    /// where there is no such file.
+    pub fn new() -> Self {
+        let interfaces = fs::read_to_string("/proc/net/dev")
+            .map(|stats| {
+                stats
+                    .lines()
+                    .filter_map(|line| Some(line.split_once(':')?.0.trim().to_owned()))
+                    .filter(|interface| interface != "lo")
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self { interfaces }
+    }
+
+    /// The counters now, over every interface; `None` if there is none,
+    /// ethtool fails on one, or one counts no allowances (not an ENA).
+    pub fn sample(&self) -> Option<NicCounters> {
+        if self.interfaces.is_empty() {
+            return None;
+        }
+        let mut counters = NicCounters::default();
+        for interface in &self.interfaces {
+            let printed = Command::new("ethtool")
+                .arg("-S")
+                .arg(interface)
+                .output()
+                .ok()?;
+            if !printed.status.success() {
+                return None;
+            }
+            counters.add(&NicCounters::parse(&String::from_utf8_lossy(
+                &printed.stdout,
+            ))?);
+        }
+        Some(counters)
+    }
+}
+
+impl Default for NicProbe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// What ENA counts past bytes: the packets held back, queued or dropped,
+/// for passing the instance's limits, inbound bandwidth, outbound, packets
+/// a second, tracked connections and link-local traffic (DNS, the metadata
+/// service, time); and each receive queue's bytes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NicCounters {
+    bw_in_allowance_exceeded: u64,
+    bw_out_allowance_exceeded: u64,
+    pps_allowance_exceeded: u64,
+    conntrack_allowance_exceeded: u64,
+    linklocal_allowance_exceeded: u64,
+    /// Each receive queue's bytes, interface after interface.
+    rx_queue_bytes: Vec<u64>,
+}
+
+impl NicCounters {
+    /// The CSV columns [`Self::csv_fields`] fills: the allowances, the
+    /// receive queues that took bytes, and the busiest one's share of them.
+    pub const CSV_COLUMNS: &str = "bw_in_allowance_exceeded,bw_out_allowance_exceeded,\
+                                   pps_allowance_exceeded,conntrack_allowance_exceeded,\
+                                   linklocal_allowance_exceeded,rx_queues_used,\
+                                   rx_busiest_queue_share";
+
+    /// `counters` as the fields of [`Self::CSV_COLUMNS`], empty where none
+    /// were counted, and the share where no queue took bytes.
+    pub fn csv_fields(counters: Option<&Self>) -> String {
+        let Some(counted) = counters else {
+            return ",,,,,,".to_owned();
+        };
+        let total: u64 = counted.rx_queue_bytes.iter().sum();
+        let busiest = counted.rx_queue_bytes.iter().max().copied().unwrap_or(0);
+        let share = match total {
+            0 => String::new(),
+            total => format!("{:.3}", busiest as f64 / total as f64),
+        };
+        format!(
+            "{},{},{},{},{},{},{share}",
+            counted.bw_in_allowance_exceeded,
+            counted.bw_out_allowance_exceeded,
+            counted.pps_allowance_exceeded,
+            counted.conntrack_allowance_exceeded,
+            counted.linklocal_allowance_exceeded,
+            counted
+                .rx_queue_bytes
+                .iter()
+                .filter(|&&bytes| bytes > 0)
+                .count()
+        )
+    }
+
+    /// What was counted between `earlier` and `self`.
+    pub fn since(&self, earlier: &Self) -> Self {
+        Self {
+            bw_in_allowance_exceeded: self
+                .bw_in_allowance_exceeded
+                .saturating_sub(earlier.bw_in_allowance_exceeded),
+            bw_out_allowance_exceeded: self
+                .bw_out_allowance_exceeded
+                .saturating_sub(earlier.bw_out_allowance_exceeded),
+            pps_allowance_exceeded: self
+                .pps_allowance_exceeded
+                .saturating_sub(earlier.pps_allowance_exceeded),
+            conntrack_allowance_exceeded: self
+                .conntrack_allowance_exceeded
+                .saturating_sub(earlier.conntrack_allowance_exceeded),
+            linklocal_allowance_exceeded: self
+                .linklocal_allowance_exceeded
+                .saturating_sub(earlier.linklocal_allowance_exceeded),
+            rx_queue_bytes: self
+                .rx_queue_bytes
+                .iter()
+                .zip(earlier.rx_queue_bytes.iter().chain(std::iter::repeat(&0)))
+                .map(|(now, then)| now.saturating_sub(*then))
+                .collect(),
+        }
+    }
+
+    /// One interface's counters, from what `ethtool -S` printed for it:
+    /// `name: value` a line, its queues' as `queue_<n>_rx_bytes`. `None`
+    /// if it counts no allowances.
+    fn parse(printed: &str) -> Option<Self> {
+        let mut counters = Self::default();
+        let mut allowances = false;
+        let mut queues = Vec::new();
+        for (name, value) in printed.lines().filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim(), value.trim().parse::<u64>().ok()?))
+        }) {
+            let allowance = match name {
+                "bw_in_allowance_exceeded" => &mut counters.bw_in_allowance_exceeded,
+                "bw_out_allowance_exceeded" => &mut counters.bw_out_allowance_exceeded,
+                "pps_allowance_exceeded" => &mut counters.pps_allowance_exceeded,
+                "conntrack_allowance_exceeded" => &mut counters.conntrack_allowance_exceeded,
+                "linklocal_allowance_exceeded" => &mut counters.linklocal_allowance_exceeded,
+                _ => {
+                    let queue = name
+                        .strip_prefix("queue_")
+                        .and_then(|rest| rest.strip_suffix("_rx_bytes"))
+                        .and_then(|number| number.parse::<usize>().ok());
+                    if let Some(queue) = queue {
+                        queues.push((queue, value));
+                    }
+                    continue;
+                }
+            };
+            *allowance = value;
+            allowances = true;
+        }
+        queues.sort_unstable();
+        counters.rx_queue_bytes = queues.into_iter().map(|(_, bytes)| bytes).collect();
+        allowances.then_some(counters)
+    }
+
+    /// Adds another interface's counters.
+    fn add(&mut self, other: &Self) {
+        self.bw_in_allowance_exceeded += other.bw_in_allowance_exceeded;
+        self.bw_out_allowance_exceeded += other.bw_out_allowance_exceeded;
+        self.pps_allowance_exceeded += other.pps_allowance_exceeded;
+        self.conntrack_allowance_exceeded += other.conntrack_allowance_exceeded;
+        self.linklocal_allowance_exceeded += other.linklocal_allowance_exceeded;
+        self.rx_queue_bytes.extend(&other.rx_queue_bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ENA's counters as `ethtool -S` prints them, the allowances and each
+    /// queue's bytes among the rest.
+    const PRINTED: &str = "NIC statistics:
+     tx_timeout: 0
+     bw_in_allowance_exceeded: 12
+     bw_out_allowance_exceeded: 0
+     pps_allowance_exceeded: 3
+     conntrack_allowance_exceeded: 0
+     linklocal_allowance_exceeded: 7
+     conntrack_allowance_available: 100
+     queue_0_rx_cnt: 5
+     queue_0_rx_bytes: 600
+     queue_1_rx_bytes: 0
+     queue_10_rx_bytes: 300
+     queue_2_rx_bytes: 100
+";
+
+    #[test]
+    fn enas_counters_are_read_from_ethtool() {
+        let counters = NicCounters::parse(PRINTED).unwrap();
+        assert_eq!(counters.bw_in_allowance_exceeded, 12);
+        assert_eq!(counters.pps_allowance_exceeded, 3);
+        assert_eq!(counters.linklocal_allowance_exceeded, 7);
+        assert_eq!(
+            counters.rx_queue_bytes,
+            [600, 0, 100, 300],
+            "by queue number"
+        );
+        assert_eq!(
+            NicCounters::csv_fields(Some(&counters)),
+            "12,0,3,0,7,3,0.600"
+        );
+        assert_eq!(
+            NicCounters::parse("NIC statistics:\n     rx_bytes: 9\n"),
+            None,
+            "not an ENA"
+        );
+    }
+
+    #[test]
+    fn enas_counters_move_between_samples() {
+        let earlier = NicCounters::parse(PRINTED).unwrap();
+        let later =
+            NicCounters::parse(&PRINTED.replace("12", "15").replace(": 600", ": 900")).unwrap();
+        let moved = later.since(&earlier);
+        assert_eq!(moved.bw_in_allowance_exceeded, 3);
+        assert_eq!(moved.rx_queue_bytes, [300, 0, 0, 0]);
+        assert_eq!(NicCounters::csv_fields(Some(&moved)), "3,0,0,0,0,1,1.000");
+        assert_eq!(NicCounters::csv_fields(None), ",,,,,,");
     }
 }

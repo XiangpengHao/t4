@@ -163,6 +163,48 @@ High-Performance Analytics", PVLDB 16(11), 2023):
     read with an intent fetches each run in one GET. No race; one copy
     striped. Each mode then comes as a policy, measured.
 
+11. **Bytes in flight are capped, and waiting GETs merge.** The user
+    gives the network t4's GETs share, `T4CachingBuilder::
+    with_network_rate(rate, unloaded_get_time)`: the NIC's rate, and what
+    a GET of a block takes with little else in flight. t4 caps its GETs'
+    bytes in flight, a racer's each counted, at what fills the NIC, the
+    two multiplied (`src/cache/get_queue.rs`): 200 MB for 50 Gbit/s and
+    32 ms. Past it a GET waits its turn, first come, first served, until
+    another's body is in; its time then includes the wait, which it
+    reports as `waited`. A GET bigger than the cap goes once nothing else
+    is in flight. The cap is bytes, not GETs, as a NIC fills with bytes:
+    a merged GET of 4 MiB takes four GETs' room, and a box of 100 Gbit/s
+    twice the room at the same GET time.
+
+    A GET's tail follows how much is in flight more than its size: on 26
+    Oct 2026's ClickBench (Vortex, 2 MiB dictionaries, read raw through t4
+    keeping no block, a c6in.8xlarge, 50 Gbit/s), t4 letting 192 GETs of
+    a block be in flight, about 200 MB, cut the GET p99, its wait
+    included, from 448 ms to 281 ms, the slowest from 3.4 s to 0.93 s, and
+    the queries' time by 4%; 96 left the NIC short (8% slower, AWS holding
+    back almost no packets), and 384 matched 192's time with a worse tail
+    (1.65 s). The HTTP on 8 threads of its own didn't help (p99 598 ms).
+    Those caps counted GETs; with GETs of a block, that is the cap in
+    bytes.
+
+    A late racer goes at once, beside the cap, as waiting would make it
+    later still. With `with_waiting_gets_merged(up_to)`, the waiting GETs
+    of a request each for a file's adjacent bytes go as one GET, of `up_to`
+    bytes and the cap at most, once the first is due and there is room for
+    them all; the one with the last bytes sends it, landing its own as they
+    come, and the others are handed theirs once they are all in. If that
+    GET fails or is given up on, they wait again. Merged up to 4 MiB under the
+    192-GET cap, they cut the GETs by 28% and the queries' time by 6.5%,
+    with a p99 of 322 ms: under a cap that counted GETs, a merged GET held
+    more bytes than one GET's room. Raced late at the p90 as well, they
+    cut the GETs by 22% and the time by 7%. Capping bytes instead, 200 MB
+    (run 6), cut the p99 by 32% and the time by 3%; merged as well, with a
+    GET joining the first only if there was room past the first's, which a
+    backlog seldom has, it cut the GETs by 6% alone. A merge now waits for
+    room for all its bytes instead, about half a millisecond at 50 Gbit/s
+    for 3 MiB more. The rate and the GET time are the user's for now
+    (Later).
+
 ## The interfaces
 
 ```rust
@@ -239,9 +281,22 @@ them (decision 9).
   (`on_disk_hit`). Right there, or the read policy's?
 - **What the policy knows of the machine,** the NIC's rate and what a
   request costs, given by the user or learned from the events: decided
-  later, with the throughput policy.
+  later, with the throughput policy. The cap on bytes in flight (decision
+  11) takes both from the user for now (Later).
 
 ## Later
+
+- **Learning the network rather than being told it** (TODO): the cap on
+  bytes in flight (decision 11) is the NIC's rate times a GET's unloaded
+  time, both given by the user. t4 hears every GET's bytes and times, so
+  it could learn both, as TCP's BBR does: the rate the GETs delivered at
+  most lately, the shortest GET times lately, the cap a little over
+  their product, raised now and then to see whether the rate rises. A
+  query fetches in bursts between its computing, so the rate is seen
+  only in them, and the probing mustn't make the bursts it is to avoid.
+  The bench's ENA counters (`bench/src/host_counters.rs`) tell how close
+  a cap is: packets held back for passing the bandwidth near none, the
+  queries no slower.
 
 - **A transport that lands a fetched block in its chunk,** one copy of a
   byte, not two (`05-network.md`); AnyBlob, the paper's library, receives
@@ -272,4 +327,5 @@ them (decision 9).
 | `src/cache/policy/stragglers.rs` | `RaceStragglers`: GETs raced late at a quantile of the GET times heard | yes |
 | `src/cache/object_cache.rs` | `start_read` and `TierWork`: the drives' work and the waits for blocks in flight awaited beside the GETs; `retry`, for blocks whose fetch cached nothing | yes |
 | `src/cache/in_flight.rs` | `InFlight`: the blocks being fetched, each fetch's requests, claimed, joined by racers, ended where the block landed or abandoned | yes |
+| `src/cache/get_queue.rs` | `GetQueue`: the cap on bytes in flight, from the network's rate; waiting GETs first come, first served, a file's adjacent ones merged; a late racer beside it | yes |
 | `src/cache/block_index/` | an entry naming several chunks, for mirrors | with mirroring |

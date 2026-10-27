@@ -31,7 +31,7 @@ use object_store::{ObjectStore, ObjectStoreExt};
 use t4_bench::Error;
 use t4_bench::host_counters::HostProbe;
 use t4_bench::replay::LatencySummary;
-use t4_bench::table_store::{CacheOptions, HttpTransport, TableLocation};
+use t4_bench::table_store::{CacheOptions, HttpOptions, TableLocation};
 
 /// The allocator: mimalloc unless built `--no-default-features`, as the
 /// `mimalloc` feature in `bench/Cargo.toml` explains. A static, as Rust takes
@@ -46,9 +46,8 @@ struct Args {
     /// `s3://bucket/path` or `gs://bucket/path`, a directory's ending in `/`.
     #[arg(long, value_parser = TableLocation::parse)]
     location: TableLocation,
-    /// How the store moves its HTTP.
-    #[arg(long, value_enum, default_value_t)]
-    http: HttpTransport,
+    #[command(flatten)]
+    http: HttpOptions,
     /// Fetches in flight at once.
     #[arg(long, default_value_t = 64)]
     in_flight: usize,
@@ -164,7 +163,8 @@ impl FetchPlan {
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let args = Args::parse();
-    let origin = args.location.origin(args.http)?;
+    let http = args.http.start()?;
+    let origin = args.location.origin(&http)?;
     let plan = FetchPlan::new(
         origin.as_ref(),
         &args.location,

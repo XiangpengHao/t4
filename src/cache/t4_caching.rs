@@ -18,7 +18,7 @@
 //!   fails.
 
 use std::fmt;
-use std::num::{NonZeroU8, NonZeroU32};
+use std::num::{NonZeroU8, NonZeroU32, NonZeroU64};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::PoisonError;
@@ -42,6 +42,7 @@ use object_store::{
 #[cfg(feature = "__fuzz")]
 use super::ChunkId;
 use super::cache_files::{CacheFiles, DiskFile};
+use super::get_queue::{GetPlace, GetQueue, GetTurn, JoinedParts};
 use super::io_report::IoReport;
 use super::object_cache::{CacheableFile, FetchedBlocks, ObjectCache};
 #[cfg(feature = "__fuzz")]
@@ -55,6 +56,38 @@ use crate::io::sync::{Arc, Mutex, MutexGuard};
 /// The name errors give this store.
 const STORE: &str = "t4";
 
+/// Where a GET's body goes: first the bytes of the waiting GETs joined to
+/// it, then the read's own blocks.
+struct BodyLanding<'c> {
+    joined: JoinedParts,
+    blocks: FetchedBlocks<'c>,
+    /// The body's bytes landed so far.
+    received: u64,
+}
+
+impl<'c> BodyLanding<'c> {
+    fn new(joined: JoinedParts, blocks: FetchedBlocks<'c>) -> Self {
+        Self {
+            joined,
+            blocks,
+            received: 0,
+        }
+    }
+
+    /// Lands `piece`, the body's next bytes.
+    async fn land(&mut self, mut piece: Bytes) -> object_store::Result<()> {
+        self.received += piece.len() as u64;
+        self.joined.take_front(&mut piece);
+        if piece.is_empty() {
+            return Ok(());
+        }
+        self.blocks
+            .land(&piece)
+            .await
+            .map_err(T4Caching::cache_error)
+    }
+}
+
 /// What makes a policy, once the tiers' chunk counts are known.
 type PlacementMaker = Box<dyn FnOnce(TierSizes) -> Arc<dyn PlacementPolicy>>;
 
@@ -67,6 +100,8 @@ type Sleep = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>;
 pub struct T4Caching {
     inner: Arc<dyn ObjectStore>,
     cache: ObjectCache,
+    /// The GETs to the inner store in flight, and those waiting for room.
+    gets: Arc<GetQueue>,
     /// What a GET's late racer waits on; none sent without it.
     sleep: Option<Sleep>,
     /// Shared with the uploads and deletes in flight, which forget their
@@ -95,6 +130,8 @@ pub struct T4CachingBuilder {
     placement: Option<PlacementMaker>,
     reads: Option<Arc<dyn ReadPolicy>>,
     sleep: Option<Sleep>,
+    network_rate: Option<(u64, Duration)>,
+    merged_up_to: u64,
 }
 
 impl T4CachingBuilder {
@@ -159,14 +196,37 @@ impl T4CachingBuilder {
         self
     }
 
+    /// The network t4's GETs to the inner store share: `bytes_per_second`,
+    /// the NIC's rate, and `unloaded_get_time`, what a GET of a block takes
+    /// when little else is in flight. t4 caps the bytes its GETs have in
+    /// flight, all their racers', at what fills the NIC, the two multiplied
+    /// (`doc/06-read-modes.md`, decision 11): 200 MB for 50 Gbit/s and
+    /// 32 ms. GETs past it wait their turn, first come, first served, each
+    /// until another's body is in; a GET bigger than the cap goes once
+    /// nothing else is in flight, and a late racer goes at once, beside
+    /// it. No cap unless set.
+    pub fn with_network_rate(mut self, bytes_per_second: u64, unloaded_get_time: Duration) -> Self {
+        self.network_rate = Some((bytes_per_second, unloaded_get_time));
+        self
+    }
+
+    /// While GETs wait their turn (`Self::with_network_rate`), those of one
+    /// request for adjacent bytes of a file go as one GET, of `up_to` bytes
+    /// at most, when the first of them is due. Each apart unless set.
+    pub fn with_waiting_gets_merged(mut self, up_to: u64) -> Self {
+        self.merged_up_to = up_to;
+        self
+    }
+
     /// The store: its cache files made and sized, its memory mapped, its
     /// policy built.
     ///
     /// # Errors
     ///
     /// If the memory capacity or a disk file wasn't given, the queue depth
-    /// is 0, or a cache file can't be made, sized and opened, or the memory
-    /// mapped.
+    /// or the network's bytes in flight are 0, waiting GETs are merged
+    /// without a network rate, or a cache file can't be made, sized and
+    /// opened, or the memory mapped.
     pub fn build(self) -> crate::Result<T4Caching> {
         let memory_chunks =
             Self::chunks(self.memory_capacity, "T4Caching needs a memory capacity")?;
@@ -184,9 +244,25 @@ impl T4CachingBuilder {
             None => Arc::new(ClockPolicy::new(memory_chunks, disk_chunks)),
         };
         let reads = self.reads.unwrap_or_else(|| Arc::new(FetchRuns));
+        let bytes_in_flight = match self.network_rate {
+            None if self.merged_up_to > 0 => {
+                return Err(crate::Error::InvalidArgument(
+                    "merging waiting GETs needs a network rate",
+                ));
+            }
+            None => NonZeroU64::MAX,
+            Some((bytes_per_second, unloaded_get_time)) => {
+                let bytes =
+                    u128::from(bytes_per_second) * unloaded_get_time.as_nanos() / 1_000_000_000;
+                NonZeroU64::new(u64::try_from(bytes).unwrap_or(u64::MAX)).ok_or(
+                    crate::Error::InvalidArgument("the network's bytes in flight must be > 0"),
+                )?
+            }
+        };
         Ok(T4Caching {
             inner: self.inner,
             cache: ObjectCache::new(memory_chunks, disk, placement, reads)?,
+            gets: Arc::new(GetQueue::new(bytes_in_flight, self.merged_up_to)),
             sleep: self.sleep,
             known: Arc::new(KnownFiles::new()),
         })
@@ -209,6 +285,8 @@ impl fmt::Debug for T4CachingBuilder {
             .field("disk_files", &self.disk_files)
             .field("queue_depth", &self.queue_depth)
             .field("direct_io", &self.direct_io)
+            .field("network_rate", &self.network_rate)
+            .field("merged_up_to", &self.merged_up_to)
             .finish_non_exhaustive()
     }
 }
@@ -225,6 +303,8 @@ impl T4Caching {
             placement: None,
             reads: None,
             sleep: None,
+            network_rate: None,
+            merged_up_to: 0,
         }
     }
 
@@ -306,14 +386,17 @@ impl T4Caching {
 
     /// Fetches the bytes `blocks` holds from the inner store, if the file is
     /// still the version with `e_tag`, and hands each piece of the answer to
-    /// `blocks` as it comes in. As many identical GETs as the plan says race
-    /// for them, sent at once: the first answer takes the bytes, and the
-    /// others are dropped, their requests with them. If the plan races it
-    /// late too, and the cache has a timer, one more request goes once the
-    /// GET has been out that long, for the bytes not in yet: the first to
-    /// have them all is taken, and the other dropped. The read policy hears
-    /// the GET finished once its body is in, and landed once its blocks are
-    /// cached.
+    /// `blocks` as it comes in. The GET waits its turn first, if the cap on
+    /// bytes in flight is reached, and keeps its place until its body is in;
+    /// it may take, before its own, the bytes of waiting GETs joined to it,
+    /// or join one and take its bytes from it. As many identical GETs as
+    /// the plan says race for them, sent at once: the first answer takes
+    /// the bytes, and the others are dropped, their requests with them. If
+    /// the plan races it late too, and the cache has a timer, one more
+    /// request goes once the GET has been out that long, for the bytes not
+    /// in yet: the first to have them all is taken, and the other dropped.
+    /// The read policy hears the GET finished once its body is in, and
+    /// landed once its blocks are cached.
     async fn fetch(
         &self,
         location: &Path,
@@ -321,7 +404,14 @@ impl T4Caching {
         mut blocks: FetchedBlocks<'_>,
         extensions: &Extensions,
     ) -> object_store::Result<()> {
-        let bytes = blocks.range();
+        let waiting = Instant::now();
+        let Some((place, joined)) = self.turn(&mut blocks).await? else {
+            // Its bytes came with another GET's.
+            return blocks.finish().await.map_err(Self::cache_error);
+        };
+        let own = blocks.range();
+        let bytes = joined.start().unwrap_or(own.start)..own.end;
+        let mut body = BodyLanding::new(joined, blocks);
         let options = GetOptions {
             range: Some(GetRange::Bounded(bytes.clone())),
             if_match: Some(e_tag.to_owned()),
@@ -330,8 +420,9 @@ impl T4Caching {
         };
         let path = location.as_ref().as_bytes();
         let sent = Instant::now();
-        let late = blocks.late_race().zip(self.sleep.clone());
-        let racers = blocks.race();
+        let waited = sent - waiting;
+        let late = body.blocks.late_race().zip(self.sleep.clone());
+        let racers = body.blocks.race();
         // The time the body's pieces took to land, apart from the time
         // spent waiting for them; and how many bytes have come, for a late
         // racer to ask for the rest.
@@ -342,12 +433,13 @@ impl T4Caching {
                 .first_answer(location, &options, path, &bytes, racers)
                 .await?;
             let received = async {
-                let mut body = answer.into_stream();
-                while let Some(piece) = body.try_next().await? {
+                let mut answer = answer.into_stream();
+                while let Some(piece) = answer.try_next().await? {
                     let started = Instant::now();
-                    blocks.land(&piece).await.map_err(Self::cache_error)?;
+                    let len = piece.len() as u64;
+                    body.land(piece).await?;
                     landing += started.elapsed();
-                    landed.fetch_add(piece.len() as u64, Ordering::Relaxed);
+                    landed.fetch_add(len, Ordering::Relaxed);
                 }
                 Ok::<_, object_store::Error>(())
             };
@@ -382,23 +474,50 @@ impl T4Caching {
                     Either::Left(report) => report,
                     // The first request given up on: the bytes not in yet
                     // land from the late racer's.
-                    Either::Right((from, body, report)) => {
-                        let skip = usize::try_from(bytes.start + blocks.received() - from)
+                    Either::Right((from, rest, report)) => {
+                        let skip = usize::try_from(bytes.start + body.received - from)
                             .expect("a GET's bytes fit in memory");
                         let started = Instant::now();
-                        blocks
-                            .land(&body[skip..])
-                            .await
-                            .map_err(Self::cache_error)?;
+                        body.land(rest.slice(skip..)).await?;
                         landing += started.elapsed();
                         report
                     }
                 }
             }
         };
-        blocks.finish().await.map_err(Self::cache_error)?;
-        report.landed(landing);
+        // Its body in, the GET gives its place back.
+        drop(place);
+        body.blocks.finish().await.map_err(Self::cache_error)?;
+        report.landed(landing, waited);
         Ok(())
+    }
+
+    /// The turn of the GET of `blocks`, once it waited for it, if the cap on
+    /// bytes in flight is reached: its place, and the waiting GETs joined to
+    /// it. `None` if it joined another GET, whose bytes `blocks` took; if
+    /// that GET failed or was given up on, it waits again.
+    async fn turn(
+        &self,
+        blocks: &mut FetchedBlocks<'_>,
+    ) -> object_store::Result<Option<(GetPlace, JoinedParts)>> {
+        loop {
+            match self
+                .gets
+                .turn(blocks.file(), blocks.range(), blocks.race())
+                .await
+            {
+                GetTurn::Send { place, joined } => return Ok(Some((place, joined))),
+                GetTurn::Joined(get) => {
+                    let Some(pieces) = get.bytes().await else {
+                        continue;
+                    };
+                    for piece in pieces {
+                        blocks.land(&piece).await.map_err(Self::cache_error)?;
+                    }
+                    return Ok(None);
+                }
+            }
+        }
     }
 
     /// The first answer of `racers` identical GETs, sent at once, the

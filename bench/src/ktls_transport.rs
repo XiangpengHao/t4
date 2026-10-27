@@ -14,17 +14,36 @@
 //! connection speaks HTTP/1.1 ([`Http1Connection`]). Connections are kept
 //! per host and reused, one exchange at a time each, new ones spread over
 //! the addresses the host resolves to. It ignores [`ClientOptions`]'
-//! timeouts and proxies. kTLS is Linux's: elsewhere the connector fails.
+//! timeouts and proxies. Given a runtime, it runs every exchange there,
+//! object_store's [`SpawnService`](object_store::client::SpawnService)
+//! moving the bodies over. kTLS is Linux's:
+//! elsewhere the connector fails.
 //!
 //! The `ktls` crate ignores a TLS 1.3 `KeyUpdate`, which then fails the
 //! connection's later reads; object_store retries such a request.
 
 use object_store::ClientOptions;
+#[cfg(target_os = "linux")]
+use object_store::client::SpawnService;
 use object_store::client::{HttpClient, HttpConnector};
+use tokio::runtime::Handle;
 
-/// Gives a store's builder kTLS clients: `with_http_connector(KtlsConnector)`.
-#[derive(Debug, Default)]
-pub struct KtlsConnector;
+/// Gives a store's builder kTLS clients:
+/// `with_http_connector(KtlsConnector::new(io))`.
+#[derive(Debug)]
+pub struct KtlsConnector {
+    // Only Linux's clients run on it.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    io: Option<Handle>,
+}
+
+impl KtlsConnector {
+    /// Clients that run on `io`'s runtime if given, else on whichever
+    /// calls them.
+    pub fn new(io: Option<Handle>) -> Self {
+        Self { io }
+    }
+}
 
 impl HttpConnector for KtlsConnector {
     #[cfg(target_os = "linux")]
@@ -34,7 +53,10 @@ impl HttpConnector for KtlsConnector {
                 store: "kTLS",
                 source: source.into(),
             })?;
-        Ok(HttpClient::new(transport))
+        Ok(match &self.io {
+            Some(io) => HttpClient::new(SpawnService::new(transport, io.clone())),
+            None => HttpClient::new(transport),
+        })
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -66,12 +88,14 @@ mod linux {
 
     type KtlsConnection = Http1Connection<KtlsStream<TcpStream>>;
 
-    /// object_store's HTTP client over kTLS connections.
+    /// object_store's HTTP client over kTLS connections; its clones share
+    /// them.
+    #[derive(Clone)]
     pub(super) struct KtlsTransport {
         tls: Arc<ClientConfig>,
-        idle: IdleConnections,
+        idle: Arc<IdleConnections>,
         /// Counts new connections, to spread them over a host's addresses.
-        opened: AtomicUsize,
+        opened: Arc<AtomicUsize>,
     }
 
     impl KtlsTransport {
@@ -89,8 +113,8 @@ mod linux {
             tls.alpn_protocols = vec![b"http/1.1".to_vec()];
             Ok(Self {
                 tls: Arc::new(tls),
-                idle: IdleConnections::default(),
-                opened: AtomicUsize::new(0),
+                idle: Arc::default(),
+                opened: Arc::default(),
             })
         }
 

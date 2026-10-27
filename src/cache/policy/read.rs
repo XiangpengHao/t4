@@ -341,12 +341,15 @@ pub enum IoPhase {
     /// started: its answer began after `answered` and was all in after
     /// `received`, of which `landing` went to landing its pieces in the
     /// cache as they came rather than to waiting for them; its blocks were
-    /// cached after `after`.
+    /// cached after `after`. Before it started, it waited `waited` for its
+    /// turn, the cap on bytes in flight reached (`doc/06-read-modes.md`,
+    /// decision 11).
     Landed {
         answered: Duration,
         received: Duration,
         landing: Duration,
         after: Duration,
+        waited: Duration,
     },
     Failed {
         after: Duration,

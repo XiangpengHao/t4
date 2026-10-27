@@ -47,7 +47,10 @@
 # S3's credentials and region come from the environment, as object_store's
 # `AmazonS3Builder::from_env` reads them (AWS_REGION, AWS_ACCESS_KEY_ID, ...).
 # Run it in the dev shell (`nix develop -c`), for cargo. Arguments go to
-# every run_queries.
+# every run_queries, such as how S3's HTTP runs: `--http ktls`, the kernel
+# decrypting; `--io-threads N`, on N threads of its own, apart from the
+# query's; `--requests-in-flight N`, at most N requests at once, sized from
+# the NIC as run_queries --help says.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."

@@ -1,6 +1,6 @@
 use std::future::poll_fn;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::Poll;
 
 use futures_util::{FutureExt, TryStreamExt};
@@ -39,9 +39,60 @@ struct CountingStore {
     /// waited on past them.
     stall: Mutex<Option<usize>>,
     stalled: Arc<AtomicBool>,
+    /// The GETs out: asked, their bodies not yet dropped.
+    gets_out: Arc<GetsOut>,
+}
+
+/// The GETs a store has out now, and the most it had at once.
+#[derive(Debug, Default)]
+struct GetsOut {
+    now: AtomicUsize,
+    most: AtomicUsize,
+}
+
+impl GetsOut {
+    /// One more out, until the guard is dropped.
+    fn sent(self: &Arc<Self>) -> GetOut {
+        let now = self.now.fetch_add(1, Ordering::Relaxed) + 1;
+        self.most.fetch_max(now, Ordering::Relaxed);
+        GetOut(Arc::clone(self))
+    }
+}
+
+/// A GET out, until its answer's body is dropped.
+struct GetOut(Arc<GetsOut>);
+
+impl Drop for GetOut {
+    fn drop(&mut self) {
+        self.0.now.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl CountingStore {
+    /// The most GETs the store had out at once.
+    fn most_gets_out(&self) -> usize {
+        self.gets_out.most.load(Ordering::Relaxed)
+    }
+
+    /// `answer` with `out` held until its body is dropped.
+    fn held_out(answer: GetResult, out: GetOut) -> GetResult {
+        let (meta, range, attributes) = (
+            answer.meta.clone(),
+            answer.range.clone(),
+            answer.attributes.clone(),
+        );
+        let body = answer.into_stream().map(move |piece| {
+            let _held = &out;
+            piece
+        });
+        GetResult {
+            payload: GetResultPayload::Stream(body.boxed()),
+            meta,
+            range,
+            attributes,
+        }
+    }
+
     /// What the cache asked since the last call.
     fn take_asked(&self) -> Vec<Asked> {
         std::mem::take(&mut self.asked.lock().unwrap())
@@ -175,16 +226,18 @@ impl ObjectStore for CountingStore {
         };
         let head = options.head;
         self.asked.lock().unwrap().push(asked);
+        let out = self.gets_out.sent();
         self.answers.arrive().await;
         let answer = self.store.get_opts(location, options).await?;
-        let stall = match head {
-            true => None,
-            false => self.stall.lock().unwrap().take(),
-        };
-        match stall {
-            Some(after) => self.stalled(answer, after).await,
-            None => Ok(answer),
+        if head {
+            return Ok(answer);
         }
+        let stall = self.stall.lock().unwrap().take();
+        let answer = match stall {
+            Some(after) => self.stalled(answer, after).await?,
+            None => answer,
+        };
+        Ok(Self::held_out(answer, out))
     }
 
     fn delete_stream(
@@ -271,6 +324,8 @@ fn a_builder_needs_a_memory_capacity_and_a_disk_file() {
         store().with_disk_file(&path, MIB),
         store().with_memory_capacity(MIB),
         builder(&inner, &dir).with_queue_depth(0),
+        builder(&inner, &dir).with_network_rate(0, Duration::from_secs(1)),
+        builder(&inner, &dir).with_waiting_gets_merged(4 * MIB),
     ];
     for builder in incomplete {
         let error = builder.build().unwrap_err();
@@ -1154,4 +1209,135 @@ fn a_reads_gets_go_out_before_its_disk_reads_are_waited_on() {
         phase: "finished",
     });
     assert!(get_started < disk_read_finished, "{heard:?}");
+}
+
+/// A cache over `inner` letting `most` bytes be in flight, a network of
+/// `most` a second whose GETs take a second, merging waiting ones into
+/// GETs of `merged_up_to` bytes, over a file "a" of six blocks.
+fn capped(inner: &Arc<CountingStore>, most: u64, merged_up_to: u64) -> (TempDir, T4Caching, Bytes) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = builder(inner, &dir)
+        .with_network_rate(most, Duration::from_secs(1))
+        .with_waiting_gets_merged(merged_up_to)
+        .build()
+        .unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(6 * MIB, 5);
+    put(inner.as_ref(), &path, &data);
+    block_on(store.head(&path)).unwrap();
+    inner.take_asked();
+    (dir, store, data)
+}
+
+/// Reads of `ranges` of "a", at once.
+fn read_at_once(store: &T4Caching, data: &Bytes, ranges: &[Range<u64>]) {
+    let path = Path::from("a");
+    let reads = block_on(join_all(
+        ranges
+            .iter()
+            .map(|range| store.get_range(&path, range.clone())),
+    ));
+    for (read, range) in reads.into_iter().zip(ranges) {
+        assert_eq!(
+            read.unwrap(),
+            data.slice(range.start as usize..range.end as usize)
+        );
+    }
+}
+
+/// The first bytes of `block`.
+fn block_start(block: u64) -> Range<u64> {
+    block * MIB..block * MIB + 10
+}
+
+/// Past the cap, a GET waits for another's body to be in: the store never
+/// has more out at once.
+#[test]
+fn gets_past_the_cap_wait_for_a_place() {
+    for (most, out) in [(MIB, 1), (8 * MIB, 3)] {
+        let inner = Arc::new(CountingStore::default());
+        let (_dir, store, data) = capped(&inner, most, 0);
+        inner.answer_gets_late(true);
+        read_at_once(
+            &store,
+            &data,
+            &[block_start(0), block_start(2), block_start(4)],
+        );
+        assert_eq!(
+            inner.take_asked(),
+            [
+                bounded(0..MIB),
+                bounded(2 * MIB..3 * MIB),
+                bounded(4 * MIB..5 * MIB)
+            ]
+        );
+        assert_eq!(inner.most_gets_out(), out, "at most {most}");
+    }
+}
+
+/// Reads of adjacent blocks waiting for room go as one GET when the
+/// first's turn comes, the one with the last block sending it; each
+/// block lands where its own read put it.
+#[test]
+fn waiting_gets_of_adjacent_blocks_go_as_one() {
+    let inner = Arc::new(CountingStore::default());
+    let (_dir, store, data) = capped(&inner, 3 * MIB, 4 * MIB);
+    inner.answer_gets_late(true);
+    let ranges = [
+        3 * MIB..6 * MIB,
+        block_start(1),
+        block_start(0),
+        block_start(2),
+    ];
+    read_at_once(&store, &data, &ranges);
+    assert_eq!(
+        inner.take_asked(),
+        [bounded(3 * MIB..6 * MIB), bounded(0..3 * MIB)]
+    );
+    read_at_once(
+        &store,
+        &data,
+        &[block_start(0), block_start(1), block_start(2)],
+    );
+    assert_eq!(inner.take_asked(), [], "each block cached");
+}
+
+/// A late racer goes at once, beside a full cap: a straggler's race doesn't
+/// wait behind the straggler.
+#[test]
+fn a_late_race_goes_beside_the_cap() {
+    let reads = late_racing();
+    let inner = Arc::new(CountingStore::default());
+    let stalled = Arc::clone(&inner.stalled);
+    let sleep = move |_| {
+        let stalled = Arc::clone(&stalled);
+        poll_fn(move |cx| {
+            if stalled.load(Ordering::Relaxed) {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .boxed()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = builder(&inner, &dir)
+        .with_read_policy(reads)
+        .with_sleep(sleep)
+        .with_network_rate(MIB, Duration::from_secs(1))
+        .build()
+        .unwrap();
+    let data = file_bytes(3 * MIB, 7);
+    put(inner.as_ref(), &Path::from("a"), &data);
+    inner.take_asked();
+    inner.stall_next_body((MIB / 4) as usize);
+    assert_eq!(
+        get_range(&store, &Path::from("a"), 0..MIB),
+        data.slice(0..MIB as usize)
+    );
+    assert_eq!(
+        inner.take_asked(),
+        [Asked::Head, bounded(0..MIB), bounded(MIB / 4..MIB)]
+    );
 }

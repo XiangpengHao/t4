@@ -18,6 +18,7 @@
 mod block_index;
 mod cache_files;
 mod chunk_pool;
+mod get_queue;
 mod in_flight;
 mod io_report;
 mod object_cache;
