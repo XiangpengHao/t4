@@ -205,6 +205,18 @@ High-Performance Analytics", PVLDB 16(11), 2023):
     for 3 MiB more. The rate and the GET time are the user's for now
     (Later).
 
+    On an i7i.48xlarge (100 Gbit/s, so 400 MB), ClickBench's queries 20 to
+    34 with the cap, merging and racing at the p90: Vortex's raw reads,
+    filled into memory, had a slowest GET of 0.82 s and none over 1 s,
+    against 3.3 s and 166 without the queue (24 Oct); Vortex's own merged
+    reads 1.13 s and 23. Parquet's got worse, 3.9 s and 12,963: its GETs
+    are mostly of 4 MiB, which hold a connection longer than the 32 ms the
+    cap is sized for, so 400 MB holds about 100 of them, too few to fill the
+    NIC, and they waited up to 3.9 s for room while S3 answered each in 671
+    ms at most. A cap that holds a GET's room for how long it holds its
+    connection is open (Later). The bench has read Vortex with its own
+    merged reads since, the user's call.
+
 ## The interfaces
 
 ```rust
@@ -286,6 +298,13 @@ them (decision 9).
 
 ## Later
 
+- **A cap that weighs a GET by how long it holds a connection** (TODO):
+  decision 11's cap counts a GET's bytes against the NIC's rate times a
+  GET's unloaded time, the time of a GET of a block. A GET of 4 MiB holds
+  its connection for its first byte and then its bytes at S3's rate a
+  connection, longer than four GETs of a block do between them, so the cap
+  in bytes lets too few big GETs out to fill the NIC; Parquet's first
+  passes waited for room for seconds on 26 Oct.
 - **Learning the network rather than being told it** (TODO): the cap on
   bytes in flight (decision 11) is the NIC's rate times a GET's unloaded
   time, both given by the user. t4 hears every GET's bytes and times, so

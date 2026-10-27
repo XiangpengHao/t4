@@ -28,7 +28,8 @@
 #   FORMAT     parquet (default) or vortex. Vortex is benched only with its
 #              dictionaries capped at 2 MiB of values: ClickBench's set is
 #              clickbench/partitioned-vortex-dict2m/ (prepare.sh says how
-#              it was made)
+#              it was made); read with vortex-datafusion's own reader, which
+#              merges segment reads less than 1 MiB apart, up to 16 MiB
 #   STORES     which of the above (default "s3 t4-s3 t4-memory t4-disk")
 #   RUNS       cold runs of each query (default 5)
 #   QUERIES    the queries' numbers, from 0 (default all)
