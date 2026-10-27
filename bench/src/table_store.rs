@@ -2,7 +2,7 @@
 //! file or a directory of files on the local file system, in GCS or in S3,
 //! moving its HTTP as asked, and t4 in front of it if asked.
 
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU8, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,11 +10,11 @@ use std::time::Duration;
 use clap::ValueEnum;
 use object_store::aws::AmazonS3Builder;
 use object_store::client::{HttpClient, HttpConnector, ReqwestConnector, SpawnedReqwestConnector};
-use object_store::gcp::GoogleCloudStorageBuilder;
+use object_store::gcp::{GcpCredential, GoogleCloudStorageBuilder};
 use object_store::limit::LimitStore;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path;
-use object_store::{ClientOptions, ObjectStore};
+use object_store::{ClientOptions, ObjectStore, StaticCredentialProvider};
 use t4::T4Caching;
 use t4::policy::{Admit, FetchRuns, RaceStragglers};
 use tokio::runtime::{Handle, Runtime};
@@ -67,7 +67,10 @@ impl TableLocation {
 
     /// The store that holds the table's files, a cloud one moving its HTTP
     /// as `http` says, configured from the environment (GCS's `GOOGLE_*`,
-    /// S3's `AWS_*` variables).
+    /// S3's `AWS_*` variables). A GCS store takes `GCS_ACCESS_TOKEN` as its
+    /// credential if set: a box outside Google Cloud, with no credentials of
+    /// Google's, given the hour's token `gcloud auth print-access-token`
+    /// prints.
     ///
     /// # Errors
     ///
@@ -77,12 +80,18 @@ impl TableLocation {
         let bucket = self.url.host_str().unwrap_or_default();
         match self.url.scheme() {
             "file" => Ok(Arc::new(LocalFileSystem::new())),
-            "gs" => Ok(http.limited(
-                GoogleCloudStorageBuilder::from_env()
+            "gs" => {
+                let builder = GoogleCloudStorageBuilder::from_env()
                     .with_bucket_name(bucket)
-                    .with_http_connector(http.connector())
-                    .build()?,
-            )),
+                    .with_http_connector(http.connector());
+                let builder = match std::env::var("GCS_ACCESS_TOKEN") {
+                    Ok(bearer) => builder.with_credentials(Arc::new(
+                        StaticCredentialProvider::new(GcpCredential { bearer }),
+                    )),
+                    Err(_) => builder,
+                };
+                Ok(http.limited(builder.build()?))
+            }
             "s3" => Ok(http.limited(
                 AmazonS3Builder::from_env()
                     .with_bucket_name(bucket)
@@ -276,13 +285,20 @@ pub struct CacheOptions {
     #[arg(long = "cache-queue-depth")]
     queue_depth: Option<u32>,
     /// Race each GET of t4's once more if its body isn't all in by this
-    /// quantile of the GET times t4 heard lately ([`RaceStragglers`]);
-    /// never unless given.
-    #[arg(long = "race-at", value_enum)]
-    race_at: Option<RaceAt>,
+    /// quantile of the GET times t4 heard lately ([`RaceStragglers`]), or
+    /// never: t4's default, the p90, unless given.
+    #[arg(long = "race-at", value_enum, default_value_t)]
+    race_at: RaceAt,
+    /// How many requests race for a Parquet or Vortex file's footer, its
+    /// last 2 MiB (`FetchRuns::racing_footers`); given more than once,
+    /// sessions take them in turn, the first session the first. t4's
+    /// default unless given.
+    #[arg(long = "footer-race")]
+    footer_races: Vec<NonZeroU8>,
     /// The NIC's rate, in Gbit/s: t4 caps its GETs' bytes in flight at
     /// what fills it, this rate times `--cache-unloaded-get-ms`, and GETs
-    /// past it wait their turn in t4. No cap unless given.
+    /// past it wait their turn in t4. t4's default, 50 Gbit/s and 32 ms,
+    /// unless given.
     #[arg(long = "cache-network-gbit")]
     network_gbit: Option<f64>,
     /// What a GET of a block takes with little else in flight, in ms: the
@@ -295,18 +311,22 @@ pub struct CacheOptions {
     merge_waiting_mib: Option<u64>,
 }
 
-/// The quantile of the GET times heard that t4 races a GET past.
-#[derive(Clone, Copy, ValueEnum)]
+/// The quantile of the GET times heard that t4 races a GET past, if any.
+#[derive(Clone, Copy, Default, ValueEnum)]
 enum RaceAt {
+    #[default]
     P90,
     P99,
+    /// No GET raced late.
+    Never,
 }
 
 impl RaceAt {
-    fn quantile(self) -> f64 {
+    fn quantile(self) -> Option<f64> {
         match self {
-            Self::P90 => 0.9,
-            Self::P99 => 0.99,
+            Self::P90 => Some(0.9),
+            Self::P99 => Some(0.99),
+            Self::Never => None,
         }
     }
 }
@@ -332,8 +352,15 @@ impl CacheOptions {
         self.policy.is_some()
     }
 
-    /// `origin` read through t4, if asked, every I/O t4 makes timed in
-    /// `latencies`; else `origin` itself.
+    /// How many requests race for a footer in session `session`, from 0,
+    /// if `--footer-race` says.
+    pub fn footer_race(&self, session: usize) -> Option<NonZeroU8> {
+        (!self.footer_races.is_empty())
+            .then(|| self.footer_races[session % self.footer_races.len()])
+    }
+
+    /// `origin` read through t4, if asked, for session `session`, from 0,
+    /// every I/O t4 makes timed in `latencies`; else `origin` itself.
     ///
     /// # Errors
     ///
@@ -343,6 +370,7 @@ impl CacheOptions {
         &self,
         origin: Arc<dyn ObjectStore>,
         latencies: &Arc<IoLatencies>,
+        session: usize,
     ) -> Result<Arc<dyn ObjectStore>, Error> {
         let Some(policy) = self.policy else {
             return Ok(origin);
@@ -361,11 +389,14 @@ impl CacheOptions {
                 builder.with_disk_file(path, disk_gib << 30)
             })
             .with_memory_capacity(memory_mib << 20);
-        let builder = match self.race_at {
-            None => builder.with_read_policy(TimedReads::new(FetchRuns, Arc::clone(latencies))),
-            Some(race_at) => builder
+        let fetches = self
+            .footer_race(session)
+            .map_or_else(FetchRuns::default, FetchRuns::racing_footers);
+        let builder = match self.race_at.quantile() {
+            None => builder.with_read_policy(TimedReads::new(fetches, Arc::clone(latencies))),
+            Some(quantile) => builder
                 .with_read_policy(TimedReads::new(
-                    RaceStragglers::at(race_at.quantile()),
+                    RaceStragglers::at(quantile).planning_as(fetches),
                     Arc::clone(latencies),
                 ))
                 .with_sleep(|after| Box::pin(tokio::time::sleep(after))),

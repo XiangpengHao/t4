@@ -197,7 +197,7 @@ async fn main() -> Result<(), Error> {
     // t4's own I/O goes untimed: this tool times the calls made of it.
     let store = args
         .cache
-        .in_front_of(args.location.origin(&http)?, &Arc::default())?;
+        .in_front_of(args.location.origin(&http)?, &Arc::default(), 0)?;
     let replayer = Replayer::new(store, args.copies);
     let probe = HostProbe::new(&args.drive_dirs)?;
 

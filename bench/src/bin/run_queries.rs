@@ -17,6 +17,8 @@
 //!   empty and running the query `--passes` times, the first cold. So each
 //!   query's cold time, its spread over the runs, and its cold time less its
 //!   warm, what it waits on the remote at most, are measured alike.
+//!   With `--footer-race` given more than once, the sessions take its
+//!   values in turn, so that the runs of each are interleaved.
 //!   `bench/end_to_end/run.sh` runs these.
 //!
 //! Either way, `--trace` records every call made of the tables' stores,
@@ -43,7 +45,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::future::Future;
 use std::io::{BufWriter, Write};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU8, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -153,14 +155,17 @@ enum TableFormat {
 
 /// A DataFusion session whose tables are read through each one's store: its
 /// origin, counted, then t4 if asked, then a trace if asked. Each session
-/// has a t4 cache of its own, which starts cold.
+/// has a t4 cache of its own, which starts cold, and HTTP connections of its
+/// own.
 struct QuerySession {
     context: SessionContext,
     vortex: VortexSession,
 }
 
 impl QuerySession {
+    /// Session `number`, from 0.
     fn new(
+        number: usize,
         args: &Args,
         http: &StoreHttp,
         requests: &Arc<RequestCounter>,
@@ -197,7 +202,7 @@ impl QuerySession {
             ));
             let mut store = args
                 .cache
-                .in_front_of(origin, latencies)
+                .in_front_of(origin, latencies, number)
                 .map_err(DataFusionError::External)?;
             if let Some(trace) = trace {
                 store = Arc::new(TracedStore::new(store, Arc::clone(trace)));
@@ -308,6 +313,9 @@ enum Step {
 struct StepRow {
     /// The session's number: with `--cold-runs`, the run of its query.
     run: usize,
+    /// How many requests raced for a footer in the session, if
+    /// `--footer-race` said.
+    footer_race: Option<NonZeroU8>,
     step: Step,
     rows: Option<usize>,
     measured: Measured,
@@ -316,7 +324,7 @@ struct StepRow {
 impl StepRow {
     fn csv_header() -> String {
         format!(
-            "pass,query,run,step,ms,rows,{},{},{},machine_dollars,{},{}",
+            "pass,query,run,footer_race,step,ms,rows,{},{},{},machine_dollars,{},{}",
             HostCounters::CSV_COLUMNS,
             CgroupMemory::CSV_COLUMNS,
             RequestCounts::CSV_COLUMNS,
@@ -342,8 +350,10 @@ impl StepRow {
         });
         writeln!(
             out,
-            "{pass},{query},{},{step},{:.3},{},{},{},{},{machine_dollars},{},{}",
+            "{pass},{query},{},{},{step},{:.3},{},{},{},{},{machine_dollars},{},{}",
             self.run,
+            self.footer_race
+                .map_or(String::new(), |race| race.to_string()),
             self.measured.elapsed.as_secs_f64() * 1e3,
             self.rows.map_or(String::new(), |rows| rows.to_string()),
             HostCounters::csv_fields(self.measured.moved.as_ref()),
@@ -362,12 +372,15 @@ impl StepRow {
         let rows = self
             .rows
             .map_or(String::new(), |rows| format!(", {rows} rows"));
+        let race = self
+            .footer_race
+            .map_or(String::new(), |race| format!(" footer race {race}"));
         let io = self
             .measured
             .io
             .map_or(String::new(), |io| format!("; t4's {io}"));
         println!(
-            "r{} {step}: {:.1} ms{rows}, {}{io}",
+            "r{}{race} {step}: {:.1} ms{rows}, {}{io}",
             self.run,
             self.measured.elapsed.as_secs_f64() * 1e3,
             self.measured.requests
@@ -497,6 +510,7 @@ impl Benchmark {
     ) -> Result<QuerySession> {
         let meters = &self.meters;
         let session = QuerySession::new(
+            run,
             &self.args,
             &self.http,
             &meters.requests,
@@ -508,6 +522,7 @@ impl Benchmark {
             .await?;
         self.write(StepRow {
             run,
+            footer_race: self.args.cache.footer_race(run),
             step: Step::Setup,
             rows: None,
             measured,
@@ -531,6 +546,7 @@ impl Benchmark {
         let elapsed = measured.elapsed;
         self.write(StepRow {
             run,
+            footer_race: self.args.cache.footer_race(run),
             step: Step::Query { pass, query },
             rows: Some(rows),
             measured,

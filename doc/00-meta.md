@@ -36,6 +36,9 @@ only the remote holds itself. The design: `03-cache.md`.
 - `06-read-modes.md`: cost, throughput and latency reads; what t4
   guarantees (mechanism) and what a placement policy and a read policy
   decide.
+- `07-prefetch.md`: blocks moved before a read asks for them, on both
+  tiers, at the lowest priority; the mechanism knows no file format, and
+  the default policy predicts the next rows of the columns being read.
 - `98-cachefs-vs-fs.md`: how a cache's storage differs from a file
   system's.
 - `99-brainstorm.md`: open notes.

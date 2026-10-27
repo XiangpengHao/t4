@@ -7,14 +7,16 @@ use super::read::{FetchRuns, Io, IoEvent, IoPhase, LocatedRead, ReadPlan, ReadPo
 use crate::io::sync::Mutex;
 use crate::io::sync::atomic::{AtomicU64, Ordering};
 
-/// Plans as [`FetchRuns`] does, and races each GET of a normal read once
-/// more if its body isn't all in by a quantile of the times GETs lately
-/// took, from their first request to their body all in: the last
-/// [`Self::HEARD`] heard of. It races nothing until it has heard
+/// Plans as [`FetchRuns`] does, the default unless [`Self::planning_as`]
+/// says otherwise, and races each GET of a normal read once more if its
+/// body isn't all in by a quantile of the times GETs lately took, from
+/// their first request to their body all in: the last [`Self::HEARD`]
+/// heard of. It races nothing until it has heard
 /// [`Self::LEARNED`]. A read with an intent isn't raced: its GETs may be of
 /// any size, and the cache holds a late racer's bytes until it has them all.
 #[derive(Debug)]
 pub struct RaceStragglers {
+    fetches: FetchRuns,
     quantile: f64,
     heard: Mutex<HeardTimes>,
     /// When a GET is raced, in µs; 0 until learned.
@@ -39,10 +41,17 @@ impl RaceStragglers {
             "a quantile is strictly between 0 and 1, not {quantile}"
         );
         Self {
+            fetches: FetchRuns::default(),
             quantile,
             heard: Mutex::new(HeardTimes::default()),
             trigger_us: AtomicU64::new(0),
         }
+    }
+
+    /// Plans as `fetches` does, before racing late.
+    #[must_use]
+    pub fn planning_as(self, fetches: FetchRuns) -> Self {
+        Self { fetches, ..self }
     }
 
     /// When a GET is raced, once learned.
@@ -54,9 +63,17 @@ impl RaceStragglers {
     }
 }
 
+/// t4's default read policy: races a GET past the p90 of the GET times
+/// heard.
+impl Default for RaceStragglers {
+    fn default() -> Self {
+        Self::at(0.9)
+    }
+}
+
 impl ReadPolicy for RaceStragglers {
     fn plan(&self, read: &LocatedRead<'_>) -> ReadPlan {
-        let plan = FetchRuns.plan(read);
+        let plan = self.fetches.plan(read);
         match (self.trigger(), read.intent()) {
             (Some(after), None) => ReadPlan::new(
                 plan.gets()

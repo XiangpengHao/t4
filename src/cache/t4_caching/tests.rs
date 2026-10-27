@@ -11,8 +11,8 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::cache::policy::{
-    Admit, BlockKey, BlockRead, ChunkId, DiskHit, IoEvent, IoPhase, LocatedRead, MemoryVictim,
-    PlannedGet, ReadPlan, Tier,
+    Admit, BlockKey, BlockRead, ChunkId, DiskHit, FetchRuns, IoEvent, IoPhase, LocatedRead,
+    MemoryVictim, PlannedGet, ReadPlan, Tier,
 };
 
 const MIB: u64 = BLOCK_SIZE_U64;
@@ -325,7 +325,6 @@ fn a_builder_needs_a_memory_capacity_and_a_disk_file() {
         store().with_memory_capacity(MIB),
         builder(&inner, &dir).with_queue_depth(0),
         builder(&inner, &dir).with_network_rate(0, Duration::from_secs(1)),
-        builder(&inner, &dir).with_waiting_gets_merged(4 * MIB),
     ];
     for builder in incomplete {
         let error = builder.build().unwrap_err();
@@ -545,7 +544,7 @@ fn overlapping_reads_of_a_block_send_one_get() {
 /// cached, so a later read fetches it again.
 #[test]
 fn overlapping_reads_of_a_discarded_block_send_one_get() {
-    let reads = ScriptedReads::new(|read| FetchRuns.plan(read));
+    let reads = ScriptedReads::new(|read| FetchRuns::default().plan(read));
     let (_dir, store, inner, _, data) = planned_by(&reads, Admit::Discard);
     let path = Path::from("a");
     block_on(store.head(&path)).unwrap();
@@ -1106,7 +1105,7 @@ fn a_late_race_waits_for_its_timer() {
 /// are cached, here written to disk.
 #[test]
 fn a_get_is_heard_landed_after_it_finished() {
-    let reads = ScriptedReads::new(|read| FetchRuns.plan(read));
+    let reads = ScriptedReads::new(|read| FetchRuns::default().plan(read));
     let (_dir, store, _inner, _, data) = planned_by(&reads, Admit::Disk);
     assert_eq!(
         get_range(&store, &Path::from("a"), 0..MIB),
@@ -1138,7 +1137,7 @@ fn a_plan_the_cache_cant_carry_out_fetches_the_runs() {
 
 #[test]
 fn the_callers_intent_reaches_both_policies() {
-    let reads = ScriptedReads::new(|read| FetchRuns.plan(read));
+    let reads = ScriptedReads::new(|read| FetchRuns::default().plan(read));
     let (_dir, store, _inner, remote_reads, data) = planned_by(&reads, Admit::Memory);
     let mut options = GetOptions {
         range: Some(GetRange::Bounded(0..MIB)),
@@ -1164,7 +1163,7 @@ fn the_callers_intent_reaches_both_policies() {
 /// bytes, started and finished.
 #[test]
 fn the_read_policy_hears_reads_from_disk() {
-    let reads = ScriptedReads::new(|read| FetchRuns.plan(read));
+    let reads = ScriptedReads::new(|read| FetchRuns::default().plan(read));
     let (_dir, store, _inner, _, data) = planned_by(&reads, Admit::Disk);
     let path = Path::from("a");
     get_range(&store, &path, 0..MIB);
@@ -1186,7 +1185,7 @@ fn the_read_policy_hears_reads_from_disk() {
 /// read policy hears the GET start before the disk read finishes.
 #[test]
 fn a_reads_gets_go_out_before_its_disk_reads_are_waited_on() {
-    let reads = ScriptedReads::new(|read| FetchRuns.plan(read));
+    let reads = ScriptedReads::new(|read| FetchRuns::default().plan(read));
     let (_dir, store, _inner, _, data) = planned_by(&reads, Admit::Disk);
     let path = Path::from("a");
     get_range(&store, &path, 0..MIB);

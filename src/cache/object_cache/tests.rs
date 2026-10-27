@@ -14,7 +14,7 @@ const MIB: u64 = BLOCK_SIZE_U64;
 /// run by a [`TestPolicy`], in a directory of its own that lives as long as
 /// the cache.
 fn cache(memory_chunks: u32, disk_chunks: u32) -> (TempDir, ObjectCache, Arc<TestPolicy>) {
-    cache_reading_with(memory_chunks, disk_chunks, Arc::new(FetchRuns))
+    cache_reading_with(memory_chunks, disk_chunks, Arc::new(FetchRuns::default()))
 }
 
 /// [`cache`], its reads planned by `reads`.
@@ -96,7 +96,7 @@ fn the_default_policy_streams_blocks_through_both_tiers() {
     let disk = CacheFiles::open(&files, NonZeroU32::new(8).unwrap(), true).unwrap();
     let (memory, disk_chunks) = (NonZeroU32::new(2).unwrap(), NonZeroU32::new(3).unwrap());
     let policy = Arc::new(crate::cache::policy::ClockPolicy::new(memory, disk_chunks));
-    let cache = ObjectCache::new(memory, disk, policy, Arc::new(FetchRuns)).unwrap();
+    let cache = ObjectCache::new(memory, disk, policy, Arc::new(FetchRuns::default())).unwrap();
     let size = 10 * MIB;
     let data = file_bytes(size);
     let file = cache.resolve(b"a", Some("v1"), size).unwrap();

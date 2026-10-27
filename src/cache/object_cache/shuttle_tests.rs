@@ -54,7 +54,7 @@ fn cache(memory_chunks: u32, disk_chunks: u32) -> (Arc<ObjectCache>, Arc<TestPol
         memory,
         disk,
         Arc::clone(&policy) as Arc<dyn PlacementPolicy>,
-        Arc::new(FetchRuns),
+        Arc::new(FetchRuns::default()),
     );
     (Arc::new(cache.unwrap()), policy)
 }

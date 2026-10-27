@@ -5,7 +5,10 @@ traits, plans carried out (split, merged, widened, raced), the intent,
 the events, a read's GETs overlapping its work on the drives, a block in
 flight fetched once. The plan's disk choices, which come with mirroring,
 are not built yet. The default read policy splits a normal read's runs
-into GETs of 4 MiB at most (decision 10).
+into GETs of 4 MiB at most, races a Parquet or Vortex file's last 2 MiB
+with two requests, and, given a timer, races a straggler late at the p90
+(decision 10); t4 caps its GETs' bytes in flight at 200 MB unless told
+the network (decision 11).
 
 A read wants one of three things (`99-brainstorm.md`):
 
@@ -142,7 +145,8 @@ High-Performance Analytics", PVLDB 16(11), 2023):
    to have them all is taken, the other dropped, and the late request's
    bytes land past the first's. `RaceStragglers` plans as `FetchRuns` does
    and races each normal read's GETs at a quantile (p90, p99) of the latest
-   GET times it heard, from a GET's first request to its body all in. On
+   GET times it heard, from a GET's first request to its body all in; at
+   the p90 it is the default read policy (decision 10). On
    24 Oct 2026's ClickBench GETs a model gave racing at p90, uncapped, 10%
    more GETs and 8 to 10% more bytes for a p99 of 495 ms, not 633, and a
    max of 1.0 s, not 3.3; the slow GETs came in bursts, when bytes in
@@ -157,16 +161,44 @@ High-Performance Analytics", PVLDB 16(11), 2023):
    they want (latency percentiles, what is in flight, each drive's queue),
    as `CachePolicy` keeps its own state now.
 
-10. **The defaults are plain.** The default read policy fetches each run of
-    remote blocks in GETs of 4 MiB at most for a normal read, one whose
+10. **The defaults race what the measurements say to.** The default read
+    policy fetches each run of remote blocks in GETs of 4 MiB at most for
+    a normal read, one whose
     intent isn't said, so that no one GET holds the read up for long; a
-    read with an intent fetches each run in one GET. No race; one copy
-    striped. Each mode then comes as a policy, measured.
+    read with an intent fetches each run in one GET. One race (27 Oct
+    2026): a normal read fetches the blocks holding a Parquet or Vortex
+    file's last 2 MiB, where its footer and metadata are, in a GET of
+    their own, two requests racing (`FetchRuns::FOOTER_BYTES`,
+    `FOOTER_RACE`, or `FetchRuns::racing_footers`), known by the path's
+    ending; three blocks when those 2 MiB start mid-block. And, since 27
+    Oct 2026, the user's call, it is `RaceStragglers` at the p90
+    (decision 8): a normal read's GET is raced late once it runs past the
+    p90 of the GET times heard, given a timer (`with_sleep`), which t4,
+    running on no runtime of its own (decision 7), can't take for itself.
+    One copy striped. Each mode then comes as a policy, measured.
+
+    Two stays the default, measured on 27 Oct 2026
+    (`bench/end_to_end/footer_race.sh`): ClickBench's query 24, each run a
+    session of its own that reads the 100 footers afresh, ten runs of each
+    race interleaved, on a c6in.8xlarge in us-east-1, t4 keeping blocks in
+    memory. From S3, two cut the slowest footer GET from 538 ms to 273 ms
+    on Parquet and from 273 ms to 89 ms on Vortex, and the footer GETs over
+    100 ms from 18 to 4 and 8 to 0 of about 1,000: it took away the first
+    byte's stragglers and left the bodies as they were. From GCS, read
+    across clouds, it cut the slowest first byte too, but the copies slowed
+    the bodies two to three times at the median, and Parquet's footer GETs
+    over 100 ms rose from 53 to 211. The slowest run fell for Vortex from
+    both (945 to 731 ms; 1,232 to 843 ms), and not for Parquet, whose
+    slowest runs waited on the query's own GETs, which the footer race
+    doesn't cover. Four did no better than two.
 
 11. **Bytes in flight are capped, and waiting GETs merge.** The user
     gives the network t4's GETs share, `T4CachingBuilder::
     with_network_rate(rate, unloaded_get_time)`: the NIC's rate, and what
-    a GET of a block takes with little else in flight. t4 caps its GETs'
+    a GET of a block takes with little else in flight; else, since 27 Oct
+    2026, the user's call, t4 takes 50 Gbit/s and 32 ms, though a NIC
+    faster than that wants its own and Parquet's big GETs may wait for
+    room as they did on the i7i (below; Later). t4 caps its GETs'
     bytes in flight, a racer's each counted, at what fills the NIC, the
     two multiplied (`src/cache/get_queue.rs`): 200 MB for 50 Gbit/s and
     32 ms. Past it a GET waits its turn, first come, first served, until
@@ -294,7 +326,7 @@ them (decision 9).
 - **What the policy knows of the machine,** the NIC's rate and what a
   request costs, given by the user or learned from the events: decided
   later, with the throughput policy. The cap on bytes in flight (decision
-  11) takes both from the user for now (Later).
+  11) takes both from the user for now, or 50 Gbit/s and 32 ms (Later).
 
 ## Later
 
@@ -307,7 +339,7 @@ them (decision 9).
   passes waited for room for seconds on 26 Oct.
 - **Learning the network rather than being told it** (TODO): the cap on
   bytes in flight (decision 11) is the NIC's rate times a GET's unloaded
-  time, both given by the user. t4 hears every GET's bytes and times, so
+  time, both given by the user or defaulted. t4 hears every GET's bytes and times, so
   it could learn both, as TCP's BBR does: the rate the GETs delivered at
   most lately, the shortest GET times lately, the cap a little over
   their product, raised now and then to see whether the rate rises. A

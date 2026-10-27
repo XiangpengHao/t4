@@ -889,7 +889,7 @@ impl<'c> TierWork<'c> {
         // A plan the cache can't carry out fetches the read as the
         // default does: a policy's mistake costs a read nothing.
         if !located.accepts(&gets) {
-            gets = FetchRuns.plan(&located);
+            gets = FetchRuns::default().plan(&located);
         }
         for get in gets.gets() {
             let fetched = get

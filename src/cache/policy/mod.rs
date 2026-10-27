@@ -6,7 +6,9 @@
 //!   moves to memory, and which chunks a full tier gives up. The default,
 //!   `clock`, a lock-free CLOCK for each tier.
 //! - [`ReadPolicy`], how a read is served (`read`): which GETs fetch what
-//!   only the remote holds, how many race. The default, [`FetchRuns`].
+//!   only the remote holds, how many race. The default, [`RaceStragglers`]
+//!   at the p90, which plans as [`FetchRuns`] does and races a straggler
+//!   late, given a timer.
 //!
 //! Tiers are exclusive: a block is in one tier at a time, and the index
 //! names it there. The cache keeps no access state of its own: a policy

@@ -244,16 +244,55 @@ impl PlannedGet {
     }
 }
 
-/// The default: each run of remote blocks fetched in GETs sent once. A
-/// normal read's, one whose intent isn't said, are of
+/// The default: each run of remote blocks fetched in GETs sent once, but a
+/// footer's. A normal read's, one whose intent isn't said, are of
 /// [`Self::NORMAL_GET_MOST`] bytes at most, so that no one GET holds the
-/// read up for long; a read with an intent fetches each run in one GET.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct FetchRuns;
+/// read up for long; and the blocks holding a Parquet or Vortex file's
+/// last [`Self::FOOTER_BYTES`], where its metadata is, it fetches in a GET
+/// of their own, [`Self::FOOTER_RACE`] requests racing for them unless
+/// [`Self::racing_footers`] says otherwise. A read with an intent fetches
+/// each run in one GET.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FetchRuns {
+    footer_race: NonZeroU8,
+}
+
+impl Default for FetchRuns {
+    fn default() -> Self {
+        Self::racing_footers(Self::FOOTER_RACE)
+    }
+}
 
 impl FetchRuns {
     /// The bytes a normal read's GET holds at most.
     pub const NORMAL_GET_MOST: u64 = 4 << 20;
+    /// The bytes at a Parquet or Vortex file's end that a normal read
+    /// races for.
+    pub const FOOTER_BYTES: u64 = 2 << 20;
+    /// The requests that race for them by default.
+    pub const FOOTER_RACE: NonZeroU8 = NonZeroU8::new(2).unwrap();
+    /// The endings of the paths of files with a footer.
+    const FOOTED: [&[u8]; 2] = [b".parquet", b".vortex"];
+
+    /// Fetches as the default does, `race` requests racing for a footer's
+    /// blocks: with one, its GET of their own is sent once.
+    pub fn racing_footers(race: NonZeroU8) -> Self {
+        Self { footer_race: race }
+    }
+
+    /// The first block a normal read of a Parquet or Vortex file races for,
+    /// the first holding its last [`Self::FOOTER_BYTES`]; for another read,
+    /// the file's end.
+    fn footer_start(read: &LocatedRead<'_>) -> u32 {
+        let footed = Self::FOOTED
+            .iter()
+            .any(|ending| read.path().ends_with(ending));
+        if !footed || read.intent().is_some() {
+            return read.file_blocks();
+        }
+        let footer = read.file_size().saturating_sub(Self::FOOTER_BYTES);
+        u32::try_from(footer / BLOCK_SIZE_U64).expect("a file's block numbers fit a u32")
+    }
 }
 
 impl ReadPolicy for FetchRuns {
@@ -263,13 +302,19 @@ impl ReadPolicy for FetchRuns {
                 .expect("a GET's blocks fit a u32"),
             Some(_) => u32::MAX,
         };
+        let footer_start = Self::footer_start(read);
         ReadPlan::new(
             read.remote_runs()
                 .flat_map(|run| {
-                    let end = run.end;
-                    run.step_by(most as usize).map(move |start| {
-                        PlannedGet::once(start..start.saturating_add(most).min(end))
-                    })
+                    let body_end = footer_start.clamp(run.start, run.end);
+                    let body = (run.start..body_end)
+                        .step_by(most as usize)
+                        .map(move |start| {
+                            PlannedGet::once(start..start.saturating_add(most).min(body_end))
+                        });
+                    let footer = (body_end < run.end)
+                        .then(|| PlannedGet::new(body_end..run.end, self.footer_race));
+                    body.chain(footer)
                 })
                 .collect(),
         )
@@ -386,7 +431,7 @@ mod tests {
     fn the_default_fetches_each_run_once() {
         use BlockSource::{Memory, Remote};
         let sources = [Remote, Memory, Remote, Remote];
-        let plan = FetchRuns.plan(&read(&sources, 0));
+        let plan = FetchRuns::default().plan(&read(&sources, 0));
         assert_eq!(
             plan.gets(),
             [PlannedGet::once(0..1), PlannedGet::once(2..4)]
@@ -399,7 +444,7 @@ mod tests {
     #[test]
     fn the_default_splits_a_normal_reads_long_run() {
         let sources = [BlockSource::Remote; 10];
-        let normal = FetchRuns.plan(&read(&sources, 0));
+        let normal = FetchRuns::default().plan(&read(&sources, 0));
         assert_eq!(
             normal.gets(),
             [
@@ -410,7 +455,69 @@ mod tests {
         );
         let size = 10 * MIB + MIB / 2;
         let warm = LocatedRead::new(b"f", size, 0..size, Some(ReadIntent::Warm), 0, &sources);
-        assert_eq!(FetchRuns.plan(&warm).gets(), [PlannedGet::once(0..10)]);
+        assert_eq!(
+            FetchRuns::default().plan(&warm).gets(),
+            [PlannedGet::once(0..10)]
+        );
+    }
+
+    /// A normal read of a Parquet or Vortex file fetches the blocks holding
+    /// its last 2 MiB in a GET of their own, two requests racing unless
+    /// told otherwise; of another file, or with an intent, it races
+    /// nothing.
+    #[test]
+    fn the_default_races_a_footer() {
+        let raced = |blocks| PlannedGet::new(blocks, FetchRuns::FOOTER_RACE);
+        let plan_by = |fetches: FetchRuns,
+                       path: &'static [u8],
+                       size,
+                       intent,
+                       first,
+                       sources: &[BlockSource]| {
+            let read = LocatedRead::new(path, size, 0..size, intent, first, sources);
+            fetches.plan(&read).gets().to_vec()
+        };
+        let plan = |path, size, intent, first, sources: &[BlockSource]| {
+            plan_by(FetchRuns::default(), path, size, intent, first, sources)
+        };
+        let size = 9 * MIB + MIB / 2;
+        let whole = [BlockSource::Remote; 10];
+        assert_eq!(
+            plan(b"t/a.parquet", size, None, 0, &whole),
+            [PlannedGet::once(0..4), PlannedGet::once(4..7), raced(7..10)],
+            "the blocks holding the last 2 MiB, 7.5 MiB on"
+        );
+        assert_eq!(
+            plan(b"t/a.vortex", size, None, 9, &[BlockSource::Remote]),
+            [raced(9..10)]
+        );
+        assert_eq!(
+            plan(b"t/a.vortex", MIB, None, 0, &[BlockSource::Remote]),
+            [raced(0..1)],
+            "a file smaller than its footer"
+        );
+        assert_eq!(
+            plan(b"t/a.csv", size, None, 0, &whole),
+            [
+                PlannedGet::once(0..4),
+                PlannedGet::once(4..8),
+                PlannedGet::once(8..10)
+            ]
+        );
+        assert_eq!(
+            plan(b"t/a.parquet", size, Some(ReadIntent::Warm), 0, &whole),
+            [PlannedGet::once(0..10)]
+        );
+        let unraced = FetchRuns::racing_footers(NonZeroU8::MIN);
+        assert_eq!(
+            plan_by(unraced, b"t/a.parquet", size, None, 0, &whole),
+            [
+                PlannedGet::once(0..4),
+                PlannedGet::once(4..7),
+                PlannedGet::once(7..10)
+            ],
+            "the footer apart, sent once"
+        );
     }
 
     // `[4..7]` is a plan of one GET, not the GET's blocks.
@@ -456,7 +563,7 @@ mod tests {
         assert!(accepts(&[(0..1, 1), (1..2, 2), (2..3, 1)]), "raced");
         assert!(!accepts(&[(0..1, 1), (1..3, 1)]), "as many as in flight");
         assert_eq!(
-            FetchRuns.plan(&located).gets().len(),
+            FetchRuns::default().plan(&located).gets().len(),
             2,
             "the default waits"
         );

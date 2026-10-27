@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "prefetch-plots",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", "/private/tmp/claude-501/-Users-xiangpeng-coding-t4/4cfcc959-d5b3-4161-bc8f-7a0702315452/scratchpad/prefetch"],
+      "port": 8765
+    }
+  ]
+}

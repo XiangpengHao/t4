@@ -174,7 +174,7 @@ async fn main() -> Result<(), Error> {
     .await?;
     let bytes = plan.bytes();
     // t4's own I/O goes untimed: this tool times the fetches made of it.
-    let store = args.cache.in_front_of(origin, &Arc::default())?;
+    let store = args.cache.in_front_of(origin, &Arc::default(), 0)?;
     let probe = HostProbe::new(&[])?;
 
     let before = probe.sample();

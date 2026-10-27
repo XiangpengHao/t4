@@ -36,8 +36,14 @@
 #   MEMORY_GIB t4's memory tier (default 128)
 #   DISK_GIB   t4's cache file on each SSD (default 64)
 #   DOLLARS_PER_HOUR  what the box costs
-#   RACE       if p90 or p99, t4 races each GET once more if its body isn't
-#              all in by that quantile of the GET times it heard lately
+#   RACE       p90 (t4's default), p99 or never: t4 races each GET once
+#              more if its body isn't all in by that quantile of the GET
+#              times it heard lately
+#   FOOTER_RACES  how many requests t4 races for a Parquet or Vortex file's
+#              footer, its last 2 MiB: t4's default (2) unless given; given
+#              several, as "1 2 4", each query's sessions take them in turn,
+#              a first round of one session each warming the process up, to
+#              be left out, then RUNS rounds; each row says its footer_race
 #   TRACE      if set, every call made of a store's tables, each run's apart,
 #              as CSV beside its results: <store>.trace.csv; and through t4,
 #              each GET it makes in phases: <store>.gets.csv
@@ -46,7 +52,9 @@
 #              /mnt/t4, as bench/devbox/startup.sh mounts them)
 #
 # S3's credentials and region come from the environment, as object_store's
-# `AmazonS3Builder::from_env` reads them (AWS_REGION, AWS_ACCESS_KEY_ID, ...).
+# `AmazonS3Builder::from_env` reads them (AWS_REGION, AWS_ACCESS_KEY_ID, ...);
+# GCS's from GOOGLE_*, or, on a box outside Google Cloud, GCS_ACCESS_TOKEN,
+# the hour's token `gcloud auth print-access-token` prints.
 # Run it in the dev shell (`nix develop -c`), for cargo. Arguments go to
 # every run_queries, such as how S3's HTTP runs: `--http ktls`, the kernel
 # decrypting; `--io-threads N`, on N threads of its own, apart from the
@@ -66,6 +74,7 @@ DISK_GIB=${DISK_GIB:-64}
 DOLLARS_PER_HOUR=${DOLLARS_PER_HOUR:-}
 TRACE=${TRACE:-}
 RACE=${RACE:-}
+FOOTER_RACES=${FOOTER_RACES:-}
 BUCKET=${BUCKET:-s3://t4-bench-xiangpeng-use1}
 MOUNTS=${MOUNTS:-/mnt/t4}
 
@@ -83,8 +92,17 @@ tpch/parquet | tpch/vortex)
     exit 1
     ;;
 esac
+footer_races=()
+sessions=$RUNS
+if [ -n "$FOOTER_RACES" ]; then
+    read -ra races <<<"$FOOTER_RACES"
+    for footer_race in "${races[@]}"; do
+        footer_races+=(--footer-race "$footer_race")
+    done
+    sessions=$(((RUNS + 1) * ${#races[@]}))
+fi
 common=(--format "$FORMAT" "${tables[@]}" --queries "bench/$WORKLOAD/queries.sql"
-    --cold-runs "$RUNS")
+    --cold-runs "$sessions")
 for query in $QUERIES; do
     common+=(--query "$query")
 done
@@ -126,6 +144,7 @@ for store in $STORES; do
     [ -z "$TRACE" ] || trace=(--trace "$OUT/$store.trace.csv" --get-phases "$OUT/$store.gets.csv")
     race=()
     [ -z "$RACE" ] || [ "$store" = s3 ] || race=(--race-at "$RACE")
+    [ "$store" = s3 ] || race+=("${footer_races[@]}")
     echo "== $store"
     started=$SECONDS
     target/release/run_queries "${common[@]}" "${cache[@]}" "${drives[@]}" "${trace[@]}" "${race[@]}" \

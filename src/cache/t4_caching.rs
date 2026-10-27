@@ -48,7 +48,7 @@ use super::object_cache::{CacheableFile, FetchedBlocks, ObjectCache};
 #[cfg(feature = "__fuzz")]
 use super::policy::Tier;
 use super::policy::{
-    ClockPolicy, FetchRuns, Io, PlacementPolicy, ReadIntent, ReadPolicy, TierSizes,
+    ClockPolicy, Io, PlacementPolicy, RaceStragglers, ReadIntent, ReadPolicy, TierSizes,
 };
 use super::{BLOCK_SIZE_U64, InsertOrAbort};
 use crate::io::sync::{Arc, Mutex, MutexGuard};
@@ -130,11 +130,18 @@ pub struct T4CachingBuilder {
     placement: Option<PlacementMaker>,
     reads: Option<Arc<dyn ReadPolicy>>,
     sleep: Option<Sleep>,
-    network_rate: Option<(u64, Duration)>,
+    network_rate: (u64, Duration),
     merged_up_to: u64,
 }
 
 impl T4CachingBuilder {
+    /// The NIC's rate, in bytes a second, that t4 sizes its cap on bytes in
+    /// flight for unless told (`Self::with_network_rate`): 50 Gbit/s.
+    pub const DEFAULT_NETWORK_RATE: u64 = 50_000_000_000 / 8;
+    /// What a GET of a block takes with little else in flight, unless told:
+    /// the other half of the cap.
+    pub const DEFAULT_UNLOADED_GET_TIME: Duration = Duration::from_millis(32);
+
     /// Memory for cached bytes, in whole 1 MiB blocks, one at least.
     /// Required.
     pub fn with_memory_capacity(mut self, bytes: u64) -> Self {
@@ -178,8 +185,10 @@ impl T4CachingBuilder {
     }
 
     /// The read policy, how reads are served: which GETs fetch what they
-    /// only the remote holds, how many race; each run of remote blocks fetched once
-    /// ([`FetchRuns`]) unless set.
+    /// only the remote holds, how many race. Unless set, [`RaceStragglers`]
+    /// at the p90: it plans as `FetchRuns` does, a Parquet or Vortex file's
+    /// footer raced, and races a GET late once it runs past the p90 of the
+    /// GET times heard, given a timer (`Self::with_sleep`).
     pub fn with_read_policy(mut self, policy: impl ReadPolicy + 'static) -> Self {
         self.reads = Some(Arc::new(policy));
         self
@@ -187,7 +196,8 @@ impl T4CachingBuilder {
 
     /// The timer a GET's late racer waits on (`PlannedGet::with_late_race`):
     /// the caller's runtime's, `tokio::time::sleep` boxed, say, as t4 runs
-    /// on none of its own. Without it no GET is raced late.
+    /// on none of its own. Without it no GET is raced late, by the default
+    /// read policy either.
     pub fn with_sleep(
         mut self,
         sleep: impl Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync + 'static,
@@ -204,9 +214,11 @@ impl T4CachingBuilder {
     /// 32 ms. GETs past it wait their turn, first come, first served, each
     /// until another's body is in; a GET bigger than the cap goes once
     /// nothing else is in flight, and a late racer goes at once, beside
-    /// it. No cap unless set.
+    /// it. Unless set, [`Self::DEFAULT_NETWORK_RATE`] and
+    /// [`Self::DEFAULT_UNLOADED_GET_TIME`], 200 MB: a NIC faster than
+    /// 50 Gbit/s wants its own.
     pub fn with_network_rate(mut self, bytes_per_second: u64, unloaded_get_time: Duration) -> Self {
-        self.network_rate = Some((bytes_per_second, unloaded_get_time));
+        self.network_rate = (bytes_per_second, unloaded_get_time);
         self
     }
 
@@ -224,9 +236,8 @@ impl T4CachingBuilder {
     /// # Errors
     ///
     /// If the memory capacity or a disk file wasn't given, the queue depth
-    /// or the network's bytes in flight are 0, waiting GETs are merged
-    /// without a network rate, or a cache file can't be made, sized and
-    /// opened, or the memory mapped.
+    /// or the network's bytes in flight are 0, or a cache file can't be
+    /// made, sized and opened, or the memory mapped.
     pub fn build(self) -> crate::Result<T4Caching> {
         let memory_chunks =
             Self::chunks(self.memory_capacity, "T4Caching needs a memory capacity")?;
@@ -243,22 +254,14 @@ impl T4CachingBuilder {
             Some(build) => build(sizes),
             None => Arc::new(ClockPolicy::new(memory_chunks, disk_chunks)),
         };
-        let reads = self.reads.unwrap_or_else(|| Arc::new(FetchRuns));
-        let bytes_in_flight = match self.network_rate {
-            None if self.merged_up_to > 0 => {
-                return Err(crate::Error::InvalidArgument(
-                    "merging waiting GETs needs a network rate",
-                ));
-            }
-            None => NonZeroU64::MAX,
-            Some((bytes_per_second, unloaded_get_time)) => {
-                let bytes =
-                    u128::from(bytes_per_second) * unloaded_get_time.as_nanos() / 1_000_000_000;
-                NonZeroU64::new(u64::try_from(bytes).unwrap_or(u64::MAX)).ok_or(
-                    crate::Error::InvalidArgument("the network's bytes in flight must be > 0"),
-                )?
-            }
-        };
+        let reads = self
+            .reads
+            .unwrap_or_else(|| Arc::new(RaceStragglers::default()));
+        let (bytes_per_second, unloaded_get_time) = self.network_rate;
+        let bytes = u128::from(bytes_per_second) * unloaded_get_time.as_nanos() / 1_000_000_000;
+        let bytes_in_flight = NonZeroU64::new(u64::try_from(bytes).unwrap_or(u64::MAX)).ok_or(
+            crate::Error::InvalidArgument("the network's bytes in flight must be > 0"),
+        )?;
         Ok(T4Caching {
             inner: self.inner,
             cache: ObjectCache::new(memory_chunks, disk, placement, reads)?,
@@ -303,7 +306,10 @@ impl T4Caching {
             placement: None,
             reads: None,
             sleep: None,
-            network_rate: None,
+            network_rate: (
+                T4CachingBuilder::DEFAULT_NETWORK_RATE,
+                T4CachingBuilder::DEFAULT_UNLOADED_GET_TIME,
+            ),
             merged_up_to: 0,
         }
     }
