@@ -2,9 +2,6 @@
 //!
 //! - [`table_store`]: the store a table is read through, a local file, GCS
 //!   or S3, with t4 in front if asked.
-//! - [`fixed_placement_policy`]: a cache policy that places every block
-//!   alike, in one tier, so that a warm run measures memory hits or disk
-//!   hits alone, or nowhere, so that a run measures t4 caching nothing.
 //! - [`request_trace`]: an object store that records every call made of
 //!   it, so a workload's reads (ClickBench's, TPC-H's) can be studied and
 //!   replayed.
@@ -24,7 +21,6 @@
 //! - [`synthetic_objects`]: an object store whose objects' bytes are
 //!   computed, not stored, for the simulated store to serve.
 
-pub mod fixed_placement_policy;
 pub mod host_counters;
 pub mod io_latency;
 // Only Linux builds `ktls_transport`, its user; it is tested everywhere.

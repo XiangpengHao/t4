@@ -16,12 +16,11 @@ use object_store::local::LocalFileSystem;
 use object_store::path::Path;
 use object_store::{ClientOptions, ObjectStore, StaticCredentialProvider};
 use t4::T4Caching;
-use t4::policy::{Admit, FetchRuns, RaceStragglers};
+use t4::policy::{Admit, FetchRuns, FixedPlacementPolicy, RaceStragglers};
 use tokio::runtime::{Handle, Runtime};
 use url::Url;
 
 use crate::Error;
-use crate::fixed_placement_policy::FixedPlacementPolicy;
 use crate::io_latency::{IoLatencies, TimedReads};
 use crate::ktls_transport::KtlsConnector;
 

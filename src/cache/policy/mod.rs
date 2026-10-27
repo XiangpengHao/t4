@@ -10,17 +10,22 @@
 //!   at the p90, which plans as [`FetchRuns`] does and races a straggler
 //!   late, given a timer.
 //!
+//! [`FixedPlacementPolicy`], a placement policy for benchmarks, keeps every
+//! fetched block in one tier, or none.
+//!
 //! Tiers are exclusive: a block is in one tier at a time, and the index
 //! names it there. The cache keeps no access state of its own: a policy
 //! hears every hit, and keeps what it wants, with what concurrency it wants,
 //! as every hook takes `&self`.
 
 mod clock;
+mod fixed_placement;
 mod read;
 mod stragglers;
 
 pub use super::{BlockKey, ChunkId, FileVersionId};
 pub use clock::ClockPolicy;
+pub use fixed_placement::FixedPlacementPolicy;
 pub use read::{
     BlockSource, FetchRuns, Io, IoEvent, IoPhase, LocatedRead, PlannedGet, ReadIntent, ReadPlan,
     ReadPolicy,

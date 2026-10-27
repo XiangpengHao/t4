@@ -1,8 +1,10 @@
-//! [`FixedPlacementPolicy`]: a cache policy that places every fetched block
-//! alike, in memory, on disk or nowhere, so that a pass measures one tier's
-//! hits alone, or t4 with no tier at all.
+//! [`FixedPlacementPolicy`]: a placement policy that places every fetched
+//! block alike, in memory, on disk or nowhere, so that a benchmark's pass
+//! measures one tier's hits alone, or t4 with no tier at all. t4's own bench
+//! uses it, and so does Vortex's (`doc/09-vortex-integration.md`, decision
+//! 7).
 
-use t4::policy::{
+use super::{
     Admit, BlockKey, BlockRead, ChunkId, ClockPolicy, DiskHit, MemoryVictim, PlacementPolicy, Tier,
     TierSizes,
 };

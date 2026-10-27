@@ -10,7 +10,9 @@ the old step 2, is shelved until measured GET counts call for it
 
 The goal: t4 in Vortex, sent to vortex-data/vortex as a pull request with
 numbers from Vortex's own benchmark, one tier at a time, for Vortex's
-maintainers to decide.
+maintainers to decide. The pull request is a proof of concept, not meant
+to merge as is (the user, 27 Oct 2026): it shows the approach and the
+numbers, and what would merge, in what shape, is the maintainers' call.
 
 The shape:
 
@@ -20,7 +22,8 @@ The shape:
   (decision 2). Vortex's `VortexReadAt` is another, and lives in Vortex
   (decision 3).
 - **The dependency goes one way.** t4 knows nothing of Vortex, and Vortex
-  depends on a published t4.
+  depends on t4: by git for the proof of concept, a published t4 if it
+  ever merges.
 
 ## What shapes it
 
@@ -213,16 +216,20 @@ the store from before the pivot; the cache isn't published.
    deletes through t4's `ObjectStore`, so the cache remembers what lists
    say. `open_read` opens a `CachedFile`.
 
-   Vortex depends on a published t4, and changes this reader whenever it
-   changes its trait.
+   Vortex depends on t4, and changes this reader whenever it changes its
+   trait.
 
 4. **Vortex lets any reader be hooked in everywhere.** These changes are
    generic; any custom reader gains from them, not only t4's.
 
    - **DataFusion.** `VortexFormat` takes a `VortexReaderFactory`, as
      `VortexSource` already does, and uses it for schema and statistics
-     too. A `T4ReaderFactory` (vortex-datafusion, feature `t4`) opens each
-     file with `open_listed`, from DataFusion's listing, so no HEAD is sent.
+     too. A `T4ReaderFactory` opens each file with `open_listed`, from
+     DataFusion's listing, so no HEAD is sent. For the proof of concept it
+     lives in datafusion-bench, about 15 lines; the hook is what Vortex
+     would take. The v2 scan, TPC-H's default there, opens each file from
+     the reader the factory makes too (`opener.rs`), so it reads through
+     t4 as well.
    - **DuckDB.** With the `t4` feature, when `VORTEX_T4_URL` names a
      prefix, vortex-duckdb's `resolve_filesystem` returns a `T4FileSystem`
      over that prefix's store. t4's inner store is the registry's store,
@@ -382,11 +389,15 @@ vx-bench options (decision 7). The policy names are t4 bench's
 `--cache-policy` names.
 
 ```text
---opt t4-policy=none|memory|disk|clock
+--opt t4-policy=clock|memory|disk|none   (absent: no t4)
 --opt t4-memory-gib=64
 --opt t4-disk=/mnt/nvme0/t4.cache:3072,...
---opt t4-coalesce=on|off            (Vortex's merging of nearby reads, decision 5)
+--opt t4-coalesce=on|off                 (Vortex's merging of nearby reads, decision 5)
 ```
+
+t4 needs the data in S3 or GCS (`--opt remote-data-dir=...`), and is
+registered as the session's store for the bucket, so that DataFusion's
+lists go through it too.
 
 ## The plan
 
@@ -413,7 +424,14 @@ vx-bench options (decision 7). The policy names are t4 bench's
    pass.
 3. **DataFusion's wiring:** `VortexFormat`'s reader factory and a
    `T4ReaderFactory`; `FixedPlacementPolicy` made public in t4; the
-   datafusion-bench options.
+   datafusion-bench options. Built 27 Oct 2026: `FixedPlacementPolicy`
+   moved into `t4::policy`; on the fork's `t4-read-at`, `VortexFormat`'s
+   `with_vortex_reader_factory`, used for schema and statistics and passed
+   to every `VortexSource`, with a test that a listing table infers its
+   schema and scans through the factory (vortex-datafusion's 233 format and
+   source tests pass); the `vortex` crate's `t4` feature; datafusion-bench's
+   `t4_cache` and options. It builds; it hasn't run against S3 yet (step
+   4).
 4. **Measured on DataFusion:** the three tiers on TPC-H SF 10 and on
    ClickBench's q20 to q34 (06's subset); and the remote tier with Vortex's
    merging on and off, with GET counts and slowest GETs.
@@ -424,11 +442,13 @@ vx-bench options (decision 7). The policy names are t4 bench's
 7. **Random access by URL:** the three tiers. These are many small reads,
    where a pool hop and a syscall for every read would show, if anywhere.
 8. **t4's defaults,** reported apart.
-9. **t4, publishable:** the dependency question settled (Open questions),
-   and 0.3.0 published.
-10. **The pull request:** the hooks (decision 4), vortex-io's `t4` module,
-    the bench's options, and the numbers. Vortex's maintainers decide. The
-    hooks may go first, alone: any reader gains from them.
+9. **t4 by git:** the fork's path dependency on t4 becomes a git one, on
+   t4's pushed branch, so that the pull request builds for others.
+10. **The pull request, a proof of concept:** the hooks (decision 4),
+    vortex-io's `t4` module, the bench's options, and the numbers, marked
+    not to merge as is. Vortex's maintainers decide what, if anything, to
+    take; the generic hooks could go first, alone, as any reader gains
+    from them.
 
 The old step 2, a batch's GETs merged, was built on 27 Oct 2026 and
 shelved the same day (decision 5).
@@ -457,9 +477,9 @@ What the reasoning expects; the runs check it:
 
 - **t4's dependencies.** bbtree, vstd and five Verus crates are new to
   Vortex's lockfile, with second versions of two crates. vstd's exact pin can't be unified with any other pin
-  of vstd. t4 has to answer this before the pull request: can the Verus
-  crates stay out of a normal build, behind a feature, with `verus!`
-  erased without them?
+  of vstd. The proof of concept carries them as they are; t4 has to answer
+  this before anything merges: can the Verus crates stay out of a normal
+  build, behind a feature, with `verus!` erased without them?
 - **GET size against cost.** A request costs, its bytes don't, and 8 to 16
   MiB is where cost and rate both flatten (06, What shapes it). t4's 4 MiB
   limit keeps any one GET from holding a read up. Should t4 merge
@@ -499,6 +519,8 @@ What the reasoning expects; the runs check it:
 
 ## Later
 
+- **t4 publishable,** if Vortex wants to merge: the dependency question
+  settled (Open questions), and 0.3.0 published.
 - **`ObjectStoreReadAt` taking a one-chunk answer as its buffer.** When a
   store answers in one aligned chunk and the session uses the static
   allocator, that chunk becomes the buffer. A small, generic pull request:
@@ -529,14 +551,14 @@ What the reasoning expects; the runs check it:
 | t4 | `src/cache/t4_caching/cached_file.rs` | `CachedFile`: `read` | yes |
 | t4 | `src/cache/t4_caching/object_store_integration.rs` | `impl ObjectStore for T4Caching`, over `open` and `read_cached` | yes |
 | t4 | `src/cache/t4_caching/cached_file.rs`, `src/cache/get_queue.rs` | `CachedFile::read_ranges`; `Gathering`: a batch's GETs merged | shelved, branch `shelved-batch-gathering` |
-| t4 | `src/cache/policy/fixed_placement.rs` | `FixedPlacementPolicy`, public, from `bench/src/fixed_placement_policy.rs` | no |
+| t4 | `src/cache/policy/fixed_placement.rs` | `FixedPlacementPolicy`, public, from `bench/src/fixed_placement_policy.rs` | yes |
 | Vortex | `vortex-io/src/t4/read_at.rs` | `T4ReadAt`, feature `t4` | yes, branch `t4-read-at` |
 | Vortex | `vortex-io/src/t4/mod.rs` | t4's `T4Caching`, `T4CachingBuilder`, `CachedFile` re-exported | yes, branch `t4-read-at` |
 | Vortex | `vortex-file/tests/t4_read_at.rs` | a Vortex file written to a store and scanned back through `T4ReadAt`; vortex-file's feature `t4` | yes, branch `t4-read-at` |
 | Vortex | `vortex-io/src/t4/filesystem.rs` | `T4FileSystem` | no |
-| Vortex | `vortex-datafusion/src/persistent/format.rs` | `VortexFormat`'s reader factory, used for schema and statistics too | no |
-| Vortex | `vortex-datafusion/src/persistent/reader.rs` | `T4ReaderFactory`, feature `t4` | no |
+| Vortex | `vortex-datafusion/src/persistent/format.rs` | `VortexFormat`'s reader factory, used for schema and statistics too | yes, branch `t4-read-at` |
+| Vortex | `vortex/Cargo.toml` | the `t4` feature, forwarding to vortex-io's and vortex-file's | yes, branch `t4-read-at` |
 | Vortex | `vortex-duckdb/src/file_reader.rs` | `resolve_filesystem`: a `T4FileSystem` for `VORTEX_T4_URL`'s prefix | no |
-| Vortex | `benchmarks/datafusion-bench/src/lib.rs` | the store and reader per `--opt t4-*` | no |
+| Vortex | `benchmarks/datafusion-bench/src/t4_cache.rs`, `lib.rs`, `main.rs` | t4 in front of the store per `--opt t4-*`; `T4ReaderFactory` | yes, branch `t4-read-at` |
 | Vortex | `benchmarks/duckdb-bench/src/main.rs` | `VORTEX_T4_*` set per `--opt t4-*` | no |
 | Vortex | `vortex-bench/src/random_access/take.rs` | files opened by URL | no |
