@@ -404,8 +404,13 @@ vx-bench options (decision 7). The policy names are t4 bench's
    `t4-read-at`: the feature, `T4ReadAt`, and unit tests in vortex-io
    (each read's bytes and alignment, a fetch then a hit; a batch; the
    size): the six pass, and clippy is clean on vortex-io with every
-   feature. The Vortex file read through it needs a `t4` feature where
-   vortex-file's tests can see it.
+   feature. And a Vortex file read through it: vortex-file gains a `t4`
+   feature, vortex-io re-exports t4's `T4Caching`, `T4CachingBuilder` and
+   `CachedFile` so that the cache is built with the t4 Vortex is built
+   against, and `vortex-file/tests/t4_read_at.rs` writes a file of over
+   2 MiB to an in-memory store and scans it back through `T4ReadAt` twice,
+   fetched then from t4's tiers, with Vortex's merging and without: both
+   pass.
 3. **DataFusion's wiring:** `VortexFormat`'s reader factory and a
    `T4ReaderFactory`; `FixedPlacementPolicy` made public in t4; the
    datafusion-bench options.
@@ -526,6 +531,8 @@ What the reasoning expects; the runs check it:
 | t4 | `src/cache/t4_caching/cached_file.rs`, `src/cache/get_queue.rs` | `CachedFile::read_ranges`; `Gathering`: a batch's GETs merged | shelved, branch `shelved-batch-gathering` |
 | t4 | `src/cache/policy/fixed_placement.rs` | `FixedPlacementPolicy`, public, from `bench/src/fixed_placement_policy.rs` | no |
 | Vortex | `vortex-io/src/t4/read_at.rs` | `T4ReadAt`, feature `t4` | yes, branch `t4-read-at` |
+| Vortex | `vortex-io/src/t4/mod.rs` | t4's `T4Caching`, `T4CachingBuilder`, `CachedFile` re-exported | yes, branch `t4-read-at` |
+| Vortex | `vortex-file/tests/t4_read_at.rs` | a Vortex file written to a store and scanned back through `T4ReadAt`; vortex-file's feature `t4` | yes, branch `t4-read-at` |
 | Vortex | `vortex-io/src/t4/filesystem.rs` | `T4FileSystem` | no |
 | Vortex | `vortex-datafusion/src/persistent/format.rs` | `VortexFormat`'s reader factory, used for schema and statistics too | no |
 | Vortex | `vortex-datafusion/src/persistent/reader.rs` | `T4ReaderFactory`, feature `t4` | no |
