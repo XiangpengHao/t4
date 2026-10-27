@@ -1,0 +1,33 @@
+<section id="net-queue" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:48px">
+<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">t4 queues, merges and races its GETs</h2>
+<div style="position:absolute;left:128px;top:340px;width:272px;height:220px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px;padding:24px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">Reads</p>
+<p style="text-align:center;font-size:24px;font-weight:400;line-height:1.2;color:#3c3c3a">from the query</p>
+</div>
+<div style="position:absolute;left:1520px;top:340px;width:272px;height:220px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;background:#a8460f;border-radius:2px;padding:24px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#ffffff">S3 · GCS</p>
+</div>
+<div data-build-in="fade 1" style="position:absolute;left:476px;top:340px;width:272px;height:220px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;background:#ffffff;border:2px solid #171716;border-radius:2px;padding:24px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">Queue</p>
+<p style="text-align:center;font-size:24px;font-weight:400;line-height:1.2;color:#3c3c3a">first come, first served</p>
+</div>
+<x-connector data-build-in="fade 1" x1="400" y1="450" x2="476" y2="450" style="color:#171716;border-width:3px"></x-connector>
+<div data-build-in="fade 2" style="position:absolute;left:824px;top:340px;width:272px;height:220px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;background:#ffffff;border:2px solid #171716;border-radius:2px;padding:24px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">Merge</p>
+<p style="text-align:center;font-size:24px;font-weight:400;line-height:1.2;color:#3c3c3a">waiting GETs for adjacent bytes, up to 4 MiB</p>
+</div>
+<x-connector data-build-in="fade 2" x1="748" y1="450" x2="824" y2="450" style="color:#171716;border-width:3px"></x-connector>
+<div data-build-in="fade 3" style="position:absolute;left:1172px;top:340px;width:272px;height:220px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;background:#ffffff;border:2px solid #171716;border-radius:2px;padding:24px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">Cap</p>
+<p style="text-align:center;font-size:24px;font-weight:400;line-height:1.2;color:#3c3c3a">200 MB in flight: 50 Gbit/s × 32 ms</p>
+</div>
+<x-connector data-build-in="fade 3" x1="1096" y1="450" x2="1172" y2="450" style="color:#171716;border-width:3px"></x-connector>
+<x-connector data-build-in="fade 3" x1="1444" y1="450" x2="1520" y2="450" style="color:#171716;border-width:3px"></x-connector>
+<div data-build-in="fade 4" style="position:absolute;left:824px;top:680px;width:620px;height:170px;display:flex;flex-direction:column;justify-content:center;gap:8px;background:#1d0fed;border-radius:2px;padding:24px 32px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#ffffff">Race</p>
+<p style="font-size:24px;font-weight:400;line-height:1.2;color:#ffffff">Slower than the p90 of the last 64 GETs: send it again, keep the first answer</p>
+</div>
+<x-connector data-build-in="fade 4" x1="1656" y1="560" x2="1444" y2="765" route="vh" style="color:#1d0fed;border-width:3px"></x-connector>
+<p data-build-in="fade 4" style="position:absolute;left:1672px;top:640px;width:120px;font-size:24px;font-weight:400;line-height:1.2;color:#1d0fed">too slow</p>
+<aside>Builds one stage at a time. 1: reads go into a queue, first come, first served. 2: waiting GETs for a file's adjacent bytes merge into one GET of up to 4 MiB. 3: t4 caps the bytes it has in flight at what fills the NIC: the NIC's rate times what an unloaded GET takes, 50 Gbit/s times 32 ms, 200 MB by default (src/cache/get_queue.rs). Past the cap a GET waits its turn. 4: a GET slower than the p90 of the last 64 GET times is raced: t4 sends it again and keeps whichever answer comes first; until it has heard 64 GETs it races at 500 ms (src/cache/policy/stragglers.rs). A late racer goes at once, beside the cap.</aside>
+</section>

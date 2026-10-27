@@ -1,0 +1,26 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          "doc/08-spiral-presentation/project/slides/bench-dense.html"
+        ],
+        "createdAt": "2026-10-27T21:47:05.160Z",
+        "reason": "Claude triage: the flagged text sits on a pinned #171716 overlay div (white 17:1, #a5a0f8 7.7:1); the checker measures it against the section's paper background"
+      },
+      {
+        "rule": "oversized-h1",
+        "value": "*",
+        "files": [
+          "doc/08-spiral-presentation/project/slides/cover.html"
+        ],
+        "createdAt": "2026-10-27T21:51:08.812Z",
+        "reason": "Claude triage: 1920x1080 title slide set at the Spiral design system's s-hero token (144px, 'title slides'), not a web hero"
+      }
+    ]
+  }
+}

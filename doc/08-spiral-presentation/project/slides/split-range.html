@@ -1,0 +1,51 @@
+<section id="split-range" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:48px">
+<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">One read, three tiers</h2>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">t4 splits a read by where its blocks live, and reads every part at once.</p>
+<p style="position:absolute;left:128px;top:352px;width:1664px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:none;color:#171716">read(file, 2.4 MiB .. 9.7 MiB)</p>
+<x-connector x1="205" y1="410" x2="1718" y2="410" head="both" style="color:#171716;border-width:3px"></x-connector>
+<div style="position:absolute;left:128px;top:440px;width:192px;height:120px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:4px;background:#8b83f6;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">2</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#171716">MEMORY</p>
+</div>
+<div style="position:absolute;left:336px;top:440px;width:192px;height:120px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:4px;background:#8b83f6;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">3</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#171716">MEMORY</p>
+</div>
+<div style="position:absolute;left:544px;top:440px;width:192px;height:120px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:4px;background:#1d0fed;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#ffffff">4</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#ffffff">DISK</p>
+</div>
+<div style="position:absolute;left:752px;top:440px;width:192px;height:120px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:4px;background:#1d0fed;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#ffffff">5</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#ffffff">DISK</p>
+</div>
+<div style="position:absolute;left:960px;top:440px;width:192px;height:120px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:4px;background:#1d0fed;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#ffffff">6</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#ffffff">DISK</p>
+</div>
+<div style="position:absolute;left:1168px;top:440px;width:192px;height:120px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:4px;background:#a8460f;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#ffffff">7</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#ffffff">REMOTE</p>
+</div>
+<div style="position:absolute;left:1376px;top:440px;width:192px;height:120px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:4px;background:#a8460f;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#ffffff">8</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#ffffff">REMOTE</p>
+</div>
+<div style="position:absolute;left:1584px;top:440px;width:192px;height:120px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:4px;background:#8b83f6;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">9</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#171716">MEMORY</p>
+</div>
+<div data-build-in="rise 1" style="position:absolute;left:128px;top:640px;width:512px;display:flex;flex-direction:column;gap:8px;background:#ffffff;border:3px solid #8b83f6;border-radius:2px;padding:32px">
+<h3 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;letter-spacing:-0.4px;color:#171716">Memory</h3>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">Blocks 2, 3 and 9, served from RAM</p>
+</div>
+<div data-build-in="rise 2" style="position:absolute;left:704px;top:640px;width:512px;display:flex;flex-direction:column;gap:8px;background:#ffffff;border:3px solid #1d0fed;border-radius:2px;padding:32px">
+<h3 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;letter-spacing:-0.4px;color:#171716">Disk</h3>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">Blocks 4 to 6, io_uring reads spread over the drives</p>
+</div>
+<div data-build-in="rise 3" style="position:absolute;left:1280px;top:640px;width:512px;display:flex;flex-direction:column;gap:8px;background:#ffffff;border:3px solid #a8460f;border-radius:2px;padding:32px">
+<h3 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;letter-spacing:-0.4px;color:#171716">Remote</h3>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">Blocks 7 and 8, GETs of at most 4 MiB</p>
+</div>
+<aside>A query may ask for one long range. Part of it is in memory, part on disk, part only in S3. t4 splits the read by tier automatically: memory blocks are served from RAM, disk blocks become io_uring reads spread over the drives, and the remote run becomes GETs of at most 4 MiB (src/cache/policy/read.rs). All three run at once, and the caller gets one answer. The block numbers and tiers here are an example, not a trace.</aside>
+</section>

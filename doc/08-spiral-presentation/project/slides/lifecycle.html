@@ -1,0 +1,32 @@
+<section id="lifecycle" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:48px">
+<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">A block’s life</h2>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">Every read is rounded out to 1 MiB blocks. A block lives in one tier at a time.</p>
+<div style="position:absolute;left:128px;top:380px;width:400px;height:160px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;background:#a8460f;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#ffffff">Remote</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:uppercase;color:#ffffff">S3 · GCS</p>
+</div>
+<div style="position:absolute;left:760px;top:380px;width:400px;height:160px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;background:#8b83f6;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">Memory</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:uppercase;color:#171716">RAM</p>
+</div>
+<div style="position:absolute;left:1392px;top:380px;width:400px;height:160px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;background:#1d0fed;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#ffffff">Disk</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:uppercase;color:#ffffff">Local SSDs</p>
+</div>
+<div style="position:absolute;left:1392px;top:700px;width:400px;height:110px;display:flex;flex-direction:column;justify-content:center;align-items:center;background:#fcfcf9;border:2px dashed #646462;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#3c3c3a">Dropped</p>
+</div>
+<x-connector data-build-in="fade 1" x1="528" y1="430" x2="760" y2="430" style="color:#171716;border-width:3px"></x-connector>
+<p data-build-in="fade 1" style="position:absolute;left:544px;top:384px;width:200px;font-size:24px;font-weight:400;line-height:1.2;color:#171716">1 · fetched</p>
+<x-connector data-build-in="fade 2" x1="1160" y1="430" x2="1392" y2="430" style="color:#171716;border-width:3px"></x-connector>
+<p data-build-in="fade 2" style="position:absolute;left:1176px;top:384px;width:200px;font-size:24px;font-weight:400;line-height:1.2;color:#171716">2 · demoted</p>
+<x-connector data-build-in="fade 3" x1="1392" y1="500" x2="1160" y2="500" style="color:#171716;border-width:3px"></x-connector>
+<p data-build-in="fade 3" style="position:absolute;left:1176px;top:516px;width:200px;font-size:24px;font-weight:400;line-height:1.2;color:#171716">3 · 2nd hit</p>
+<x-connector data-build-in="fade 4" x1="1592" y1="540" x2="1592" y2="700" style="color:#171716;border-width:3px"></x-connector>
+<p data-build-in="fade 4" style="position:absolute;left:1608px;top:605px;width:180px;font-size:24px;font-weight:400;line-height:1.2;color:#171716">4 · evicted</p>
+<div data-build-in="rise 5" style="position:absolute;left:128px;top:640px;width:1180px;display:flex;flex-direction:column;gap:16px">
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">The default policy is a lock-free CLOCK per tier. A fetched block goes to memory. Memory’s victims go to disk. A disk block moves up on its 2nd hit.</p>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">Eviction runs when a block comes in: at most 8 victims a batch, never more than 1/16 of a tier.</p>
+</div>
+<aside>The life cycle. Memory and disk both start empty. As queries run, their byte ranges are rounded out to 1 MiB blocks and fetched from S3. Once a block is fetched, a policy decides where it goes: memory, disk, or nowhere. Once memory or disk is full, the policy picks victims: memory's go down to disk, disk's are dropped. A disk block that is hit a second time moves back up to memory. The default policy is a lock-free CLOCK per tier (src/cache/policy/clock.rs); eviction runs at insertion, at most 8 victims a batch, never more than 1/16 of the tier, up to 4 rounds (doc/03-cache.md). Placement is a trait, so a user can plug in their own: on_remote_read, on_memory_hit, on_disk_hit.</aside>
+</section>

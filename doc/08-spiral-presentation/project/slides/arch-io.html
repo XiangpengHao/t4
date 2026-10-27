@@ -1,0 +1,40 @@
+<section id="arch-io" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:48px">
+<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">One thread owns every I/O</h2>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">Callers on any runtime send reads over a channel. The worker submits them and reaps completions.</p>
+<div style="position:absolute;left:1024px;top:330px;width:320px;height:400px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;background:#1d0fed;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#ffffff">I/O worker</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:uppercase;color:#ffffff">one thread</p>
+</div>
+<div style="position:absolute;left:1472px;top:330px;width:320px;height:160px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;background:#ffffff;border:2px solid #171716;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">io_uring</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:uppercase;color:#646462">SQ · CQ</p>
+</div>
+<div style="position:absolute;left:1472px;top:570px;width:320px;height:160px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;background:#ebebe8;border:1px solid #d4d4d2;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">NVMe SSDs</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:uppercase;color:#646462">1 to 12 drives</p>
+</div>
+<x-connector x1="1344" y1="410" x2="1472" y2="410" head="both" style="color:#171716;border-width:3px"></x-connector>
+<x-connector x1="1632" y1="490" x2="1632" y2="570" head="both" style="color:#171716;border-width:3px"></x-connector>
+<div data-build-in="fade 1" style="position:absolute;left:576px;top:330px;width:320px;height:400px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">Channel</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:uppercase;color:#646462">mpsc</p>
+</div>
+<x-connector data-build-in="fade 1" x1="896" y1="530" x2="1024" y2="530" style="color:#171716;border-width:3px"></x-connector>
+<div data-build-in="fade 2" style="position:absolute;left:128px;top:330px;width:320px;height:100px;display:flex;flex-direction:column;justify-content:center;align-items:center;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">tokio task</p>
+</div>
+<div data-build-in="fade 2" style="position:absolute;left:128px;top:480px;width:320px;height:100px;display:flex;flex-direction:column;justify-content:center;align-items:center;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">smol task</p>
+</div>
+<div data-build-in="fade 2" style="position:absolute;left:128px;top:630px;width:320px;height:100px;display:flex;flex-direction:column;justify-content:center;align-items:center;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">plain thread</p>
+</div>
+<x-connector data-build-in="fade 2" x1="448" y1="380" x2="576" y2="380" style="color:#171716;border-width:3px"></x-connector>
+<x-connector data-build-in="fade 2" x1="448" y1="530" x2="576" y2="530" style="color:#171716;border-width:3px"></x-connector>
+<x-connector data-build-in="fade 2" x1="448" y1="680" x2="576" y2="680" style="color:#171716;border-width:3px"></x-connector>
+<x-connector data-build-in="fade 3" x1="1184" y1="730" x2="1184" y2="800" head="none" style="color:#1d0fed;border-width:3px"></x-connector>
+<x-connector data-build-in="fade 3" x1="1184" y1="800" x2="288" y2="800" head="none" style="color:#1d0fed;border-width:3px"></x-connector>
+<x-connector data-build-in="fade 3" x1="288" y1="800" x2="288" y2="730" style="color:#1d0fed;border-width:3px"></x-connector>
+<p data-build-in="fade 3" style="position:absolute;left:576px;top:816px;width:600px;font-size:24px;font-weight:400;line-height:1.2;color:#1d0fed">completions wake the caller’s task</p>
+<aside>Start with the right half only: a single thread manages every I/O in the process. It submits reads to io_uring and polls the completion queue, the same two rings as on the io_uring slide. Build 1: each read request reaches that thread through a message-passing channel (an mpsc channel, src/io/io_worker.rs). Build 2: the callers can be on any runtime, tokio, smol or a plain thread; t4 assumes no executor. Build 3: a completion wakes the caller's task. Default queue depth is 64. Off Linux, the same interface runs on a thread pool, and tests run on a simulated drive (src/io/mod.rs).</aside>
+</section>

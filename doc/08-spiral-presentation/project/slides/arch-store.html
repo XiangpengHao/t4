@@ -1,0 +1,31 @@
+<section id="arch-store" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">One index, three tiers</h2>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">DataFusion and Vortex call t4 through object_store’s ObjectStore trait.</p>
+<div style="display:flex;flex-direction:column;gap:12px">
+<div style="align-self:center;width:640px;display:flex;flex-direction:column;align-items:center;gap:8px;background:#171716;border-radius:2px;padding:24px 32px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#ffffff">t4 · ObjectStore</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:uppercase;color:#d4d4d2">the interface</p>
+</div>
+<x-shape kind="arrow-down" style="align-self:center;width:32px;height:32px;background:#3c3c3a"></x-shape>
+<div style="align-self:center;width:960px;display:flex;flex-direction:column;align-items:center;gap:8px;background:#ebebe8;border:1px solid #d4d4d2;border-radius:2px;padding:24px 32px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">Index: a bbtree</p>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">(file, 1 MiB block) → memory or disk</p>
+</div>
+<x-shape kind="arrow-down" style="align-self:center;width:32px;height:32px;background:#3c3c3a"></x-shape>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#8b83f6;border-radius:2px;padding:32px">
+<h3 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;letter-spacing:-0.4px;color:#171716">Memory</h3>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#171716">RAM, the smallest tier</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#1d0fed;border-radius:2px;padding:32px">
+<h3 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;letter-spacing:-0.4px;color:#ffffff">Disk</h3>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#ffffff">Local SSDs, read with io_uring</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#a8460f;border-radius:2px;padding:32px">
+<h3 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;letter-spacing:-0.4px;color:#ffffff">Remote</h3>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#ffffff">S3 or GCS: the store t4 wraps</p>
+</div>
+</div>
+</div>
+<aside>The t4 ObjectStore is the interface: DataFusion and Vortex read through object_store's trait and don't know t4 is there. Inside it, one bbtree index: paths maps a file's path to its version, and blocks maps (version, 1 MiB block) to a chunk in memory or on disk. The key is one u64, 40 version bits and 24 block bits (doc/03-cache.md). A block the index doesn't hold is read from the remote, which is the inner ObjectStore t4 wraps. Tiers are exclusive: a block lives in exactly one of them.</aside>
+</section>

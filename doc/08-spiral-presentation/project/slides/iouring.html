@@ -1,0 +1,30 @@
+<section id="iouring" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:48px">
+<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">io_uring: rings shared with the kernel</h2>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">In Linux since 5.1 (2019). tokio::fs can’t use it: it runs a blocking pread on a thread pool.</p>
+<div style="position:absolute;left:128px;top:380px;width:400px;height:110px;display:flex;flex-direction:column;justify-content:center;align-items:center;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">Your thread</p>
+</div>
+<div style="position:absolute;left:1200px;top:380px;width:400px;height:110px;display:flex;flex-direction:column;justify-content:center;align-items:center;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">Your buffer</p>
+</div>
+<div style="position:absolute;left:128px;top:560px;width:440px;height:110px;display:flex;flex-direction:column;justify-content:center;align-items:center;background:#ffffff;border:2px solid #171716;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">Submission queue</p>
+</div>
+<div style="position:absolute;left:640px;top:560px;width:440px;height:110px;display:flex;flex-direction:column;justify-content:center;align-items:center;background:#ffffff;border:2px solid #171716;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">Completion queue</p>
+</div>
+<div style="position:absolute;left:128px;top:740px;width:952px;height:110px;display:flex;flex-direction:column;justify-content:center;align-items:center;background:#ebebe8;border:1px solid #d4d4d2;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">Kernel · NVMe SSD</p>
+</div>
+<x-connector data-build-in="fade 1" x1="328" y1="490" x2="328" y2="560" style="color:#171716;border-width:3px"></x-connector>
+<p data-build-in="fade 1" style="position:absolute;left:344px;top:510px;width:280px;font-size:24px;font-weight:400;line-height:1.2;color:#171716">1 · queue reads</p>
+<x-connector data-build-in="fade 2" x1="328" y1="670" x2="328" y2="740" style="color:#171716;border-width:3px"></x-connector>
+<p data-build-in="fade 2" style="position:absolute;left:344px;top:690px;width:290px;font-size:24px;font-weight:400;line-height:1.2;color:#171716">2 · the kernel takes them</p>
+<x-connector data-build-in="fade 3" x1="1080" y1="795" x2="1400" y2="490" route="hv" style="color:#1d0fed;border-width:3px"></x-connector>
+<p data-build-in="fade 3" style="position:absolute;left:1096px;top:811px;width:600px;font-size:24px;font-weight:400;line-height:1.2;color:#1d0fed">3 · the SSD writes into your buffer, no copy</p>
+<x-connector data-build-in="fade 4" x1="860" y1="740" x2="860" y2="670" style="color:#171716;border-width:3px"></x-connector>
+<p data-build-in="fade 4" style="position:absolute;left:876px;top:690px;width:260px;font-size:24px;font-weight:400;line-height:1.2;color:#171716">4 · a completion</p>
+<x-connector data-build-in="fade 5" x1="860" y1="560" x2="528" y2="435" route="vh" style="color:#171716;border-width:3px"></x-connector>
+<p data-build-in="fade 5" style="position:absolute;left:548px;top:391px;width:300px;font-size:24px;font-weight:400;line-height:1.2;color:#171716">5 · the thread reaps it</p>
+<aside>Keep this gentle. io_uring is relatively new: Linux 5.1, 2019. The app and the kernel share two ring buffers. 1: the thread writes read requests into the submission queue, many at once, with no system call per read. 2: the kernel picks them up. 3: with O_DIRECT the SSD writes by DMA straight into your buffer: no page cache, no copy. 4: the kernel posts a completion. 5: the thread reaps completions. Compare with the pread slide: no copy, and one system call can cover many reads. tokio's file reads can't do this: tokio::fs runs a blocking pread on its thread pool. Vortex's local reader, FileReadAt, also preads on a blocking pool; vortex-duckdb chose it over tokio's pool, which it calls very bad for local reads on high-core machines (doc/09-vortex-integration.md).</aside>
+</section>

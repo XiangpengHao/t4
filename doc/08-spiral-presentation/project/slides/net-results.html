@@ -1,0 +1,23 @@
+<section id="net-results" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:48px">
+<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">What the queue buys</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px;padding:40px">
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:uppercase;color:#3c3c3a">Cap on bytes in flight</p>
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;color:#171716">0.93 s</p>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">slowest GET, down from 3.4 s. The p99 fell from 448 to 281 ms.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px;padding:40px">
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:uppercase;color:#3c3c3a">Merging waiting GETs</p>
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;color:#171716">−28%</p>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">GETs, and 6.5% less query time</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;background:#1d0fed;border-radius:2px;padding:40px">
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:uppercase;color:#ffffff">Cap, merge and race</p>
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;color:#ffffff">166 → 0</p>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:rgba(255, 255, 255, 0.72)">GETs over 1 s on queries 20–34. The slowest fell from 3.3 s to 0.82 s.</p>
+</div>
+</div>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">Not solved yet: Parquet’s 4 MiB GETs hold a connection longer than the cap assumes, and wait too long for room.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:none;color:#646462">INTERNAL · CLICKBENCH, VORTEX, 2 MiB DICTIONARIES · c6in.8xlarge 26 OCT · i7i.48xlarge 24 OCT 2026 · doc/06</p>
+<aside>Card 1, c6in.8xlarge at 50 Gbit/s, 26 Oct, Vortex read raw through t4: capping in-flight GETs at about 200 MB cut the GET p99, wait included, from 448 to 281 ms and the slowest GET from 3.4 s to 0.93 s. Card 2: merging waiting GETs up to 4 MiB under that cap cut GETs by 28% and query time by 6.5%. Card 3, i7i.48xlarge at 100 Gbit/s (a 400 MB cap), queries 20 to 34, cap plus merging plus racing at the p90: Vortex's raw reads had a slowest GET of 0.82 s and none over 1 s, against 3.3 s and 166 without the queue (24 Oct). With Vortex's own merged reads, which the bench uses now: slowest 1.13 s, 23 over 1 s. Be upfront that Parquet got worse on the i7i, slowest 3.9 s and 12,963 over 1 s: its 4 MiB GETs hold a connection longer than the 32 ms the cap is sized for. A cap that accounts for connection time is open (doc/06-read-modes.md, decision 11).</aside>
+</section>

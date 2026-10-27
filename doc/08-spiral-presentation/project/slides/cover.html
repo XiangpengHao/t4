@@ -1,0 +1,28 @@
+<section id="cover" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:0px">
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:uppercase;color:#3c3c3a">Xiangpeng Hao · Spiral · Oct 30, 2026</p>
+<div style="flex:1"></div>
+<h1 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:144px;font-weight:500;line-height:1;letter-spacing:-1.44px;color:#171716">t4 serves Vortex<br>faster from disk<br>than memory</h1>
+<div style="flex:1"></div>
+<div style="display:flex;flex-direction:column;gap:24px">
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:uppercase;color:#646462">ClickBench, 100 files · queries 20–30 · end to end · min–max of 10 runs</p>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#1d0fed;border:1px solid #1d0fed;border-radius:2px;padding:32px">
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:uppercase;color:#ffffff">t4 · disk</p>
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;color:#ffffff">[__ s]</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px;padding:32px">
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:uppercase;color:#646462">t4 · memory</p>
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;color:#171716">[__ s]</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px;padding:32px">
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:uppercase;color:#646462">t4 · from S3</p>
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;color:#171716">[__ s]</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px;padding:32px">
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:uppercase;color:#646462">S3 direct</p>
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;color:#171716">[__ s]</p>
+</div>
+</div>
+</div>
+<aside>Placeholder figures: the planned run is DataFusion + Vortex over ClickBench partitioned (100 files), queries 20 to 30, 10 runs per store, reporting min and max. bench/end_to_end/run.sh already runs the four stores (s3, t4-s3, t4-memory, t4-disk); its default is 5 runs, so set RUNS=10. Maybe add a desktop run to show this is not an exotic box. The closest numbers we have today: ClickBench's 43 queries on the single file, warm pass, page cache 15.27 s, t4 memory 15.31 s, t4 disk on 12 SSDs 14.93 s (doc/04-multi-device.md, End to end).</aside>
+</section>

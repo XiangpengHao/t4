@@ -1,0 +1,29 @@
+<section id="pread" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:48px">
+<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">The usual way to read a file: pread</h2>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">What tokio::fs and object_store’s LocalFileSystem do for every read</p>
+<div style="position:absolute;left:128px;top:360px;width:400px;height:110px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:4px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">Your thread</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">pread()</p>
+</div>
+<div style="position:absolute;left:1392px;top:360px;width:400px;height:110px;display:flex;flex-direction:column;justify-content:center;align-items:center;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">Your buffer</p>
+</div>
+<div style="position:absolute;left:128px;top:620px;width:400px;height:110px;display:flex;flex-direction:column;justify-content:center;align-items:center;background:#ebebe8;border:1px solid #d4d4d2;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">NVMe SSD</p>
+</div>
+<div style="position:absolute;left:760px;top:620px;width:400px;height:110px;display:flex;flex-direction:column;justify-content:center;align-items:center;background:#ebebe8;border:1px solid #d4d4d2;border-radius:2px">
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">Page cache</p>
+</div>
+<x-connector x1="128" y1="530" x2="1792" y2="530" head="none" style="color:#bebebb;border-width:2px;border-style:dashed"></x-connector>
+<p style="position:absolute;left:640px;top:488px;width:320px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:uppercase;color:#646462">User space</p>
+<p style="position:absolute;left:640px;top:546px;width:320px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:uppercase;color:#646462">Kernel</p>
+<x-connector data-build-in="fade 1" x1="328" y1="470" x2="328" y2="620" style="color:#171716;border-width:3px"></x-connector>
+<p data-build-in="fade 1" style="position:absolute;left:344px;top:482px;width:260px;font-size:24px;font-weight:400;line-height:1.2;color:#171716">1 · system call</p>
+<x-connector data-build-in="fade 2" x1="528" y1="675" x2="760" y2="675" style="color:#171716;border-width:3px"></x-connector>
+<p data-build-in="fade 2" style="position:absolute;left:544px;top:626px;width:200px;font-size:24px;font-weight:400;line-height:1.2;color:#171716">2 · DMA</p>
+<x-connector data-build-in="fade 3" x1="1160" y1="675" x2="1592" y2="470" route="hv" style="color:#171716;border-width:3px"></x-connector>
+<p data-build-in="fade 3" style="position:absolute;left:1176px;top:691px;width:400px;font-size:24px;font-weight:400;line-height:1.2;color:#171716">3 · the CPU copies every byte</p>
+<p data-build-in="rise 4" style="position:absolute;left:128px;top:790px;width:808px;padding:20px 28px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px;font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">A system call costs <span style="color:#171716">[__ ns]</span></p>
+<p data-build-in="rise 5" style="position:absolute;left:984px;top:790px;width:808px;padding:20px 28px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px;font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">Copying 4 KiB costs <span style="color:#171716">[__ ns]</span></p>
+<aside>Builds in five steps. 1: your thread makes a system call. 2: the SSD writes the data into the kernel's page cache by DMA. 3: the CPU copies it from the page cache into your buffer. 4 and 5: what each costs. This is pread, and it is the tokio way of doing file I/O: tokio::fs runs a blocking pread on a thread pool. object_store's LocalFileSystem zeroes a buffer for each range and preads into it, so every byte is written twice (doc/04-multi-device.md, At 56 streams). The two costs are placeholders: measure a syscall and a 4 KiB memcpy on the bench box before the talk.</aside>
+</section>

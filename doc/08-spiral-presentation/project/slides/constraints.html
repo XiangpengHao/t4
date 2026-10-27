@@ -1,0 +1,16 @@
+<section id="constraints" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:48px">
+<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">What t4 will not give up</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:24px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px;padding:48px">
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">01</p>
+<h3 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;letter-spacing:-0.4px;color:#171716">Any async runtime</h3>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">t4 runs under tokio or any other executor. It owns one I/O thread and assumes no runtime. You pass in a timer.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:24px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px;padding:48px">
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">02</p>
+<h3 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;letter-spacing:-0.4px;color:#171716">TLS as it is</h3>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">Remote reads use standard TLS. No home-made encryption in its place to save CPU.</p>
+</div>
+</div>
+<aside>The constraints t4 works under, and most papers don't. One: it must be runtime agnostic. You can't say tokio is not supported. t4 keeps one I/O thread of its own and never assumes an executor; a late race needs a timer, which the user gives with T4CachingBuilder::with_sleep (doc/06-read-modes.md, decision 7). Two: you can't invent your own encryption and replace TLS to win a benchmark.</aside>
+</section>

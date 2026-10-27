@@ -1,0 +1,41 @@
+<section id="net-tail" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:48px">
+<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">A query waits for its slowest GET</h2>
+<div style="display:flex;gap:64px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px">
+<div style="position:relative;width:760px;height:520px">
+<div style="position:absolute;left:0px;top:0px;width:260px;height:40px;background:#d4d4d2;border-radius:2px"></div>
+<div style="position:absolute;left:0px;top:60px;width:310px;height:40px;background:#d4d4d2;border-radius:2px"></div>
+<div style="position:absolute;left:0px;top:120px;width:220px;height:40px;background:#d4d4d2;border-radius:2px"></div>
+<div style="position:absolute;left:0px;top:180px;width:290px;height:40px;background:#d4d4d2;border-radius:2px"></div>
+<div style="position:absolute;left:0px;top:240px;width:680px;height:40px;background:#a8460f;border-radius:2px"></div>
+<div style="position:absolute;left:0px;top:300px;width:240px;height:40px;background:#d4d4d2;border-radius:2px"></div>
+<div style="position:absolute;left:0px;top:360px;width:330px;height:40px;background:#d4d4d2;border-radius:2px"></div>
+<div style="position:absolute;left:0px;top:420px;width:270px;height:40px;background:#d4d4d2;border-radius:2px"></div>
+<x-connector x1="680" y1="6" x2="680" y2="470" head="none" style="color:#171716;border-width:2px;border-style:dashed"></x-connector>
+<p style="position:absolute;left:420px;top:482px;width:252px;text-align:right;font-size:24px;font-weight:400;line-height:1.2;color:#171716">the query ends here</p>
+</div>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:uppercase;color:#646462">Schematic · one query’s GETs over time</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:32px">
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:uppercase;color:#3c3c3a">S3 GETs, 1,024 in flight</p>
+<div style="display:flex;gap:16px;align-items:center">
+<p style="width:160px;font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">median</p>
+<div style="width:400px;display:flex;align-items:center"><div style="width:25px;height:48px;background:#d4d4d2;border-radius:2px"></div></div>
+<p style="width:200px;text-align:right;font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">451 ms</p>
+</div>
+<div style="display:flex;gap:16px;align-items:center">
+<p style="width:160px;font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">p99</p>
+<div style="width:400px;display:flex;align-items:center"><div style="width:202px;height:48px;background:#d4d4d2;border-radius:2px"></div></div>
+<p style="width:200px;text-align:right;font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">3,686 ms</p>
+</div>
+<div style="display:flex;gap:16px;align-items:center">
+<p style="width:160px;font-size:30px;font-weight:300;line-height:1.35;color:#171716">slowest</p>
+<div style="width:400px;display:flex;align-items:center"><div style="width:400px;height:48px;background:#a8460f;border-radius:2px"></div></div>
+<p style="width:200px;text-align:right;font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#a8460f">7,281 ms</p>
+</div>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">The slowest GET took 16 times the median. The query waits for it.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:none;color:#646462">INTERNAL · object_store, DIRECT FROM S3 · 1,024 GETS IN FLIGHT · doc/05</p>
+<aside>Reading from the network is extremely noisy. The same kind of request, sorted from fastest to slowest, spans an order of magnitude: with 1,024 GETs in flight straight from S3, median 451 ms, p99 3,686 ms, slowest 7,281 ms (doc/05-network.md). At 256 in flight it was 175, 407 and 861 ms. A query's GETs run in parallel and the query ends only after the slowest one finishes, so the max is what matters, not the median. A real case from run 6 on 26 Oct: one 23 s GET turned a 3.5 s query into a 26 s run. The left chart is a schematic, not data. You also wanted a chart of one request type's latencies sorted from lowest to highest: the per-GET CSV (store.gets.csv from run_queries) has what it needs.</aside>
+</section>

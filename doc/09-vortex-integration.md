@@ -3,7 +3,10 @@
 Status: design (2026-10-27). Built: plan step 1, t4's `open`,
 `open_listed` and `CachedFile::read`, with the `ObjectStore` integration
 rebuilt on them. Rewritten the same day: the first version kept t4 behind
-Vortex's object store reader (Rejected).
+Vortex's object store reader (Rejected). Revised the same day: the thin
+adapter first, over what t4 does already; merging a batch's GETs, built as
+the old step 2, is shelved until measured GET counts call for it
+(decision 5).
 
 The goal: t4 in Vortex, sent to vortex-data/vortex as a pull request with
 numbers from Vortex's own benchmark, one tier at a time, for Vortex's
@@ -11,8 +14,8 @@ maintainers to decide.
 
 The shape:
 
-- **t4 has an API of its own:** a file opened once, then read one range or
-  many ranges at a time (decision 1).
+- **t4 has an API of its own:** a file opened once, then read a range at a
+  time (decision 1).
 - **Integrations compose that API.** `ObjectStore` is one, and stays in t4
   (decision 2). Vortex's `VortexReadAt` is another, and lives in Vortex
   (decision 3).
@@ -82,18 +85,21 @@ above.
 **Behind `ObjectStoreReadAt`, t4 loses what the trait carries.** `get_opts`
 asks for one range of a path. Through it, t4:
 
-- never sees a batch, so it can't fetch together what Vortex asked for
-  together;
-- can't stop Vortex from merging reads above the cache. On a hit, t4 then
-  copies the gaps, and a merged GET may fetch blocks memory already holds;
-- can't replace the per-file limit of 192 reads with its own cap;
+- can't have Vortex's merging turned off for it alone. Merged above the
+  cache, a hit copies the gaps, and a merged GET may fetch blocks memory
+  already holds;
+- can't have the per-file limit of 192 reads set for it alone;
 - answers with a body that Vortex copies again;
 - looks the file up again on every read: its metadata, and its version in
   the index.
 
+A thin reader of its own (decision 3) takes all four back, with nothing
+new in t4. One thing it doesn't take: seeing a batch whole, so as to merge
+its GETs. That waits on measurement (decision 5).
+
 | The bytes are | Vortex today | t4 behind `ObjectStoreReadAt` | t4's own reader (decision 3) |
 |---|---|---|---|
-| in memory | page cache: one copy (`pread`), one or two pool hops | two copies, gaps included; no hop | one copy, no gaps, no hop |
+| in memory | page cache: one copy (`pread`), one or two pool hops | two copies, gaps included; no hop | one copy, no hop; no gaps with Vortex's merging off |
 | on NVMe | buffered `pread`: DMA to the page cache, then one copy | `O_DIRECT` DMA, then one copy | DMA, no copy |
 | in S3 | one copy, the body into Vortex's buffer | two | one |
 
@@ -124,28 +130,29 @@ compiled in Vortex's CI against `develop`, and every change to Vortex's
 trait would wait on a change to t4. An integration living in Vortex
 changes with the trait.
 
-**t4 adds eight crates to Vortex.** Every crate t4 pulls in is in Vortex's
-lockfile already, except eight: t4, bbtree, vstd, and five Verus crates
-(`verus_builtin`, `verus_builtin_macros`, `verus_prettyplease`,
-`verus_state_machines_macros`, `verus_syn`). vstd is pinned exactly
+**t4 adds ten entries to Vortex's lockfile.** Every crate t4 pulls in is
+in Vortex's lockfile already, except t4, bbtree, vstd, and five Verus
+crates (`verus_builtin`, `verus_builtin_macros`, `verus_prettyplease`,
+`verus_state_machines_macros`, `verus_syn`); and the Verus macros bring
+second versions of `convert_case` and `synstructure`. No version Vortex
+locks moved (the fork's `t4-read-at` branch, 27 Oct 2026). vstd is pinned exactly
 (`=0.0.0-2026-08-30-0159`). Vortex's style guide asks contributors to "be
 conservative with adding new dependencies". The t4 0.2.0 on crates.io is
 the store from before the pivot; the cache isn't published.
 
 ## Decisions
 
-1. **t4's own API: a file opened once, then read one range or many.**
+1. **t4's own API: a file opened once, then read a range at a time.**
 
    - **Opening.** `T4Caching::open` asks the inner store what the file is,
      once (`03-cache.md`, decision 11). `T4Caching::open_listed` takes what
      a list already said and asks nothing, unless the cache already knows
      the path: it keeps to what it heard first.
    - **The handle.** A `CachedFile` holds what the store said of the file,
-     its size and e_tag, and reads with:
-     - `read`: one range, as a bounded GET takes it: clamped to the file's
-       end, an error if it starts past it;
-     - `read_ranges`: many ranges asked together, each answered as soon as
-       its bytes are in (decision 5).
+     its size and e_tag, and reads with `read`: one range, as a bounded GET
+     takes it, clamped to the file's end, an error if it starts past it.
+     Reads of many ranges at once are many `read`s; a batch read that
+     merges their GETs is shelved (decision 5).
    - **Its reads are of the version opened.** A read whose fetch finds the
      file changed fails with the store's `Precondition` error, rather than
      mix two versions of one file.
@@ -181,15 +188,20 @@ the store from before the pivot; the cache isn't published.
    vortex-io gains a `t4` feature beside its `object_store` one, unix only
    (Linux intended, `00-meta.md`). It holds two types.
 
-   `T4ReadAt` reads one `CachedFile`:
+   `T4ReadAt` reads one `CachedFile`. It is a thin adapter: it does what
+   `ObjectStoreReadAt` does, but for where its bytes come from, so that
+   the comparison with it measures t4 and nothing else:
 
-   - **`coalesce_config`: none.** Vortex hands over exact segment ranges,
-     and t4 decides what to fetch together (decision 5). Only t4 knows what
-     it holds.
-   - **`concurrency`: 1,024 per file.** t4's cap on bytes in flight already
-     bounds the network, across files too (06, decision 11), which is the
-     cap Vortex's TODO asks for. This number only bounds the outputs a
-     file's reads allocate before their bytes come.
+   - **`coalesce_config`: Vortex's, as `ObjectStoreReadAt`'s,** reads less
+     than 1 MiB apart merged up to 16 MiB; or none, set at construction.
+     Off, Vortex hands over exact segment ranges and t4 decides what to
+     fetch together. Which is better is measured (decision 5).
+   - **`concurrency`: `ObjectStoreReadAt`'s 192 per file,** or set at
+     construction. t4's cap on bytes in flight already bounds the network
+     across files (06, decision 11), the cap Vortex's TODO asks for.
+   - **`read_ranges`:** a `CachedFile::read` for each range, at most
+     `concurrency` at once, driven by one task on Vortex's I/O runtime, as
+     `ObjectStoreReadAt` drives its GETs; each answered as it lands.
    - **`size`:** the file's, known since it was opened.
    - **Each answer** is t4's `Bytes` itself, with no copy, if it is aligned
      as asked and the session uses the static allocator. Otherwise it is
@@ -220,25 +232,34 @@ the store from before the pivot; the cache isn't published.
      `LocalFileSystem`. t4 caches object stores; in front of a local file
      it would cache an NVMe file on NVMe.
 
-5. **A batch's GETs go together.** `read_ranges` starts a read for each
-   range at once, as t4 starts any read:
-   - hits are copied from memory, or read from disk, straight away;
-   - blocks already in flight are waited for (06, decision 2);
-   - remote blocks are planned by the read policy.
+5. **t4 merges as it does today; a batch merges only if the GET counts
+   call for it.** What t4 does already:
 
-   The batch's GETs enter `GetQueue` as one group, and adjacent ones go as
-   one GET, up to the read policy's GET size (4 MiB by default; 06,
-   decision 10), whether or not they wait. This is 06 decision 11's merging
-   applied to GETs asked together. Each range is answered once its own
-   blocks are in. Vortex merges reads less than 1 MiB apart; with 1 MiB
-   blocks, those land in the same block, which t4 fetches once, or in
-   adjacent blocks, which it merges.
+   - **With Vortex merging (the default, decision 3),** t4 sees GETs of up
+     to 16 MiB, already merged.
+   - **With it off,** Vortex hands over each segment. t4 fetches each block
+     once, however many reads want it (06, decision 2). It merges adjacent
+     GETs while they wait under the cap (06, decision 11), if
+     `with_waiting_gets_merged` is set. GETs sent while there is room go
+     apart.
 
-   The evidence for t4 merging rather than Vortex: on ClickBench's q20 to
-   q34 through t4 (06, decision 11), Vortex's reads unmerged had a slowest
-   GET of 0.82 s and none over 1 s; merged, 1.13 s and 23 over 1 s. t4's
-   bench has read Vortex's merged reads since 26 Oct 2026, but the user
-   lifted that call for this integration on 27 Oct.
+   The remote tier runs both and counts GETs (decision 7). If merging off
+   sends many more GETs than merging on, for no lower slowest GET, then
+   merging a batch's GETs comes back.
+
+   That batch merging was built as the old step 2 and shelved the same
+   day, on t4's branch `shelved-batch-gathering`:
+   `CachedFile::read_ranges`, and `GetQueue`'s `Gathering`. A batch's GETs
+   wait aside, room or not, then enter the queue together, so that
+   adjacent ones merge, while other GETs go on. It came with unit and
+   shuttle tests.
+
+   The evidence so far: on ClickBench's q20 to q34 through t4 (06, decision
+   11), Vortex's reads unmerged had a slowest GET of 0.82 s and none over
+   1 s; merged, 1.13 s and 23 over 1 s. That merging was the existing
+   merging of waiting GETs, under the cap. t4's bench has read Vortex's
+   merged reads since 26 Oct 2026, but the user lifted that call for this
+   integration on 27 Oct.
 
 6. **Late races use the integrator's timer.** t4 races a slow GET late only
    if it is given a sleep function (06, decisions 7 and 8). vortex-duckdb
@@ -262,9 +283,9 @@ the store from before the pivot; the cache isn't published.
      reads are the remote tier's.
    - **The disk baseline** runs `--iterations 1` n times, since vx-bench
      drops the cache once per process.
-   - **t4 behind `ObjectStoreReadAt`,** with Vortex merging, also runs in
-     the remote and memory tiers. That splits the gain between t4's own
-     reader and who merges.
+   - **Vortex merging on and off,** in the remote tier: their GET counts
+     and slowest GETs decide whether a batch's GETs should merge
+     (decision 5).
    - **t4's defaults** (CLOCK, fetched blocks to memory, memory's victims to
      disk) are reported apart, last, as what a user would get. Their medians
      come from caching, not from reading faster.
@@ -307,14 +328,6 @@ impl CachedFile {
         range: Range<u64>,
         intent: Option<ReadIntent>,
     ) -> object_store::Result<Bytes>;
-
-    /// `ranges` of the file, asked together: each answered, with its
-    /// index, once its bytes are in (decision 5). Not built.
-    pub fn read_ranges(
-        &self,
-        ranges: Arc<[Range<u64>]>,
-        intent: Option<ReadIntent>,
-    ) -> impl Stream<Item = (usize, object_store::Result<Bytes>)> + Send + 'static;
 }
 ```
 
@@ -324,17 +337,28 @@ Vortex, `vortex-io/src/t4/` (decision 3):
 /// A Vortex file read through t4.
 pub struct T4ReadAt {
     file: t4::CachedFile,
+    uri: Arc<str>,
+    handle: Handle,
     allocator: BufferAllocatorRef,
+    concurrency: usize,
+    coalesce_config: Option<CoalesceConfig>,
+}
+
+impl T4ReadAt {
+    pub fn new(file: CachedFile, handle: Handle) -> Self;
+    pub fn new_with_allocator(file: CachedFile, handle: Handle, allocator: BufferAllocatorRef) -> Self;
+    pub fn with_concurrency(self, concurrency: usize) -> Self;
+    pub fn with_coalesce_config(self, config: Option<CoalesceConfig>) -> Self;
 }
 
 impl VortexReadAt for T4ReadAt {
-    fn coalesce_config(&self) -> Option<CoalesceConfig> { None }
-    fn concurrency(&self) -> usize { 1024 }
+    fn coalesce_config(&self) -> Option<CoalesceConfig> { self.coalesce_config }
+    fn concurrency(&self) -> usize { self.concurrency }
     fn size(&self) -> BoxFuture<'static, VortexResult<u64>> { /* the file's */ }
     fn read_at(&self, offset: u64, length: usize, alignment: Alignment)
         -> BoxFuture<'static, VortexResult<BufferHandle>> { /* `CachedFile::read` */ }
     fn read_ranges(&self, requests: Arc<[ReadAtRequest]>) -> ReadAtStream {
-        /* `CachedFile::read_ranges` */
+        /* a `CachedFile::read` each, `concurrency` at once */
     }
 }
 
@@ -361,7 +385,7 @@ vx-bench options (decision 7). The policy names are t4 bench's
 --opt t4-policy=none|memory|disk|clock
 --opt t4-memory-gib=64
 --opt t4-disk=/mnt/nvme0/t4.cache:3072,...
---opt t4-reader=t4|object-store     (t4's own reader, or t4 behind ObjectStoreReadAt)
+--opt t4-coalesce=on|off            (Vortex's merging of nearby reads, decision 5)
 ```
 
 ## The plan
@@ -373,23 +397,36 @@ vx-bench options (decision 7). The policy names are t4 bench's
    listing, alignment on a fetch and a hit, a file with no e_tag, a file
    changed since it was opened, the intent). The fuzz target compiles; it
    wasn't run.
-2. **The batch:** `CachedFile::read_ranges`, and a batch's GETs as one group
-   in `GetQueue`. Shuttle tests cover a group merging while other GETs
-   wait.
-3. **t4, publishable:** `FixedPlacementPolicy` made public, the dependency
-   question settled (Open questions), and 0.3.0 published. Until then the
-   fork takes t4 by git.
-4. **The fork,** based on #10766: vortex-io's `t4` module, and
-   `VortexFormat`'s reader factory.
-5. **DataFusion:** the three tiers on TPC-H SF 10 and ClickBench's q20 to
-   q34 (06's subset), with t4 behind `ObjectStoreReadAt` alongside.
-6. **DuckDB:** `resolve_filesystem`'s `t4` path, then the same tiers.
+2. **The thin adapter, in the fork,** based on #10766: vortex-io's `t4`
+   feature and `T4ReadAt` over `CachedFile::read`, with its tests, a
+   Vortex file read through it among them. Nothing new in t4; the fork
+   takes t4 by path, then by git. Started 27 Oct 2026 on the fork's branch
+   `t4-read-at`: the feature, `T4ReadAt`, and unit tests in vortex-io
+   (each read's bytes and alignment, a fetch then a hit; a batch; the
+   size): the six pass, and clippy is clean on vortex-io with every
+   feature. The Vortex file read through it needs a `t4` feature where
+   vortex-file's tests can see it.
+3. **DataFusion's wiring:** `VortexFormat`'s reader factory and a
+   `T4ReaderFactory`; `FixedPlacementPolicy` made public in t4; the
+   datafusion-bench options.
+4. **Measured on DataFusion:** the three tiers on TPC-H SF 10 and on
+   ClickBench's q20 to q34 (06's subset); and the remote tier with Vortex's
+   merging on and off, with GET counts and slowest GETs.
+5. **A batch's GETs merged, only if step 4 calls for it:** the shelved
+   branch brought back (decision 5).
+6. **DuckDB:** `T4FileSystem` and `resolve_filesystem`'s `t4` path, then
+   the same tiers.
 7. **Random access by URL:** the three tiers. These are many small reads,
    where a pool hop and a syscall for every read would show, if anywhere.
 8. **t4's defaults,** reported apart.
-9. **The pull request:** the hooks (decision 4), vortex-io's `t4` module,
-   the bench's options, and the numbers. Vortex's maintainers decide. The
-   hooks may go first, alone: any reader gains from them.
+9. **t4, publishable:** the dependency question settled (Open questions),
+   and 0.3.0 published.
+10. **The pull request:** the hooks (decision 4), vortex-io's `t4` module,
+    the bench's options, and the numbers. Vortex's maintainers decide. The
+    hooks may go first, alone: any reader gains from them.
+
+The old step 2, a batch's GETs merged, was built on 27 Oct 2026 and
+shelved the same day (decision 5).
 
 Every run takes under 5 minutes: the queries and the number of runs are
 picked from one timed pass, before any comparison. The box is an
@@ -398,12 +435,12 @@ the region.
 
 What the reasoning expects; the runs check it:
 
-- **Remote:** the slowest runs are lower. Reads t4 merges itself had the
-  lower slowest GET (decision 5), and the footer race cut the slowest
-  Vortex run on q24 from 945 to 731 ms (06, decision 10). Medians are
-  within noise. t4's GETs are 4 MiB at most, where Vortex's merged GETs
-  reach 16 MiB, so on long runs t4 sends more of them; the GET counts are
-  reported.
+- **Remote:** the slowest runs are lower, from the footer race, which cut
+  the slowest Vortex run on q24 from 945 to 731 ms (06, decision 10), and
+  late races. With Vortex's merging off, the slowest GET is lower still
+  (decision 5), but t4 sends more GETs: its GETs are 4 MiB at most, where
+  Vortex's merged GETs reach 16 MiB, and GETs sent while there is room go
+  apart. Medians are within noise.
 - **Memory:** TPC-H and ClickBench tie the page cache, since decoding
   dominates; t4's end-to-end run of 22 Oct 2026 tied a local file, warm and
   cold. Random access gains, since every read skips the pool, the
@@ -414,14 +451,14 @@ What the reasoning expects; the runs check it:
 ## Open questions
 
 - **t4's dependencies.** bbtree, vstd and five Verus crates are new to
-  Vortex's lockfile. vstd's exact pin can't be unified with any other pin
+  Vortex's lockfile, with second versions of two crates. vstd's exact pin can't be unified with any other pin
   of vstd. t4 has to answer this before the pull request: can the Verus
   crates stay out of a normal build, behind a feature, with `verus!`
   erased without them?
 - **GET size against cost.** A request costs, its bytes don't, and 8 to 16
   MiB is where cost and rate both flatten (06, What shapes it). t4's 4 MiB
-  limit keeps any one GET from holding a read up. Should a batch's group
-  merge further?
+  limit keeps any one GET from holding a read up. Should t4 merge
+  further?
 - **One cache, several stores.** A query over two buckets gets t4 in front
   of one of them. A t4 over several stores sharing one budget would be a t4
   change.
@@ -447,10 +484,9 @@ What the reasoning expects; the runs check it:
   every change to Vortex's trait would wait on t4. An integration lives
   with what it integrates.
 - **t4 behind `ObjectStoreReadAt` alone.** This doc's first version, the
-  same day. `get_opts` throws away the batch, the merging, the
-  concurrency, the buffer and the opened file. It stays only as the
-  benchmark's comparison variant (decision 7); its zero-copy fix is Later.
-- **Vortex merging in front of t4:** decision 3.
+  same day. Through `get_opts`, Vortex's reader can't turn its merging off
+  for t4 alone. It copies every answer. It opens the file again on every
+  read. Its zero-copy fix is Later.
 - **t4 in front of a local file:** decision 4.
 - **t4's defaults in the remote comparison:** from the second run on they
   serve from memory, which is caching, not a faster remote path
@@ -468,9 +504,12 @@ What the reasoning expects; the runs check it:
   races Latency reads (06, plan step 3). Until then, a read with an intent
   is fetched in one GET with no race. That is worse than the footer race a
   normal read gets by its path's ending.
+- **A batch's GETs merged,** built and shelved on
+  `shelved-batch-gathering` (decision 5). Only if the GET counts call for
+  it.
 - **A batch planned as one read:** one `LocatedRead` over several ranges,
   so the policy could widen across gaps for cost. Only if the GET counts
-  call for it.
+  call for it, and the batch merging falls short.
 - **t4's I/O worker under local files.** An io_uring `FileReadAt` would
   replace the `pread` pool Vortex's maintainers pointed at. It reads files
   rather than caching, so it would be a pull request of its own, to
@@ -483,11 +522,10 @@ What the reasoning expects; the runs check it:
 |---|---|---|---|
 | t4 | `src/cache/t4_caching.rs` | `T4Caching`, a handle; `open`, `open_listed`; reads served and fetched | yes |
 | t4 | `src/cache/t4_caching/cached_file.rs` | `CachedFile`: `read` | yes |
-| t4 | `src/cache/t4_caching/cached_file.rs` | `CachedFile::read_ranges` | no |
 | t4 | `src/cache/t4_caching/object_store_integration.rs` | `impl ObjectStore for T4Caching`, over `open` and `read_cached` | yes |
-| t4 | `src/cache/get_queue.rs` | a batch's GETs as one group, adjacent ones merged | no |
+| t4 | `src/cache/t4_caching/cached_file.rs`, `src/cache/get_queue.rs` | `CachedFile::read_ranges`; `Gathering`: a batch's GETs merged | shelved, branch `shelved-batch-gathering` |
 | t4 | `src/cache/policy/fixed_placement.rs` | `FixedPlacementPolicy`, public, from `bench/src/fixed_placement_policy.rs` | no |
-| Vortex | `vortex-io/src/t4/read_at.rs` | `T4ReadAt` | no |
+| Vortex | `vortex-io/src/t4/read_at.rs` | `T4ReadAt`, feature `t4` | yes, branch `t4-read-at` |
 | Vortex | `vortex-io/src/t4/filesystem.rs` | `T4FileSystem` | no |
 | Vortex | `vortex-datafusion/src/persistent/format.rs` | `VortexFormat`'s reader factory, used for schema and statistics too | no |
 | Vortex | `vortex-datafusion/src/persistent/reader.rs` | `T4ReaderFactory`, feature `t4` | no |

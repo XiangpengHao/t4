@@ -1,0 +1,50 @@
+{
+  "v": 4,
+  "createdOnFiles": { "v": 1, "at": "2026-10-27T21:40:00Z" },
+  "lists": "css",
+  "title": "t4 serves Vortex faster from disk than memory",
+  "cover": "cover",
+  "order": [
+    "cover",
+    "hardware",
+    "pread",
+    "pread-cost",
+    "iouring",
+    "papers",
+    "constraints",
+    "arch-io",
+    "arch-store",
+    "lifecycle",
+    "split-range",
+    "bench-dense",
+    "cost-model",
+    "bench-real",
+    "more",
+    "net-tail",
+    "net-queue",
+    "net-results",
+    "footer-race",
+    "multi-ssd",
+    "closing"
+  ],
+  "sections": {
+    "why": { "description": "SSDs got fast, and the usual read path wastes them", "start": "cover" },
+    "how": { "description": "How t4 drives the disks and decides where each block lives", "start": "arch-io" },
+    "proof": { "description": "A cost model says disk can match memory, and the runs agree", "start": "bench-dense" },
+    "more": { "description": "Remote reads you can predict, and many SSDs without RAID", "start": "more" }
+  },
+  "faces": {
+    "acid-grotesk": { "family": "Acid Grotesk", "src": "project/ds/spiral/fonts/acid-grotesk-medium.woff2" },
+    "inter": { "family": "Inter", "href": "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500&display=swap" },
+    "geist-mono": { "family": "Geist Mono", "href": "https://fonts.googleapis.com/css2?family=Geist+Mono:wght@300;400;500&display=swap" }
+  },
+  "designSystems": [
+    {
+      "title": "Spiral Design System (Oct 2026)",
+      "namespace": "spiral",
+      "artifact": "https://claude.ai/artifact/8pTaukwZn7z2fjfV57ipva",
+      "version": "1793131447-946e",
+      "copiedAt": "2026-10-27T21:40:00Z"
+    }
+  ]
+}
