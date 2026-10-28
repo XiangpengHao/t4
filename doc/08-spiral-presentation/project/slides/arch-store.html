@@ -1,31 +1,27 @@
-<section id="arch-store" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:32px">
-<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">One index, three tiers</h2>
-<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">DataFusion and Vortex call t4 through object_store’s ObjectStore trait.</p>
-<div style="display:flex;flex-direction:column;gap:12px">
-<div style="align-self:center;width:640px;display:flex;flex-direction:column;align-items:center;gap:8px;background:#171716;border-radius:2px;padding:24px 32px">
-<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#ffffff">t4 · ObjectStore</p>
-<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:uppercase;color:#d4d4d2">the interface</p>
-</div>
-<x-shape kind="arrow-down" style="align-self:center;width:32px;height:32px;background:#3c3c3a"></x-shape>
-<div style="align-self:center;width:960px;display:flex;flex-direction:column;align-items:center;gap:8px;background:#ebebe8;border:1px solid #d4d4d2;border-radius:2px;padding:24px 32px">
-<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">Index: a bbtree</p>
-<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">(file, 1 MiB block) → memory or disk</p>
-</div>
-<x-shape kind="arrow-down" style="align-self:center;width:32px;height:32px;background:#3c3c3a"></x-shape>
-<div style="display:flex;gap:32px">
-<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#8b83f6;border-radius:2px;padding:32px">
-<h3 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;letter-spacing:-0.4px;color:#171716">Memory</h3>
-<p style="font-size:30px;font-weight:300;line-height:1.35;color:#171716">RAM, the smallest tier</p>
-</div>
-<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#1d0fed;border-radius:2px;padding:32px">
-<h3 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;letter-spacing:-0.4px;color:#ffffff">Disk</h3>
-<p style="font-size:30px;font-weight:300;line-height:1.35;color:#ffffff">Local SSDs, read with io_uring</p>
-</div>
-<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#a8460f;border-radius:2px;padding:32px">
-<h3 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;letter-spacing:-0.4px;color:#ffffff">Remote</h3>
-<p style="font-size:30px;font-weight:300;line-height:1.35;color:#ffffff">S3 or GCS: the store t4 wraps</p>
-</div>
-</div>
-</div>
-<aside>The t4 ObjectStore is the interface: DataFusion and Vortex read through object_store's trait and don't know t4 is there. Inside it, one bbtree index: paths maps a file's path to its version, and blocks maps (version, 1 MiB block) to a chunk in memory or on disk. The key is one u64, 40 version bits and 24 block bits (doc/03-cache.md). A block the index doesn't hold is read from the remote, which is the inner ObjectStore t4 wraps. Tiers are exclusive: a block lives in exactly one of them.</aside>
+<section id="arch-store" data-transition="magic" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px">
+<h2 id="ix-title" style="position:absolute;left:128px;top:128px;width:1664px;font-family:'Acid Grotesk', Inter, sans-serif;font-weight:500;line-height:1.1;font-size:72px;letter-spacing:-0.72px;color:#171716">One index, three tiers</h2>
+<p id="ix-caption" style="position:absolute;left:128px;top:223px;width:1664px;font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">t4’s index is one bbtree, keyed by (file, 1 MiB block): one entry for each block it caches</p>
+<svg id="ix-wires" aria-label="The tree's edges, and each leaf entry's pointer to the chunk that holds its block." style="position:absolute;left:0px;top:0px" width="1920" height="1080" viewBox="0 0 1920 1080">
+<defs>
+<marker id="h-mem" markerWidth="5" markerHeight="5" refX="2" refY="2" orient="auto" overflow="visible"><path d="M0 0 L4 2 L0 4 Z" fill="#8b83f6"/></marker>
+<marker id="h-disk" markerWidth="5" markerHeight="5" refX="2" refY="2" orient="auto" overflow="visible"><path d="M0 0 L4 2 L0 4 Z" fill="#1d0fed"/></marker>
+<marker id="h-remote" markerWidth="5" markerHeight="5" refX="2" refY="2" orient="auto" overflow="visible"><path d="M0 0 L4 2 L0 4 Z" fill="#a8460f"/></marker>
+<marker id="h-link" markerWidth="5" markerHeight="5" refX="2" refY="2" orient="auto" overflow="visible"><path d="M0 0 L4 2 L0 4 Z" fill="#bebebb"/></marker>
+</defs>
+<path d="M890 396 C890 424 674 424 674 452 M1030 396 C1030 424 1246 424 1246 452" fill="none" stroke="#646462" stroke-width="2"/>
+<path d="M880 498 L1034 498" fill="none" stroke="#bebebb" stroke-width="2" marker-end="url(#h-link)"/>
+</svg>
+<div id="ix-root" style="position:absolute;left:870px;top:324px;width:180px;height:72px;display:flex;align-items:center;background:#ffffff;border:2px solid #171716;border-radius:2px"><div style="width:36px;height:68px;display:flex;align-items:center;justify-content:center"><div style="width:10px;height:10px;background:#646462;border-radius:50%"></div></div><p style="width:104px;height:68px;border-left:1px solid #dfdfdd;border-right:1px solid #dfdfdd;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;font-size:28px;line-height:68px;text-align:center;color:#171716">a·3</p><div style="width:36px;height:68px;display:flex;align-items:center;justify-content:center"><div style="width:10px;height:10px;background:#646462;border-radius:50%"></div></div></div>
+<div id="ix-leaf-1" style="position:absolute;left:468px;top:452px;width:412px;height:92px;background:#ffffff;border:2px solid #171716;border-radius:2px"></div>
+<div id="ix-leaf-2" style="position:absolute;left:1040px;top:452px;width:412px;height:92px;background:#ffffff;border:2px solid #171716;border-radius:2px"></div>
+<div id="ix-e0" style="position:absolute;left:470px;top:454px;width:136px;height:88px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;background:transparent;border-right:1px solid #dfdfdd;"><p style="font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;font-size:28px;line-height:1.2;color:#171716">a·0</p><p style="font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;font-size:24px;line-height:1.2;color:#646462">mem 1</p></div>
+<div id="ix-e1" style="position:absolute;left:606px;top:454px;width:136px;height:88px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;background:transparent;border-right:1px solid #dfdfdd;"><p style="font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;font-size:28px;line-height:1.2;color:#171716">a·1</p><p style="font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;font-size:24px;line-height:1.2;color:#646462">mem 3</p></div>
+<div id="ix-e2" style="position:absolute;left:742px;top:454px;width:136px;height:88px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;background:transparent;"><p style="font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;font-size:28px;line-height:1.2;color:#171716">a·2</p><p style="font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;font-size:24px;line-height:1.2;color:#646462">disk 0</p></div>
+<div id="ix-e3" style="position:absolute;left:1042px;top:454px;width:136px;height:88px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;background:transparent;border-right:1px solid #dfdfdd;"><p style="font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;font-size:28px;line-height:1.2;color:#171716">a·3</p><p style="font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;font-size:24px;line-height:1.2;color:#646462">disk 2</p></div>
+<div id="ix-e4" style="position:absolute;left:1178px;top:454px;width:136px;height:88px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;background:transparent;border-right:1px solid #dfdfdd;"><p style="font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;font-size:28px;line-height:1.2;color:#bebebb">a·4</p><p style="font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;font-size:24px;line-height:1.2;color:#bebebb">—</p></div>
+<div id="ix-e5" style="position:absolute;left:1314px;top:454px;width:136px;height:88px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;background:transparent;"><p style="font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;font-size:28px;line-height:1.2;color:#bebebb">a·5</p><p style="font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;font-size:24px;line-height:1.2;color:#bebebb">—</p></div>
+<p id="ix-tree-label" style="position:absolute;left:660px;top:288px;width:600px;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;font-size:24px;line-height:1.2;color:#171716">bbtree<span style="color:#646462"> · key (file, block)</span></p>
+<p id="ix-inner-label" style="position:absolute;left:1066px;top:345px;width:420px;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;font-size:24px;line-height:1.2;color:#646462">inner node: routing only</p>
+<p id="ix-leaf-label" style="position:absolute;left:128px;top:469px;width:324px;text-align:right;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;font-size:24px;line-height:1.2;color:#646462">leaves: key<br>and value</p>
+<aside>t4's index. Draw attention to the tree: it's a bbtree, a B+ tree. The key is (file, block): file a's version and a 1 MiB block number, packed into one u64, 40 bits of version and 24 of block. Its leaves hold one entry for each block t4 caches; the dashed ones, blocks 4 and 5, have no entry. There's a second bbtree, paths, that maps a file's path to its version (doc/03-cache.md, decision 4). This picture stays for the next slides.</aside>
 </section>

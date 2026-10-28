@@ -1,0 +1,133 @@
+<section id="lifecycle-drop" data-transition="fade" style="background:#fcfcf9">
+  <h2 id="ix-title" style="position:absolute; top:128px; left:128px; width:1664px; font-family:'Acid Grotesk', sans-serif; font-size:72px; font-weight:500; line-height:1.1; letter-spacing:-0.7px; color:#171716">A block’s life</h2>
+  <p id="ix-caption" style="position:absolute; top:223px; left:128px; width:1664px; font-family:Inter, Arial, sans-serif; font-size:30px; font-weight:300; line-height:1.35; color:#3c3c3a">Disk’s victims are dropped: block 0 loses its entry, and lives only in S3 again</p>
+  <svg xmlns="http://www.w3.org/2000/svg" aria-label="The tree's edges, and each leaf entry's pointer to the chunk that holds its block." viewBox="0 0 1920 1080" id="ix-wires" style="position:absolute; top:0; left:0; width:1920px; height:1080px">
+<defs>
+<marker id="h-mem" markerWidth="5" markerHeight="5" refX="2" refY="2" orient="auto" overflow="visible"><path d="M0 0 L4 2 L0 4 Z" fill="#8b83f6"/></marker>
+<marker id="h-disk" markerWidth="5" markerHeight="5" refX="2" refY="2" orient="auto" overflow="visible"><path d="M0 0 L4 2 L0 4 Z" fill="#1d0fed"/></marker>
+<marker id="h-remote" markerWidth="5" markerHeight="5" refX="2" refY="2" orient="auto" overflow="visible"><path d="M0 0 L4 2 L0 4 Z" fill="#a8460f"/></marker>
+<marker id="h-link" markerWidth="5" markerHeight="5" refX="2" refY="2" orient="auto" overflow="visible"><path d="M0 0 L4 2 L0 4 Z" fill="#bebebb"/></marker>
+</defs>
+<path d="M890 396 C890 424 674 424 674 452 M1030 396 C1030 424 1246 424 1246 452" fill="none" stroke="#646462" stroke-width="2"/>
+<path d="M880 498 L1034 498" fill="none" stroke="#bebebb" stroke-width="2" marker-end="url(#h-link)"/>
+<path d="M538 550 C538 632 1340 632 1340 714" fill="none" stroke="#a8460f" stroke-width="3" stroke-dasharray="10 8" marker-end="url(#h-remote)"/>
+<path d="M674 550 C674 632 760 632 760 714" fill="none" stroke="#1d0fed" stroke-width="3" marker-end="url(#h-disk)"/>
+<path d="M810 550 C810 632 340 632 340 714" fill="none" stroke="#8b83f6" stroke-width="3" marker-end="url(#h-mem)"/>
+<path d="M1110 550 C1110 632 420 632 420 714" fill="none" stroke="#8b83f6" stroke-width="3" marker-end="url(#h-mem)"/>
+<path d="M1246 550 C1246 632 180 632 180 714" fill="none" stroke="#8b83f6" stroke-width="3" marker-end="url(#h-mem)"/>
+<path d="M1382 550 C1382 632 260 632 260 714" fill="none" stroke="#8b83f6" stroke-width="3" marker-end="url(#h-mem)"/>
+<circle cx="538" cy="550" r="6" fill="#a8460f" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="674" cy="550" r="6" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="810" cy="550" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1110" cy="550" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1246" cy="550" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1382" cy="550" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+</svg>
+  <div id="ix-tray-mem" style="position:absolute; top:720px; left:128px; width:344px; height:96px; display:flex; flex-direction:column; background:#ffffff; border:1px solid #dfdfdd; border-radius:2px">
+  </div>
+  <p id="ix-name-mem" style="position:absolute; top:826px; left:128px; width:344px; font-family:'Acid Grotesk', sans-serif; font-size:28px; font-weight:500; line-height:1.1; color:#171716">Memory</p>
+  <p id="ix-meta-mem" style="position:absolute; top:828px; left:128px; width:344px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">4 chunks</p>
+  <div id="ix-tray-disk" style="position:absolute; top:720px; left:628px; width:504px; height:96px; display:flex; flex-direction:column; background:#ffffff; border:1px solid #dfdfdd; border-radius:2px">
+  </div>
+  <p id="ix-name-disk" style="position:absolute; top:826px; left:628px; width:504px; font-family:'Acid Grotesk', sans-serif; font-size:28px; font-weight:500; line-height:1.1; color:#171716">Disk</p>
+  <p id="ix-meta-disk" style="position:absolute; top:828px; left:628px; width:504px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">6 chunks on the SSDs</p>
+  <div id="ix-tray-remote" style="position:absolute; top:720px; left:1288px; width:504px; height:96px; display:flex; flex-direction:column; background:#ffffff; border:1px solid #dfdfdd; border-radius:2px">
+  </div>
+  <p id="ix-name-remote" style="position:absolute; top:826px; left:1288px; width:504px; font-family:'Acid Grotesk', sans-serif; font-size:28px; font-weight:500; line-height:1.1; color:#171716">Remote</p>
+  <p id="ix-meta-remote" style="position:absolute; top:828px; left:1288px; width:504px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">file a in S3</p>
+  <div id="ix-mem-0" style="position:absolute; top:732px; left:144px; width:72px; height:72px; display:flex; flex-direction:column; background:#ebebe8; border-radius:2px">
+  </div>
+  <div id="ix-mem-1" style="position:absolute; top:732px; left:224px; width:72px; height:72px; display:flex; flex-direction:column; background:#ebebe8; border-radius:2px">
+  </div>
+  <div id="ix-mem-2" style="position:absolute; top:732px; left:304px; width:72px; height:72px; display:flex; flex-direction:column; background:#ebebe8; border-radius:2px">
+  </div>
+  <div id="ix-mem-3" style="position:absolute; top:732px; left:384px; width:72px; height:72px; display:flex; flex-direction:column; background:#ebebe8; border-radius:2px">
+  </div>
+  <div id="ix-disk-0" style="position:absolute; top:732px; left:644px; width:72px; height:72px; display:flex; flex-direction:column; background:#ebebe8; border-radius:2px">
+  </div>
+  <div id="ix-disk-1" style="position:absolute; top:732px; left:724px; width:72px; height:72px; display:flex; flex-direction:column; background:#ebebe8; border-radius:2px">
+  </div>
+  <div id="ix-disk-2" style="position:absolute; top:732px; left:804px; width:72px; height:72px; display:flex; flex-direction:column; background:#ebebe8; border-radius:2px">
+  </div>
+  <div id="ix-disk-3" style="position:absolute; top:732px; left:884px; width:72px; height:72px; display:flex; flex-direction:column; background:#ebebe8; border-radius:2px">
+  </div>
+  <div id="ix-disk-4" style="position:absolute; top:732px; left:964px; width:72px; height:72px; display:flex; flex-direction:column; background:#ebebe8; border-radius:2px">
+  </div>
+  <div id="ix-disk-5" style="position:absolute; top:732px; left:1044px; width:72px; height:72px; display:flex; flex-direction:column; background:#ebebe8; border-radius:2px">
+  </div>
+  <div id="ix-c1" style="position:absolute; top:732px; left:724px; width:72px; height:72px; display:flex; flex-direction:row; align-items:center; justify-content:center; background:#1d0fed; border-radius:2px">
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#ffffff">a·1</p>
+  </div>
+  <div id="ix-c2" style="position:absolute; top:732px; left:304px; width:72px; height:72px; display:flex; flex-direction:row; align-items:center; justify-content:center; background:#8b83f6; border-radius:2px">
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#171716">a·2</p>
+  </div>
+  <div id="ix-c3" style="position:absolute; top:732px; left:384px; width:72px; height:72px; display:flex; flex-direction:row; align-items:center; justify-content:center; background:#8b83f6; border-radius:2px">
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#171716">a·3</p>
+  </div>
+  <div id="ix-c4" style="position:absolute; top:732px; left:144px; width:72px; height:72px; display:flex; flex-direction:row; align-items:center; justify-content:center; background:#8b83f6; border-radius:2px">
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#171716">a·4</p>
+  </div>
+  <div id="ix-c5" style="position:absolute; top:732px; left:224px; width:72px; height:72px; display:flex; flex-direction:row; align-items:center; justify-content:center; background:#8b83f6; border-radius:2px">
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#171716">a·5</p>
+  </div>
+  <div id="ix-r0" style="position:absolute; top:732px; left:1304px; width:72px; height:72px; display:flex; flex-direction:row; align-items:center; justify-content:center; background:#a8460f; border-radius:2px">
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#ffffff">a·0</p>
+  </div>
+  <div id="ix-r1" style="position:absolute; top:732px; left:1384px; width:72px; height:72px; display:flex; flex-direction:row; align-items:center; justify-content:center; background:#a8460f; border-radius:2px">
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#ffffff">a·1</p>
+  </div>
+  <div id="ix-r2" style="position:absolute; top:732px; left:1464px; width:72px; height:72px; display:flex; flex-direction:row; align-items:center; justify-content:center; background:#a8460f; border-radius:2px">
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#ffffff">a·2</p>
+  </div>
+  <div id="ix-r3" style="position:absolute; top:732px; left:1544px; width:72px; height:72px; display:flex; flex-direction:row; align-items:center; justify-content:center; background:#a8460f; border-radius:2px">
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#ffffff">a·3</p>
+  </div>
+  <div id="ix-r4" style="position:absolute; top:732px; left:1624px; width:72px; height:72px; display:flex; flex-direction:row; align-items:center; justify-content:center; background:#a8460f; border-radius:2px">
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#ffffff">a·4</p>
+  </div>
+  <div id="ix-r5" style="position:absolute; top:732px; left:1704px; width:72px; height:72px; display:flex; flex-direction:row; align-items:center; justify-content:center; background:#a8460f; border-radius:2px">
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#ffffff">a·5</p>
+  </div>
+  <div id="ix-root" style="position:absolute; top:324px; left:870px; width:180px; height:72px; display:flex; flex-direction:row; align-items:center; background:#ffffff; border:2px solid #171716; border-radius:2px">
+    <div style="width:36px; height:68px; display:flex; flex-direction:row; align-items:center; justify-content:center">
+      <div style="width:10px; height:10px; display:flex; flex-direction:column; background:#646462; border-radius:256px">
+      </div>
+    </div>
+    <p style="width:104px; height:68px; font-family:'Geist Mono', 'Courier New', monospace; font-size:28px; font-weight:400; line-height:2.43; text-align:center; color:#171716; border-right:1px solid #dfdfdd; border-left:1px solid #dfdfdd">a·3</p>
+    <div style="width:36px; height:68px; display:flex; flex-direction:row; align-items:center; justify-content:center">
+      <div style="width:10px; height:10px; display:flex; flex-direction:column; background:#646462; border-radius:256px">
+      </div>
+    </div>
+  </div>
+  <div id="ix-leaf-1" style="position:absolute; top:452px; left:468px; width:412px; height:92px; display:flex; flex-direction:column; background:#ffffff; border:2px solid #171716; border-radius:2px">
+  </div>
+  <div id="ix-leaf-2" style="position:absolute; top:452px; left:1040px; width:412px; height:92px; display:flex; flex-direction:column; background:#ffffff; border:2px solid #171716; border-radius:2px">
+  </div>
+  <div id="ix-e0" style="position:absolute; top:454px; left:470px; width:136px; height:88px; display:flex; flex-direction:column; gap:4px; align-items:center; justify-content:center; background:#00000000; border-right:1px solid #dfdfdd">
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:28px; font-weight:400; line-height:1.2; color:#bebebb">a·0</p>
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#bebebb">—</p>
+  </div>
+  <div id="ix-e1" style="position:absolute; top:454px; left:606px; width:136px; height:88px; display:flex; flex-direction:column; gap:4px; align-items:center; justify-content:center; background:#00000000; border-right:1px solid #dfdfdd">
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:28px; font-weight:400; line-height:1.2; color:#171716">a·1</p>
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#646462">disk 1</p>
+  </div>
+  <div id="ix-e2" style="position:absolute; top:454px; left:742px; width:136px; height:88px; display:flex; flex-direction:column; gap:4px; align-items:center; justify-content:center; background:#00000000">
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:28px; font-weight:400; line-height:1.2; color:#171716">a·2</p>
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#646462">mem 2</p>
+  </div>
+  <div id="ix-e3" style="position:absolute; top:454px; left:1042px; width:136px; height:88px; display:flex; flex-direction:column; gap:4px; align-items:center; justify-content:center; background:#00000000; border-right:1px solid #dfdfdd">
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:28px; font-weight:400; line-height:1.2; color:#171716">a·3</p>
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#646462">mem 3</p>
+  </div>
+  <div id="ix-e4" style="position:absolute; top:454px; left:1178px; width:136px; height:88px; display:flex; flex-direction:column; gap:4px; align-items:center; justify-content:center; background:#00000000; border-right:1px solid #dfdfdd">
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:28px; font-weight:400; line-height:1.2; color:#171716">a·4</p>
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#646462">mem 0</p>
+  </div>
+  <div id="ix-e5" style="position:absolute; top:454px; left:1314px; width:136px; height:88px; display:flex; flex-direction:column; gap:4px; align-items:center; justify-content:center; background:#00000000">
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:28px; font-weight:400; line-height:1.2; color:#171716">a·5</p>
+    <p style="font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#646462">mem 1</p>
+  </div>
+  <p id="ix-tree-label" style="position:absolute; top:288px; left:660px; width:600px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#171716">bbtree<span style="color:#646462"> · key (file, block)</span></p>
+  <p id="ix-leaf-label" style="position:absolute; top:469px; left:128px; width:324px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">leaves: key<br>and value</p>
+  <aside>The end of a block's life. When the disk is full, its victims are dropped, not written anywhere: their entries leave the tree, and the next read of block 0 goes to S3 again. A chunk goes free only once no reader holds it, and an entry changes only if it still names that chunk, so a reader mid-read never sees its bytes swapped (doc/03-cache.md, decision 8). So: fetched from S3, placed by the policy, demoted to disk, dropped. Placement is a trait, so a user can plug in another policy.</aside>
+</section>

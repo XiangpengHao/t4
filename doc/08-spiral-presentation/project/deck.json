@@ -1,50 +1,127 @@
 {
   "v": 4,
-  "createdOnFiles": { "v": 1, "at": "2026-10-27T21:40:00Z" },
-  "lists": "css",
-  "title": "t4 serves Vortex faster from disk than memory",
+  "attachments": {},
   "cover": "cover",
-  "order": [
-    "cover",
-    "hardware",
-    "pread",
-    "pread-cost",
-    "iouring",
-    "papers",
-    "constraints",
-    "arch-io",
-    "arch-store",
-    "lifecycle",
-    "split-range",
-    "bench-dense",
-    "cost-model",
-    "bench-real",
-    "more",
-    "net-tail",
-    "net-queue",
-    "net-results",
-    "footer-race",
-    "multi-ssd",
-    "closing"
-  ],
-  "sections": {
-    "why": { "description": "SSDs got fast, and the usual read path wastes them", "start": "cover" },
-    "how": { "description": "How t4 drives the disks and decides where each block lives", "start": "arch-io" },
-    "proof": { "description": "A cost model says disk can match memory, and the runs agree", "start": "bench-dense" },
-    "more": { "description": "Remote reads you can predict, and many SSDs without RAID", "start": "more" }
-  },
-  "faces": {
-    "acid-grotesk": { "family": "Acid Grotesk", "src": "project/ds/spiral/fonts/acid-grotesk-medium.woff2" },
-    "inter": { "family": "Inter", "href": "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500&display=swap" },
-    "geist-mono": { "family": "Geist Mono", "href": "https://fonts.googleapis.com/css2?family=Geist+Mono:wght@300;400;500&display=swap" }
+  "createdOnFiles": {
+    "at": "2026-10-27T21:40:00Z",
+    "v": 1
   },
   "designSystems": [
     {
-      "title": "Spiral Design System (Oct 2026)",
-      "namespace": "spiral",
       "artifact": "https://claude.ai/artifact/8pTaukwZn7z2fjfV57ipva",
-      "version": "1793131447-946e",
-      "copiedAt": "2026-10-27T21:40:00Z"
+      "copiedAt": "2026-10-27T21:40:00Z",
+      "namespace": "spiral",
+      "title": "Spiral Design System (Oct 2026)",
+      "version": "1793131447-946e"
     }
-  ]
+  ],
+  "faces": {
+    "acid-grotesk": {
+      "family": "Acid Grotesk",
+      "src": "project/ds/spiral/fonts/acid-grotesk-medium.woff2"
+    },
+    "geist-mono": {
+      "family": "Geist Mono",
+      "href": "https://fonts.googleapis.com/css2?family=Geist+Mono:wght@300;400;500&display=swap"
+    },
+    "inter": {
+      "family": "Inter",
+      "href": "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500&display=swap"
+    }
+  },
+  "lists": "css",
+  "order": [
+    "cover",
+    "toc-overview",
+    "overview",
+    "toc-background",
+    "hardware",
+    "hardware-device",
+    "hardware-bw",
+    "pread",
+    "pread-syscall",
+    "pread-sleep",
+    "pread-dma",
+    "pread-irq",
+    "pread-copy",
+    "iouring",
+    "iouring-submit",
+    "iouring-enter",
+    "iouring-dma",
+    "iouring-reap",
+    "toc-disk-io",
+    "papers",
+    "constraints",
+    "arch-io",
+    "arch-io-await",
+    "arch-io-submit",
+    "arch-io-direct",
+    "arch-io-complete",
+    "arch-io-wake",
+    "multi-ssd",
+    "toc-hybrid-cache",
+    "arch-store",
+    "arch-store-chunks",
+    "arch-store-pointers",
+    "split-range",
+    "split-range-lookup",
+    "split-range-read",
+    "lifecycle",
+    "lifecycle-fetch",
+    "lifecycle-demote",
+    "lifecycle-refill",
+    "lifecycle-drop",
+    "toc-optimizations",
+    "net-tail",
+    "net-race",
+    "net-queue",
+    "net-queue-wait",
+    "net-queue-merge",
+    "net-queue-cap",
+    "net-queue-next",
+    "footer-race",
+    "footer-race-send",
+    "footer-race-win",
+    "footer-race-result",
+    "policies",
+    "toc-evaluation",
+    "bench-dense",
+    "cost-model",
+    "cost-check",
+    "gap-tpch",
+    "gap-clickbench",
+    "instances",
+    "run-after-run",
+    "pq-i3en-tpch",
+    "pq-i7ie-tpch",
+    "pq-i7i-tpch",
+    "closing"
+  ],
+  "sections": {
+    "background": {
+      "description": "SSDs got fast and cheap, and the usual way of reading a file wastes them",
+      "start": "toc-background"
+    },
+    "disk-io": {
+      "description": "One I/O thread on io_uring, direct I/O, and many SSDs without RAID",
+      "start": "toc-disk-io"
+    },
+    "evaluation": {
+      "description": "A cost model, and ClickBench runs that agree with it",
+      "start": "toc-evaluation"
+    },
+    "hybrid-cache": {
+      "description": "One bbtree over memory, disk and S3: where each block lives, and how it moves",
+      "start": "toc-hybrid-cache"
+    },
+    "optimizations": {
+      "description": "Queued and merged GETs, raced slow and metadata reads, pluggable caching policies",
+      "start": "toc-optimizations"
+    },
+    "overview": {
+      "description": "What t4 is, and what it does for Vortex",
+      "start": "cover"
+    }
+  },
+  "title": "t4 serves Vortex faster from disk than memory"
 }

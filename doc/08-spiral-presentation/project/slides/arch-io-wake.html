@@ -1,0 +1,65 @@
+<section id="arch-io-wake" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px">
+<h2 id="ar-title" style="position:absolute;left:128px;top:128px;width:1664px;font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">t4 architecture</h2>
+<p id="ar-caption" style="position:absolute;left:128px;top:223px;width:1664px;font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">5 · The worker polls the completion queue and wakes each task with its filled buffer</p>
+<x-connector id="ar-split-1" x1="128" y1="600" x2="1792" y2="600" head="none" style="color:#bebebb;border-width:2px;border-style:dashed"></x-connector>
+<x-connector id="ar-split-2" x1="128" y1="776" x2="1792" y2="776" head="none" style="color:#bebebb;border-width:2px;border-style:dashed"></x-connector>
+<p id="ar-lane-user" style="position:absolute;left:128px;top:434px;width:200px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:uppercase;color:#646462">User</p>
+<p id="ar-lane-kernel" style="position:absolute;left:128px;top:674px;width:200px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:uppercase;color:#646462">Kernel</p>
+<p id="ar-lane-ssd" style="position:absolute;left:128px;top:846px;width:200px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:uppercase;color:#646462">SSD</p>
+<svg id="ar-rings" aria-label="io_uring's two rings straddling the line between user space and the kernel: the submission queue, SQ, and the completion queue, CQ." style="position:absolute;left:1408px;top:528px" width="304" height="144" viewBox="0 0 304 144">
+<circle cx="72" cy="72" r="49" fill="none" stroke="#ffffff" stroke-width="30"/>
+<path d="M72 38 L72 8 M96 48 L117.3 26.7 M106 72 L136 72 M96 96 L117.3 117.3 M72 106 L72 136 M48 96 L26.7 117.3 M38 72 L8 72 M48 48 L26.7 26.7" fill="none" stroke="#bebebb" stroke-width="2"/>
+<circle cx="72" cy="72" r="64" fill="none" stroke="#171716" stroke-width="2"/>
+<circle cx="72" cy="72" r="34" fill="#fcfcf9" stroke="#171716" stroke-width="2"/>
+<circle cx="232" cy="72" r="49" fill="none" stroke="#ffffff" stroke-width="30"/>
+<path d="M232 38 L232 8 M256 48 L277.3 26.7 M266 72 L296 72 M256 96 L277.3 117.3 M232 106 L232 136 M208 96 L186.7 117.3 M198 72 L168 72 M208 48 L186.7 26.7" fill="none" stroke="#bebebb" stroke-width="2"/>
+<circle cx="232" cy="72" r="64" fill="none" stroke="#171716" stroke-width="2"/>
+<circle cx="232" cy="72" r="34" fill="#fcfcf9" stroke="#171716" stroke-width="2"/>
+</svg>
+<p id="ar-sq-label" style="position:absolute;left:1446px;top:583px;width:68px;text-align:center;font-family:'Acid Grotesk', Inter, sans-serif;font-size:32px;font-weight:500;line-height:1.1;color:#171716">SQ</p>
+<p id="ar-cq-label" style="position:absolute;left:1606px;top:583px;width:68px;text-align:center;font-family:'Acid Grotesk', Inter, sans-serif;font-size:32px;font-weight:500;line-height:1.1;color:#171716">CQ</p>
+<x-connector id="ar-to-worker" x1="1352" y1="340" x2="1392" y2="340" style="color:#171716;border-width:3px"></x-connector>
+<x-connector id="ar-req-1" x1="460" y1="404" x2="460" y2="364" style="color:#171716;border-width:3px"></x-connector>
+<x-connector id="ar-req-2" x1="684" y1="404" x2="684" y2="364" style="color:#171716;border-width:3px"></x-connector>
+<x-connector id="ar-req-3" x1="908" y1="404" x2="908" y2="364" style="color:#171716;border-width:3px"></x-connector>
+<x-connector id="ar-req-4" x1="1132" y1="404" x2="1132" y2="364" style="color:#171716;border-width:3px"></x-connector>
+<x-connector id="ar-submit" x1="1480" y1="484" x2="1480" y2="536" style="color:#171716;border-width:3px"></x-connector>
+<p id="ar-submit-label" style="position:absolute;left:1276px;top:495px;width:188px;text-align:right;font-size:24px;font-weight:400;line-height:1.2;color:#171716">submit</p>
+<x-connector id="ar-enter" x1="1480" y1="664" x2="1480" y2="800" style="color:#171716;border-width:3px"></x-connector>
+<p id="ar-enter-label" style="position:absolute;left:1200px;top:700px;width:264px;text-align:right;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#171716">io_uring_enter()</p>
+<p id="ar-direct-label" style="position:absolute;left:360px;top:674px;width:600px;font-size:24px;font-weight:400;line-height:1.2;color:#1d0fed">Direct I/O: no page cache, no CPU copy</p>
+<x-connector id="ar-complete" x1="1640" y1="800" x2="1640" y2="664" style="color:#171716;border-width:3px"></x-connector>
+<x-connector id="ar-poll" x1="1640" y1="484" x2="1640" y2="536" style="color:#171716;border-width:3px"></x-connector>
+<p id="ar-poll-label" style="position:absolute;left:1656px;top:495px;width:120px;font-size:24px;font-weight:400;line-height:1.2;color:#171716">poll</p>
+<x-connector id="ar-wake" x1="1392" y1="444" x2="1232" y2="444" style="color:#171716;border-width:3px"></x-connector>
+<p id="ar-wake-label" style="position:absolute;left:1248px;top:404px;width:128px;text-align:center;font-size:24px;font-weight:400;line-height:1.2;color:#171716">wake</p>
+<div id="ar-channel" style="position:absolute;left:360px;top:316px;width:992px;height:48px;display:flex;align-items:center;padding:0px 16px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px"><p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">channel</p></div>
+<div id="ar-buf-1" style="position:absolute;left:360px;top:500px;width:200px;height:76px;display:flex;align-items:center;padding:0px 16px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px"><p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">buffer</p></div>
+<div id="ar-buf-2" style="position:absolute;left:584px;top:500px;width:200px;height:76px;display:flex;align-items:center;padding:0px 16px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px"><p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">buffer</p></div>
+<div id="ar-buf-3" style="position:absolute;left:808px;top:500px;width:200px;height:76px;display:flex;align-items:center;padding:0px 16px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px"><p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">buffer</p></div>
+<div id="ar-buf-4" style="position:absolute;left:1032px;top:500px;width:200px;height:76px;display:flex;align-items:center;padding:0px 16px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px"><p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">buffer</p></div>
+<div id="ar-rq-1" style="position:absolute;left:1470px;top:842px;width:20px;height:20px;background:#171716;border-radius:2px"></div>
+<div id="ar-rq-2" style="position:absolute;left:1470px;top:842px;width:20px;height:20px;background:#171716;border-radius:2px"></div>
+<div id="ar-rq-3" style="position:absolute;left:1470px;top:842px;width:20px;height:20px;background:#171716;border-radius:2px"></div>
+<div id="ar-rq-4" style="position:absolute;left:1470px;top:842px;width:20px;height:20px;background:#171716;border-radius:2px"></div>
+<div id="ar-cqe-1" style="position:absolute;left:1630px;top:390px;width:20px;height:20px;background:#171716;border-radius:2px"></div>
+<div id="ar-cqe-2" style="position:absolute;left:1630px;top:390px;width:20px;height:20px;background:#171716;border-radius:2px"></div>
+<div id="ar-cqe-3" style="position:absolute;left:1630px;top:390px;width:20px;height:20px;background:#171716;border-radius:2px"></div>
+<div id="ar-cqe-4" style="position:absolute;left:1630px;top:390px;width:20px;height:20px;background:#171716;border-radius:2px"></div>
+<div id="ar-ssd" style="position:absolute;left:360px;top:800px;width:1432px;height:104px;background:#ebebe8;border:1px solid #d4d4d2;border-radius:2px"></div>
+<p id="ar-ssd-label" style="position:absolute;left:1240px;top:830px;width:220px;font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">NVMe SSDs</p>
+<div id="ar-disk-1" style="position:absolute;left:504px;top:832px;width:40px;height:40px;background:#1d0fed;border-radius:2px"></div>
+<div id="ar-disk-2" style="position:absolute;left:728px;top:832px;width:40px;height:40px;background:#1d0fed;border-radius:2px"></div>
+<div id="ar-disk-3" style="position:absolute;left:952px;top:832px;width:40px;height:40px;background:#1d0fed;border-radius:2px"></div>
+<div id="ar-disk-4" style="position:absolute;left:1176px;top:832px;width:40px;height:40px;background:#1d0fed;border-radius:2px"></div>
+<div id="ar-data-1" style="position:absolute;left:504px;top:518px;width:40px;height:40px;background:#1d0fed;border-radius:2px"></div>
+<div id="ar-data-2" style="position:absolute;left:728px;top:518px;width:40px;height:40px;background:#1d0fed;border-radius:2px"></div>
+<div id="ar-data-3" style="position:absolute;left:952px;top:518px;width:40px;height:40px;background:#1d0fed;border-radius:2px"></div>
+<div id="ar-data-4" style="position:absolute;left:1176px;top:518px;width:40px;height:40px;background:#1d0fed;border-radius:2px"></div>
+<div id="ar-task-1" style="position:absolute;left:360px;top:404px;width:200px;height:80px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:2px;background:#171716;border-radius:2px"><p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:28px;font-weight:500;line-height:1.1;color:#fcfcf9">Partition 1</p><p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#bebebb">running</p></div>
+<div id="ar-task-2" style="position:absolute;left:584px;top:404px;width:200px;height:80px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:2px;background:#171716;border-radius:2px"><p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:28px;font-weight:500;line-height:1.1;color:#fcfcf9">Partition 2</p><p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#bebebb">running</p></div>
+<div id="ar-task-3" style="position:absolute;left:808px;top:404px;width:200px;height:80px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:2px;background:#171716;border-radius:2px"><p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:28px;font-weight:500;line-height:1.1;color:#fcfcf9">Partition 3</p><p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#bebebb">running</p></div>
+<div id="ar-task-4" style="position:absolute;left:1032px;top:404px;width:200px;height:80px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:2px;background:#171716;border-radius:2px"><p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:28px;font-weight:500;line-height:1.1;color:#fcfcf9">Partition 4</p><p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#bebebb">running</p></div>
+<div id="ar-worker" style="position:absolute;left:1392px;top:316px;width:320px;height:168px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:4px;background:#1d0fed;border-radius:2px"><p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:36px;font-weight:500;line-height:1.1;color:#ffffff">I/O worker</p><p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#ffffff">one thread</p></div>
+<aside>The worker polls the completion queue, busy-waiting while I/O is in flight (src/io/io_uring.rs), matches each completion to its request, and wakes that task through its Waker. The task gets back its buffer, filled by the SSD's DMA with no page cache in between; its future is ready, and tokio runs it again. So: tasks never block, one thread does all the I/O, and the SSD writes each byte into memory once. Next: what sits in front of this, one index over three tiers.</aside>
+</section>

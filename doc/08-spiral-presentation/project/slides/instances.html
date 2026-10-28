@@ -1,0 +1,80 @@
+<section id="instances" data-transition="fade" style="display:flex; flex-direction:column; gap:24px; padding:128px 128px 160px; background:#fcfcf9">
+  <h2 style="font-family:'Acid Grotesk', sans-serif; font-size:72px; font-weight:500; line-height:1.1; letter-spacing:-0.7px; color:#171716">Disk matches memory on all three instances</h2>
+  <p style="font-family:Inter, Arial, sans-serif; font-size:30px; font-weight:300; line-height:1.35; color:#3c3c3a">With SSDs that read 12.7 GB/s or more, t4 from disk matches or beats Vortex from memory. On every instance it beats Vortex reading the same SSDs.</p>
+  <div style="display:flex; flex-direction:row; gap:40px; align-items:center">
+    <div style="display:flex; flex-direction:row; gap:12px; align-items:center">
+      <div style="width:20px; height:20px; display:flex; flex-direction:column; background:#171716; border-radius:256px">
+      </div>
+      <p style="font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#3c3c3a">TPC-H SF10</p>
+    </div>
+    <div style="display:flex; flex-direction:row; gap:12px; align-items:center">
+      <div style="width:20px; height:20px; display:flex; flex-direction:column; background:#1d0fed; border-radius:256px">
+      </div>
+      <p style="font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#3c3c3a">ClickBench q20–34</p>
+    </div>
+  </div>
+  <div style="width:1664px; height:480px; display:flex; flex-direction:row">
+    <div style="position:relative; width:300px; height:480px; display:flex; flex-direction:column; align-self:stretch">
+      <p style="position:absolute; top:110px; left:0; width:300px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#171716">i3en.2xlarge</p>
+      <p style="position:absolute; top:142px; left:0; width:300px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#646462">SSDs 1.36 GB/s steady</p>
+      <p style="position:absolute; top:230px; left:0; width:300px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#171716">i7ie.12xlarge</p>
+      <p style="position:absolute; top:262px; left:0; width:300px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#646462">SSDs 12.7 GB/s steady</p>
+      <p style="position:absolute; top:350px; left:0; width:300px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#171716">i7i.24xlarge</p>
+      <p style="position:absolute; top:382px; left:0; width:300px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#646462">SSDs 26.85 GB/s steady</p>
+    </div>
+    <div style="position:relative; width:700px; height:480px; display:flex; flex-direction:column; align-self:stretch">
+      <svg xmlns="http://www.w3.org/2000/svg" aria-label="Dot plot, t4 ÷ Vortex from memory: i3en.2xlarge 1.05 TPC-H and 1.03 ClickBench, i7ie.12xlarge 1.00 TPC-H and 0.96 ClickBench, i7i.24xlarge 0.96 TPC-H and 0.95 ClickBench." viewBox="0 0 700 480" style="position:absolute; top:0; left:0; width:700px; height:480px">
+<line x1="60.0" y1="90" x2="60.0" y2="420" stroke="#ebebe8" stroke-width="2"/>
+<line x1="246.7" y1="90" x2="246.7" y2="420" stroke="#ebebe8" stroke-width="2"/>
+<line x1="433.3" y1="90" x2="433.3" y2="420" stroke="#171716" stroke-width="2" stroke-dasharray="8 6"/>
+<line x1="620.0" y1="90" x2="620.0" y2="420" stroke="#ebebe8" stroke-width="2"/>
+<circle cx="528.3" cy="124" r="10" fill="#171716" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="498.6" cy="156" r="10" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="442.6" cy="244" r="10" fill="#171716" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="361.1" cy="276" r="10" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="359.9" cy="364" r="10" fill="#171716" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="344.2" cy="396" r="10" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+</svg>
+      <p style="position:absolute; top:432px; left:20px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">0.8</p>
+      <p style="position:absolute; top:432px; left:207px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">0.9</p>
+      <p style="position:absolute; top:432px; left:393px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">1.0</p>
+      <p style="position:absolute; top:432px; left:580px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">1.1</p>
+      <p style="position:absolute; top:20px; left:60px; width:560px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#171716">t4 ÷ Vortex from memory</p>
+      <p style="position:absolute; top:52px; left:60px; width:560px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#646462">← t4 faster · 1.0 same time</p>
+      <p style="position:absolute; top:109px; left:546px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#171716">1.05</p>
+      <p style="position:absolute; top:141px; left:517px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#1d0fed">1.03</p>
+      <p style="position:absolute; top:229px; left:461px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#171716">1.00</p>
+      <p style="position:absolute; top:261px; left:263px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#1d0fed">0.96</p>
+      <p style="position:absolute; top:349px; left:262px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#171716">0.96</p>
+      <p style="position:absolute; top:381px; left:246px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#1d0fed">0.95</p>
+    </div>
+    <div style="position:relative; width:664px; height:480px; display:flex; flex-direction:column; align-self:stretch">
+      <svg xmlns="http://www.w3.org/2000/svg" aria-label="Dot plot, t4 ÷ Vortex from the same SSDs: i3en.2xlarge 0.84 TPC-H and 0.91 ClickBench, i7ie.12xlarge 0.87 TPC-H and 0.88 ClickBench, i7i.24xlarge 0.87 TPC-H and 0.86 ClickBench." viewBox="0 0 664 480" style="position:absolute; top:0; left:0; width:664px; height:480px">
+<line x1="40.0" y1="90" x2="40.0" y2="420" stroke="#ebebe8" stroke-width="2"/>
+<line x1="226.7" y1="90" x2="226.7" y2="420" stroke="#ebebe8" stroke-width="2"/>
+<line x1="413.3" y1="90" x2="413.3" y2="420" stroke="#171716" stroke-width="2" stroke-dasharray="8 6"/>
+<line x1="600.0" y1="90" x2="600.0" y2="420" stroke="#ebebe8" stroke-width="2"/>
+<circle cx="121.9" cy="124" r="10" fill="#171716" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="250.4" cy="156" r="10" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="178.2" cy="244" r="10" fill="#171716" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="193.3" cy="276" r="10" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="177.7" cy="364" r="10" fill="#171716" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="158.2" cy="396" r="10" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+</svg>
+      <p style="position:absolute; top:432px; left:0; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">0.8</p>
+      <p style="position:absolute; top:432px; left:187px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">0.9</p>
+      <p style="position:absolute; top:432px; left:373px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">1.0</p>
+      <p style="position:absolute; top:432px; left:560px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">1.1</p>
+      <p style="position:absolute; top:20px; left:40px; width:560px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; color:#171716">t4 ÷ Vortex from the same SSDs</p>
+      <p style="position:absolute; top:52px; left:40px; width:560px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#646462">← t4 faster · 1.0 same time</p>
+      <p style="position:absolute; top:109px; left:24px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#171716">0.84</p>
+      <p style="position:absolute; top:141px; left:152px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#1d0fed">0.91</p>
+      <p style="position:absolute; top:229px; left:80px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#171716">0.87</p>
+      <p style="position:absolute; top:261px; left:95px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#1d0fed">0.88</p>
+      <p style="position:absolute; top:349px; left:80px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#171716">0.87</p>
+      <p style="position:absolute; top:381px; left:60px; width:80px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#1d0fed">0.86</p>
+    </div>
+  </div>
+  <p style="position:absolute; bottom:64px; left:128px; width:1664px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; letter-spacing:0.5px; color:#646462">INTERNAL · VORTEX DATAFUSION BENCH · SPOT INSTANCES · 28 OCT 2026 · t4 Disk Tier Across Boxes</p>
+  <aside>Every result in one picture: t4's time over Vortex's, each suite's median runs summed, on three single-socket AWS instances, all of each instance's SSDs as one RAID0 on the instance's defaults. Left, against Vortex reading from memory: on the i7ie.12xlarge and i7i.24xlarge t4 from SSD takes 0.95 to 1.00 of memory's time; on the small i3en.2xlarge, whose two SSDs read 1.36 GB/s steady, it is 3 to 5% behind, exactly where the cost model says the drives bind. Right, against Vortex reading the same SSDs, its pages evicted before every run: t4 takes 0.84 to 0.91 of its time on every instance. Two instances of one type can differ in CPU speed, so read the ratios, not the times across instances. Last five of twelve runs back to back, 28 Oct 2026.</aside>
+</section>

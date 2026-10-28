@@ -1,19 +1,79 @@
-<section id="hardware" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:48px">
-<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">Twenty years of memory and SSDs</h2>
-<table style="font-family:Inter, Arial, sans-serif;font-size:30px;color:#3c3c3a">
-<tr style="background:#ebebe8">
-<th style="width:40%;padding:20px 24px;text-align:left;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;text-transform:uppercase;color:#3c3c3a">One server</th>
-<th style="width:20%;padding:20px 24px;text-align:right;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;color:#3c3c3a">2006</th>
-<th style="width:20%;padding:20px 24px;text-align:right;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;color:#3c3c3a">2016</th>
-<th style="width:20%;padding:20px 24px;text-align:right;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;color:#3c3c3a">2026</th>
-</tr>
-<tr style="background:#ffffff"><td style="padding:20px 24px">Memory bandwidth</td><td style="padding:20px 24px;text-align:right;color:#646462">[__ GB/s]</td><td style="padding:20px 24px;text-align:right;color:#646462">[__ GB/s]</td><td style="padding:20px 24px;text-align:right;color:#646462">[__ GB/s]</td></tr>
-<tr style="background:#ffffff"><td style="padding:20px 24px">SSD bandwidth</td><td style="padding:20px 24px;text-align:right;color:#646462">[__ GB/s]</td><td style="padding:20px 24px;text-align:right;color:#646462">[__ GB/s]</td><td style="padding:20px 24px;text-align:right;color:#171716">50.1 GiB/s</td></tr>
-<tr style="background:#ffffff"><td style="padding:20px 24px">SSD as a share of memory</td><td style="padding:20px 24px;text-align:right;color:#646462">[__%]</td><td style="padding:20px 24px;text-align:right;color:#646462">[__%]</td><td style="padding:20px 24px;text-align:right;color:#646462">[__%]</td></tr>
-<tr style="background:#ffffff"><td style="padding:20px 24px">S3 into one box</td><td style="padding:20px 24px;text-align:right;color:#646462">[__]</td><td style="padding:20px 24px;text-align:right;color:#646462">[__ GB/s]</td><td style="padding:20px 24px;text-align:right;color:#171716">26.8 GiB/s</td></tr>
-<tr style="background:#ffffff"><td style="padding:20px 24px">Memory, $ per GB</td><td style="padding:20px 24px;text-align:right;color:#646462">[$__]</td><td style="padding:20px 24px;text-align:right;color:#646462">[$__]</td><td style="padding:20px 24px;text-align:right;color:#646462">[$__]</td></tr>
-<tr style="background:#ffffff"><td style="padding:20px 24px">SSD, $ per GB</td><td style="padding:20px 24px;text-align:right;color:#646462">[$__]</td><td style="padding:20px 24px;text-align:right;color:#646462">[$__]</td><td style="padding:20px 24px;text-align:right;color:#646462">[$__]</td></tr>
-</table>
-<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:none;color:#646462">2026: INTERNAL · i7i.48xlarge, 12 SSDs, fio, 23 OCT · S3: 300 Gbit/s BOX, 768 GETS IN FLIGHT · OTHERS: [SOURCE]</p>
-<aside>Sets the scene: which devices we are talking about. Point: one server's SSDs now read a large share of what its memory moves, and S3 into a single box is in the same range. The 2026 column is ours: fio on the i7i.48xlarge read 53.8 GB/s (50.1 GiB/s) over 12 instance SSDs, 1 MiB direct reads (doc/04-multi-device.md). S3 into one 300 Gbit/s box read 26.8 GiB/s at 768 GETs in flight (doc/05-network.md). Every bracket still needs a sourced figure: memory and SSD prices per GB over time, memory bandwidth per server (DDR generation times channels), SSD bandwidth per server. Once the series is in, this can become two line charts: price, and bandwidth with SSD as a share of memory.</aside>
+<section id="hardware" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<div style="display:flex;flex-direction:column;gap:16px">
+<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">Price per GB: memory and SSD</h2>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">Since 2018, a GB of memory has cost 33 to 57 times a GB of SSD.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:16px">
+<div style="display:flex;gap:48px;align-items:center">
+<div style="display:flex;gap:12px;align-items:center"><div style="width:40px;height:4px;background:#8b83f6"></div><p style="font-size:24px;font-weight:400;line-height:1.2;color:#171716">Memory (DRAM)</p></div>
+<div style="display:flex;gap:12px;align-items:center"><div style="width:40px;height:4px;background:#1d0fed"></div><p style="font-size:24px;font-weight:400;line-height:1.2;color:#171716">SSD (series starts in 2013)</p></div>
+<p style="font-size:24px;font-weight:400;line-height:1.2;color:#646462">Lowest retail price each year · log scale</p>
+</div>
+<div style="position:relative;width:1664px;height:560px">
+<svg aria-label="Line chart, log scale, lowest retail price per GB by year. Memory fell from $74.50 in 2006 to $1.31 in 2023, then rose to $2.83 in 2026. SSD fell from $0.625 in 2013 to $0.03 in 2023 and was $0.05 in 2026. In 2026 memory costs 57 times as much per GB." style="position:absolute;left:0px;top:0px" width="1664" height="560" viewBox="0 0 1664 560">
+<line x1="140" y1="20" x2="1464" y2="20" stroke="#ebebe8" stroke-width="2"/>
+<line x1="140" y1="140" x2="1464" y2="140" stroke="#ebebe8" stroke-width="2"/>
+<line x1="140" y1="260" x2="1464" y2="260" stroke="#ebebe8" stroke-width="2"/>
+<line x1="140" y1="380" x2="1464" y2="380" stroke="#ebebe8" stroke-width="2"/>
+<line x1="140" y1="500" x2="1464" y2="500" stroke="#bebebb" stroke-width="2"/>
+<polyline fill="none" stroke="#8b83f6" stroke-width="4" stroke-linejoin="round" stroke-linecap="round" points="140,35.3 206.2,92.3 272.4,140 338.6,140 404.8,128.4 471,173.6 537.2,191.1 603.4,183.1 669.6,155 735.8,191.1 802,206.2 868.2,176.1 934.4,178.8 1000.6,206.2 1066.8,206.2 1133,209 1199.2,219.9 1265.4,245.9 1331.6,236.8 1397.8,238.9 1464,205.8"/>
+<polyline fill="none" stroke="#1d0fed" stroke-width="4" stroke-linejoin="round" stroke-linecap="round" points="603.4,284.5 669.6,311.1 735.8,332.3 802,343.1 868.2,332.3 934.4,378 1000.6,392.2 1066.8,395 1133,394.3 1199.2,421.6 1265.4,441.9 1331.6,424 1397.8,421.6 1464,416.1"/>
+<circle cx="140" cy="35.3" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="206.2" cy="92.3" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="272.4" cy="140" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="338.6" cy="140" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="404.8" cy="128.4" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="471" cy="173.6" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="537.2" cy="191.1" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="603.4" cy="183.1" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="669.6" cy="155" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="735.8" cy="191.1" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="802" cy="206.2" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="868.2" cy="176.1" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="934.4" cy="178.8" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1000.6" cy="206.2" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1066.8" cy="206.2" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1133" cy="209" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1199.2" cy="219.9" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1265.4" cy="245.9" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1331.6" cy="236.8" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1397.8" cy="238.9" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1464" cy="205.8" r="6" fill="#8b83f6" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="603.4" cy="284.5" r="6" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="669.6" cy="311.1" r="6" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="735.8" cy="332.3" r="6" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="802" cy="343.1" r="6" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="868.2" cy="332.3" r="6" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="934.4" cy="378" r="6" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1000.6" cy="392.2" r="6" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1066.8" cy="395" r="6" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1133" cy="394.3" r="6" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1199.2" cy="421.6" r="6" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1265.4" cy="441.9" r="6" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1331.6" cy="424" r="6" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1397.8" cy="421.6" r="6" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1464" cy="416.1" r="6" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<line x1="1476" y1="205.8" x2="1488" y2="205.8" stroke="#171716" stroke-width="2"/>
+<line x1="1488" y1="205.8" x2="1488" y2="416.1" stroke="#171716" stroke-width="2"/>
+<line x1="1476" y1="416.1" x2="1488" y2="416.1" stroke="#171716" stroke-width="2"/>
+</svg>
+<p style="position:absolute;left:0px;top:6px;width:124px;text-align:right;font-size:24px;font-weight:400;line-height:1.2;color:#646462">$100</p>
+<p style="position:absolute;left:0px;top:126px;width:124px;text-align:right;font-size:24px;font-weight:400;line-height:1.2;color:#646462">$10</p>
+<p style="position:absolute;left:0px;top:246px;width:124px;text-align:right;font-size:24px;font-weight:400;line-height:1.2;color:#646462">$1</p>
+<p style="position:absolute;left:0px;top:366px;width:124px;text-align:right;font-size:24px;font-weight:400;line-height:1.2;color:#646462">$0.10</p>
+<p style="position:absolute;left:0px;top:486px;width:124px;text-align:right;font-size:24px;font-weight:400;line-height:1.2;color:#646462">$0.01</p>
+<p style="position:absolute;left:90px;top:516px;width:100px;text-align:center;font-size:24px;font-weight:400;line-height:1.2;color:#646462">2006</p>
+<p style="position:absolute;left:355px;top:516px;width:100px;text-align:center;font-size:24px;font-weight:400;line-height:1.2;color:#646462">2010</p>
+<p style="position:absolute;left:620px;top:516px;width:100px;text-align:center;font-size:24px;font-weight:400;line-height:1.2;color:#646462">2014</p>
+<p style="position:absolute;left:884px;top:516px;width:100px;text-align:center;font-size:24px;font-weight:400;line-height:1.2;color:#646462">2018</p>
+<p style="position:absolute;left:1149px;top:516px;width:100px;text-align:center;font-size:24px;font-weight:400;line-height:1.2;color:#646462">2022</p>
+<p style="position:absolute;left:1414px;top:516px;width:100px;text-align:center;font-size:24px;font-weight:400;line-height:1.2;color:#646462">2026</p>
+<p style="position:absolute;left:1500px;top:191px;width:164px;font-size:24px;font-weight:500;line-height:1.2;color:#171716">$2.83</p>
+<p style="position:absolute;left:1500px;top:402px;width:164px;font-size:24px;font-weight:500;line-height:1.2;color:#171716">$0.05</p>
+<p style="position:absolute;left:1500px;top:285px;width:164px;font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">57×</p>
+<p style="position:absolute;left:1500px;top:333px;width:164px;font-size:24px;font-weight:400;line-height:1.2;color:#646462">in 2026</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:none;color:#646462">2006–2024: J. C. MCCALLUM, NEWEGG · 2025–2026: STANFORD DAM, AMAZON · NOMINAL USD</p>
+<aside>Price per GB, nominal dollars, the lowest retail price recorded each year (price divided by labelled capacity). 2006 to July 2024: John C. McCallum's tables of NewEgg consumer listings, DRAM DIMMs and mostly SATA SSDs (web.archive.org/web/20250716092935/https://jcmit.net/memoryprice.htm and web.archive.org/web/20250716094252/https://jcmit.net/flashprice.htm; jcmit.net itself no longer serves them). 2025 and 2026 (January to September): Stanford DAM's price tracker, the cheapest Amazon listing via Keepa, NVMe drives only (dam.stanford.edu/memory-prices.html). The two baskets differ, so read the 2024 to 2025 step loosely. McCallum's SSD series starts in 2013; no sourced retail SSD price before that (one enterprise point: Intel X25-E, 2008, $21.7 per GB in 1,000-unit lots). Memory: $74.50 in 2006, $1.31 in 2023, $2.83 in 2026, the cheapest module of any generation (a DDR3 server module); DDR5 alone was $7.11. From September 2025 to September 2026 the cheapest DRAM went from $2.12 to $4.85 a GB and the cheapest DDR5 from $2.18 to $13.41. SSD: $0.625 in 2013, $0.0305 in 2023, $0.05 in 2026. The ratio memory over SSD: 7x in 2013, 33x to 57x every year since 2018.</aside>
 </section>

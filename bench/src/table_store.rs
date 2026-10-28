@@ -305,7 +305,8 @@ pub struct CacheOptions {
     #[arg(long = "cache-unloaded-get-ms", default_value_t = 32.0)]
     unloaded_get_ms: f64,
     /// While t4's GETs wait their turn, those of adjacent bytes of a file
-    /// go as one GET of this many MiB at most; each apart unless given.
+    /// go as one GET of this many MiB at most, each apart if 0; t4's
+    /// default, 4 MiB, unless given.
     #[arg(long = "cache-merge-waiting-mib")]
     merge_waiting_mib: Option<u64>,
 }

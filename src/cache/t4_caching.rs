@@ -41,7 +41,7 @@ use super::object_cache::{CacheableFile, FetchedBlocks, ObjectCache};
 #[cfg(feature = "__fuzz")]
 use super::policy::Tier;
 use super::policy::{
-    ClockPolicy, Io, PlacementPolicy, RaceStragglers, ReadIntent, ReadPolicy, TierSizes,
+    ClockPolicy, FetchRuns, Io, PlacementPolicy, RaceStragglers, ReadIntent, ReadPolicy, TierSizes,
 };
 use super::{BLOCK_SIZE_U64, InsertOrAbort};
 use crate::io::sync::Arc;
@@ -136,6 +136,10 @@ impl T4CachingBuilder {
     /// What a GET of a block takes with little else in flight, unless told:
     /// the other half of the cap.
     pub const DEFAULT_UNLOADED_GET_TIME: Duration = Duration::from_millis(32);
+    /// The most bytes waiting GETs go as, merged, unless told
+    /// (`Self::with_waiting_gets_merged`): the default read policy's GET of
+    /// a normal read, 4 MiB, so that merging never undoes its split.
+    pub const DEFAULT_MERGED_UP_TO: u64 = FetchRuns::NORMAL_GET_MOST;
 
     /// Memory for cached bytes, in whole 1 MiB blocks, one at least.
     /// Required.
@@ -219,7 +223,8 @@ impl T4CachingBuilder {
 
     /// While GETs wait their turn (`Self::with_network_rate`), those of one
     /// request for adjacent bytes of a file go as one GET, of `up_to` bytes
-    /// at most, when the first of them is due. Each apart unless set.
+    /// at most, when the first of them is due; each apart if 0. Unless set,
+    /// [`Self::DEFAULT_MERGED_UP_TO`], 4 MiB.
     pub fn with_waiting_gets_merged(mut self, up_to: u64) -> Self {
         self.merged_up_to = up_to;
         self
@@ -305,7 +310,7 @@ impl T4Caching {
                 T4CachingBuilder::DEFAULT_NETWORK_RATE,
                 T4CachingBuilder::DEFAULT_UNLOADED_GET_TIME,
             ),
-            merged_up_to: 0,
+            merged_up_to: T4CachingBuilder::DEFAULT_MERGED_UP_TO,
         }
     }
 

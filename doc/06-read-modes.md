@@ -8,7 +8,8 @@ are not built yet. The default read policy splits a normal read's runs
 into GETs of 4 MiB at most, races a Parquet or Vortex file's last 2 MiB
 with two requests, and, given a timer, races a straggler late at the p90
 (decision 10); t4 caps its GETs' bytes in flight at 200 MB unless told
-the network (decision 11).
+the network, and merges adjacent waiting GETs up to 4 MiB unless told
+(decision 11).
 
 A read wants one of three things (`99-brainstorm.md`):
 
@@ -239,7 +240,12 @@ High-Performance Analytics", PVLDB 16(11), 2023):
     backlog seldom has, it cut the GETs by 6% alone. A merge now waits for
     room for all its bytes instead, about half a millisecond at 50 Gbit/s
     for 3 MiB more. The rate and the GET time are the user's for now
-    (Later).
+    (Later). Since 27 Oct 2026, the user's call, waiting GETs merge by
+    default, up to 4 MiB (`T4CachingBuilder::DEFAULT_MERGED_UP_TO`), the
+    default read policy's GET of a normal read, so that merging never
+    undoes its split; `with_waiting_gets_merged(0)` sends each apart.
+    `doc/09-vortex-integration.md`'s step 4 had found it off: its run with
+    Vortex's merging off merged nothing anywhere.
 
     On an i7i.48xlarge (100 Gbit/s, so 400 MB), ClickBench's queries 20 to
     34 with the cap, merging and racing at the p90: Vortex's raw reads,

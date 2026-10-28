@@ -1,5 +1,11 @@
 This is the draft for the presentation at spiral on Oct 30
 
+Meta guide:
+1. at the bottom of each slide, show navigation (content structure), so that readers are not lost.
+2. 
+
+=======
+
 Title: t4 serves Vortex faster from disk than memory
 Author: Xiangpeng Hao
 The title slide may have a benchmark comparing datafusion-vortex reading from t4-disk vs t4-memory vs t4-s3 vs s3. 

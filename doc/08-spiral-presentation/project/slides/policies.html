@@ -1,0 +1,32 @@
+<section id="policies" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">Caching policies are pluggable</h2>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">One trait decides where every block lives. The cache keeps no access state of its own: the policy hears every hit.</p>
+<div style="display:flex;gap:48px;align-items:start">
+<div style="width:900px;display:flex;flex-direction:column;gap:4px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px;padding:32px">
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.35;white-space:nowrap;color:#171716"><span style="color:#1d0fed">trait</span> PlacementPolicy {</p>
+<p style="padding:0px 0px 0px 40px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.35;white-space:nowrap;color:#646462">// fetched from S3: memory, disk, or nowhere?</p>
+<p style="padding:0px 0px 0px 40px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.35;white-space:nowrap;color:#171716"><span style="color:#1d0fed">fn</span> on_remote_read(&amp;self, read) -&gt; Admit;</p>
+<p style="padding:0px 0px 0px 40px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.35;white-space:nowrap;color:#646462">// read from disk: stay, or move up to memory?</p>
+<p style="padding:0px 0px 0px 40px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.35;white-space:nowrap;color:#171716"><span style="color:#1d0fed">fn</span> on_disk_hit(&amp;self, chunk, read) -&gt; DiskHit;</p>
+<p style="padding:0px 0px 0px 40px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.35;white-space:nowrap;color:#171716"><span style="color:#1d0fed">fn</span> on_memory_hit(&amp;self, chunk, read);</p>
+<p style="padding:0px 0px 0px 40px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.35;white-space:nowrap;color:#171716"><span style="color:#1d0fed">fn</span> on_admit(&amp;self, tier, chunk, block);</p>
+<p style="padding:0px 0px 0px 40px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.35;white-space:nowrap;color:#646462">// a tier is full: which chunks give way?</p>
+<p style="padding:0px 0px 0px 40px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.35;white-space:nowrap;color:#171716"><span style="color:#1d0fed">fn</span> pick_memory_victims(&amp;self, n) -&gt; Vec&lt;MemoryVictim&gt;;</p>
+<p style="padding:0px 0px 0px 40px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.35;white-space:nowrap;color:#171716"><span style="color:#1d0fed">fn</span> pick_disk_victims(&amp;self, n) -&gt; Vec&lt;ChunkId&gt;;</p>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.35;white-space:nowrap;color:#171716">}</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:24px">
+<div style="display:flex;flex-direction:column;gap:8px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px;padding:32px">
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:uppercase;color:#1d0fed">Default</p>
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">CLOCK per tier</p>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">Fetched blocks go to memory. Memory’s victims move down to disk. A disk block read twice moves back up.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px;padding:32px">
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:uppercase;color:#646462">For benchmarks</p>
+<p style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">FixedPlacementPolicy</p>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">Every fetched block goes to one tier, or none, so a run measures memory hits alone or disk hits alone. Vortex’s bench uses it too.</p>
+</div>
+</div>
+</div>
+<aside>Where a block lives is a trait, PlacementPolicy (src/cache/policy/mod.rs), one policy for both tiers. Every hook takes &self, so a policy keeps whatever state it wants with whatever concurrency it wants; the cache keeps none. Each hook on the read path gets the block, the file's size and path, and the range the read asked for. on_remote_read is asked as the read plans its fetches, so the policy hears of every remote read, even the ones it doesn't cache. on_disk_hit is asked before the read, so a move up reads the block straight into a memory chunk, one I/O. The default is a lock-free CLOCK per tier (clock.rs). FixedPlacementPolicy (fixed_placement.rs) admits every fetched block where one setting says, memory, disk or nowhere, and never moves a disk hit up: t4's bench uses it, and so does Vortex's (doc/09-vortex-integration.md, decision 7). How a read is served is a second trait, ReadPolicy, whose default is the p90 racing from earlier in this part.</aside>
+</section>

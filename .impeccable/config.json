@@ -20,6 +20,28 @@
         ],
         "createdAt": "2026-10-27T21:51:08.812Z",
         "reason": "Claude triage: 1920x1080 title slide set at the Spiral design system's s-hero token (144px, 'title slides'), not a web hero"
+      },
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          "doc/08-spiral-presentation/project/slides/arch-store*.html",
+          "doc/08-spiral-presentation/project/slides/lifecycle*.html",
+          "doc/08-spiral-presentation/project/slides/split-range*.html"
+        ],
+        "createdAt": "2026-10-28T21:17:52.106Z",
+        "reason": "Claude triage: #bebebb is the deliberate 'no entry' style for bbtree leaf cells whose block is only in S3; real entries are #171716"
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          "doc/08-spiral-presentation/project/slides/arch-store*.html",
+          "doc/08-spiral-presentation/project/slides/lifecycle*.html",
+          "doc/08-spiral-presentation/project/slides/split-range*.html"
+        ],
+        "createdAt": "2026-10-28T21:17:52.125Z",
+        "reason": "Claude triage: the flush child is the full-canvas svg that draws the tree edges and pointers (a 1920x1080 backdrop at 0,0); content sits inside the 128px margins"
       }
     ]
   }

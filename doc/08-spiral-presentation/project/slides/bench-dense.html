@@ -1,30 +1,85 @@
 <section id="bench-dense" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:24px">
-<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">ClickBench queries 20–30, every run</h2>
-<div style="display:flex;gap:48px;align-items:center">
-<div style="display:flex;gap:12px;align-items:center"><div style="width:24px;height:24px;background:#1d0fed;border-radius:2px"></div><p style="font-size:24px;font-weight:400;line-height:1.2;color:#3c3c3a">t4 · disk</p></div>
-<div style="display:flex;gap:12px;align-items:center"><div style="width:24px;height:24px;background:#8b83f6;border-radius:2px"></div><p style="font-size:24px;font-weight:400;line-height:1.2;color:#3c3c3a">t4 · memory</p></div>
-<div style="display:flex;gap:12px;align-items:center"><div style="width:24px;height:24px;background:#a8460f;border-radius:2px"></div><p style="font-size:24px;font-weight:400;line-height:1.2;color:#3c3c3a">t4 · from S3</p></div>
-<div style="display:flex;gap:12px;align-items:center"><div style="width:24px;height:24px;background:#bebebb;border-radius:2px"></div><p style="font-size:24px;font-weight:400;line-height:1.2;color:#3c3c3a">S3 direct</p></div>
+<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-weight:500;line-height:1.1;font-size:72px;letter-spacing:-0.72px;color:#171716">ClickBench q20–34, every query</h2>
+<div style="display:flex;justify-content:space-between;align-items:center">
+<div style="display:flex;gap:48px;align-items:center"><div style="display:flex;gap:12px;align-items:center"><div style="width:24px;height:24px;background:#8b83f6;border-radius:2px"></div><p style="font-size:24px;font-weight:400;line-height:1.2;color:#3c3c3a">Vortex from memory</p></div><div style="display:flex;gap:12px;align-items:center"><div style="width:24px;height:24px;background:#bebebb;border-radius:2px"></div><p style="font-size:24px;font-weight:400;line-height:1.2;color:#3c3c3a">Vortex from SSD</p></div><div style="display:flex;gap:12px;align-items:center"><div style="width:24px;height:24px;background:#1d0fed;border-radius:2px"></div><p style="font-size:24px;font-weight:400;line-height:1.2;color:#3c3c3a">t4 from SSD</p></div></div>
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">i7ie.12xlarge · bar: median · line: fastest–slowest</p>
 </div>
-<div style="height:520px;display:flex;flex-direction:column;justify-content:center;align-items:center;background:#ffffff;border:1px solid #dfdfdd;border-radius:2px;padding:32px">
-<p style="font-size:30px;font-weight:300;line-height:1.35;color:#646462">[11 queries × 4 stores × 10 runs: each run, min and max]</p>
+<div style="position:relative;width:1664px;height:520px">
+<svg aria-label="Grouped bars, ClickBench queries 20 to 34 on an i7ie.12xlarge, median of the last 5 back-to-back runs per reader with lines from fastest to slowest run." style="position:absolute;left:0px;top:0px" width="1664" height="520" viewBox="0 0 1664 520">
+<line x1="104" y1="316.7" x2="1664" y2="316.7" stroke="#ebebe8" stroke-width="2"/>
+<line x1="104" y1="163.3" x2="1664" y2="163.3" stroke="#ebebe8" stroke-width="2"/>
+<line x1="104" y1="10.0" x2="1664" y2="10.0" stroke="#ebebe8" stroke-width="2"/>
+<line x1="104" y1="470" x2="1664" y2="470" stroke="#bebebb" stroke-width="2"/>
+<rect x="113.0" y="362.2" width="26" height="107.8" rx="2" fill="#8b83f6"/>
+<rect x="143.0" y="352.8" width="26" height="117.2" rx="2" fill="#bebebb"/>
+<rect x="173.0" y="376.7" width="26" height="93.3" rx="2" fill="#1d0fed"/>
+<rect x="217.0" y="378.4" width="26" height="91.6" rx="2" fill="#8b83f6"/>
+<rect x="247.0" y="352.9" width="26" height="117.1" rx="2" fill="#bebebb"/>
+<rect x="277.0" y="388.8" width="26" height="81.2" rx="2" fill="#1d0fed"/>
+<rect x="321.0" y="311.1" width="26" height="158.9" rx="2" fill="#8b83f6"/>
+<rect x="351.0" y="284.4" width="26" height="185.6" rx="2" fill="#bebebb"/>
+<rect x="381.0" y="320.9" width="26" height="149.1" rx="2" fill="#1d0fed"/>
+<rect x="425.0" y="287.9" width="26" height="182.1" rx="2" fill="#8b83f6"/>
+<rect x="455.0" y="247.0" width="26" height="223.0" rx="2" fill="#bebebb"/>
+<rect x="485.0" y="276.6" width="26" height="193.4" rx="2" fill="#1d0fed"/>
+<rect x="529.0" y="439.8" width="26" height="30.2" rx="2" fill="#8b83f6"/>
+<rect x="559.0" y="438.5" width="26" height="31.5" rx="2" fill="#bebebb"/>
+<rect x="589.0" y="440.1" width="26" height="29.9" rx="2" fill="#1d0fed"/>
+<rect x="633.0" y="420.7" width="26" height="49.3" rx="2" fill="#8b83f6"/>
+<rect x="663.0" y="420.9" width="26" height="49.1" rx="2" fill="#bebebb"/>
+<rect x="693.0" y="421.6" width="26" height="48.4" rx="2" fill="#1d0fed"/>
+<rect x="737.0" y="440.7" width="26" height="29.3" rx="2" fill="#8b83f6"/>
+<rect x="767.0" y="436.8" width="26" height="33.2" rx="2" fill="#bebebb"/>
+<rect x="797.0" y="441.3" width="26" height="28.7" rx="2" fill="#1d0fed"/>
+<rect x="841.0" y="328.4" width="26" height="141.6" rx="2" fill="#8b83f6"/>
+<rect x="871.0" y="310.5" width="26" height="159.5" rx="2" fill="#bebebb"/>
+<rect x="901.0" y="333.8" width="26" height="136.2" rx="2" fill="#1d0fed"/>
+<rect x="945.0" y="34.1" width="26" height="435.9" rx="2" fill="#8b83f6"/>
+<rect x="975.0" y="36.4" width="26" height="433.6" rx="2" fill="#bebebb"/>
+<rect x="1005.0" y="40.9" width="26" height="429.1" rx="2" fill="#1d0fed"/>
+<rect x="1049.0" y="461.7" width="26" height="8.3" rx="2" fill="#8b83f6"/>
+<rect x="1079.0" y="461.3" width="26" height="8.7" rx="2" fill="#bebebb"/>
+<rect x="1109.0" y="462.4" width="26" height="7.6" rx="2" fill="#1d0fed"/>
+<rect x="1153.0" y="413.9" width="26" height="56.1" rx="2" fill="#8b83f6"/>
+<rect x="1183.0" y="411.6" width="26" height="58.4" rx="2" fill="#bebebb"/>
+<rect x="1213.0" y="413.8" width="26" height="56.2" rx="2" fill="#1d0fed"/>
+<rect x="1257.0" y="407.8" width="26" height="62.2" rx="2" fill="#8b83f6"/>
+<rect x="1287.0" y="397.7" width="26" height="72.3" rx="2" fill="#bebebb"/>
+<rect x="1317.0" y="412.1" width="26" height="57.9" rx="2" fill="#1d0fed"/>
+<rect x="1361.0" y="328.0" width="26" height="142.0" rx="2" fill="#8b83f6"/>
+<rect x="1391.0" y="318.8" width="26" height="151.2" rx="2" fill="#bebebb"/>
+<rect x="1421.0" y="330.6" width="26" height="139.4" rx="2" fill="#1d0fed"/>
+<rect x="1465.0" y="256.9" width="26" height="213.1" rx="2" fill="#8b83f6"/>
+<rect x="1495.0" y="249.9" width="26" height="220.1" rx="2" fill="#bebebb"/>
+<rect x="1525.0" y="278.4" width="26" height="191.6" rx="2" fill="#1d0fed"/>
+<rect x="1569.0" y="276.1" width="26" height="193.9" rx="2" fill="#8b83f6"/>
+<rect x="1599.0" y="257.6" width="26" height="212.4" rx="2" fill="#bebebb"/>
+<rect x="1629.0" y="283.3" width="26" height="186.7" rx="2" fill="#1d0fed"/>
+<path d="M126.0 370.8 L126.0 357.8 M121.0 357.8 L131.0 357.8 M156.0 356.4 L156.0 340.5 M151.0 340.5 L161.0 340.5 M186.0 380.1 L186.0 373.4 M181.0 373.4 L191.0 373.4 M230.0 385.0 L230.0 373.5 M225.0 373.5 L235.0 373.5 M260.0 359.5 L260.0 347.9 M255.0 347.9 L265.0 347.9 M290.0 391.6 L290.0 382.4 M285.0 382.4 L295.0 382.4 M334.0 314.8 L334.0 297.6 M329.0 297.6 L339.0 297.6 M364.0 288.5 L364.0 271.9 M359.0 271.9 L369.0 271.9 M394.0 329.3 L394.0 314.0 M389.0 314.0 L399.0 314.0 M438.0 290.5 L438.0 271.9 M433.0 271.9 L443.0 271.9 M468.0 250.4 L468.0 243.9 M463.0 243.9 L473.0 243.9 M498.0 287.5 L498.0 274.1 M493.0 274.1 L503.0 274.1 M542.0 441.3 L542.0 439.7 M537.0 439.7 L547.0 439.7 M572.0 440.6 L572.0 437.0 M567.0 437.0 L577.0 437.0 M602.0 442.1 L602.0 438.8 M597.0 438.8 L607.0 438.8 M646.0 421.9 L646.0 420.1 M641.0 420.1 L651.0 420.1 M676.0 423.7 L676.0 419.3 M671.0 419.3 L681.0 419.3 M706.0 423.7 L706.0 419.9 M701.0 419.9 L711.0 419.9 M750.0 442.1 L750.0 438.8 M745.0 438.8 L755.0 438.8 M780.0 440.5 L780.0 435.2 M775.0 435.2 L785.0 435.2 M810.0 441.6 L810.0 437.9 M805.0 437.9 L815.0 437.9 M854.0 333.7 L854.0 325.3 M849.0 325.3 L859.0 325.3 M884.0 314.4 L884.0 304.4 M879.0 304.4 L889.0 304.4 M914.0 338.3 L914.0 328.7 M909.0 328.7 L919.0 328.7 M958.0 40.3 L958.0 27.1 M953.0 27.1 L963.0 27.1 M988.0 42.3 L988.0 26.5 M983.0 26.5 L993.0 26.5 M1018.0 61.1 L1018.0 18.3 M1013.0 18.3 L1023.0 18.3 M1062.0 461.8 L1062.0 461.1 M1057.0 461.1 L1067.0 461.1 M1092.0 461.3 L1092.0 460.9 M1087.0 460.9 L1097.0 460.9 M1122.0 462.5 L1122.0 461.9 M1117.0 461.9 L1127.0 461.9 M1166.0 416.1 L1166.0 412.9 M1161.0 412.9 L1171.0 412.9 M1196.0 414.5 L1196.0 409.7 M1191.0 409.7 L1201.0 409.7 M1226.0 414.9 L1226.0 412.3 M1221.0 412.3 L1231.0 412.3 M1270.0 409.6 L1270.0 404.4 M1265.0 404.4 L1275.0 404.4 M1300.0 399.4 L1300.0 395.1 M1295.0 395.1 L1305.0 395.1 M1330.0 415.0 L1330.0 408.4 M1325.0 408.4 L1335.0 408.4 M1374.0 330.3 L1374.0 325.7 M1369.0 325.7 L1379.0 325.7 M1404.0 321.3 L1404.0 316.8 M1399.0 316.8 L1409.0 316.8 M1434.0 331.6 L1434.0 330.1 M1429.0 330.1 L1439.0 330.1 M1478.0 259.6 L1478.0 243.7 M1473.0 243.7 L1483.0 243.7 M1508.0 254.6 L1508.0 248.1 M1503.0 248.1 L1513.0 248.1 M1538.0 284.6 L1538.0 263.3 M1533.0 263.3 L1543.0 263.3 M1582.0 278.8 L1582.0 270.5 M1577.0 270.5 L1587.0 270.5 M1612.0 264.4 L1612.0 255.7 M1607.0 255.7 L1617.0 255.7 M1642.0 287.3 L1642.0 264.8 M1637.0 264.8 L1647.0 264.8" fill="none" stroke="#171716" stroke-width="1.5"/>
+</svg>
+<p style="position:absolute;left:0px;top:456px;width:88px;text-align:right;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">0 s</p>
+<p style="position:absolute;left:0px;top:303px;width:88px;text-align:right;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">0.5 s</p>
+<p style="position:absolute;left:0px;top:149px;width:88px;text-align:right;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">1 s</p>
+<p style="position:absolute;left:0px;top:-4px;width:88px;text-align:right;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">1.5 s</p>
+<p style="position:absolute;left:104px;top:482px;width:104px;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">Q20</p>
+<p style="position:absolute;left:208px;top:482px;width:104px;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">Q21</p>
+<p style="position:absolute;left:312px;top:482px;width:104px;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">Q22</p>
+<p style="position:absolute;left:416px;top:482px;width:104px;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">Q23</p>
+<p style="position:absolute;left:520px;top:482px;width:104px;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">Q24</p>
+<p style="position:absolute;left:624px;top:482px;width:104px;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">Q25</p>
+<p style="position:absolute;left:728px;top:482px;width:104px;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">Q26</p>
+<p style="position:absolute;left:832px;top:482px;width:104px;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">Q27</p>
+<p style="position:absolute;left:936px;top:482px;width:104px;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">Q28</p>
+<p style="position:absolute;left:1040px;top:482px;width:104px;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">Q29</p>
+<p style="position:absolute;left:1144px;top:482px;width:104px;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">Q30</p>
+<p style="position:absolute;left:1248px;top:482px;width:104px;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">Q31</p>
+<p style="position:absolute;left:1352px;top:482px;width:104px;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">Q32</p>
+<p style="position:absolute;left:1456px;top:482px;width:104px;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">Q33</p>
+<p style="position:absolute;left:1560px;top:482px;width:104px;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;color:#646462">Q34</p>
 </div>
-<div style="display:flex">
-<p style="flex:1;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">Q20</p>
-<p style="flex:1;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">Q21</p>
-<p style="flex:1;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">Q22</p>
-<p style="flex:1;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">Q23</p>
-<p style="flex:1;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">Q24</p>
-<p style="flex:1;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">Q25</p>
-<p style="flex:1;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">Q26</p>
-<p style="flex:1;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">Q27</p>
-<p style="flex:1;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">Q28</p>
-<p style="flex:1;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">Q29</p>
-<p style="flex:1;text-align:center;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#646462">Q30</p>
-</div>
-<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:none;color:#646462">INTERNAL · [BOX] · [DATE] · bench/end_to_end/run.sh, RUNS=10</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-family:'Geist Mono', 'Courier New', monospace;font-weight:400;line-height:1.2;font-size:24px;letter-spacing:0.5px;color:#646462">INTERNAL · VORTEX DATAFUSION BENCH · SPOT INSTANCES · 28 OCT 2026 · t4 Disk Tier Across Boxes</p>
 <div data-build-in="fade 1" style="position:absolute;left:0px;top:0px;width:1920px;height:1080px;background:#171716"></div>
-<p data-build-in="fade 1" style="position:absolute;left:128px;top:340px;width:1664px;font-family:'Acid Grotesk', Inter, sans-serif;font-size:96px;font-weight:500;line-height:1.05;letter-spacing:-0.96px;color:#ffffff">Pro tip: don’t trust Claude’s performance numbers</p>
-<p data-build-in="fade 2" style="position:absolute;left:128px;top:620px;width:1664px;font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#a5a0f8">Pro tip: performance optimization is only scientific when you have a cost model</p>
-<aside>First show the full benchmark figure: small text, a mouthful of information, dense on purpose. Don't explain it. Build 1 blacks it out: pro tip, don't trust Claude's performance numbers. Build 2: performance optimization is only scientific when you have a cost model. The chart is a placeholder until the q20 to q30 run exists: 11 queries, 4 stores, 10 runs each, every run as a dot with min and max marked.</aside>
+<p data-build-in="fade 1" style="position:absolute;left:128px;top:340px;width:1664px;font-family:'Acid Grotesk', Inter, sans-serif;font-weight:500;line-height:1.1;font-size:96px;line-height:1.05;letter-spacing:-0.96px;color:#ffffff">Pro tip: don’t trust Claude’s performance numbers</p>
+<p data-build-in="fade 2" style="position:absolute;left:128px;top:620px;width:1664px;font-family:'Acid Grotesk', Inter, sans-serif;font-weight:500;line-height:1.1;font-size:72px;letter-spacing:-0.72px;color:#a5a0f8">Pro tip: performance optimization is only scientific when you have a cost model</p>
+<aside>First the full benchmark, dense on purpose: ClickBench queries 20 to 34 on an i7ie.12xlarge (24 cores, 4 SSDs as one RAID0), Vortex's own DataFusion bench read three ways: Vortex from the page cache, Vortex from the SSDs with its pages evicted before every run, and t4 from its disk tier on the same SSDs. Each bar is a query's median of the last five of twelve runs back to back; the line runs from its fastest to its slowest. Don't explain it. Build 1 blacks it out: pro tip, don't trust Claude's performance numbers. Build 2: performance optimization is only scientific when you have a cost model. Next: the cost model.</aside>
 </section>
