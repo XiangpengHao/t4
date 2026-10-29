@@ -159,9 +159,30 @@ decision 9).
 
 5. **Control over a Unix socket; value bytes in a shared region.**
    - **The socket** carries frames: a little-endian `u64` length, then
-     the body, as doc/02's. Requests carry an id, many are in flight on
-     one connection, and replies come back in any order. A read is one
-     request with two replies: the answer, then served.
+     the body, as doc/02's (`sharing/frames.rs`). Calls carry a number,
+     many are in flight on one connection, and answers come back in any
+     order. A client's read, named by a number of its own, goes:
+     - `StartRead` (path, e_tag, size, range, intent) is answered
+       `Started`: the file's version, and the read's next step, a run to
+       plan or the GETs to make; or `Uncacheable`.
+     - `TakeGets` (the run's plan, which the owner checks) is answered
+       `Next`: the next run, or the GETs.
+     - `Land` (a GET's next bytes) and `Abandon` (a GET failed) take no
+       answer; `Commit` (a GET all in) is answered `Committed`.
+     - `Finish`, sent with the GETs, is answered once the read's work on
+       the tiers is done and its GETs are committed or abandoned:
+       `Retry`, the next step for the blocks it waited for that no fetch
+       cached, or `Served`, the read's bytes.
+     - `EndRead` (no answer) ends a read the client gave up.
+     - `Failed` answers any call the cache failed: the read goes to the
+       remote.
+
+     The owner runs a client's reads as tasks on the connection's thread,
+     and tells the client each read from disk it makes for one
+     (`DiskRead`), for the client's read policy. Before the region (step
+     4), a fetched block's bytes cross the socket twice: to the owner,
+     which lands them as its own fetches' (`FetchedBlocks`), and back in
+     the read's bytes.
    - **The region**, on Linux, is a memfd the client makes, sizes to
      1 GiB, seals (`F_SEAL_SHRINK`, `F_SEAL_GROW`, `F_SEAL_SEAL`) and
      sends in the handshake; both map it. Pages take memory only once
@@ -324,4 +345,5 @@ pipelined. The owner's own reads cost what they cost now.
 | `src/cache/cache_files.rs` | the lock (decision 1) | yes |
 | `src/cache/object_cache.rs` | the storage half (decision 2) | as the whole cache; the split is step 2 |
 | `src/cache/t4_caching.rs` | the fetch half (decision 2) | as the whole cache's front end |
-| `src/cache/sharing/` | the owner's listener and a client's connection, the frames, the address, the region (decisions 5 to 7) | no |
+| `src/cache/sharing/frames.rs` | the frames, each checked as it arrives (decision 5) | yes |
+| `src/cache/sharing/` | the owner's listener and a client's connection, the address, the region (decisions 5 to 7) | no |
