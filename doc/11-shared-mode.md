@@ -1,8 +1,9 @@
 # 11 — Shared mode: one cache, several processes
 
 Status: design (2026-10-29). Built: build step 1, the lock
-(`CacheFiles::open_file`, `Error::Busy`). The user's call of 29 Oct
-2026, for Spiral (`10-spiral-integration.md`, decision 8).
+(`CacheFiles::open_file`, `Error::Busy`), and step 2.1, the read policy
+in the fetch half. The user's call of 29 Oct 2026, for Spiral
+(`10-spiral-integration.md`, decision 8).
 
 Several processes on one machine read through one cache: Spiral's
 desktop Studio host and `spiral connect`, which Kismet lets share one
@@ -77,20 +78,28 @@ decision 9).
    - **Claim** blocks a GET covers outside the read (a read policy's
      widening): claimed, or held by a tier or another reader already.
    - **Land** a claimed block: a buffer its bytes go into as they
-     arrive. **Commit** it once all in, and the storage half keeps it
-     where the claim said; **abandon** it if the GET failed.
+     arrive. **Commit** it once all in: the storage half keeps it where
+     the claim said, or nowhere, and serves it to the claim's waiters
+     either way (decision 3). **Abandon** it if the GET failed.
    - **Wait** on a block another reader is fetching: the storage half
      serves it into the waiter's output once committed, or tells the
      waiter to fetch it itself once abandoned.
 
-   Today the two halves interleave in four places
-   (`ObjectCache::start_read` and what it returns); each is resolved so:
+   The two halves interleaved in four places (`ObjectCache::start_read`
+   and what it returns). The first is resolved (step 2.1); each of the
+   others is to be resolved so:
 
-   - **The read policy plans in the storage half.** `TierWork::plan`
-     locates the blocks, then calls `ReadPolicy::plan` itself. It moves
-     to the fetch half: the read answer is what the read policy needs
-     (`LocatedRead`: each block's source), and widened blocks are
-     claimed in a second call. A read that widens takes two round trips.
+   - **The read policy planned in the storage half:** `TierWork::plan`
+     located a run's blocks, then called `ReadPolicy::plan` itself.
+     Resolved: `TierWork::locate_next_run` takes a run's hits and returns
+     a `LocatedRun`, each block's source as the read policy needs it
+     (`LocatedRead`); `T4Caching` plans it with its own read policy
+     (`LocatedRun::planned_by`), and `TierWork::take_gets` takes the
+     plan, claiming the blocks it widens to. Over the socket those are
+     the read and claim calls: a read that widens takes two round trips.
+     `take_gets` trusts the plan, which the fetch half checked
+     (`LocatedRead::accepts`); the owner will check a client's where it
+     arrives.
    - **A fetched block lands in its chunk on its first byte**
      (`ObjectCache::landing`): a memory chunk or a disk write buffer,
      allocated then, evicting if the tier is full. In the owner, landing
@@ -114,14 +123,20 @@ decision 9).
 
 3. **Each process fetches with its own inner store; the placement policy
    decides what comes back.** A claim says where the block goes: memory,
-   disk, or nowhere. A block for nowhere is fetched, served to its reader
-   and dropped, never sent to the owner, as now
-   (`on_remote_read`, `03-cache.md` decision 7). Credentials never leave
-   the process that holds them.
+   disk, or nowhere (`on_remote_read`, `03-cache.md` decision 7). Every
+   claimed block is committed, a block for nowhere too: other readers may
+   wait on its claim, and the owner serves it to them and keeps nothing,
+   as a fetch hands a block no tier keeps to its waiters now
+   (`FetchEnd::Passed`). Through the region, a commit names the block's
+   buffer, and the owner copies from it only into waiters' outputs: with
+   no waiter, nothing is copied. Through the socket, the owner's answer
+   to the commit of a block for nowhere asks for its bytes only if a
+   reader waits. Credentials never leave the process that holds them.
 
 4. **A block is fetched once across processes.** The blocks being
    fetched (`InFlight`) are the storage half's, in the owner. The first
-   reader of an absent block claims it; the others wait on the claim. A
+   reader of an absent block claims it, wherever the placement policy
+   puts it; the others wait on the claim, and are served at its commit. A
    client's claims end when its connection closes: the owner abandons
    them, and their waiters fetch for themselves. Kismet fetches a block
    once per process only (`10-spiral-integration.md`).
