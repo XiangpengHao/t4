@@ -15,8 +15,8 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::cache::policy::{
-    Admit, BlockKey, BlockRead, ChunkId, DiskHit, FetchRuns, IoEvent, IoPhase, LocatedRead,
-    MemoryVictim, PlannedGet, ReadPlan, Tier,
+    Admit, BlockKey, BlockRead, ChunkId, ClockPolicy, DiskHit, FetchRuns, IoEvent, IoPhase,
+    LocatedRead, MemoryVictim, PlannedGet, ReadPlan, Tier,
 };
 
 const MIB: u64 = BLOCK_SIZE_U64;

@@ -19,6 +19,10 @@ use super::sharing::{ClientFetch, ClientRead, OwnerConnection, OwnerListener};
 use crate::io::error::Result;
 use crate::io::sync::Arc;
 
+mod current_link;
+
+pub(super) use current_link::{CurrentLink, LinkMaker, PlacementMaker};
+
 pub(super) enum StorageLink {
     /// This process holds the cache files' lock: it runs the storage half,
     /// and serves it to clients if it was built for sharing, as long as the
@@ -33,6 +37,15 @@ pub(super) enum StorageLink {
 }
 
 impl StorageLink {
+    /// Whether this is a client's link whose owner has gone: its calls
+    /// fail, and a new link is due (decision 7).
+    pub(super) fn owner_gone(&self) -> bool {
+        match self {
+            Self::Owner { .. } => false,
+            Self::Client(owner) => owner.owner_gone(),
+        }
+    }
+
     /// The storage half, if this process runs it.
     #[cfg(any(all(test, not(feature = "shuttle")), feature = "__fuzz"))]
     pub(super) fn owned(&self) -> Option<&ObjectCache> {

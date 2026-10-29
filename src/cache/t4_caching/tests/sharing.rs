@@ -51,7 +51,7 @@ fn a_clients_cold_read_is_cached_for_its_owner() {
         owners_meta.e_tag, clients_meta.e_tag,
         "one file, one version"
     );
-    assert!(matches!(client.link(), StorageLink::Client(_)));
+    assert!(matches!(*client.link(), StorageLink::Client(_)));
 
     let read = read_listed(&client, &clients_meta, 10..2 * MIB);
     assert_eq!(read, data.slice(10..));
@@ -255,4 +255,114 @@ fn a_clients_read_waiting_on_another_when_the_owner_goes_reads_from_its_store() 
     drop(open);
     assert_eq!(fetched.recv_timeout(Duration::from_secs(5)).unwrap(), data);
     assert_eq!(fetchings.take_asked(), [bounded(0..MIB), bounded(0..MIB)]);
+}
+
+/// Whether `cache` owns its files now.
+fn owns(cache: &T4Caching) -> bool {
+    matches!(*cache.link(), StorageLink::Owner { .. })
+}
+
+/// Whether `cache` reads through an owner that is still there.
+fn reads_through_an_owner(cache: &T4Caching) -> bool {
+    matches!(&*cache.link(), StorageLink::Client(owner) if !owner.owner_gone())
+}
+
+/// A client whose owner went comes to own the cache at a read: from then
+/// on it caches what it reads, and a cache built for sharing on its files
+/// is its client.
+#[test]
+fn a_client_whose_owner_went_comes_to_own_the_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(MIB, 9);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let (owner, _, _) = process(&path, &data, shared);
+    let (client, clients, clients_meta) = process(&path, &data, shared);
+
+    drop(owner);
+    wait_until(
+        || {
+            assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+            owns(&client)
+        },
+        "a read makes the client the owner",
+    );
+    clients.take_asked();
+    assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+    assert_eq!(clients.take_asked(), [], "the read that took over cached");
+
+    let (next, nexts, nexts_meta) = process(&path, &data, shared);
+    assert!(reads_through_an_owner(&next));
+    assert_eq!(read_listed(&next, &nexts_meta, 0..MIB), data);
+    assert_eq!(
+        nexts.take_asked(),
+        [],
+        "served by the client that took over"
+    );
+}
+
+/// Two clients whose owner went: one comes to own the cache, and the other
+/// reads through it.
+#[test]
+fn two_clients_whose_owner_went_one_owns_and_the_other_reads_through_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(MIB, 10);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let (owner, _, _) = process(&path, &data, shared);
+    let (first, firsts, firsts_meta) = process(&path, &data, shared);
+    let (second, seconds, seconds_meta) = process(&path, &data, shared);
+
+    drop(owner);
+    wait_until(
+        || {
+            assert_eq!(read_listed(&first, &firsts_meta, 0..MIB), data);
+            assert_eq!(read_listed(&second, &seconds_meta, 0..MIB), data);
+            let first_owns = owns(&first) && reads_through_an_owner(&second);
+            first_owns || owns(&second) && reads_through_an_owner(&first)
+        },
+        "one owns the cache, and the other reads through it",
+    );
+    let (owning, owners) = if owns(&first) {
+        (&first, &firsts)
+    } else {
+        (&second, &seconds)
+    };
+    let (reading, readers) = if owns(&first) {
+        (&second, &seconds)
+    } else {
+        (&first, &firsts)
+    };
+    let fresh = Path::from("b");
+    let other = file_bytes(MIB, 11);
+    put(owners.as_ref(), &fresh, &other);
+    put(readers.as_ref(), &fresh, &other);
+    let (owners_meta, readers_meta) = (listed(owners, &fresh), listed(readers, &fresh));
+    readers.take_asked();
+    assert_eq!(read_listed(owning, &owners_meta, 0..MIB), other);
+    assert_eq!(read_listed(reading, &readers_meta, 0..MIB), other);
+    assert_eq!(readers.take_asked(), [], "served by the new owner");
+}
+
+/// A client whose files a cache not built for sharing took once its owner
+/// went: it can neither own them nor reach an owner, and reads from its
+/// store, no read waiting long for an owner.
+#[test]
+fn a_client_that_finds_no_owner_reads_from_its_store_without_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(MIB, 12);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let (owner, _, _) = process(&path, &data, shared);
+    let (client, clients, clients_meta) = process(&path, &data, shared);
+    drop(owner);
+    let (_unshared, _, _) = process(&path, &data, |inner| builder(inner, &dir));
+
+    let started = Instant::now();
+    for _ in 0..3 {
+        assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+    }
+    assert!(started.elapsed() < Duration::from_secs(1), "no read waits");
+    assert!(!owns(&client) && !reads_through_an_owner(&client));
+    assert_eq!(clients.take_asked().len(), 3, "each read from its store");
 }

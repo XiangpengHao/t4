@@ -175,10 +175,10 @@ impl OwnerConnection {
         }
     }
 
-    /// Whether the owner has gone: the connection closed, or broke.
-    #[cfg(all(test, not(feature = "shuttle")))]
+    /// Whether the owner has gone: the connection closed, or broke, and
+    /// every call fails.
     pub(in crate::cache) fn owner_gone(&self) -> bool {
-        self.reader.as_ref().is_none_or(JoinHandle::is_finished)
+        self.calls.owner_gone()
     }
 
     /// The error of a call the owner answered with a frame no call of its
@@ -228,7 +228,7 @@ impl CallTable {
     fn wait(&self) -> Result<(u64, Arc<TaskCompletion<OwnerFrame>>)> {
         let mut calls = self.calls();
         if calls.owner_gone {
-            return Err(Self::owner_gone());
+            return Err(Self::gone_error());
         }
         let number = calls.next;
         calls.next += 1;
@@ -253,6 +253,11 @@ impl CallTable {
         Ok(())
     }
 
+    /// Whether the owner is gone: every call fails.
+    fn owner_gone(&self) -> bool {
+        self.calls().owner_gone
+    }
+
     /// Fails every call waiting, and every call after: the owner is gone.
     fn fail_all(&self) {
         let waiting = {
@@ -261,11 +266,12 @@ impl CallTable {
             std::mem::take(&mut calls.waiting)
         };
         for (_, call) in waiting {
-            call.complete(Err(Self::owner_gone()));
+            call.complete(Err(Self::gone_error()));
         }
     }
 
-    fn owner_gone() -> Error {
+    /// The error of a call made, or waiting, once the owner is gone.
+    fn gone_error() -> Error {
         Error::Io(io::Error::new(
             io::ErrorKind::BrokenPipe,
             "the owner of the shared cache is gone",

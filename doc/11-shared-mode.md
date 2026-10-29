@@ -7,7 +7,8 @@ step 2.4, no read policy held by the storage half; step 2.5,
 `StorageLink`; and of step 3, the frames, the owner listening and
 serving a client's reads, and a client connecting (`with_sharing`) and
 reading through its owner, its reads going to the remote once its owner
-goes, those in flight too.
+goes, those in flight too, until a read makes it the owner or a client
+of the next.
 The user's call of 29 Oct 2026, for Spiral
 (`10-spiral-integration.md`, decision 8).
 
@@ -255,7 +256,15 @@ decision 9).
      The next read tries the lock: the client that wins
      owns the cache, cold until the snapshot exists
      (`10-spiral-integration.md`, decision 7) and from it after; the
-     others connect to it.
+     others connect to it. One read of a client's tries at a time, once,
+     no more than every 10 ms: the lock, then the owner, never the 10 s
+     a build waits for one. The others read from the remote meanwhile,
+     their calls on the dead connection failing at once
+     (`CurrentLink`, `LinkMaker`). A client builds the cache from its own
+     builder's settings, its placement policy made then: a cache owns at
+     most once, as an owner never goes back to being a client, so the
+     policy's maker is called once (it is `Send` now, for a read on
+     another thread may call it).
    - **A client goes:** the owner sees the connection close, abandons
      its claims, drops its landings not committed, and unmaps its region
      once its I/O into it completes.
@@ -387,8 +396,13 @@ pipelined. The owner's own reads cost what they cost now.
    and the read goes to the remote
    (`a_clients_read_whose_owner_goes_mid_get_reads_from_its_store`,
    `a_clients_read_waiting_on_another_when_the_owner_goes_reads_from_its_store`).
-   Next: a client coming to own the cache, and the tests in real
-   processes.
+   A client coming to own the cache, or to read through the client
+   that did (`a_client_whose_owner_went_comes_to_own_the_cache`,
+   `two_clients_whose_owner_went_one_owns_and_the_other_reads_through_it`),
+   and one that finds neither the lock nor an owner reading from the
+   remote with no wait
+   (`a_client_that_finds_no_owner_reads_from_its_store_without_waiting`).
+   Next: the tests in real processes.
 4. **The region,** on Linux: outputs and landings in a sealed memfd; the
    socket when one doesn't fit.
 5. **Polling,** only if measured (Later).
@@ -401,11 +415,12 @@ pipelined. The owner's own reads cost what they cost now.
 | `src/cache/object_cache.rs` | the storage half (decision 2) | yes |
 | `src/cache/t4_caching.rs` | the fetch half (decision 2), and `with_sharing` (decision 1) | yes |
 | `src/cache/storage_link.rs` | how the fetch half reaches the storage half: its own, or its owner's (decision 2) | yes |
+| `src/cache/storage_link/current_link.rs` | the link a cache reads through now, and what makes it: at build, and anew once a client's owner goes (decisions 1, 7) | yes |
 | `src/cache/sharing/frames.rs` | the frames, each checked as it arrives (decision 5) | yes |
 | `src/cache/sharing/frame_socket.rs` | a socket frames cross whole, raising no `SIGPIPE` (decision 5) | yes |
 | `src/cache/sharing/address.rs` | the owner's address, by the first cache file's identity (decision 6) | yes |
 | `src/cache/sharing/handshake.rs` | a client's hello, its descriptor by `SCM_RIGHTS`, and the owner's check (decision 6) | yes |
 | `src/cache/sharing/owner.rs` | the owner's listener and a session for each client (decisions 1, 5) | yes |
 | `src/cache/sharing/client_reads.rs` | a client's reads, each a task of its session's (decision 5) | yes |
-| `src/cache/sharing/client.rs` | a client's connection to its owner, its calls, and its reads through it (decisions 5 to 7) | yes; taking over next |
+| `src/cache/sharing/client.rs` | a client's connection to its owner, its calls, and its reads through it (decisions 5 to 7) | yes |
 | the region | outputs and landings in a sealed memfd (decision 5) | no: step 4 |

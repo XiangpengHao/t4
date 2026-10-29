@@ -34,17 +34,17 @@ use object_store::{
 
 #[cfg(feature = "__fuzz")]
 use super::ChunkId;
-use super::cache_files::{CacheFiles, DiskFile};
+use super::cache_files::DiskFile;
 use super::get_queue::{GetPlace, GetQueue, GetTurn, JoinedParts};
 use super::io_report::IoReport;
-use super::object_cache::ObjectCache;
 #[cfg(feature = "__fuzz")]
 use super::policy::Tier;
 use super::policy::{
-    ClockPolicy, FetchRuns, Io, PlacementPolicy, RaceStragglers, ReadIntent, ReadPolicy, TierSizes,
+    FetchRuns, Io, PlacementPolicy, RaceStragglers, ReadIntent, ReadPolicy, TierSizes,
 };
-use super::sharing::{OwnerConnection, OwnerListener};
-use super::storage_link::{LinkedFetch, LinkedRead, StorageLink};
+#[cfg(all(test, not(feature = "shuttle")))]
+use super::storage_link::StorageLink;
+use super::storage_link::{CurrentLink, LinkMaker, LinkedFetch, LinkedRead, PlacementMaker};
 use super::{BLOCK_SIZE_U64, InsertOrAbort};
 use crate::io::sync::Arc;
 
@@ -83,9 +83,6 @@ impl<'c> BodyLanding<'c> {
     }
 }
 
-/// What makes a policy, once the tiers' chunk counts are known.
-type PlacementMaker = Box<dyn FnOnce(TierSizes) -> Arc<dyn PlacementPolicy>>;
-
 /// A timer: a future done a while from now, the caller's runtime's, as t4
 /// has none of its own.
 type Sleep = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>;
@@ -96,8 +93,9 @@ type Sleep = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>;
 #[derive(Clone)]
 pub struct T4Caching {
     inner: Arc<dyn ObjectStore>,
-    /// The cache: this process's own, or its owner's (`doc/11-shared-mode.md`).
-    link: Arc<StorageLink>,
+    /// The cache: this process's own, or its owner's, until that owner
+    /// goes (`doc/11-shared-mode.md`).
+    link: Arc<CurrentLink>,
     /// What plans each read's GETs, as the cache locates its blocks, and
     /// hears of its I/O: its GETs, and its reads from disk, which the
     /// cache reports to it as they go.
@@ -152,8 +150,6 @@ impl T4CachingBuilder {
     /// files (`Self::with_sharing`) before it fails with `Error::Busy`: an
     /// owner starting or leaving refuses connections a while.
     pub const OWNER_WAIT: Duration = Duration::from_secs(10);
-    /// How long it waits between tries.
-    const OWNER_RETRY: Duration = Duration::from_millis(10);
 
     /// Memory for cached bytes, in whole 1 MiB blocks, one at least.
     /// Required.
@@ -188,10 +184,13 @@ impl T4CachingBuilder {
 
     /// The placement policy, where blocks live, which `build` makes for the
     /// tiers' chunk counts, once it knows them; a CLOCK for each tier
-    /// ([`ClockPolicy`]) unless set.
+    /// ([`ClockPolicy`](super::policy::ClockPolicy)) unless set. A cache
+    /// built for sharing makes it once it owns the cache files, which may
+    /// be later, on another thread: as a client whose owner went
+    /// (`Self::with_sharing`).
     pub fn with_placement_policy<P: PlacementPolicy + 'static>(
         mut self,
-        build: impl FnOnce(TierSizes) -> P + 'static,
+        build: impl FnOnce(TierSizes) -> P + Send + 'static,
     ) -> Self {
         self.placement = Some(Box::new(move |sizes| Arc::new(build(sizes))));
         self
@@ -288,68 +287,23 @@ impl T4CachingBuilder {
             .reads
             .take()
             .unwrap_or_else(|| Arc::new(RaceStragglers::default()));
-        let link = self.link(memory_chunks, queue_depth, &reads)?;
+        let mut maker = LinkMaker::new(
+            memory_chunks,
+            self.disk_files,
+            queue_depth,
+            self.direct_io,
+            self.placement,
+            self.sharing,
+            Arc::clone(&reads),
+        );
+        let link = maker.link_within(Self::OWNER_WAIT)?;
         Ok(T4Caching {
             inner: self.inner,
-            link: Arc::new(link),
+            link: Arc::new(CurrentLink::new(link, maker)),
             reads,
             gets: Arc::new(GetQueue::new(bytes_in_flight, self.merged_up_to)),
             sleep: self.sleep,
             known: Arc::new(KnownFiles::new()),
-        })
-    }
-
-    /// The cache: this process's own, if it takes the cache files' lock;
-    /// else, built for sharing, its owner's, through a connection to it.
-    /// An owner starting or leaving refuses connections a while: the lock
-    /// is tried again, and the owner again, until [`Self::OWNER_WAIT`] is
-    /// up.
-    fn link(
-        &mut self,
-        memory_chunks: NonZeroU32,
-        queue_depth: NonZeroU32,
-        reads: &Arc<dyn ReadPolicy>,
-    ) -> crate::Result<StorageLink> {
-        let deadline = Instant::now() + Self::OWNER_WAIT;
-        loop {
-            match CacheFiles::open(&self.disk_files, queue_depth, self.direct_io) {
-                Ok(disk) => return self.own(memory_chunks, disk),
-                Err(crate::Error::Busy) if self.sharing => {}
-                Err(error) => return Err(error),
-            }
-            let first_file = self.disk_files[0].path();
-            if let Some(owner) = OwnerConnection::connect(first_file, Arc::clone(reads))? {
-                return Ok(StorageLink::Client(owner));
-            }
-            if Instant::now() >= deadline {
-                return Err(crate::Error::Busy);
-            }
-            std::thread::sleep(Self::OWNER_RETRY);
-        }
-    }
-
-    /// The cache of `memory_chunks` chunks of memory and the chunks of
-    /// `disk`, its files' lock taken: this process's own, served to clients
-    /// if built for sharing.
-    fn own(&mut self, memory_chunks: NonZeroU32, disk: CacheFiles) -> crate::Result<StorageLink> {
-        let disk_chunks = NonZeroU32::new(disk.chunks().chunk_count())
-            .expect("a disk file holds a chunk at least");
-        let sizes = TierSizes::new(memory_chunks, disk_chunks);
-        let placement = match self.placement.take() {
-            Some(build) => build(sizes),
-            None => Arc::new(ClockPolicy::new(memory_chunks, disk_chunks)),
-        };
-        let first_file = disk.first_file();
-        let cache = Arc::new(ObjectCache::new(memory_chunks, disk, placement)?);
-        let listener = match first_file {
-            Some(first_file) if self.sharing => {
-                Some(OwnerListener::listen(Arc::clone(&cache), first_file)?)
-            }
-            _ => None,
-        };
-        Ok(StorageLink::Owner {
-            _listener: listener,
-            cache,
         })
     }
 
@@ -461,8 +415,8 @@ impl T4Caching {
     ) -> object_store::Result<Option<Bytes>> {
         let intent = extensions.get::<ReadIntent>().copied();
         let path = location.as_ref().as_bytes();
-        let started = self
-            .link
+        let link = self.link.get();
+        let started = link
             .start_read(path, e_tag, size, range, intent, &*self.reads)
             .await;
         let Ok(Some(mut read)) = started else {
@@ -759,16 +713,16 @@ impl T4Caching {
     #[cfg(feature = "__fuzz")]
     #[doc(hidden)]
     pub fn check_at_rest(&self) -> Result<Vec<(Tier, ChunkId)>, String> {
-        match self.link.owned() {
+        match self.link.current().owned() {
             Some(cache) => cache.check_at_rest(),
             None => Err("a client holds no cache: its owner does".to_owned()),
         }
     }
 
-    /// How the cache is reached: for tests.
+    /// How the cache is reached now: for tests.
     #[cfg(all(test, not(feature = "shuttle")))]
-    pub(super) fn link(&self) -> &StorageLink {
-        &self.link
+    pub(super) fn link(&self) -> Arc<StorageLink> {
+        self.link.current()
     }
 }
 

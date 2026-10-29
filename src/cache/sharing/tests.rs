@@ -60,10 +60,10 @@ fn eventually(done: impl Fn() -> bool) -> bool {
     true
 }
 
-/// The connection of `store`, a client.
-fn connection(store: &T4Caching) -> &super::client::OwnerConnection {
-    match store.link() {
-        StorageLink::Client(connection) => connection,
+/// Whether the owner of `store`, a client, has gone.
+fn owner_gone(store: &T4Caching) -> bool {
+    match &*store.link() {
+        StorageLink::Client(connection) => connection.owner_gone(),
         StorageLink::Owner { .. } => panic!("a client"),
     }
 }
@@ -127,9 +127,9 @@ fn a_cache_built_for_sharing_on_owned_files_is_their_owners_client() {
     block_on(inner.put(&path, data.clone().into())).unwrap();
 
     let owner = shared(&inner, &dir).build().unwrap();
-    assert!(matches!(owner.link(), StorageLink::Owner { .. }));
+    assert!(matches!(*owner.link(), StorageLink::Owner { .. }));
     let client = shared(&inner, &dir).build().unwrap();
-    assert!(!connection(&client).owner_gone());
+    assert!(!owner_gone(&client));
     for store in [&owner, &client] {
         let read = block_on(store.get_range(&path, 10..2 * MIB - 10)).unwrap();
         assert_eq!(read, data.slice(10..2 * MIB as usize - 10));
@@ -154,7 +154,7 @@ fn an_owner_dropped_hands_its_files_to_the_next_cache() {
     let client = shared(&inner, &dir).build().unwrap();
 
     within_5s(move || drop(owner)).expect("the owner's drop ends");
-    assert!(eventually(|| connection(&client).owner_gone()));
+    assert!(eventually(|| owner_gone(&client)));
     let kept = Arc::clone(&dir);
     let (next_owner, next_client) = within_5s(move || {
         let next_owner = shared(&inner, &dir).build().unwrap();
@@ -162,8 +162,8 @@ fn an_owner_dropped_hands_its_files_to_the_next_cache() {
         (next_owner, next_client)
     })
     .expect("the next owner and its client are built");
-    assert!(matches!(next_owner.link(), StorageLink::Owner { .. }));
-    assert!(!connection(&next_client).owner_gone());
+    assert!(matches!(*next_owner.link(), StorageLink::Owner { .. }));
+    assert!(!owner_gone(&next_client));
     drop((next_client, next_owner, kept));
 }
 
