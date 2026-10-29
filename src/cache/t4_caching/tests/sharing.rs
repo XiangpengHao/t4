@@ -183,15 +183,6 @@ fn a_client_whose_owner_went_reads_from_its_store() {
     assert_eq!(clients.take_asked(), [bounded(0..MIB)]);
 }
 
-/// Waits until `done`, a few seconds at most, else fails with `what`.
-fn wait_until(mut done: impl FnMut() -> bool, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !done() {
-        assert!(Instant::now() < deadline, "{what}");
-        std::thread::sleep(Duration::from_millis(1));
-    }
-}
-
 /// `range` of the file `meta` names, read through `cache` on a thread of
 /// its own: its bytes, once read, come through the receiver returned.
 fn read_on_thread(cache: T4Caching, meta: ObjectMeta, range: Range<u64>) -> mpsc::Receiver<Bytes> {

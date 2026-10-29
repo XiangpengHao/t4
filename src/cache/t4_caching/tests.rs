@@ -305,10 +305,19 @@ impl ObjectStore for CountingStore {
 
 /// A builder of a cache of 4 MiB of memory and 8 on disk over `inner`, in
 /// `dir`.
-fn builder(inner: &Arc<CountingStore>, dir: &TempDir) -> T4CachingBuilder {
+fn builder(inner: &Arc<CountingStore>, dir: impl AsRef<std::path::Path>) -> T4CachingBuilder {
     T4Caching::builder(Arc::clone(inner) as Arc<dyn ObjectStore>)
         .with_memory_capacity(4 * MIB)
-        .with_disk_file(dir.path().join("cache"), 8 * MIB)
+        .with_disk_file(dir.as_ref().join("cache"), 8 * MIB)
+}
+
+/// Waits until `done`, a few seconds at most, else fails with `what`.
+fn wait_until(mut done: impl FnMut() -> bool, what: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !done() {
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// A cache over a [`CountingStore`], in a directory of its own that lives
@@ -1518,4 +1527,5 @@ fn an_opened_files_intent_reaches_both_policies() {
     );
 }
 
+mod processes;
 mod sharing;

@@ -4,11 +4,12 @@ Status: design (2026-10-29). Built: build step 1, the lock
 (`CacheFiles::open_file`, `Error::Busy`); step 2.1, the read policy
 in the fetch half; step 2.2, no `Location` held by the fetch half;
 step 2.4, no read policy held by the storage half; step 2.5,
-`StorageLink`; and of step 3, the frames, the owner listening and
-serving a client's reads, and a client connecting (`with_sharing`) and
-reading through its owner, its reads going to the remote once its owner
-goes, those in flight too, until a read makes it the owner or a client
-of the next.
+`StorageLink`; and step 3, the socket: the frames, the owner listening
+and serving a client's reads, and a client connecting (`with_sharing`)
+and reading through its owner, its reads going to the remote once its
+owner goes, those in flight too, until a read makes it the owner or a
+client of the next; tested in one process and in real ones. Next: the
+region (step 4).
 The user's call of 29 Oct 2026, for Spiral
 (`10-spiral-integration.md`, decision 8).
 
@@ -413,7 +414,18 @@ pipelined. The owner's own reads cost what they cost now.
    `an_answer_to_a_call_given_up_is_dropped`); a client's GET that fails
    abandons its fetch, so its read ends
    (`a_clients_failed_get_abandons_its_fetch`).
-   Next: the tests in real processes.
+   In real processes, the test binary run as its own children
+   (`t4_caching/tests/processes.rs`), each telling the others what it
+   did through marker files: the owner killed mid-read, the client's
+   read returning the right bytes and a later read making it the owner,
+   as the kernel released the dead owner's lock
+   (`an_owner_killed_mid_read_leaves_its_client_the_cache`); a client
+   killed holding a claim, the owner's read waiting on it fetching the
+   block itself (`a_client_killed_holding_a_claim_hands_it_to_its_waiter`);
+   eight processes starting at once on fresh files, one owning, each
+   reading right, and their stores together sending the file once
+   (`eight_processes_starting_at_once_fetch_each_block_once`). They take
+   about 0.3 s. Built 29 Oct 2026.
 4. **The region,** on Linux: outputs and landings in a sealed memfd; the
    socket when one doesn't fit.
 5. **Polling,** only if measured (Later).
@@ -434,4 +446,5 @@ pipelined. The owner's own reads cost what they cost now.
 | `src/cache/sharing/owner.rs` | the owner's listener and a session for each client (decisions 1, 5) | yes |
 | `src/cache/sharing/client_reads.rs` | a client's reads, each a task of its session's (decision 5) | yes |
 | `src/cache/sharing/client.rs` | a client's connection to its owner, its calls, and its reads through it (decisions 5 to 7) | yes |
+| `src/cache/t4_caching/tests/sharing.rs`, `processes.rs` | an owner and its clients in one process, and in real ones (build step 3) | yes |
 | the region | outputs and landings in a sealed memfd (decision 5) | no: step 4 |
