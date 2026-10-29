@@ -54,7 +54,6 @@ fn cache(memory_chunks: u32, disk_chunks: u32) -> (Arc<ObjectCache>, Arc<TestPol
         memory,
         disk,
         Arc::clone(&policy) as Arc<dyn PlacementPolicy>,
-        Arc::new(FetchRuns::default()),
     );
     (Arc::new(cache.unwrap()), policy)
 }
@@ -69,16 +68,16 @@ fn contents(path: &[u8]) -> Vec<u8> {
     vec![path[0]; FILE_SIZE as usize]
 }
 
-/// Reads the file whole, and checks the read got the file's own bytes from
-/// a tier, or nothing and a fetch of the file; then, if `fill`, caches what
-/// it fetched.
+/// Reads the file whole, its GETs planned by the default read policy, and
+/// checks the read got the file's own bytes from a tier, or nothing and a
+/// fetch of the file; then, if `fill`, caches what it fetched.
 fn read(cache: &ObjectCache, file: &CacheableFile<'static>, fill: bool) {
     read_fetching(cache, file, fill);
 }
 
 /// [`read`], and whether the read fetched the file.
 fn read_fetching(cache: &ObjectCache, file: &CacheableFile<'static>, fill: bool) -> bool {
-    let mut read = block_on(cache.read(file, 0..FILE_SIZE, None)).unwrap();
+    let mut read = block_on(cache.read(file, 0..FILE_SIZE, None, &FetchRuns::default())).unwrap();
     if read.fetches().is_empty() {
         assert_eq!(
             read.into_bytes().unwrap(),
@@ -404,7 +403,8 @@ fn a_dropped_eviction_gives_its_victim_back() {
         // `b`'s fill picks `a` and writes it to disk. One poll submits the
         // write; dropping the fill then is a caller giving up on it, unless
         // that poll finished it.
-        let mut remote = block_on(cache.read(&b, 0..FILE_SIZE, None)).unwrap();
+        let mut remote =
+            block_on(cache.read(&b, 0..FILE_SIZE, None, &FetchRuns::default())).unwrap();
         let _ = cache
             .take_fetched(&mut remote, 0..FILE_SIZE, &contents(b.path))
             .now_or_never();

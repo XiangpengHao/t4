@@ -61,7 +61,6 @@ pub(super) struct ObjectCache {
     memory: Arc<MemoryPool>,
     disk: CacheFiles,
     placement: Arc<dyn PlacementPolicy>,
-    reads: Arc<dyn ReadPolicy>,
     /// The blocks being fetched, shared with the claims on them.
     in_flight: Arc<InFlight>,
 }
@@ -78,13 +77,11 @@ impl ObjectCache {
 
     /// A cache of `memory_chunks` chunks of memory and the chunks of
     /// `disk`, all free, holding nothing: its blocks placed by `placement`,
-    /// which is built for both counts, and its reads served as `reads`
-    /// plans them.
+    /// which is built for both counts.
     pub(super) fn new(
         memory_chunks: NonZeroU32,
         disk: CacheFiles,
         placement: Arc<dyn PlacementPolicy>,
-        reads: Arc<dyn ReadPolicy>,
     ) -> Result<Self> {
         Ok(Self {
             paths: PathTable::new(),
@@ -92,14 +89,8 @@ impl ObjectCache {
             memory: Arc::new(MemoryPool::new(memory_chunks)?),
             disk,
             placement,
-            reads,
             in_flight: Arc::default(),
         })
-    }
-
-    /// The policy the cache's reads are served by, which hears their I/O.
-    pub(super) fn read_policy(&self) -> &dyn ReadPolicy {
-        &*self.reads
     }
 
     /// The file at `path`, the version of it with `e_tag` and `size`, as
@@ -122,7 +113,7 @@ impl ObjectCache {
     /// copied into the output, the pages of blocks on disk submitted to be
     /// read straight into it, the blocks another read is fetching to be
     /// waited for, and the rest claimed for the read's GETs, which the
-    /// caller plans with its read policy, the work takes
+    /// caller plans with its read policy, `reads`, the work takes
     /// ([`TierWork::take_gets`]), and the caller makes and the read takes
     /// ([`Self::receive`]). The caller awaits the work beside its GETs: a
     /// read's time on the network overlaps its time on the drives, the
@@ -130,8 +121,8 @@ impl ObjectCache {
     ///
     /// The placement policy hears of every block: a hit in either tier,
     /// where a disk hit goes, a remote read and where its block goes once
-    /// fetched, and where each block a GET fetches past the read goes. The
-    /// read policy hears of every read from disk.
+    /// fetched, and where each block a GET fetches past the read goes.
+    /// `reads` hears of every read from disk the work makes, as it goes.
     ///
     /// # Errors
     ///
@@ -141,10 +132,18 @@ impl ObjectCache {
         file: &CacheableFile<'c>,
         range: Range<u64>,
         intent: Option<ReadIntent>,
+        reads: &'c dyn ReadPolicy,
     ) -> Result<(PartialRead, TierWork<'c>)> {
         let plan = self.blocks.plan_read(file.version, range.clone());
         let read = PartialRead::new(file.version, plan.bytes())?;
-        let work = TierWork::new(self, *file, range, intent, [plan.into_blocks()].into());
+        let work = TierWork::new(
+            self,
+            reads,
+            *file,
+            range,
+            intent,
+            [plan.into_blocks()].into(),
+        );
         Ok((read, work))
     }
 
@@ -153,13 +152,15 @@ impl ObjectCache {
     /// ([`TierWork::finish`]). As [`Self::start_read`]'s work locates a
     /// read, each run of adjacent ones as a read of its own: some may be
     /// cached by now, or in flight again, and the read fetches the rest,
-    /// its GETs the caller's to plan and make.
+    /// its GETs the caller's to plan and make, its reads from disk heard by
+    /// `reads`.
     pub(super) fn retry<'c>(
         &'c self,
         file: &CacheableFile<'c>,
         range: Range<u64>,
         intent: Option<ReadIntent>,
         blocks: BlocksToFetch,
+        reads: &'c dyn ReadPolicy,
     ) -> TierWork<'c> {
         let relocated: Vec<PlannedBlock> = blocks
             .0
@@ -170,11 +171,11 @@ impl ObjectCache {
             .chunk_by(|a, b| a.key().index() + 1 == b.key().index())
             .map(<[PlannedBlock]>::to_vec)
             .collect();
-        TierWork::new(self, *file, range, intent, runs)
+        TierWork::new(self, reads, *file, range, intent, runs)
     }
 
-    /// [`Self::start_read`] with its GETs planned by the cache's own read
-    /// policy, as a caller plans them: for tests.
+    /// [`Self::start_read`] with its GETs planned by `reads`, as a caller
+    /// plans them: for tests.
     ///
     /// # Errors
     ///
@@ -186,14 +187,14 @@ impl ObjectCache {
         file: &CacheableFile<'c>,
         range: Range<u64>,
         intent: Option<ReadIntent>,
+        reads: &'c dyn ReadPolicy,
     ) -> Result<(PartialRead, TierWork<'c>)> {
-        let (mut read, mut work) = self.start_read(file, range, intent)?;
-        self.plan_gets(&mut read, &mut work, file, intent)?;
+        let (mut read, mut work) = self.start_read(file, range, intent, reads)?;
+        Self::plan_gets(&mut read, &mut work, file, intent, reads)?;
         Ok((read, work))
     }
 
-    /// [`Self::retry`] with its GETs planned by the cache's own read policy:
-    /// for tests.
+    /// [`Self::retry`] with its GETs planned by `reads`: for tests.
     ///
     /// # Errors
     ///
@@ -206,25 +207,25 @@ impl ObjectCache {
         range: Range<u64>,
         intent: Option<ReadIntent>,
         blocks: BlocksToFetch,
+        reads: &'c dyn ReadPolicy,
     ) -> Result<TierWork<'c>> {
-        let mut work = self.retry(file, range, intent, blocks);
-        self.plan_gets(read, &mut work, file, intent)?;
+        let mut work = self.retry(file, range, intent, blocks, reads);
+        Self::plan_gets(read, &mut work, file, intent, reads)?;
         Ok(work)
     }
 
-    /// Plans `read`'s GETs with the cache's own read policy, run by run as
-    /// `work` locates them, as `T4Caching` plans them with its own: for
-    /// tests.
+    /// Plans `read`'s GETs with `reads`, run by run as `work` locates them,
+    /// as `T4Caching` plans them with its own: for tests.
     #[cfg(test)]
     fn plan_gets(
-        &self,
         read: &mut PartialRead,
         work: &mut TierWork<'_>,
         file: &CacheableFile<'_>,
         intent: Option<ReadIntent>,
+        reads: &dyn ReadPolicy,
     ) -> Result<()> {
         while let Some(run) = work.locate_next_run(read)? {
-            let gets = run.planned_by(&*self.reads, file, intent);
+            let gets = run.planned_by(reads, file, intent);
             work.take_gets(read, run, &gets);
         }
         Ok(())
@@ -241,14 +242,15 @@ impl ObjectCache {
         file: &CacheableFile<'_>,
         range: Range<u64>,
         intent: Option<ReadIntent>,
+        reads: &dyn ReadPolicy,
     ) -> Result<PartialRead> {
-        let (mut read, mut work) = self.start_planned_read(file, range.clone(), intent)?;
+        let (mut read, mut work) = self.start_planned_read(file, range.clone(), intent, reads)?;
         loop {
             let retry = work.finish(&mut read).await?;
             if retry.is_empty() {
                 return Ok(read);
             }
-            work = self.retry_planned(&mut read, file, range.clone(), intent, retry)?;
+            work = self.retry_planned(&mut read, file, range.clone(), intent, retry, reads)?;
         }
     }
 
@@ -329,23 +331,6 @@ impl ObjectCache {
                 }
             },
         }
-    }
-
-    /// Reports a read of `block`'s pages from the disk chunk `on_disk`
-    /// holds, started.
-    fn report_disk_read(
-        &self,
-        on_disk: &DiskChunkReader<'_>,
-        block: &PlannedBlock,
-    ) -> IoReport<'_> {
-        let pages = block.window().pages();
-        IoReport::start(
-            &*self.reads,
-            Io::DiskRead {
-                drive: on_disk.position().file(),
-                bytes: pages.end - pages.start,
-            },
-        )
     }
 
     /// Reads the pages of `block` that `read` needs from the disk chunk
@@ -518,9 +503,10 @@ impl ObjectCache {
     }
 
     /// Moves `block`, in disk chunk `on_disk`, to a memory chunk: reads its
-    /// pages into one, then points its entry at it, and closes the disk
-    /// chunk, which goes free when its last reader leaves. Gives the disk
-    /// chunk back if memory has no room even after evicting.
+    /// pages into one, a read `reads` hears of, then points its entry at
+    /// it, and closes the disk chunk, which goes free when its last reader
+    /// leaves. Gives the disk chunk back if memory has no room even after
+    /// evicting.
     ///
     /// The read fills a lent memory chunk, which no reader sees until it is
     /// done. If the block left disk another way meanwhile, the memory copy
@@ -529,6 +515,7 @@ impl ObjectCache {
         &'c self,
         on_disk: DiskChunkReader<'c>,
         block: &PlannedBlock,
+        reads: &dyn ReadPolicy,
     ) -> Result<Promotion<'c>> {
         let Some(writer) = self.allocate_memory().await? else {
             return Ok(Promotion::NoRoom(on_disk));
@@ -540,7 +527,7 @@ impl ObjectCache {
             .expect("a block is a chunk's bytes or fewer, one or more");
         let (buffer, lent) = writer.lend_for_read(&self.memory, pages);
         let report = IoReport::start(
-            &*self.reads,
+            reads,
             Io::DiskRead {
                 drive: on_disk.position().file(),
                 bytes: pages.get(),
@@ -866,6 +853,9 @@ enum MoveToDisk {
 /// caller awaits it beside the read's GETs.
 pub(super) struct TierWork<'c> {
     cache: &'c ObjectCache,
+    /// The caller's read policy, which hears of the read's reads from disk
+    /// as they go.
+    reads: &'c dyn ReadPolicy,
     /// The read's file, the bytes it asked for and what for: what the
     /// placement policy hears of each block.
     file: CacheableFile<'c>,
@@ -886,9 +876,10 @@ pub(super) struct TierWork<'c> {
 
 impl<'c> TierWork<'c> {
     /// No work yet, for a read of `range` of `file` whose blocks are the
-    /// runs `unlocated`.
+    /// runs `unlocated`, its reads from disk heard by `reads`.
     fn new(
         cache: &'c ObjectCache,
+        reads: &'c dyn ReadPolicy,
         file: CacheableFile<'c>,
         range: Range<u64>,
         intent: Option<ReadIntent>,
@@ -896,6 +887,7 @@ impl<'c> TierWork<'c> {
     ) -> Self {
         Self {
             cache,
+            reads,
             file,
             range,
             intent,
@@ -1030,7 +1022,7 @@ impl<'c> TierWork<'c> {
         let context = self.context(block.key(), true);
         match self.cache.placement.on_disk_hit(reader.chunk(), &context) {
             DiskHit::Stay => {
-                let report = self.cache.report_disk_read(&reader, block);
+                let report = self.report_disk_read(&reader, block);
                 let pages = self.cache.read_pages(read, &reader, block)?;
                 self.page_reads
                     .push((reader, report.awaiting(pages).boxed()));
@@ -1038,6 +1030,23 @@ impl<'c> TierWork<'c> {
             DiskHit::Promote => self.promotions.push((reader, *block)),
         }
         Ok(())
+    }
+
+    /// Reports a read of `block`'s pages from the disk chunk `on_disk`
+    /// holds, started, to the read's policy.
+    fn report_disk_read(
+        &self,
+        on_disk: &DiskChunkReader<'_>,
+        block: &PlannedBlock,
+    ) -> IoReport<'c> {
+        let pages = block.window().pages();
+        IoReport::start(
+            self.reads,
+            Io::DiskRead {
+                drive: on_disk.position().file(),
+                bytes: pages.end - pages.start,
+            },
+        )
     }
 
     /// What the placement policy hears of the read's block `key`: whether
@@ -1094,19 +1103,17 @@ impl<'c> TierWork<'c> {
             }
         }
         Self::page_reads_done(std::mem::take(&mut self.page_reads)).await?;
-        let Self {
-            cache, promotions, ..
-        } = self;
-        let promoted =
-            join_all(promotions.into_iter().map(|(on_disk, block)| async move {
-                (cache.promote(on_disk, &block).await, block)
-            }))
-            .await;
+        let promotions = std::mem::take(&mut self.promotions);
+        let (cache, reads) = (self.cache, self.reads);
+        let promoted = join_all(promotions.into_iter().map(|(on_disk, block)| async move {
+            (cache.promote(on_disk, &block, reads).await, block)
+        }))
+        .await;
         for (promotion, block) in promoted {
             match promotion? {
                 Promotion::InMemory(reader) => read.place_from_chunk(&block, reader.bytes()),
                 Promotion::NoRoom(on_disk) => {
-                    let report = cache.report_disk_read(&on_disk, &block);
+                    let report = self.report_disk_read(&on_disk, &block);
                     let pages = cache.read_pages(read, &on_disk, &block)?;
                     report.awaiting(pages).await?;
                 }

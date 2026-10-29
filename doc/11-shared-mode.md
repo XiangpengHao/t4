@@ -2,7 +2,8 @@
 
 Status: design (2026-10-29). Built: build step 1, the lock
 (`CacheFiles::open_file`, `Error::Busy`); step 2.1, the read policy
-in the fetch half; and step 2.2, no `Location` held by the fetch half.
+in the fetch half; step 2.2, no `Location` held by the fetch half;
+and step 2.4, no read policy held by the storage half.
 The user's call of 29 Oct 2026, for Spiral
 (`10-spiral-integration.md`, decision 8).
 
@@ -87,8 +88,7 @@ decision 9).
      waiter to fetch it itself once abandoned.
 
    The two halves interleaved in four places (`ObjectCache::start_read`
-   and what it returns). The first three are resolved (steps 2.1 to
-   2.3); the last is to be resolved so:
+   and what it returns). All four are resolved (steps 2.1 to 2.4):
 
    - **The read policy planned in the storage half:** `TierWork::plan`
      located a run's blocks, then called `ReadPolicy::plan` itself.
@@ -124,10 +124,13 @@ decision 9).
      `BlocksToFetch`, which the fetch half can only ask whether any is
      left and hand back; the cache finds each block again, as it did.
      The fetch half names no `Location`, `PlannedBlock` or `BlockFetch`.
-   - **The storage half reports disk reads to the read policy**
-     (`report_disk_read`, `promote`). The read policy is the fetch
-     half's, so each disk read made for a read comes back with the read's
-     answer, and the fetch half reports it.
+   - **The storage half reported disk reads to the read policy**
+     (`report_disk_read`, `promote`), which it held. Resolved: each read
+     carries its caller's read policy (`ObjectCache::start_read` and
+     `ObjectCache::retry` take it, `TierWork` keeps it), which hears the
+     read's disk reads as they happen; the storage half holds none. In
+     the owner serving a client, that is a recorder whose events go back
+     with the read's answer (step 3).
 
    The placement policy stays wholly in the storage half: every hook runs
    in the owner, `on_remote_read` at claim time, as now. A read's intent
@@ -298,7 +301,9 @@ pipelined. The owner's own reads cost what they cost now.
       not as `PlannedBlock`s;
    3. landing and commit behind the storage half's interface. Already so
       (29 Oct 2026): `FetchedBlocks`, no change needed;
-   4. disk reads reported back with a read's answer;
+   4. disk reads reported to the read's caller. Built 29 Oct 2026:
+      `ObjectCache::start_read` and `retry` take the caller's read policy,
+      which `TierWork` reports the read's disk reads to;
    5. the one type the fetch half reaches the storage half through.
 3. **The socket, bytes in its frames,** on Linux and macOS: the owner
    listens, a client connects on `Busy`, the handshake, failures to the

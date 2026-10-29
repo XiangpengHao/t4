@@ -14,15 +14,6 @@ const MIB: u64 = BLOCK_SIZE_U64;
 /// run by a [`TestPolicy`], in a directory of its own that lives as long as
 /// the cache.
 fn cache(memory_chunks: u32, disk_chunks: u32) -> (TempDir, ObjectCache, Arc<TestPolicy>) {
-    cache_reading_with(memory_chunks, disk_chunks, Arc::new(FetchRuns::default()))
-}
-
-/// [`cache`], its reads planned by `reads`.
-fn cache_reading_with(
-    memory_chunks: u32,
-    disk_chunks: u32,
-    reads: Arc<dyn ReadPolicy>,
-) -> (TempDir, ObjectCache, Arc<TestPolicy>) {
     let dir = tempfile::tempdir().unwrap();
     let file = DiskFile::new(dir.path().join("cache"), u64::from(disk_chunks) * MIB);
     let disk = CacheFiles::open(&[file], NonZeroU32::new(8).unwrap(), true).unwrap();
@@ -32,7 +23,6 @@ fn cache_reading_with(
         memory,
         disk,
         Arc::clone(&policy) as Arc<dyn PlacementPolicy>,
-        reads,
     )
     .unwrap();
     (dir, cache, policy)
@@ -43,16 +33,16 @@ fn file_bytes(size: u64) -> Vec<u8> {
     (0..size).map(|offset| (offset % 251) as u8).collect()
 }
 
-/// Reads `range`, then fetches what the read names from `data` and caches
-/// it, as the front end will; returns what the caller got, and the fetches
-/// the read named.
+/// Reads `range`, its GETs planned by the default read policy, then fetches
+/// what the read names from `data` and caches it, as the front end will;
+/// returns what the caller got, and the fetches the read named.
 fn read_through(
     cache: &ObjectCache,
     file: &CacheableFile<'_>,
     data: &[u8],
     range: Range<u64>,
 ) -> (Vec<u8>, Vec<Range<u64>>) {
-    let mut read = block_on(cache.read(file, range, None)).unwrap();
+    let mut read = block_on(cache.read(file, range, None, &FetchRuns::default())).unwrap();
     let fetches = read.fetches().to_vec();
     for fetch in &fetches {
         let fetched = &data[fetch.start as usize..fetch.end as usize];
@@ -96,7 +86,7 @@ fn the_default_policy_streams_blocks_through_both_tiers() {
     let disk = CacheFiles::open(&files, NonZeroU32::new(8).unwrap(), true).unwrap();
     let (memory, disk_chunks) = (NonZeroU32::new(2).unwrap(), NonZeroU32::new(3).unwrap());
     let policy = Arc::new(crate::cache::policy::ClockPolicy::new(memory, disk_chunks));
-    let cache = ObjectCache::new(memory, disk, policy, Arc::new(FetchRuns::default())).unwrap();
+    let cache = ObjectCache::new(memory, disk, policy).unwrap();
     let size = 10 * MIB;
     let data = file_bytes(size);
     let file = cache.resolve(b"a", Some("v1"), size).unwrap();
@@ -151,7 +141,8 @@ fn a_read_fetches_only_the_blocks_memory_lacks() {
     read_through(&cache, &file, &data, MIB..2 * MIB);
     read_through(&cache, &file, &data, 3 * MIB..4 * MIB);
 
-    let mut read = block_on(cache.read(&file, 10..4 * MIB - 10, None)).unwrap();
+    let mut read =
+        block_on(cache.read(&file, 10..4 * MIB - 10, None, &FetchRuns::default())).unwrap();
     assert_eq!(read.bytes(), 10..4 * MIB - 10);
     assert_eq!(read.fetches(), [0..MIB, 2 * MIB..3 * MIB]);
     for fetch in read.fetches().to_vec() {
@@ -534,7 +525,8 @@ fn fetched_bytes_land_in_pieces_of_any_size() {
     let size = 2 * MIB + MIB / 2;
     let data = file_bytes(size);
     let file = cache.resolve(b"a", Some("v1"), size).unwrap();
-    let mut read = block_on(cache.read(&file, 100..size - 100, None)).unwrap();
+    let mut read =
+        block_on(cache.read(&file, 100..size - 100, None, &FetchRuns::default())).unwrap();
     assert_eq!(read.fetches(), [0..size]);
     let mut blocks = cache.receive(&mut read, 0..size).unwrap();
     let mut at: usize = 0;
@@ -554,7 +546,7 @@ fn fetched_bytes_land_in_pieces_of_any_size() {
 fn a_fetch_bringing_more_than_it_holds_is_refused() {
     let (_dir, cache, _policy) = cache(1, 1);
     let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
-    let mut read = block_on(cache.read(&file, 0..MIB, None)).unwrap();
+    let mut read = block_on(cache.read(&file, 0..MIB, None, &FetchRuns::default())).unwrap();
     let mut blocks = cache.receive(&mut read, 0..MIB).unwrap();
     assert!(block_on(blocks.land(&file_bytes(MIB + 1))).is_err());
 }
@@ -567,13 +559,13 @@ fn a_fetch_cut_short_caches_nothing() {
     let data = file_bytes(MIB);
     let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
 
-    let mut read = block_on(cache.read(&file, 0..MIB, None)).unwrap();
+    let mut read = block_on(cache.read(&file, 0..MIB, None, &FetchRuns::default())).unwrap();
     let mut blocks = cache.receive(&mut read, 0..MIB).unwrap();
     block_on(blocks.land(&data[..MIB as usize / 2])).unwrap();
     assert!(block_on(blocks.finish()).is_err());
     assert!(location(&cache, &file, 0).is_none());
 
-    let mut read = block_on(cache.read(&file, 0..MIB, None)).unwrap();
+    let mut read = block_on(cache.read(&file, 0..MIB, None, &FetchRuns::default())).unwrap();
     let mut blocks = cache.receive(&mut read, 0..MIB).unwrap();
     block_on(blocks.land(&data[..MIB as usize / 2])).unwrap();
     drop(blocks);
@@ -587,11 +579,14 @@ fn a_fetch_cut_short_caches_nothing() {
 #[test]
 fn a_read_waits_for_a_block_another_is_fetching() {
     let (_dir, cache, _policy) = cache(2, 1);
+    let reads = FetchRuns::default();
     let data = file_bytes(MIB);
     let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
-    let mut fetching = block_on(cache.read(&file, 0..MIB, None)).unwrap();
+    let mut fetching = block_on(cache.read(&file, 0..MIB, None, &reads)).unwrap();
     assert_eq!(fetching.fetches(), [0..MIB]);
-    let (mut waiting, work) = cache.start_planned_read(&file, 10..20, None).unwrap();
+    let (mut waiting, work) = cache
+        .start_planned_read(&file, 10..20, None, &reads)
+        .unwrap();
     assert_eq!(waiting.fetches(), [], "no second fetch");
 
     block_on(cache.take_fetched(&mut fetching, 0..MIB, &data)).unwrap();
@@ -607,16 +602,19 @@ fn a_read_waits_for_a_block_another_is_fetching() {
 #[test]
 fn a_read_waiting_for_a_fetch_given_up_on_fetches_the_block_itself() {
     let (_dir, cache, _policy) = cache(2, 1);
+    let reads = FetchRuns::default();
     let data = file_bytes(MIB);
     let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
-    let given_up = block_on(cache.read(&file, 0..MIB, None)).unwrap();
-    let (mut waiting, work) = cache.start_planned_read(&file, 0..MIB, None).unwrap();
+    let given_up = block_on(cache.read(&file, 0..MIB, None, &reads)).unwrap();
+    let (mut waiting, work) = cache
+        .start_planned_read(&file, 0..MIB, None, &reads)
+        .unwrap();
     drop(given_up);
 
     let retry = block_on(work.finish(&mut waiting)).unwrap();
     assert_eq!(retry.len(), 1, "the fetch ended without the block");
     let work = cache
-        .retry_planned(&mut waiting, &file, 0..MIB, None, retry)
+        .retry_planned(&mut waiting, &file, 0..MIB, None, retry, &reads)
         .unwrap();
     assert_eq!(waiting.fetches(), [0..MIB]);
     block_on(cache.take_fetched(&mut waiting, 0..MIB, &data)).unwrap();
@@ -654,11 +652,11 @@ impl ReadPolicy for RacesInFlight {
 /// reads waiting, and the other's copy goes back.
 #[test]
 fn a_racing_read_joins_a_fetch_in_flight() {
-    let (_dir, cache, _policy) = cache_reading_with(2, 1, Arc::new(RacesInFlight));
+    let (_dir, cache, _policy) = cache(2, 1);
     let data = file_bytes(MIB);
     let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
-    let mut first = block_on(cache.read(&file, 0..MIB, None)).unwrap();
-    let mut racing = block_on(cache.read(&file, 0..MIB, None)).unwrap();
+    let mut first = block_on(cache.read(&file, 0..MIB, None, &RacesInFlight)).unwrap();
+    let mut racing = block_on(cache.read(&file, 0..MIB, None, &RacesInFlight)).unwrap();
     assert_eq!(racing.fetches(), [0..MIB], "raced, not waited for");
     let fetch = cache.in_flight.get(key(&file, 0)).unwrap();
     assert_eq!(fetch.requests(), 3, "one in flight, two racing it");

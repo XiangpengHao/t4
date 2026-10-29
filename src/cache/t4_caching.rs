@@ -95,7 +95,9 @@ type Sleep = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>;
 pub struct T4Caching {
     inner: Arc<dyn ObjectStore>,
     cache: Arc<ObjectCache>,
-    /// What plans each read's GETs, as the cache locates its blocks.
+    /// What plans each read's GETs, as the cache locates its blocks, and
+    /// hears of its I/O: its GETs, and its reads from disk, which the
+    /// cache reports to it as they go.
     reads: Arc<dyn ReadPolicy>,
     /// The GETs to the inner store in flight, and those waiting for room.
     gets: Arc<GetQueue>,
@@ -266,12 +268,7 @@ impl T4CachingBuilder {
         )?;
         Ok(T4Caching {
             inner: self.inner,
-            cache: Arc::new(ObjectCache::new(
-                memory_chunks,
-                disk,
-                placement,
-                Arc::clone(&reads),
-            )?),
+            cache: Arc::new(ObjectCache::new(memory_chunks, disk, placement)?),
             reads,
             gets: Arc::new(GetQueue::new(bytes_in_flight, self.merged_up_to)),
             sleep: self.sleep,
@@ -381,7 +378,9 @@ impl T4Caching {
         extensions: &Extensions,
     ) -> object_store::Result<Option<Bytes>> {
         let intent = extensions.get::<ReadIntent>().copied();
-        let Ok((mut read, mut work)) = self.cache.start_read(file, range.clone(), intent) else {
+        let reads = &*self.reads;
+        let Ok((mut read, mut work)) = self.cache.start_read(file, range.clone(), intent, reads)
+        else {
             return Ok(None);
         };
         loop {
@@ -424,7 +423,7 @@ impl T4Caching {
             }
             // Blocks the read waited for that no fetch cached: it fetches
             // them itself, or waits again for a read that fetches them now.
-            work = self.cache.retry(file, range.clone(), intent, retry);
+            work = self.cache.retry(file, range.clone(), intent, retry, reads);
         }
     }
 
@@ -602,7 +601,7 @@ impl T4Caching {
                 bytes: bytes.clone(),
                 racer,
             };
-            let mut report = IoReport::start(self.cache.read_policy(), get);
+            let mut report = IoReport::start(&*self.reads, get);
             let get = self.inner.get_opts(location, options.clone());
             async move {
                 match get.await {
@@ -642,7 +641,7 @@ impl T4Caching {
             bytes: rest.clone(),
             racer,
         };
-        let mut report = IoReport::start_at(self.cache.read_policy(), get, sent);
+        let mut report = IoReport::start_at(&*self.reads, get, sent);
         let options = GetOptions {
             range: Some(GetRange::Bounded(rest.clone())),
             ..options.clone()
