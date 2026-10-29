@@ -4,9 +4,9 @@ Status: design (2026-10-29). Built: build step 1, the lock
 (`CacheFiles::open_file`, `Error::Busy`); step 2.1, the read policy
 in the fetch half; step 2.2, no `Location` held by the fetch half;
 step 2.4, no read policy held by the storage half; step 2.5,
-`StorageLink`; and of step 3, the frames, and the owner listening and
-a client connecting (`with_sharing`), whose reads go to the remote
-until the socket serves them.
+`StorageLink`; and of step 3, the frames, the owner listening and
+serving a client's reads, and a client connecting (`with_sharing`),
+whose reads go to the remote until it calls its owner.
 The user's call of 29 Oct 2026, for Spiral
 (`10-spiral-integration.md`, decision 8).
 
@@ -176,13 +176,21 @@ decision 9).
        the tiers is done and its GETs are committed or abandoned:
        `Retry`, the next step for the blocks it waited for that no fetch
        cached, or `Served`, the read's bytes.
-     - `EndRead` (no answer) ends a read the client gave up.
+     - `EndRead` (no answer) ends the read, served or not, once the
+       client is done with it: the owner keeps the read's number until
+       then, and drops the frames sent to a read it ended first, served
+       or failed, as the client may send them before it knows.
      - `Failed` answers any call the cache failed: the read goes to the
        remote.
 
-     The owner runs a client's reads as tasks on the connection's thread,
-     and tells the client each read from disk it makes for one
-     (`DiskRead`), for the client's read policy. Before the region (step
+     The owner runs a client's reads as tasks on the connection's thread
+     (`sharing/client_reads.rs`), each taking its frames in order, and
+     tells the client each read from disk it makes for one (`DiskRead`),
+     for the client's read policy. A frame the protocol doesn't allow
+     where it comes (GETs where none were due, a fetch or a read the
+     client never started, a fetch's bytes after its commit) closes the
+     connection, as a protocol error does; the owner never panics on a
+     client's frame. Before the region (step
      4), a fetched block's bytes cross the socket twice: to the owner,
      which lands them as its own fetches' (`FetchedBlocks`), and back in
      the read's bytes.
@@ -345,9 +353,14 @@ pipelined. The owner's own reads cost what they cost now.
    trying the lock and the owner again until `OWNER_WAIT`
    (`a_cache_built_for_sharing_on_owned_files_is_their_owners_client`,
    `an_owner_dropped_hands_its_files_to_the_next_cache`,
-   `the_owner_admits_only_a_writer_of_its_first_cache_file`). Next:
-   reads served over the socket, then failures to the remote, a client
-   coming to own the cache, and the tests in real processes.
+   `the_owner_admits_only_a_writer_of_its_first_cache_file`); the
+   owner serving a client's reads, frame by frame
+   (`the_owner_serves_and_caches_a_clients_cold_read`,
+   `the_owner_serves_a_clients_hits_and_tells_it_of_its_disk_reads`,
+   `a_client_gone_mid_read_hands_its_claims_to_their_waiters`,
+   `a_clients_misuse_closes_its_connection`). Next: a client reading
+   through its owner, then failures to the remote, a client coming to
+   own the cache, and the tests in real processes.
 4. **The region,** on Linux: outputs and landings in a sealed memfd; the
    socket when one doesn't fit.
 5. **Polling,** only if measured (Later).
@@ -364,6 +377,7 @@ pipelined. The owner's own reads cost what they cost now.
 | `src/cache/sharing/frame_socket.rs` | a socket frames cross whole, raising no `SIGPIPE` (decision 5) | yes |
 | `src/cache/sharing/address.rs` | the owner's address, by the first cache file's identity (decision 6) | yes |
 | `src/cache/sharing/handshake.rs` | a client's hello, its descriptor by `SCM_RIGHTS`, and the owner's check (decision 6) | yes |
-| `src/cache/sharing/owner.rs` | the owner's listener and a session for each client (decisions 1, 5) | listening and admitting; reads next |
+| `src/cache/sharing/owner.rs` | the owner's listener and a session for each client (decisions 1, 5) | yes |
+| `src/cache/sharing/client_reads.rs` | a client's reads, each a task of its session's (decision 5) | yes |
 | `src/cache/sharing/client.rs` | a client's connection to its owner (decisions 5 to 7) | connecting; calls next |
 | the region | outputs and landings in a sealed memfd (decision 5) | no: step 4 |

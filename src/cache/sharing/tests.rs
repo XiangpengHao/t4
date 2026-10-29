@@ -1,10 +1,13 @@
 use std::fs::File;
 use std::io::Write;
+use std::num::NonZeroU8;
+use std::ops::Range;
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use object_store::ObjectMeta;
 use object_store::ObjectStore;
 use object_store::ObjectStoreExt;
 use object_store::memory::InMemory;
@@ -14,8 +17,12 @@ use tempfile::TempDir;
 
 use super::address::{FileIdentity, OwnerAddress};
 use super::frame_socket::FrameSocket;
-use super::frames::{ClientFrame, OwnerFrame, PROTOCOL_VERSION};
+use super::frames::{ClientFrame, FetchSpec, NextStep, OwnerFrame, PROTOCOL_VERSION};
 use super::handshake::Hello;
+use crate::cache::object_cache::LocatedRun;
+use crate::cache::policy::{
+    Admit, BlockSource, FixedPlacementPolicy, IoPhase, PlannedGet, ReadPlan,
+};
 use crate::cache::storage_link::StorageLink;
 use crate::cache::{T4Caching, T4CachingBuilder};
 use crate::io::sync::Arc;
@@ -235,4 +242,342 @@ fn the_owner_admits_only_a_writer_of_its_first_cache_file() {
     assert_eq!(bare, None);
     let garbage = answer_to(&address, |socket| socket.send(&[0xff; 17]).unwrap());
     assert_eq!(garbage, None);
+}
+
+/// A client of an owner's that speaks frames itself, as a test drives it:
+/// admitted, then each frame sent and each answer taken by hand.
+struct RawClient {
+    socket: FrameSocket,
+    /// The news of disk reads taken so far, between answers.
+    news: Vec<OwnerFrame>,
+}
+
+impl RawClient {
+    /// A client of the owner of the cache file in `dir`, admitted.
+    fn admitted(dir: &TempDir) -> Self {
+        let cache_file = File::options()
+            .read(true)
+            .write(true)
+            .open(dir.path().join("cache"))
+            .unwrap();
+        let address = OwnerAddress::of(FileIdentity::of(&cache_file).unwrap());
+        let socket = FrameSocket::new(address.connect().unwrap()).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        Hello::new(PROTOCOL_VERSION, cache_file)
+            .send(&socket)
+            .unwrap();
+        let mut client = Self {
+            socket,
+            news: Vec::new(),
+        };
+        let version = PROTOCOL_VERSION;
+        assert_eq!(client.answer(), OwnerFrame::Welcome { version });
+        client
+    }
+
+    fn send(&self, frame: &ClientFrame) {
+        self.socket.send(&frame.encode()).unwrap();
+    }
+
+    /// The owner's next answer, the news before it kept.
+    fn answer(&mut self) -> OwnerFrame {
+        loop {
+            let body = self.socket.receive(FrameSocket::MOST_BYTES).unwrap();
+            let frame = OwnerFrame::decode(body.expect("an answer, not a close")).unwrap();
+            if !matches!(frame, OwnerFrame::DiskRead { .. }) {
+                return frame;
+            }
+            self.news.push(frame);
+        }
+    }
+
+    /// Whether the owner closes the connection within 5 s, whatever it
+    /// sends before.
+    fn closed(&self) -> bool {
+        loop {
+            match self.socket.receive(FrameSocket::MOST_BYTES) {
+                Ok(Some(_)) => {}
+                Ok(None) => return true,
+                Err(error) => {
+                    use std::io::ErrorKind::{TimedOut, WouldBlock};
+                    return !matches!(error.kind(), WouldBlock | TimedOut);
+                }
+            }
+        }
+    }
+}
+
+/// A file of `size` bytes at `path` in `inner`, each byte a function of
+/// its offset: its bytes, and what the store says of it.
+fn put_file(inner: &InMemory, path: &Path, size: u64) -> (Bytes, ObjectMeta) {
+    let data = Bytes::from((0..size).map(|at| (at % 251) as u8).collect::<Vec<_>>());
+    block_on(inner.put(path, data.clone().into())).unwrap();
+    (data, block_on(inner.head(path)).unwrap())
+}
+
+/// A client's start of a read, numbered `read`, of `range` of the file
+/// `meta` names; its call numbered `read` times 100.
+fn start_read(read: u64, meta: &ObjectMeta, range: Range<u64>) -> ClientFrame {
+    ClientFrame::StartRead {
+        call: read * 100,
+        read,
+        path: Bytes::copy_from_slice(meta.location.as_ref().as_bytes()),
+        e_tag: meta.e_tag.clone().unwrap(),
+        size: meta.size,
+        range,
+        intent: None,
+    }
+}
+
+/// `range` of the file `meta` names, read through `store`'s cache, opened
+/// as listed: no HEAD.
+fn read_listed(
+    store: &T4Caching,
+    meta: &ObjectMeta,
+    range: Range<u64>,
+) -> object_store::Result<Bytes> {
+    block_on(store.open_listed(meta.clone()).read(range, None))
+}
+
+/// A client's cold read, call by call: the owner locates its run, takes
+/// the client's GETs, lands their bytes as they come, caches them and
+/// serves the read. The owner holds the blocks then: its own read of them,
+/// the file gone from the store, is a hit.
+#[test]
+fn the_owner_serves_and_caches_a_clients_cold_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let path = Path::from("a");
+    let (data, meta) = put_file(&inner, &path, 2 * MIB);
+    let owner = shared(&inner, &dir).build().unwrap();
+    let mut client = RawClient::admitted(&dir);
+
+    client.send(&start_read(1, &meta, 10..2 * MIB));
+    let OwnerFrame::Started {
+        call: 100,
+        version,
+        next,
+    } = client.answer()
+    else {
+        panic!("the read started");
+    };
+    let remote = vec![BlockSource::Remote, BlockSource::Remote];
+    assert_eq!(
+        next,
+        NextStep::Plan(LocatedRun::new(0, 10..2 * MIB, remote))
+    );
+    assert_eq!(version.size(), 2 * MIB);
+    let plan = ReadPlan::new(vec![PlannedGet::once(0..2)]);
+    client.send(&ClientFrame::TakeGets {
+        call: 2,
+        read: 1,
+        plan,
+    });
+    let fetch = FetchSpec::new(0..2 * MIB, NonZeroU8::MIN, None);
+    let next = NextStep::Fetch(vec![fetch]);
+    assert_eq!(client.answer(), OwnerFrame::Next { call: 2, next });
+
+    client.send(&ClientFrame::Finish { call: 4, read: 1 });
+    for piece in [0..MIB / 3, MIB / 3..2 * MIB] {
+        let bytes = data.slice(piece.start as usize..piece.end as usize);
+        client.send(&ClientFrame::Land {
+            read: 1,
+            fetch: 0,
+            bytes,
+        });
+    }
+    client.send(&ClientFrame::Commit {
+        call: 3,
+        read: 1,
+        fetch: 0,
+    });
+    assert_eq!(client.answer(), OwnerFrame::Committed { call: 3 });
+    let bytes = Some(data.slice(10..2 * MIB as usize));
+    assert_eq!(client.answer(), OwnerFrame::Served { call: 4, bytes });
+    client.send(&ClientFrame::EndRead { read: 1 });
+
+    block_on(inner.delete(&path)).unwrap();
+    assert_eq!(read_listed(&owner, &meta, 0..2 * MIB).unwrap(), data);
+}
+
+/// A client's read of blocks the owner holds is served with nothing to
+/// fetch; and a read of blocks on disk tells the client of each read from
+/// disk made for it, for its read policy.
+#[test]
+fn the_owner_serves_a_clients_hits_and_tells_it_of_its_disk_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let path = Path::from("a");
+    let (data, meta) = put_file(&inner, &path, 2 * MIB);
+    let owner = shared(&inner, &dir)
+        .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
+        .build()
+        .unwrap();
+    assert_eq!(read_listed(&owner, &meta, 0..2 * MIB).unwrap(), data);
+    let mut client = RawClient::admitted(&dir);
+
+    client.send(&start_read(1, &meta, 5..2 * MIB - 5));
+    let OwnerFrame::Started {
+        call: 100, next, ..
+    } = client.answer()
+    else {
+        panic!("the read started");
+    };
+    assert_eq!(next, NextStep::Fetch(Vec::new()), "nothing to fetch");
+    client.send(&ClientFrame::Finish { call: 1, read: 1 });
+    let bytes = Some(data.slice(5..2 * MIB as usize - 5));
+    assert_eq!(client.answer(), OwnerFrame::Served { call: 1, bytes });
+    client.send(&ClientFrame::EndRead { read: 1 });
+
+    // Each block's pages read from drive 0: started, then finished.
+    let phases: Vec<_> = client
+        .news
+        .iter()
+        .map(|news| match news {
+            OwnerFrame::DiskRead {
+                drive: 0, phase, ..
+            } => match phase {
+                IoPhase::Started => "started",
+                IoPhase::Finished { .. } => "finished",
+                _ => "other",
+            },
+            _ => "not a disk read of drive 0",
+        })
+        .collect();
+    assert_eq!(phases, ["started", "started", "finished", "finished"]);
+}
+
+/// A client gone mid-read, holding the claims of its GETs, gives them up:
+/// a read of the owner's that waited for them fetches the blocks itself.
+#[test]
+fn a_client_gone_mid_read_hands_its_claims_to_their_waiters() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let path = Path::from("a");
+    let (data, meta) = put_file(&inner, &path, MIB);
+    let owner = Arc::new(shared(&inner, &dir).build().unwrap());
+    let mut client = RawClient::admitted(&dir);
+    client.send(&start_read(1, &meta, 0..MIB));
+    assert!(matches!(client.answer(), OwnerFrame::Started { .. }));
+    let plan = ReadPlan::new(vec![PlannedGet::once(0..1)]);
+    client.send(&ClientFrame::TakeGets {
+        call: 2,
+        read: 1,
+        plan,
+    });
+    assert!(matches!(client.answer(), OwnerFrame::Next { .. }));
+
+    let (done, finished) = mpsc::channel();
+    let waiting = Arc::clone(&owner);
+    std::thread::spawn(move || {
+        let _ = done.send(read_listed(&waiting, &meta, 0..MIB));
+    });
+    let waited = finished.recv_timeout(Duration::from_millis(200));
+    assert!(
+        waited.is_err(),
+        "the owner's read waits for the client's claim"
+    );
+    drop(client);
+    let read = finished.recv_timeout(Duration::from_secs(5));
+    assert_eq!(read.expect("the waiter fetches").unwrap(), data);
+}
+
+/// A frame the protocol doesn't allow where it comes closes the client's
+/// connection, and nothing else: the owner serves its next client.
+#[test]
+fn a_clients_misuse_closes_its_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let path = Path::from("a");
+    let (data, meta) = put_file(&inner, &path, MIB);
+    let owner = shared(&inner, &dir).build().unwrap();
+    let plan = || ReadPlan::new(vec![PlannedGet::once(0..1)]);
+    let land = || ClientFrame::Land {
+        read: 1,
+        fetch: 0,
+        bytes: data.clone(),
+    };
+    let take_gets = || ClientFrame::TakeGets {
+        call: 2,
+        read: 1,
+        plan: plan(),
+    };
+    // Each misuse: the frames that set it up, each answered, then the one
+    // that breaks the protocol.
+    let misuses: Vec<(&str, Vec<ClientFrame>, ClientFrame)> = vec![
+        ("GETs of no read", vec![], take_gets()),
+        ("bytes of no read", vec![], land()),
+        (
+            "a read's number twice",
+            vec![start_read(1, &meta, 0..1)],
+            start_read(1, &meta, 0..1),
+        ),
+        (
+            "bytes before the GETs",
+            vec![start_read(1, &meta, 0..1)],
+            land(),
+        ),
+        (
+            "GETs twice",
+            vec![start_read(1, &meta, 0..1), take_gets()],
+            take_gets(),
+        ),
+        (
+            "bytes of no fetch",
+            vec![start_read(1, &meta, 0..1), take_gets()],
+            ClientFrame::Land {
+                read: 1,
+                fetch: 1,
+                bytes: data.clone(),
+            },
+        ),
+        (
+            "bytes after the commit",
+            vec![
+                start_read(1, &meta, 0..1),
+                take_gets(),
+                land(),
+                ClientFrame::Commit {
+                    call: 3,
+                    read: 1,
+                    fetch: 0,
+                },
+            ],
+            land(),
+        ),
+        (
+            "a second hello",
+            vec![],
+            ClientFrame::Hello {
+                version: PROTOCOL_VERSION,
+            },
+        ),
+        (
+            "a read ended twice",
+            vec![ClientFrame::EndRead { read: 1 }],
+            ClientFrame::EndRead { read: 1 },
+        ),
+    ];
+    for (misuse, setup, breaking) in misuses {
+        let mut client = RawClient::admitted(&dir);
+        let mut answered = vec![];
+        for frame in setup {
+            let answers = !matches!(
+                frame,
+                ClientFrame::Land { .. } | ClientFrame::EndRead { .. }
+            );
+            client.send(&frame);
+            if answers {
+                answered.push(client.answer());
+            }
+        }
+        client.send(&breaking);
+        assert!(client.closed(), "{misuse}: closed, after {answered:?}");
+    }
+    assert_eq!(read_listed(&owner, &meta, 0..MIB).unwrap(), data);
+    let mut client = RawClient::admitted(&dir);
+    client.send(&start_read(1, &meta, 0..MIB));
+    assert!(matches!(client.answer(), OwnerFrame::Started { .. }));
 }

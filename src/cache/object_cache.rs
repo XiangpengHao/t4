@@ -773,7 +773,6 @@ pub(super) struct CacheableFile<'p> {
 }
 
 impl CacheableFile<'_> {
-    #[cfg(test)]
     pub(super) fn version(&self) -> FileVersion {
         self.version
     }
