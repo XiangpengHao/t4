@@ -2,7 +2,7 @@
 //! one a drive, read and written by direct I/O through one I/O worker
 //! (`doc/03-cache.md`, decisions 2, 3 and 9; `doc/04-multi-device.md`).
 
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -132,6 +132,13 @@ impl CacheFiles {
         })
     }
 
+    /// Opens the cache file at `path` and takes it for this cache: an
+    /// exclusive `flock`, held as long as the file is open, so until the
+    /// I/O worker that owns it is dropped. A file another cache holds, in
+    /// this process or another, by whatever path, is [`Error::Busy`]. The
+    /// kernel drops the lock when its holder exits, however it exits. A
+    /// `flock`, not an `fcntl` record lock: record locks don't conflict
+    /// within a process, and closing any descriptor of the file drops them.
     fn open_file(path: &Path, direct_io: bool) -> Result<File> {
         let mut open = OpenOptions::new();
         open.read(true).write(true).create(true).truncate(false);
@@ -147,6 +154,10 @@ impl CacheFiles {
             ));
         }
         let file = open.open(path)?;
+        file.try_lock().map_err(|error| match error {
+            TryLockError::WouldBlock => Error::Busy,
+            TryLockError::Error(error) => Error::Io(error),
+        })?;
         // macOS has no O_DIRECT: it bypasses the page cache per descriptor.
         #[cfg(target_os = "macos")]
         if direct_io {

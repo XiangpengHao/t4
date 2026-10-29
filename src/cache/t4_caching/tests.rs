@@ -341,6 +341,30 @@ fn a_builder_needs_a_memory_capacity_and_a_disk_file() {
         .unwrap();
 }
 
+/// A cache file has one owner: a second cache on it fails to build, by
+/// any path that reaches the file, until the first is dropped.
+#[test]
+fn a_cache_file_has_one_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(CountingStore::default());
+    let first = builder(&inner, &dir).build().unwrap();
+
+    let again = builder(&inner, &dir).build().unwrap_err();
+    assert!(matches!(again, crate::Error::Busy), "{again}");
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(dir.path().join("cache"), &link).unwrap();
+    let through_link = T4Caching::builder(Arc::clone(&inner) as Arc<dyn ObjectStore>)
+        .with_memory_capacity(MIB)
+        .with_disk_file(dir.path().join("other"), MIB)
+        .with_disk_file(&link, MIB)
+        .build()
+        .unwrap_err();
+    assert!(matches!(through_link, crate::Error::Busy), "{through_link}");
+
+    drop(first);
+    builder(&inner, &dir).build().unwrap();
+}
+
 /// Files of unequal size each hold as many chunks as the smallest, and
 /// take only those; the tier is all of them, and serves reads.
 #[test]

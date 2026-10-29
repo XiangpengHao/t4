@@ -8,6 +8,8 @@ pub enum Error {
     /// A range past what it reads from: a window of pages past `u32`.
     RangeOutOfBounds,
     InvalidArgument(&'static str),
+    /// Another cache owns a cache file: in this process or another.
+    Busy,
 }
 
 impl fmt::Display for Error {
@@ -16,6 +18,7 @@ impl fmt::Display for Error {
             Self::Io(err) => write!(f, "io error: {err}"),
             Self::RangeOutOfBounds => write!(f, "requested range is out of bounds"),
             Self::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
+            Self::Busy => write!(f, "a cache file is owned by another cache"),
         }
     }
 }
