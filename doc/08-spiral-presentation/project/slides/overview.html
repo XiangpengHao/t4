@@ -1,6 +1,35 @@
-<section id="overview" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:48px">
+<section id="overview" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
 <h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">Overview</h2>
-<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">[One line: what t4 is and the headline result]</p>
-<div style="flex:1;display:flex;align-items:center;justify-content:center;border:2px dashed #bebebb;border-radius:2px"><p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;text-transform:uppercase;color:#646462">[Overview figure]</p></div>
-<aside>Placeholder for part 0, the overview. To fill in: what t4 is (a cache for object_store reads across memory, local SSDs and S3 or GCS), where it sits (DataFusion and Vortex read through it), and the headline the title promises: served from disk as fast as from memory.</aside>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">t4 keeps object-store data in memory and on local SSDs. From SSD, it beats Vortex reading from memory.</p>
+<div style="flex:1;display:flex;flex-direction:column;justify-content:center;gap:24px">
+<p style="font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:uppercase;color:#646462">ClickBench q20–34 · summed median runs · line: fastest–slowest</p>
+<div style="position:relative;width:1664px;height:320px">
+<svg aria-label="Bar chart, ClickBench queries 20 to 34, summed median run time. i7ie.12xlarge: Vortex from memory 6.20 s, Vortex from SSD 6.76 s, t4 from SSD 5.96 s. i7i.24xlarge: Vortex from memory 4.42 s, Vortex from SSD 4.87 s, t4 from SSD 4.21 s. Lines show the summed fastest to slowest runs." style="position:absolute;left:0px;top:0px" width="1664" height="320" viewBox="0 0 1664 320">
+<rect x="260" y="64" width="384" height="60" rx="2" fill="#8b83f6"/>
+<rect x="260" y="152" width="419" height="60" rx="2" fill="#bebebb"/>
+<rect x="260" y="240" width="370" height="60" rx="2" fill="#1d0fed"/>
+<path d="M634 94 L661 94 M634 84 L634 104 M661 84 L661 104 M668 182 L692 182 M668 172 L668 192 M692 172 L692 192 M616 270 L649 270 M616 260 L616 280 M649 260 L649 280" fill="none" stroke="#171716" stroke-width="2"/>
+<rect x="1124" y="64" width="274" height="60" rx="2" fill="#8b83f6"/>
+<rect x="1124" y="152" width="302" height="60" rx="2" fill="#bebebb"/>
+<rect x="1124" y="240" width="261" height="60" rx="2" fill="#1d0fed"/>
+<path d="M1386 94 L1435 94 M1386 84 L1386 104 M1435 84 L1435 104 M1413 182 L1436 182 M1413 172 L1413 192 M1436 172 L1436 192 M1378 270 L1392 270 M1378 260 L1378 280 M1392 260 L1392 280" fill="none" stroke="#171716" stroke-width="2"/>
+</svg>
+<p style="position:absolute;left:0px;top:0px;width:780px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#171716">i7ie.12xlarge · 24 cores · 4 SSDs</p>
+<p style="position:absolute;left:0px;top:79px;width:244px;font-size:24px;font-weight:400;line-height:1.2;color:#3c3c3a">Vortex from memory</p>
+<p style="position:absolute;left:706px;top:79px;width:90px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#171716">6.20 s</p>
+<p style="position:absolute;left:0px;top:167px;width:244px;font-size:24px;font-weight:400;line-height:1.2;color:#3c3c3a">Vortex from SSD</p>
+<p style="position:absolute;left:706px;top:167px;width:90px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#171716">6.76 s</p>
+<p style="position:absolute;left:0px;top:255px;width:244px;font-size:24px;font-weight:500;line-height:1.2;color:#171716">t4 from SSD</p>
+<p style="position:absolute;left:706px;top:255px;width:90px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#1d0fed">5.96 s</p>
+<p style="position:absolute;left:864px;top:0px;width:780px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#171716">i7i.24xlarge · 48 cores · 6 SSDs</p>
+<p style="position:absolute;left:864px;top:79px;width:244px;font-size:24px;font-weight:400;line-height:1.2;color:#3c3c3a">Vortex from memory</p>
+<p style="position:absolute;left:1570px;top:79px;width:90px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#171716">4.42 s</p>
+<p style="position:absolute;left:864px;top:167px;width:244px;font-size:24px;font-weight:400;line-height:1.2;color:#3c3c3a">Vortex from SSD</p>
+<p style="position:absolute;left:1570px;top:167px;width:90px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#171716">4.87 s</p>
+<p style="position:absolute;left:864px;top:255px;width:244px;font-size:24px;font-weight:500;line-height:1.2;color:#171716">t4 from SSD</p>
+<p style="position:absolute;left:1570px;top:255px;width:90px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;color:#1d0fed">4.21 s</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;color:#646462">INTERNAL · VORTEX DATAFUSION BENCH · SPOT INSTANCES · 28 OCT 2026 · t4 Disk Tier Across Boxes</p>
+<aside>The claim, up front. Vortex's own DataFusion benchmark (the fork's t4-read-at branch), ClickBench partitioned in 100 files, queries 20 to 34, run three ways on the same instance: Vortex reading its files from the page cache, in memory; Vortex reading them from the SSDs, its pages evicted before every run; and t4 reading them from its disk tier on the same SSDs, direct I/O, nothing kept in memory. Each bar is the sum of each query's median of the last five of twelve runs back to back, once the drives' burst after a rest is spent; the thin line runs from the summed fastest to the summed slowest of those five. Same scale for both instances. On the i7ie.12xlarge (24 cores, 4 SSDs as one RAID0, 12.7 GB/s steady) t4 from SSD takes 0.96 of Vortex's time from memory and 0.88 of Vortex's from the same SSDs; on the i7i.24xlarge (48 cores, 6 SSDs, 26.9 GB/s) 0.95 and 0.86. TPC-H SF10 on the same instances: 1.00 and 0.96 of memory. On a small i3en.2xlarge, whose two SSDs read only 1.4 GB/s steady, t4 is 3 to 5% behind memory, still 9 to 16% ahead of Vortex from SSD. All single-socket Spot instances, on their defaults, 28 Oct 2026 (dashboard: t4 Disk Tier Across Boxes).</aside>
 </section>

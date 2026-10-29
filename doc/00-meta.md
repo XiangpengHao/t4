@@ -44,26 +44,33 @@ only the remote holds itself. The design: `03-cache.md`.
   or many), with `ObjectStore` composed over it in t4 and Vortex's
   `VortexReadAt` over it in Vortex; Vortex's own benchmark measures each
   tier alone.
+- `10-spiral-integration.md`: t4 in place of spiraldb's Kismet cache,
+  through t4's existing API, Spiral naming each file as a path; then t4's
+  merging and races in spiral-io's read path where they measure better.
+  New in t4: a disk tier kept across restarts, one process per cache
+  file, a cache file that grows.
 - `98-cachefs-vs-fs.md`: how a cache's storage differs from a file
   system's.
 - `99-brainstorm.md`: open notes.
 
 ## Platforms
 
-**Linux is the only intended platform.** Design decisions and performance
-work target Linux: io_uring and `O_DIRECT`. The cache makes no durability
-guarantee: a restart starts it cold.
+**Linux is the platform t4 is designed and tuned for.** Design decisions
+and performance work target Linux: io_uring and `O_DIRECT`. The cache makes
+no durability guarantee: a restart starts it cold.
 
-**macOS is for development only**: to build t4 and test that it works on a
-developer's machine, never to run it for real. CI's macOS job exists to keep
-that working. On macOS:
+**macOS runs t4 for real, untuned.** Spiral's desktop Studio ships for
+macOS, and t4 is to replace its cache there (`10-spiral-integration.md`,
+the user's call of 28 Oct 2026). So t4 must be correct on macOS, tested
+there (CI's macOS job), and fit for a user's machine. On macOS:
 
 - I/O goes through the fallback backend (a thread pool doing `pread` and
   `pwrite`), not io_uring, so its performance says nothing about Linux's.
 - Direct I/O is `F_NOCACHE`, not `O_DIRECT`.
 
-Don't design, tune or benchmark for macOS, and don't let it constrain a Linux
-design: a macOS fallback only has to work.
+Don't design, tune or benchmark for macOS's speed, and don't let it
+constrain a Linux design: a macOS fallback has to work, and be no worse
+than the cache it replaces, nothing more.
 
 ## Verification
 

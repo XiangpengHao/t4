@@ -32,7 +32,6 @@
   "lists": "css",
   "order": [
     "cover",
-    "toc-overview",
     "overview",
     "toc-background",
     "hardware",
@@ -50,7 +49,6 @@
     "iouring-dma",
     "iouring-reap",
     "toc-disk-io",
-    "papers",
     "constraints",
     "arch-io",
     "arch-io-await",

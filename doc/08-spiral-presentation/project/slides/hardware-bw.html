@@ -1,59 +1,66 @@
 <section id="hardware-bw" data-transition="fade" style="display:flex; flex-direction:column; gap:24px; padding:128px 128px 160px; background:#fcfcf9">
   <div style="display:flex; flex-direction:column; gap:16px">
     <h2 style="font-family:'Acid Grotesk', sans-serif; font-size:72px; font-weight:500; line-height:1.1; letter-spacing:-0.7px; color:#171716">AWS: SSD bandwidth vs memory per core</h2>
-    <p style="font-family:Inter, Arial, sans-serif; font-size:30px; font-weight:300; line-height:1.35; color:#3c3c3a">Per core, memory reads only 2.6–6.1 GB/s. One instance’s SSDs read up to 54 GB/s.</p>
+    <p style="font-family:Inter, Arial, sans-serif; font-size:30px; font-weight:300; line-height:1.35; color:#3c3c3a">Per core, memory reads 2.6–12.7 GB/s. The i7i.24xlarge’s six SSDs read 26.9 GB/s, more than four cores’ share.</p>
   </div>
   <div style="position:relative; width:1664px; height:630px; display:flex; flex-direction:column; align-self:stretch">
-    <svg xmlns="http://www.w3.org/2000/svg" aria-label="Scatter plot of AWS instances with local NVMe: SSD read bandwidth on the x axis, memory read bandwidth per CPU core on the y axis. i3.16xlarge 16.1 GB/s and 3.4 per core; i3en.24xlarge 16.4 and 4.7; i4i.32xlarge 24.8 and 5.3; i4g.16xlarge 9.2 and 2.6; im4gn.16xlarge 6.6 and 2.7; is4gen.8xlarge 6.6 and 5.5; i7i.48xlarge 53.8 and 6.0; i7ie.24xlarge 24.9 and 6.1; i8g.24xlarge and i8ge.24xlarge about 25 and 5.1; m8gd and r8gd.48xlarge 23 and 4.8; m9gd.48xlarge 30.5 and 3.9." viewBox="0 0 1664 630" style="position:absolute; top:0; left:0; width:1664px; height:630px">
-<line x1="140" y1="50" x2="1464" y2="50" stroke="#ebebe8" stroke-width="2"/>
-<line x1="140" y1="175" x2="1464" y2="175" stroke="#ebebe8" stroke-width="2"/>
-<line x1="140" y1="300" x2="1464" y2="300" stroke="#ebebe8" stroke-width="2"/>
-<line x1="140" y1="425" x2="1464" y2="425" stroke="#ebebe8" stroke-width="2"/>
-<line x1="581.3" y1="50" x2="581.3" y2="550" stroke="#ebebe8" stroke-width="2"/>
-<line x1="1022.7" y1="50" x2="1022.7" y2="550" stroke="#ebebe8" stroke-width="2"/>
-<line x1="1464" y1="50" x2="1464" y2="550" stroke="#ebebe8" stroke-width="2"/>
+    <svg xmlns="http://www.w3.org/2000/svg" aria-label="Scatter plot of AWS instances with local NVMe: SSD read bandwidth on the x axis, memory read bandwidth per CPU core on the y axis. Our three test instances, highlighted: i3en.2xlarge 1.36 and 12.7; i7ie.12xlarge 12.7 and 9.5; i7i.24xlarge 26.85 and 6.1. Others: i3.16xlarge 16.1 and 3.4 per core; i3en.24xlarge 16.35 and 4.7 per core; i4i.32xlarge 24.8 and 5.3 per core; i4g.16xlarge 9.15 and 2.6 per core; im4gn.16xlarge 6.55 and 2.7 per core; is4gen.8xlarge 6.63 and 5.5 per core; i7ie.24xlarge 24.9 and 6.1 per core; i8g.24xlarge 25.5 and 5.1 per core; i8ge.24xlarge 24.85 and 5.1 per core; m8gd.48xlarge 23.1 and 4.8 per core; r8gd.48xlarge 23.2 and 4.8 per core; m9gd.48xlarge 30.5 and 3.9 per core." viewBox="0 0 1664 630" style="position:absolute; top:0; left:0; width:1664px; height:630px">
+<line x1="140" y1="407.1" x2="1464" y2="407.1" stroke="#ebebe8" stroke-width="2"/>
+<line x1="140" y1="264.3" x2="1464" y2="264.3" stroke="#ebebe8" stroke-width="2"/>
+<line x1="140" y1="121.4" x2="1464" y2="121.4" stroke="#ebebe8" stroke-width="2"/>
+<line x1="518.3" y1="50" x2="518.3" y2="550" stroke="#ebebe8" stroke-width="2"/>
+<line x1="896.6" y1="50" x2="896.6" y2="550" stroke="#ebebe8" stroke-width="2"/>
+<line x1="1274.9" y1="50" x2="1274.9" y2="550" stroke="#ebebe8" stroke-width="2"/>
 <line x1="140" y1="50" x2="140" y2="550" stroke="#bebebb" stroke-width="2"/>
 <line x1="140" y1="550" x2="1464" y2="550" stroke="#bebebb" stroke-width="2"/>
-<line x1="699.5" y1="169.4" x2="832" y2="134.5" stroke="#bebebb" stroke-width="2"/>
-<line x1="697.3" y1="216.2" x2="832" y2="171.5" stroke="#bebebb" stroke-width="2"/>
-<line x1="712.7" y1="231.2" x2="832" y2="223" stroke="#bebebb" stroke-width="2"/>
-<line x1="660.9" y1="251.9" x2="832" y2="289" stroke="#bebebb" stroke-width="2"/>
-<circle cx="495.3" cy="337.5" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
-<circle cx="500.8" cy="256.9" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
-<circle cx="341.9" cy="384.4" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
-<circle cx="284.5" cy="379.4" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
-<circle cx="286.3" cy="207.5" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
-<circle cx="650.9" cy="251.9" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
-<circle cx="688.4" cy="230.6" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
-<circle cx="702.7" cy="231.2" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
-<circle cx="687.3" cy="216.2" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
-<circle cx="689.5" cy="169.4" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
-<circle cx="813" cy="307.5" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
-<circle cx="1327.2" cy="172.5" r="10" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<line x1="998" y1="192.4" x2="1074.7" y2="320.5" stroke="#bebebb" stroke-width="2"/>
+<line x1="998" y1="226.4" x2="1070.9" y2="347.4" stroke="#bebebb" stroke-width="2"/>
+<line x1="998" y1="274.8" x2="1070.8" y2="357.0" stroke="#bebebb" stroke-width="2"/>
+<line x1="998" y1="338.8" x2="1008.8" y2="366.6" stroke="#bebebb" stroke-width="2"/>
+<circle cx="749.0" cy="428.6" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="758.5" cy="382.5" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1078.1" cy="359.4" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="486.1" cy="455.5" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="387.8" cy="452.6" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="390.8" cy="354.5" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1081.9" cy="332.5" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1104.6" cy="367.7" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1080.0" cy="367.4" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1013.8" cy="379.7" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1017.6" cy="379.5" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1293.8" cy="411.4" r="8" fill="#646462" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="191.4" cy="98.2" r="10" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="620.4" cy="210.6" r="10" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
+<circle cx="1155.7" cy="332.7" r="10" fill="#1d0fed" stroke="#fcfcf9" stroke-width="2"/>
 </svg>
     <p style="position:absolute; top:0; left:140px; width:700px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#646462">Memory bandwidth per core (GB/s)</p>
-    <p style="position:absolute; top:36px; left:0; width:124px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">8</p>
-    <p style="position:absolute; top:161px; left:0; width:124px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">6</p>
-    <p style="position:absolute; top:286px; left:0; width:124px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">4</p>
-    <p style="position:absolute; top:411px; left:0; width:124px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">2</p>
-    <p style="position:absolute; top:536px; left:0; width:124px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">0</p>
-    <p style="position:absolute; top:562px; left:100px; width:80px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">0</p>
-    <p style="position:absolute; top:562px; left:541px; width:80px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">20</p>
-    <p style="position:absolute; top:562px; left:983px; width:80px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">40</p>
-    <p style="position:absolute; top:562px; left:1424px; width:80px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">60</p>
+    <div style="position:absolute; top:107px; left:0; width:124px; display:flex; flex-direction:column; gap:114.06px">
+      <p style="height:28.8px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">12</p>
+      <p style="height:28.8px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">8</p>
+      <p style="height:28.8px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">4</p>
+      <p style="height:28.8px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">0</p>
+    </div>
+    <div style="position:absolute; top:562px; left:100px; display:flex; flex-direction:row; gap:298.29px">
+      <p style="width:80px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">0</p>
+      <p style="width:80px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">10</p>
+      <p style="width:80px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">20</p>
+      <p style="width:80px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">30</p>
+    </div>
     <p style="position:absolute; top:600px; left:864px; width:600px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">SSD read, all local drives together (GB/s)</p>
-    <p style="position:absolute; top:193px; left:302px; width:300px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#171716">is4gen.8xlarge · <span style="color:#646462">$4.61/h</span></p>
-    <p style="position:absolute; top:242px; left:185px; width:300px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#171716">i3en.24xlarge · <span style="color:#646462">$10.85/h</span></p>
-    <p style="position:absolute; top:323px; left:179px; width:300px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#171716">i3.16xlarge · <span style="color:#646462">$4.99/h</span></p>
-    <p style="position:absolute; top:370px; left:358px; width:300px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#171716">i4g.16xlarge · <span style="color:#646462">$4.94/h</span></p>
-    <p style="position:absolute; top:408px; left:150px; width:300px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#171716">im4gn.16xlarge · <span style="color:#646462">$5.82/h</span></p>
-    <p style="position:absolute; top:293px; left:517px; width:280px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#171716">m9gd.48xlarge · <span style="color:#646462">$12.07/h</span></p>
-    <p style="position:absolute; top:158px; left:1343px; width:300px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:500; line-height:1.2; color:#171716">i7i.48xlarge · <span style="color:#646462">$18.12/h</span><br><span style="color:#646462">SSD: our fio run</span></p>
-    <p style="position:absolute; top:120px; left:840px; width:340px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#171716">i7ie.24xlarge · <span style="color:#646462">$12.48/h</span></p>
-    <p style="position:absolute; top:157px; left:840px; width:340px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#171716">i4i.32xlarge · <span style="color:#646462">$10.98/h</span></p>
-    <p style="position:absolute; top:194px; left:840px; width:340px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#171716">i8g.24xlarge · <span style="color:#646462">$8.24/h</span><br>i8ge.24xlarge · <span style="color:#646462">$11.39/h</span></p>
-    <p style="position:absolute; top:260px; left:840px; width:340px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#171716">m8gd.48xlarge · <span style="color:#646462">$11.07/h</span><br>r8gd.48xlarge · <span style="color:#646462">$14.11/h</span></p>
+    <p style="position:absolute; top:334px; left:407px; width:340px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#171716">is4gen.8xlarge · <span style="color:#646462">$4.61/h</span></p>
+    <p style="position:absolute; top:375px; left:402px; width:340px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#171716">i3en.24xlarge · <span style="color:#646462">$10.85/h</span></p>
+    <p style="position:absolute; top:415px; left:765px; width:340px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#171716">i3.16xlarge · <span style="color:#646462">$4.99/h</span></p>
+    <p style="position:absolute; top:442px; left:502px; width:340px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#171716">i4g.16xlarge · <span style="color:#646462">$4.94/h</span></p>
+    <p style="position:absolute; top:407px; left:348px; width:340px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#171716">im4gn.16xlarge · <span style="color:#646462">$5.82/h</span></p>
+    <p style="position:absolute; top:397px; left:1310px; width:340px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#171716">m9gd.48xlarge · <span style="color:#646462">$12.07/h</span></p>
+    <p style="position:absolute; top:84px; left:207px; width:340px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:500; line-height:1.2; color:#171716">i3en.2xlarge · <span style="color:#646462">$0.90/h</span></p>
+    <p style="position:absolute; top:197px; left:264px; width:340px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:500; line-height:1.2; text-align:right; color:#171716">i7ie.12xlarge · <span style="color:#646462">$6.24/h</span></p>
+    <p style="position:absolute; top:319px; left:1172px; width:340px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:500; line-height:1.2; color:#171716">i7i.24xlarge · <span style="color:#646462">$9.06/h</span></p>
+    <p style="position:absolute; top:178px; left:650px; width:340px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#171716">i7ie.24xlarge · <span style="color:#646462">$12.48/h</span></p>
+    <p style="position:absolute; top:212px; left:650px; width:340px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#171716">i4i.32xlarge · <span style="color:#646462">$10.98/h</span></p>
+    <p style="position:absolute; top:246px; left:650px; width:340px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#171716">i8ge.24xlarge · <span style="color:#646462">$11.39/h</span><br>i8g.24xlarge · <span style="color:#646462">$8.24/h</span></p>
+    <p style="position:absolute; top:310px; left:650px; width:340px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#171716">m8gd.48xlarge · <span style="color:#646462">$11.07/h</span><br>r8gd.48xlarge · <span style="color:#646462">$14.11/h</span></p>
   </div>
-  <p style="position:absolute; bottom:64px; left:128px; width:1664px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; letter-spacing:0.5px; text-transform:none; color:#646462">SSD: SCYLLADB iotune, i7i OUR fio · MEMORY: SPARE CORES bw_mem ÷ AWS CORE COUNT · AWS ON-DEMAND PRICE</p>
-  <aside>Each dot is one AWS instance type with local NVMe. x: all its local SSDs read together, GB/s. y: its whole-instance memory read bandwidth divided by its physical CPU cores (AWS's instance-type tables; Intel and AMD instances run 2 threads per core, Graviton 1). Label: on-demand Linux price in us-east-1, per hour (AWS price file, 27 Oct 2026). SSD: ScyllaDB's measured read_bandwidth per disk times the disk count (scylladb/scylla-machine-image, common/aws_io_params.yaml, iotune over RAID0 of all disks); i7i.48xlarge is our own fio, 1 MiB direct reads on all 12 drives, 53.8 GB/s. Memory: Spare Cores' lmbench bw_mem read with one copy per vCPU, 512 MB (keeper.sparecores.net); on Graviton3 it reads about 7% above STREAM Triad. Values (SSD GB/s; memory GB/s ÷ cores = per core; price): i3.16xlarge 16.1; 108.8 ÷ 32 = 3.4; $4.99. i3en.24xlarge 16.35; 225.1 ÷ 48 = 4.7; $10.85. i4i.32xlarge 24.8; 341.5 ÷ 64 = 5.3; $10.98. i4g.16xlarge 9.15; 169.3 ÷ 64 = 2.6; $4.94. im4gn.16xlarge 6.55; 174.6 ÷ 64 = 2.7; $5.82. is4gen.8xlarge 6.63; 175.2 ÷ 32 = 5.5; $4.61 (half the chip's cores, all its memory channels). i7i.48xlarge 53.8; 580.0 ÷ 96 = 6.0; $18.12. i7ie.24xlarge 24.9; 292.3 ÷ 48 = 6.1; $12.48. i8g.24xlarge 25.5; 490.0 ÷ 96 = 5.1; $8.24. i8ge.24xlarge 24.85; 490.7 ÷ 96 = 5.1; $11.39. m8gd.48xlarge 23.1; 915.8 ÷ 192 = 4.8; $11.07. r8gd.48xlarge 23.2; 916.6 ÷ 192 = 4.8; $14.11. m9gd.48xlarge 30.5; 744.9 ÷ 192 = 3.9; $12.07. The point for the talk: a core gets only a few GB/s of memory bandwidth as its share, while one box's SSDs read tens of GB/s; on i7i.48xlarge the SSDs read about as much as 9 cores' share of memory. Not plotted, no SSD measurement found: i7ie, i8g and i8ge at 48xlarge, c6id/m6id/r6id, x2idn, c7gd, c8gd, c8id/m8id/r8id.</aside>
+  <p style="position:absolute; bottom:64px; left:128px; width:1664px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; letter-spacing:0.5px; text-transform:none; color:#646462">SSD: SCYLLADB iotune, OURS fio STEADY · MEMORY: SPARE CORES bw_mem ÷ AWS CORE COUNT · AWS ON-DEMAND PRICE</p>
+  <aside>Each dot is one AWS instance type with local NVMe. x: all its local SSDs read together, GB/s. y: its whole-instance memory read bandwidth divided by its physical CPU cores (AWS's instance-type tables; Intel and AMD instances run 2 threads per core, Graviton 1). Label: on-demand Linux price in us-east-1, per hour (AWS price file, 27 Oct 2026). Blue: the three instances the evaluation runs on. Their SSD figure is our own fio, 1 MiB direct reads on all drives as one RAID0, at the steady rate once the drives' burst after a rest is spent (dashboard t4 Disk Tier Across Boxes); ScyllaDB's iotune agrees within 5% (1.33, 12.2 and 25.6 GB/s). The i3en.2xlarge's two SSDs burst to 6.3 GB/s for about half a second after a rest, then hold 1.36. Grey: ScyllaDB's measured read_bandwidth per disk times the disk count (scylladb/scylla-machine-image, common/aws_io_params.yaml, iotune over RAID0 of all disks). Memory: Spare Cores' lmbench bw_mem read with one copy per vCPU, 512 MB (keeper.sparecores.net); on Graviton3 it reads about 7% above STREAM Triad. Values (SSD GB/s; memory GB/s ÷ cores = per core; price): ours: i3en.2xlarge 1.36; 50.6 ÷ 4 = 12.7; $0.90. i7ie.12xlarge 12.7; 228.1 ÷ 24 = 9.5; $6.24. i7i.24xlarge 26.85; 292.1 ÷ 48 = 6.1; $9.06. Others: i3.16xlarge 16.1; 108.8 ÷ 32 = 3.4; $4.99. i3en.24xlarge 16.35; 225.1 ÷ 48 = 4.7; $10.85. i4i.32xlarge 24.8; 341.5 ÷ 64 = 5.3; $10.98. i4g.16xlarge 9.15; 169.3 ÷ 64 = 2.6; $4.94. im4gn.16xlarge 6.55; 174.6 ÷ 64 = 2.7; $5.82. is4gen.8xlarge 6.63; 175.2 ÷ 32 = 5.5; $4.61 (half the chip's cores, all its memory channels). i7ie.24xlarge 24.9; 292.3 ÷ 48 = 6.1; $12.48. i8g.24xlarge 25.5; 490.0 ÷ 96 = 5.1; $8.24. i8ge.24xlarge 24.85; 490.7 ÷ 96 = 5.1; $11.39. m8gd.48xlarge 23.1; 915.8 ÷ 192 = 4.8; $11.07. r8gd.48xlarge 23.2; 916.6 ÷ 192 = 4.8; $14.11. m9gd.48xlarge 30.5; 744.9 ÷ 192 = 3.9; $12.07. The point for the talk: a core gets a few GB/s of memory bandwidth as its share, while one instance's SSDs read tens of GB/s; on the i7i.24xlarge the six SSDs read 26.9 GB/s, the share of more than four of its 48 cores. The small i3en.2xlarge is the exception: four cores on a shared host pull 12.7 GB/s each while neighbours are quiet, and its two SSDs hold only 1.36 GB/s. Not plotted, no public SSD measurement: i7i, i7ie, i8g and i8ge at 48xlarge (our earlier fio read 53.8 GB/s on a two-socket i7i.48xlarge), c6id/m6id/r6id, x2idn, c7gd, c8gd, c8id/m8id/r8id.</aside>
 </section>
