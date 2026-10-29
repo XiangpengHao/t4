@@ -184,6 +184,11 @@ decision 9).
        or failed, as the client may send them before it knows.
      - `Failed` answers any call the cache failed: the read goes to the
        remote.
+     - A call the client gives up, its read dropped before the answer,
+       leaves the client's table of calls waiting, as the owner may never
+       answer it (it answers no call of a read it ended); an answer that
+       still comes is dropped. An answer to a call never made is a
+       protocol error.
 
      The owner runs a client's reads as tasks on the connection's thread
      (`sharing/client_reads.rs`), each taking its frames in order, and
@@ -402,6 +407,12 @@ pipelined. The owner's own reads cost what they cost now.
    and one that finds neither the lock nor an owner reading from the
    remote with no wait
    (`a_client_that_finds_no_owner_reads_from_its_store_without_waiting`).
+   A read given up leaves no call waiting, and its claims end with it
+   (`a_clients_read_given_up_leaves_no_call_waiting`,
+   `a_clients_read_given_up_mid_get_abandons_its_claim`,
+   `an_answer_to_a_call_given_up_is_dropped`); a client's GET that fails
+   abandons its fetch, so its read ends
+   (`a_clients_failed_get_abandons_its_fetch`).
    Next: the tests in real processes.
 4. **The region,** on Linux: outputs and landings in a sealed memfd; the
    socket when one doesn't fit.

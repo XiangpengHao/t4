@@ -162,9 +162,9 @@ impl OwnerConnection {
     ///
     /// If the owner is gone, or goes before it answers.
     async fn call(&self, call: impl FnOnce(u64) -> ClientFrame) -> Result<OwnerFrame> {
-        let (number, answer) = self.calls.wait()?;
-        self.tell(&call(number));
-        OwnerAnswer(answer).await
+        let waiting = self.calls.wait()?;
+        self.tell(&call(waiting.number));
+        waiting.await
     }
 
     /// Sends `frame`, which takes no answer; dropped if the owner is gone.
@@ -179,6 +179,15 @@ impl OwnerConnection {
     /// every call fails.
     pub(in crate::cache) fn owner_gone(&self) -> bool {
         self.calls.owner_gone()
+    }
+
+    /// The numbers of the calls waiting for their answers, in order: for
+    /// tests.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(in crate::cache) fn calls_waiting(&self) -> Vec<u64> {
+        let mut waiting: Vec<u64> = self.calls.calls().waiting.keys().copied().collect();
+        waiting.sort_unstable();
+        waiting
     }
 
     /// The error of a call the owner answered with a frame no call of its
@@ -220,12 +229,12 @@ struct WaitingCalls {
 }
 
 impl CallTable {
-    /// A call's number, and where its answer comes.
+    /// A new call, waiting in the table for its answer.
     ///
     /// # Errors
     ///
     /// If the owner is gone.
-    fn wait(&self) -> Result<(u64, Arc<TaskCompletion<OwnerFrame>>)> {
+    fn wait(&self) -> Result<WaitingCall<'_>> {
         let mut calls = self.calls();
         if calls.owner_gone {
             return Err(Self::gone_error());
@@ -234,23 +243,40 @@ impl CallTable {
         calls.next += 1;
         let answer = Arc::new(TaskCompletion::new());
         calls.waiting.insert(number, Arc::clone(&answer));
-        Ok((number, answer))
+        Ok(WaitingCall {
+            table: self,
+            number,
+            answer,
+        })
     }
 
-    /// Answers the call `answer` names.
+    /// Answers the call `answer` names, if it still waits: the answer to a
+    /// call given up is dropped.
     ///
     /// # Errors
     ///
-    /// If it names no call waiting, or isn't an answer.
+    /// If it names no call made, or isn't an answer.
     fn answer(&self, answer: OwnerFrame) -> Result<()> {
-        let waiting = answer
-            .call()
-            .and_then(|call| self.calls().waiting.remove(&call));
-        let Some(waiting) = waiting else {
-            return Err(FrameReader::malformed("answer: to no call waiting"));
+        let Some(call) = answer.call() else {
+            return Err(FrameReader::malformed("answer: of no call"));
         };
-        waiting.complete(Ok(answer));
+        let waiting = {
+            let mut calls = self.calls();
+            if call >= calls.next {
+                return Err(FrameReader::malformed("answer: to no call made"));
+            }
+            calls.waiting.remove(&call)
+        };
+        if let Some(waiting) = waiting {
+            waiting.complete(Ok(answer));
+        }
         Ok(())
+    }
+
+    /// Gives up the call `number`: it leaves the table, and its answer, if
+    /// the owner sends it, is dropped.
+    fn give_up(&self, number: u64) {
+        self.calls().waiting.remove(&number);
     }
 
     /// Whether the owner is gone: every call fails.
@@ -283,14 +309,28 @@ impl CallTable {
     }
 }
 
-/// An answer to a call, once the owner sends it.
-struct OwnerAnswer(Arc<TaskCompletion<OwnerFrame>>);
+/// A call waiting in its table: done once the owner answers it, or goes.
+/// Dropped first, as with a read given up, the call is given up, and
+/// leaves the table: the owner may never answer it, as it doesn't a read's
+/// calls once the read ends.
+struct WaitingCall<'t> {
+    table: &'t CallTable,
+    number: u64,
+    answer: Arc<TaskCompletion<OwnerFrame>>,
+}
 
-impl Future for OwnerAnswer {
+impl Future for WaitingCall<'_> {
     type Output = Result<OwnerFrame>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.0.poll_result(cx)
+        self.answer.poll_result(cx)
+    }
+}
+
+impl Drop for WaitingCall<'_> {
+    fn drop(&mut self) {
+        // Answered or failed, the call left the table already.
+        self.table.give_up(self.number);
     }
 }
 
@@ -619,3 +659,6 @@ impl Drop for ClientFetch<'_> {
         }
     }
 }
+
+#[cfg(all(test, not(feature = "shuttle")))]
+mod tests;

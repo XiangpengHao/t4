@@ -184,7 +184,7 @@ fn a_client_whose_owner_went_reads_from_its_store() {
 }
 
 /// Waits until `done`, a few seconds at most, else fails with `what`.
-fn wait_until(done: impl Fn() -> bool, what: &str) {
+fn wait_until(mut done: impl FnMut() -> bool, what: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !done() {
         assert!(Instant::now() < deadline, "{what}");
@@ -365,4 +365,118 @@ fn a_client_that_finds_no_owner_reads_from_its_store_without_waiting() {
     assert!(started.elapsed() < Duration::from_secs(1), "no read waits");
     assert!(!owns(&client) && !reads_through_an_owner(&client));
     assert_eq!(clients.take_asked().len(), 3, "each read from its store");
+}
+
+/// The calls `cache`, a client, waits on its owner for, by number.
+fn calls_waiting(cache: &T4Caching) -> Vec<u64> {
+    match &*cache.link() {
+        StorageLink::Client(owner) => owner.calls_waiting(),
+        StorageLink::Owner { .. } => panic!("a client"),
+    }
+}
+
+/// A client's read given up while it waits for its owner, its `Finish`
+/// unanswered: the call leaves the client's table with the read, and the
+/// connection serves the client's next read.
+#[test]
+fn a_clients_read_given_up_leaves_no_call_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(MIB, 13);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let (owner, owners, owners_meta) = process(&path, &data, shared);
+    let (client, clients, clients_meta) = process(&path, &data, shared);
+    let open = owners.gate_next_get();
+    let owned = read_on_thread(owner.clone(), owners_meta, 0..MIB);
+    wait_until(|| owners.gets_out_now() == 1, "the owner's GET goes out");
+
+    let file = client.open_listed(clients_meta.clone());
+    let mut read = Box::pin(file.read(0..MIB, None));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    // Its start and its GETs answered, its `Finish` waits on the owner's
+    // GET.
+    wait_until(
+        || {
+            assert!(read.as_mut().poll(&mut context).is_pending());
+            calls_waiting(&client) == [2]
+        },
+        "the read's Finish waits",
+    );
+    drop(read);
+    assert_eq!(
+        calls_waiting(&client),
+        [],
+        "the call given up with its read"
+    );
+
+    drop(open);
+    assert_eq!(owned.recv_timeout(Duration::from_secs(5)).unwrap(), data);
+    assert!(reads_through_an_owner(&client));
+    assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+    assert_eq!(clients.take_asked(), [], "served by the owner");
+}
+
+/// A client's read given up while its GET is out, part of its body landed:
+/// its claim ends with it, so the owner's read of the block fetches it
+/// itself rather than wait; no call is left waiting, and the connection
+/// stays whole.
+#[test]
+fn a_clients_read_given_up_mid_get_abandons_its_claim() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(MIB, 14);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let (owner, owners, owners_meta) = process(&path, &data, shared);
+    let (client, clients, clients_meta) = process(&path, &data, shared);
+    clients.stall_next_body(MIB as usize / 2);
+
+    let file = client.open_listed(clients_meta.clone());
+    let mut read = Box::pin(file.read(0..MIB, None));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    wait_until(
+        || {
+            assert!(read.as_mut().poll(&mut context).is_pending());
+            clients.stalled.load(Ordering::Relaxed)
+        },
+        "the client's GET stalls halfway",
+    );
+    drop(read);
+    assert_eq!(calls_waiting(&client), []);
+
+    let owned = read_on_thread(owner.clone(), owners_meta, 0..MIB);
+    assert_eq!(owned.recv_timeout(Duration::from_secs(5)).unwrap(), data);
+    assert_eq!(
+        owners.take_asked(),
+        [bounded(0..MIB)],
+        "the owner's own GET"
+    );
+    assert!(reads_through_an_owner(&client));
+    clients.take_asked();
+    assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+    assert_eq!(clients.take_asked(), [], "served by the owner");
+}
+
+/// A client's GET that fails, the file changed since the client opened it:
+/// its fetch is abandoned, so the owner's work for the read ends, and the
+/// read ends, in bounded time, with the store's answer.
+#[test]
+fn a_clients_failed_get_abandons_its_fetch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(MIB, 15);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let (_owner, _, _) = process(&path, &data, shared);
+    let (client, clients, clients_meta) = process(&path, &data, shared);
+    put(clients.as_ref(), &path, &file_bytes(MIB, 16));
+
+    let (done, read) = mpsc::channel();
+    std::thread::spawn(move || {
+        let file = client.open_listed(clients_meta);
+        let _ = done.send(block_on(file.read(0..MIB, None)));
+    });
+    let read = read.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(
+        matches!(read, Err(object_store::Error::Precondition { .. })),
+        "{read:?}"
+    );
 }
