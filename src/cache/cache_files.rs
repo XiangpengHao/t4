@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use super::BLOCK_SIZE_U64;
 use super::chunk_pool::disk_chunks::{DiskChunkReader, DiskChunkWriter, DiskChunks};
+use super::sharing::FileIdentity;
 use crate::buffer::AlignedBuf;
 use crate::io::error::{Error, Result};
 use crate::io::io_task::PageWrite;
@@ -26,6 +27,10 @@ impl DiskFile {
     pub(super) fn new(path: PathBuf, capacity: u64) -> Self {
         Self { path, capacity }
     }
+
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 /// The disk tier: its chunks, striped over its files by number, and the
@@ -33,6 +38,9 @@ impl DiskFile {
 pub(super) struct CacheFiles {
     io: IoWorker,
     chunks: Arc<DiskChunks>,
+    /// The first file's identity, which names its owner's address
+    /// (`doc/11-shared-mode.md`, decision 6); `None` for simulated files.
+    first_file: Option<FileIdentity>,
 }
 
 impl CacheFiles {
@@ -69,7 +77,10 @@ impl CacheFiles {
                 Ok(opened)
             })
             .collect::<Result<Vec<_>>>()?;
-        Self::on(IoWorker::new(queue_depth, opened)?, count, chunks_per_file)
+        let first_file = FileIdentity::of(&opened[0])?;
+        let mut files = Self::on(IoWorker::new(queue_depth, opened)?, count, chunks_per_file)?;
+        files.first_file = Some(first_file);
+        Ok(files)
     }
 
     /// The disk tier on the `files` files `io` reads and writes, of
@@ -78,11 +89,18 @@ impl CacheFiles {
         Ok(Self {
             io,
             chunks: Arc::new(DiskChunks::new(files, chunks_per_file)?),
+            first_file: None,
         })
     }
 
     pub(super) fn chunks(&self) -> &Arc<DiskChunks> {
         &self.chunks
+    }
+
+    /// The identity of the first cache file; `None` if the files are
+    /// simulated.
+    pub(super) fn first_file(&self) -> Option<FileIdentity> {
+        self.first_file
     }
 
     /// Writes `pages` at the start of the chunk `writer` holds.

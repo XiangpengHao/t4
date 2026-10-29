@@ -943,7 +943,7 @@ fn a_get_merged_over_a_hit_drops_its_bytes() {
     );
     assert_eq!(get_range(&store, &path, 0..3 * MIB), data);
     assert_eq!(inner.take_asked(), []);
-    store.cache.check_at_rest().unwrap();
+    store.link().owned().unwrap().check_at_rest().unwrap();
 }
 
 /// A GET widened past the read caches the blocks it brings, where the

@@ -1,0 +1,96 @@
+//! Where a cache's owner listens for its clients (`doc/11-shared-mode.md`,
+//! decision 6): an address named by the first cache file's identity, so
+//! that every path to the file names the same one.
+
+use std::fs::File;
+use std::io;
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(not(target_os = "linux"))]
+use std::path::PathBuf;
+
+/// A file, by whatever path it is reached: its device and inode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::cache) struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl FileIdentity {
+    /// The identity of the file `file` is open on.
+    pub(in crate::cache) fn of(file: &File) -> io::Result<Self> {
+        let meta = file.metadata()?;
+        Ok(Self {
+            device: meta.dev(),
+            inode: meta.ino(),
+        })
+    }
+}
+
+/// The address of the owner of the cache whose first cache file is one
+/// file: on Linux an abstract socket's name, which no file holds and which
+/// is gone with the owner's socket, however the owner exits; elsewhere a
+/// socket file's path, in the temporary directory.
+pub(super) struct OwnerAddress {
+    #[cfg(target_os = "linux")]
+    name: String,
+    #[cfg(not(target_os = "linux"))]
+    path: PathBuf,
+}
+
+impl OwnerAddress {
+    /// The address of the owner of the cache whose first cache file is
+    /// `file`.
+    pub(super) fn of(file: FileIdentity) -> Self {
+        let FileIdentity { device, inode } = file;
+        Self {
+            #[cfg(target_os = "linux")]
+            name: format!("t4/{device:x}/{inode:x}"),
+            #[cfg(not(target_os = "linux"))]
+            path: std::env::temp_dir().join(format!("t4-{device:x}-{inode:x}.sock")),
+        }
+    }
+
+    /// Listens at the address, for the owner. It holds the cache files'
+    /// lock, so no other process binds the address meanwhile: a socket file
+    /// there is one an owner left as it died, and goes first.
+    pub(super) fn listen(&self) -> io::Result<UnixListener> {
+        #[cfg(target_os = "linux")]
+        {
+            UnixListener::bind_addr(&self.socket_address()?)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            match std::fs::remove_file(&self.path) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+                _ => {}
+            }
+            UnixListener::bind(&self.path)
+        }
+    }
+
+    /// A connection to the owner listening at the address.
+    pub(super) fn connect(&self) -> io::Result<UnixStream> {
+        #[cfg(target_os = "linux")]
+        {
+            UnixStream::connect_addr(&self.socket_address()?)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            UnixStream::connect(&self.path)
+        }
+    }
+
+    /// The owner's listener gone, its socket file goes too, while the owner
+    /// still holds the lock; an abstract name went with its socket.
+    pub(super) fn remove(&self) {
+        #[cfg(not(target_os = "linux"))]
+        let _ = std::fs::remove_file(&self.path);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn socket_address(&self) -> io::Result<std::os::unix::net::SocketAddr> {
+        use std::os::linux::net::SocketAddrExt;
+        std::os::unix::net::SocketAddr::from_abstract_name(self.name.as_bytes())
+    }
+}

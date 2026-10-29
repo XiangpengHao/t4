@@ -4,11 +4,26 @@
 //!
 //! - `frames`: what the socket carries, each frame decoded and checked as
 //!   it arrives.
+//! - `frame_socket`: a connected socket, which frames cross whole.
+//! - `address`: where an owner listens, named by its first cache file.
+//! - `handshake`: a client's hello, and the owner's check of it.
+//! - `owner`: an owner's listener, and a session for each client.
+//! - `client`: a client's connection to its owner.
 
-// Used outside its tests once the socket carries the frames (step 3's
-// next commit).
-#![allow(dead_code)]
-
+mod address;
+mod client;
+mod frame_socket;
+// The frames of reads are used outside their tests once the socket serves
+// reads (step 3's next commit).
+#[allow(dead_code)]
 mod frames;
+mod handshake;
+mod owner;
 
+pub(super) use address::FileIdentity;
+pub(super) use client::OwnerConnection;
 pub(super) use frames::{FrameReader, FrameWriter};
+pub(super) use owner::OwnerListener;
+
+#[cfg(all(test, not(feature = "shuttle")))]
+mod tests;

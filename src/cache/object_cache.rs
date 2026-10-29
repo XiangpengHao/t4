@@ -1404,7 +1404,6 @@ impl LocatedRun {
     }
 
     /// Writes the run into `frame`, for a client to plan its GETs by.
-    #[allow(dead_code)] // Until the socket carries the frames.
     pub(super) fn write_to(&self, frame: &mut FrameWriter) {
         frame.u32(self.first);
         frame.range(&self.asked);
@@ -1417,7 +1416,6 @@ impl LocatedRun {
     ///
     /// If the frame ends first, or the run holds no block or one past the
     /// last a file has.
-    #[allow(dead_code)] // Until the socket carries the frames.
     pub(super) fn read_from(frame: &mut FrameReader) -> Result<Self> {
         let first = frame.u32()?;
         let asked = frame.range()?;

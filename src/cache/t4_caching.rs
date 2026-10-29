@@ -43,6 +43,8 @@ use super::policy::Tier;
 use super::policy::{
     ClockPolicy, FetchRuns, Io, PlacementPolicy, RaceStragglers, ReadIntent, ReadPolicy, TierSizes,
 };
+use super::sharing::{OwnerConnection, OwnerListener};
+use super::storage_link::StorageLink;
 use super::{BLOCK_SIZE_U64, InsertOrAbort};
 use crate::io::sync::Arc;
 
@@ -94,7 +96,8 @@ type Sleep = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>;
 #[derive(Clone)]
 pub struct T4Caching {
     inner: Arc<dyn ObjectStore>,
-    cache: Arc<ObjectCache>,
+    /// The cache: this process's own, or its owner's (`doc/11-shared-mode.md`).
+    link: Arc<StorageLink>,
     /// What plans each read's GETs, as the cache locates its blocks, and
     /// hears of its I/O: its GETs, and its reads from disk, which the
     /// cache reports to it as they go.
@@ -131,6 +134,7 @@ pub struct T4CachingBuilder {
     sleep: Option<Sleep>,
     network_rate: (u64, Duration),
     merged_up_to: u64,
+    sharing: bool,
 }
 
 impl T4CachingBuilder {
@@ -144,6 +148,12 @@ impl T4CachingBuilder {
     /// (`Self::with_waiting_gets_merged`): the default read policy's GET of
     /// a normal read, 4 MiB, so that merging never undoes its split.
     pub const DEFAULT_MERGED_UP_TO: u64 = FetchRuns::NORMAL_GET_MOST;
+    /// How long a cache built for sharing tries to reach the owner of its
+    /// files (`Self::with_sharing`) before it fails with `Error::Busy`: an
+    /// owner starting or leaving refuses connections a while.
+    pub const OWNER_WAIT: Duration = Duration::from_secs(10);
+    /// How long it waits between tries.
+    const OWNER_RETRY: Duration = Duration::from_millis(10);
 
     /// Memory for cached bytes, in whole 1 MiB blocks, one at least.
     /// Required.
@@ -234,15 +244,34 @@ impl T4CachingBuilder {
         self
     }
 
+    /// Shares the cache with the other processes on the machine that build
+    /// one for sharing on the same cache files (`doc/11-shared-mode.md`).
+    /// The first to build owns the cache and serves it to the others, its
+    /// clients, from a thread of its own; another, rather than fail with
+    /// `Error::Busy`, becomes a client. A client's tier settings and
+    /// placement policy count only once it owns the cache; its read policy
+    /// and its credentials, the inner store's, stay its own. Off unless
+    /// set: a second cache on owned files is `Busy`.
+    ///
+    /// Being built: for now a client's reads go to the inner store alone.
+    pub fn with_sharing(mut self) -> Self {
+        self.sharing = true;
+        self
+    }
+
     /// The store: its cache files made and sized, its memory mapped, its
-    /// policy built.
+    /// policy built; or, built for sharing on files another cache owns, a
+    /// client of that cache's.
     ///
     /// # Errors
     ///
     /// If the memory capacity or a disk file wasn't given, the queue depth
     /// or the network's bytes in flight are 0, or a cache file can't be
-    /// made, sized and opened, or the memory mapped.
-    pub fn build(self) -> crate::Result<T4Caching> {
+    /// made, sized and opened, or the memory mapped. `Error::Busy` if
+    /// another cache owns a cache file, and either this one isn't built for
+    /// sharing or that one's owner didn't admit it within
+    /// [`Self::OWNER_WAIT`].
+    pub fn build(mut self) -> crate::Result<T4Caching> {
         let memory_chunks =
             Self::chunks(self.memory_capacity, "T4Caching needs a memory capacity")?;
         if self.disk_files.is_empty() {
@@ -250,29 +279,74 @@ impl T4CachingBuilder {
         }
         let queue_depth = NonZeroU32::new(self.queue_depth)
             .ok_or(crate::Error::InvalidArgument("queue depth must be > 0"))?;
-        let disk = CacheFiles::open(&self.disk_files, queue_depth, self.direct_io)?;
-        let disk_chunks = NonZeroU32::new(disk.chunks().chunk_count())
-            .expect("a disk file holds a chunk at least");
-        let sizes = TierSizes::new(memory_chunks, disk_chunks);
-        let placement = match self.placement {
-            Some(build) => build(sizes),
-            None => Arc::new(ClockPolicy::new(memory_chunks, disk_chunks)),
-        };
-        let reads = self
-            .reads
-            .unwrap_or_else(|| Arc::new(RaceStragglers::default()));
         let (bytes_per_second, unloaded_get_time) = self.network_rate;
         let bytes = u128::from(bytes_per_second) * unloaded_get_time.as_nanos() / 1_000_000_000;
         let bytes_in_flight = NonZeroU64::new(u64::try_from(bytes).unwrap_or(u64::MAX)).ok_or(
             crate::Error::InvalidArgument("the network's bytes in flight must be > 0"),
         )?;
+        let link = self.link(memory_chunks, queue_depth)?;
+        let reads = self
+            .reads
+            .unwrap_or_else(|| Arc::new(RaceStragglers::default()));
         Ok(T4Caching {
             inner: self.inner,
-            cache: Arc::new(ObjectCache::new(memory_chunks, disk, placement)?),
+            link: Arc::new(link),
             reads,
             gets: Arc::new(GetQueue::new(bytes_in_flight, self.merged_up_to)),
             sleep: self.sleep,
             known: Arc::new(KnownFiles::new()),
+        })
+    }
+
+    /// The cache: this process's own, if it takes the cache files' lock;
+    /// else, built for sharing, its owner's, through a connection to it.
+    /// An owner starting or leaving refuses connections a while: the lock
+    /// is tried again, and the owner again, until [`Self::OWNER_WAIT`] is
+    /// up.
+    fn link(
+        &mut self,
+        memory_chunks: NonZeroU32,
+        queue_depth: NonZeroU32,
+    ) -> crate::Result<StorageLink> {
+        let deadline = Instant::now() + Self::OWNER_WAIT;
+        loop {
+            match CacheFiles::open(&self.disk_files, queue_depth, self.direct_io) {
+                Ok(disk) => return self.own(memory_chunks, disk),
+                Err(crate::Error::Busy) if self.sharing => {}
+                Err(error) => return Err(error),
+            }
+            if let Some(owner) = OwnerConnection::connect(self.disk_files[0].path())? {
+                return Ok(StorageLink::Client(owner));
+            }
+            if Instant::now() >= deadline {
+                return Err(crate::Error::Busy);
+            }
+            std::thread::sleep(Self::OWNER_RETRY);
+        }
+    }
+
+    /// The cache of `memory_chunks` chunks of memory and the chunks of
+    /// `disk`, its files' lock taken: this process's own, served to clients
+    /// if built for sharing.
+    fn own(&mut self, memory_chunks: NonZeroU32, disk: CacheFiles) -> crate::Result<StorageLink> {
+        let disk_chunks = NonZeroU32::new(disk.chunks().chunk_count())
+            .expect("a disk file holds a chunk at least");
+        let sizes = TierSizes::new(memory_chunks, disk_chunks);
+        let placement = match self.placement.take() {
+            Some(build) => build(sizes),
+            None => Arc::new(ClockPolicy::new(memory_chunks, disk_chunks)),
+        };
+        let first_file = disk.first_file();
+        let cache = Arc::new(ObjectCache::new(memory_chunks, disk, placement)?);
+        let listener = match first_file {
+            Some(first_file) if self.sharing => {
+                Some(OwnerListener::listen(Arc::clone(&cache), first_file)?)
+            }
+            _ => None,
+        };
+        Ok(StorageLink::Owner {
+            _listener: listener,
+            cache,
         })
     }
 
@@ -295,6 +369,7 @@ impl fmt::Debug for T4CachingBuilder {
             .field("direct_io", &self.direct_io)
             .field("network_rate", &self.network_rate)
             .field("merged_up_to", &self.merged_up_to)
+            .field("sharing", &self.sharing)
             .finish_non_exhaustive()
     }
 }
@@ -316,6 +391,7 @@ impl T4Caching {
                 T4CachingBuilder::DEFAULT_UNLOADED_GET_TIME,
             ),
             merged_up_to: T4CachingBuilder::DEFAULT_MERGED_UP_TO,
+            sharing: false,
         }
     }
 
@@ -371,6 +447,7 @@ impl T4Caching {
     /// forgets then.
     async fn read_through(
         &self,
+        cache: &ObjectCache,
         location: &Path,
         file: &CacheableFile<'_>,
         e_tag: &str,
@@ -379,8 +456,7 @@ impl T4Caching {
     ) -> object_store::Result<Option<Bytes>> {
         let intent = extensions.get::<ReadIntent>().copied();
         let reads = &*self.reads;
-        let Ok((mut read, mut work)) = self.cache.start_read(file, range.clone(), intent, reads)
-        else {
+        let Ok((mut read, mut work)) = cache.start_read(file, range.clone(), intent, reads) else {
             return Ok(None);
         };
         loop {
@@ -389,7 +465,7 @@ impl T4Caching {
             }
             let mut receivers = Vec::new();
             for fetch in read.fetches() {
-                let Ok(blocks) = self.cache.receive(&mut read, fetch) else {
+                let Ok(blocks) = cache.receive(&mut read, fetch) else {
                     return Ok(None);
                 };
                 receivers.push(blocks);
@@ -423,7 +499,7 @@ impl T4Caching {
             }
             // Blocks the read waited for that no fetch cached: it fetches
             // them itself, or waits again for a read that fetches them now.
-            work = self.cache.retry(file, range.clone(), intent, retry, reads);
+            work = cache.retry(file, range.clone(), intent, retry, reads);
         }
     }
 
@@ -680,7 +756,16 @@ impl T4Caching {
     #[cfg(feature = "__fuzz")]
     #[doc(hidden)]
     pub fn check_at_rest(&self) -> Result<Vec<(Tier, ChunkId)>, String> {
-        self.cache.check_at_rest()
+        match self.link.owned() {
+            Some(cache) => cache.check_at_rest(),
+            None => Err("a client holds no cache: its owner does".to_owned()),
+        }
+    }
+
+    /// How the cache is reached: for tests.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(super) fn link(&self) -> &StorageLink {
+        &self.link
     }
 }
 

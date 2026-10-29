@@ -67,7 +67,8 @@ impl CachedFile {
     /// told the `ReadIntent` `extensions` hold, and the GETs to the inner
     /// store carrying them. `None` if the cache can't serve it: the file
     /// has no e_tag, the cache can't hold it, a read of a cache file failed,
-    /// or a fetch found the file changed, which the cache forgets then.
+    /// a fetch found the file changed, which the cache forgets then, or the
+    /// cache is another process's (for now).
     pub(super) async fn read_cached(
         &self,
         range: Range<u64>,
@@ -76,13 +77,18 @@ impl CachedFile {
         let Some(e_tag) = self.meta.e_tag.as_deref() else {
             return Ok(None);
         };
+        // A client's reads go to the remote until the socket serves them
+        // (`doc/11-shared-mode.md`, build step 3).
+        let Some(cache) = self.store.link.owned() else {
+            return Ok(None);
+        };
         let location = &self.meta.location;
         let path = location.as_ref().as_bytes();
-        let Ok(file) = self.store.cache.resolve(path, Some(e_tag), self.meta.size) else {
+        let Ok(file) = cache.resolve(path, Some(e_tag), self.meta.size) else {
             return Ok(None);
         };
         self.store
-            .read_through(location, &file, e_tag, range, extensions)
+            .read_through(cache, location, &file, e_tag, range, extensions)
             .await
     }
 

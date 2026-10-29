@@ -3,7 +3,10 @@
 Status: design (2026-10-29). Built: build step 1, the lock
 (`CacheFiles::open_file`, `Error::Busy`); step 2.1, the read policy
 in the fetch half; step 2.2, no `Location` held by the fetch half;
-and step 2.4, no read policy held by the storage half.
+step 2.4, no read policy held by the storage half; step 2.5,
+`StorageLink`; and of step 3, the frames, and the owner listening and
+a client connecting (`with_sharing`), whose reads go to the remote
+until the socket serves them.
 The user's call of 29 Oct 2026, for Spiral
 (`10-spiral-integration.md`, decision 8).
 
@@ -327,13 +330,24 @@ pipelined. The owner's own reads cost what they cost now.
       `ObjectCache::start_read` and `retry` take the caller's read policy,
       which `TierWork` reports the read's disk reads to;
    5. the one type the fetch half reaches the storage half through.
+      Built 29 Oct 2026, with step 3's connection: `StorageLink`, the
+      owner's `ObjectCache` and its listener, or a client's
+      `OwnerConnection`.
 3. **The socket, bytes in its frames,** on Linux and macOS: the owner
    listens, a client connects on `Busy`, the handshake, failures to the
    remote, a client coming to own the cache. Tests in one process (a
    second cache built for sharing on the same file is a client, as the
    lock conflicts within a process too), and in real processes for
    deaths: the owner killed mid-read, a client killed holding a claim,
-   eight clients starting at once.
+   eight clients starting at once. Built so far (29 Oct 2026): the
+   frames (`sharing/frames.rs`); `with_sharing`; the owner listening,
+   its sessions, the handshake, and a client connecting on `Busy`,
+   trying the lock and the owner again until `OWNER_WAIT`
+   (`a_cache_built_for_sharing_on_owned_files_is_their_owners_client`,
+   `an_owner_dropped_hands_its_files_to_the_next_cache`,
+   `the_owner_admits_only_a_writer_of_its_first_cache_file`). Next:
+   reads served over the socket, then failures to the remote, a client
+   coming to own the cache, and the tests in real processes.
 4. **The region,** on Linux: outputs and landings in a sealed memfd; the
    socket when one doesn't fit.
 5. **Polling,** only if measured (Later).
@@ -343,7 +357,13 @@ pipelined. The owner's own reads cost what they cost now.
 | Module | What | Built |
 |---|---|---|
 | `src/cache/cache_files.rs` | the lock (decision 1) | yes |
-| `src/cache/object_cache.rs` | the storage half (decision 2) | as the whole cache; the split is step 2 |
-| `src/cache/t4_caching.rs` | the fetch half (decision 2) | as the whole cache's front end |
+| `src/cache/object_cache.rs` | the storage half (decision 2) | yes |
+| `src/cache/t4_caching.rs` | the fetch half (decision 2), and `with_sharing` (decision 1) | yes |
+| `src/cache/storage_link.rs` | how the fetch half reaches the storage half: its own, or its owner's (decision 2) | yes; a client's reads go to the remote for now |
 | `src/cache/sharing/frames.rs` | the frames, each checked as it arrives (decision 5) | yes |
-| `src/cache/sharing/` | the owner's listener and a client's connection, the address, the region (decisions 5 to 7) | no |
+| `src/cache/sharing/frame_socket.rs` | a socket frames cross whole, raising no `SIGPIPE` (decision 5) | yes |
+| `src/cache/sharing/address.rs` | the owner's address, by the first cache file's identity (decision 6) | yes |
+| `src/cache/sharing/handshake.rs` | a client's hello, its descriptor by `SCM_RIGHTS`, and the owner's check (decision 6) | yes |
+| `src/cache/sharing/owner.rs` | the owner's listener and a session for each client (decisions 1, 5) | listening and admitting; reads next |
+| `src/cache/sharing/client.rs` | a client's connection to its owner (decisions 5 to 7) | connecting; calls next |
+| the region | outputs and landings in a sealed memfd (decision 5) | no: step 4 |

@@ -27,7 +27,6 @@ impl FileVersion {
     /// The version `id` of a file of `size` bytes, as an owner named it to
     /// its client (`doc/11-shared-mode.md`); `None` if the cache can't hold
     /// a file that large.
-    #[allow(dead_code)] // Until the socket carries the frames.
     pub(in crate::cache) fn named(id: FileVersionId, size: u64) -> Option<Self> {
         (size <= Self::MAX_SIZE).then_some(Self { id, size })
     }
