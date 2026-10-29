@@ -87,8 +87,8 @@ decision 9).
      waiter to fetch it itself once abandoned.
 
    The two halves interleaved in four places (`ObjectCache::start_read`
-   and what it returns). The first two are resolved (steps 2.1 and 2.2);
-   each of the others is to be resolved so:
+   and what it returns). The first three are resolved (steps 2.1 to
+   2.3); the last is to be resolved so:
 
    - **The read policy planned in the storage half:** `TierWork::plan`
      located a run's blocks, then called `ReadPolicy::plan` itself.
@@ -107,7 +107,13 @@ decision 9).
      stays that. In a client, the landing is a buffer in its region, and
      the owner allocates the chunk at commit: a copy from the region for
      memory, a direct write from it for disk. The memory pool is a
-     private mapping, never shared: a client can't write a chunk.
+     private mapping, never shared: a client can't write a chunk. Already
+     behind the storage half's interface (step 2.3): the fetch half lands
+     a fetch's bytes only through `FetchedBlocks`'s `range`, `file`,
+     `race`, `late_race`, `land` and `finish`, the commit; where a block
+     lands, the eviction it makes and its claim are private to
+     `object_cache.rs`. A client's `FetchedBlocks`, landing in its region
+     and committing over the socket, comes with steps 3 and 4.
    - **The fetch half held where blocks were.** A fetch ends with
      `FetchEnd::Cached(Location)`, but the waiter that takes it is the
      read's work on the tiers (`TierWork::finish`), which pins the chunk
@@ -290,7 +296,8 @@ pipelined. The owner's own reads cost what they cost now.
       Built 29 Oct 2026: the waiters already were (`TierWork::finish`);
       the blocks left to fetch go to the fetch half as a `BlocksToFetch`,
       not as `PlannedBlock`s;
-   3. landing and commit behind the storage half's interface;
+   3. landing and commit behind the storage half's interface. Already so
+      (29 Oct 2026): `FetchedBlocks`, no change needed;
    4. disk reads reported back with a read's answer;
    5. the one type the fetch half reaches the storage half through.
 3. **The socket, bytes in its frames,** on Linux and macOS: the owner
