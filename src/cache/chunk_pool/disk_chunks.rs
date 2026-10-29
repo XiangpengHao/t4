@@ -23,19 +23,23 @@ pub(in crate::cache) struct DiskChunks {
 impl DiskChunks {
     /// `chunks_per_file` chunks in each of `files` files, all free.
     pub(in crate::cache) fn new(files: NonZeroU32, chunks_per_file: u32) -> Result<Self> {
-        let chunk_count =
-            files
-                .get()
-                .checked_mul(chunks_per_file)
-                .ok_or(Error::InvalidArgument(
-                    "a disk tier holds 2^32 chunks or fewer",
-                ))?;
         // A file holds at most 2^32 chunks of 2^20 bytes: no offset
         // overflows.
         Ok(Self {
             files,
-            table: ChunkTable::new(chunk_count),
+            table: ChunkTable::new(Self::total_chunks(files, chunks_per_file)?),
         })
+    }
+
+    /// The chunks of `files` files of `chunks_per_file` each: as many as a
+    /// tier numbers at most.
+    fn total_chunks(files: NonZeroU32, chunks_per_file: u32) -> Result<u32> {
+        files
+            .get()
+            .checked_mul(chunks_per_file)
+            .ok_or(Error::InvalidArgument(
+                "a disk tier holds 2^32 chunks or fewer",
+            ))
     }
 
     pub(in crate::cache) fn chunk_count(&self) -> u32 {
@@ -204,7 +208,12 @@ mod tests {
     #[test]
     fn rejects_more_chunks_than_a_tier_numbers() {
         assert!(DiskChunks::new(TWO, u32::MAX).is_err());
-        assert!(DiskChunks::new(TWO, u32::MAX / 2).is_ok());
+        // The most a tier numbers, counted rather than built: its chunk
+        // table would take 64 GiB, which CI's runners refuse.
+        assert_eq!(
+            DiskChunks::total_chunks(TWO, u32::MAX / 2).unwrap(),
+            u32::MAX - 1
+        );
     }
 
     #[test]
