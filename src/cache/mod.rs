@@ -15,6 +15,8 @@
 //!   `Bytes` with no copy.
 //! - `t4_caching`: the front end over another `ObjectStore`: files opened
 //!   and read through the cache, and an `ObjectStore` itself.
+//! - `sharing`: one cache read by several processes, through the one that
+//!   owns it (`doc/11-shared-mode.md`).
 
 mod block_index;
 mod cache_files;
@@ -25,6 +27,7 @@ mod io_report;
 mod object_cache;
 pub mod policy;
 mod read_output;
+mod sharing;
 mod t4_caching;
 
 pub use t4_caching::{CachedFile, T4Caching, T4CachingBuilder};

@@ -24,6 +24,14 @@ impl FileVersion {
     /// past its last block is a block number too.
     const MAX_SIZE: u64 = (BlockKey::INDEX_LIMIT - 1) as u64 * BLOCK_SIZE_U64;
 
+    /// The version `id` of a file of `size` bytes, as an owner named it to
+    /// its client (`doc/11-shared-mode.md`); `None` if the cache can't hold
+    /// a file that large.
+    #[allow(dead_code)] // Until the socket carries the frames.
+    pub(in crate::cache) fn named(id: FileVersionId, size: u64) -> Option<Self> {
+        (size <= Self::MAX_SIZE).then_some(Self { id, size })
+    }
+
     pub(in crate::cache) fn id(self) -> FileVersionId {
         self.id
     }

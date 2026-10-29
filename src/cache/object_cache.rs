@@ -46,6 +46,7 @@ use super::policy::{
     PlacementPolicy, PlannedGet, ReadIntent, ReadPlan, ReadPolicy, Tier, VictimAction,
 };
 use super::read_output::ReadOutput;
+use super::sharing::{FrameReader, FrameWriter};
 use super::{BLOCK_SIZE_U64, BlockKey, ChunkId, FileVersionId};
 use crate::PAGE_SIZE_U32;
 use crate::buffer::AlignedBuf;
@@ -1391,6 +1392,48 @@ struct HeldRun {
 }
 
 impl LocatedRun {
+    /// A run of `sources`, from block `first`, the read's `asked` bytes of
+    /// it: for tests.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(super) fn new(first: u32, asked: Range<u64>, sources: Vec<BlockSource>) -> Self {
+        Self {
+            first,
+            asked,
+            sources,
+        }
+    }
+
+    /// Writes the run into `frame`, for a client to plan its GETs by.
+    #[allow(dead_code)] // Until the socket carries the frames.
+    pub(super) fn write_to(&self, frame: &mut FrameWriter) {
+        frame.u32(self.first);
+        frame.range(&self.asked);
+        frame.sources(&self.sources);
+    }
+
+    /// The run `frame` holds next, as [`Self::write_to`] wrote it.
+    ///
+    /// # Errors
+    ///
+    /// If the frame ends first, or the run holds no block or one past the
+    /// last a file has.
+    #[allow(dead_code)] // Until the socket carries the frames.
+    pub(super) fn read_from(frame: &mut FrameReader) -> Result<Self> {
+        let first = frame.u32()?;
+        let asked = frame.range()?;
+        let sources = frame.sources()?;
+        let blocks = u32::try_from(sources.len()).ok();
+        let end = blocks.and_then(|blocks| first.checked_add(blocks));
+        if sources.is_empty() || end.is_none_or(|end| end > BlockKey::INDEX_LIMIT) {
+            return Err(FrameReader::malformed("a located run's blocks"));
+        }
+        Ok(Self {
+            first,
+            asked,
+            sources,
+        })
+    }
+
     /// The GETs `policy` plans for the run, of a read of `file` for
     /// `intent`; the cache checks them as it takes them
     /// ([`TierWork::take_gets`]).
