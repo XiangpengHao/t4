@@ -49,6 +49,10 @@ only the remote holds itself. The design: `03-cache.md`.
   merging and races in spiral-io's read path where they measure better.
   New in t4: a disk tier kept across restarts, one process per cache
   file, a cache file that grows.
+- `11-shared-mode.md`: one cache, several processes: the process that
+  takes the cache files' lock owns the cache and serves it; the others
+  read through it over a Unix socket and shared memory, and fetch what it
+  doesn't hold with their own credentials.
 - `98-cachefs-vs-fs.md`: how a cache's storage differs from a file
   system's.
 - `99-brainstorm.md`: open notes.

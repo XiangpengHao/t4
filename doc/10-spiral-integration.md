@@ -5,7 +5,9 @@ spiraldb's branch `xiangpeng/t4-cache`, not pushed. Revised the same day:
 the first version gave t4 a new core API, files opened under the caller's
 key and version (Later); t4's existing API does the job, with Spiral
 naming each file as a path (decision 2). macOS runs t4 for real, untuned
-(decision 12).
+(decision 12). Revised 29 Oct 2026: Spiral's processes share one cache
+through its owner, `11-shared-mode.md` (decision 8); the lock is built
+(plan step 3).
 
 The goal: t4 replaces spiraldb's local I/O cache, Kismet, and then
 takes over the rest of the work `spiral-io` does to read fast. The rest
@@ -21,9 +23,9 @@ The shape:
 - **spiral-io's store keeps** providers, credentials, pins, retries, the
   scheduler, writes and lists (decision 1).
 - **What Kismet gives its hosts, t4 has to give too:** a cache that
-  survives a restart (decision 7), a cache file one process owns safely
-  (decision 8), and a footprint a laptop accepts (decision 9). That is
-  the new t4 work.
+  survives a restart (decision 7), one cache shared by Spiral's
+  processes (decision 8), and a footprint a laptop accepts (decision 9).
+  That is the new t4 work.
 
 ## What shapes it
 
@@ -115,7 +117,10 @@ up to 16 MiB before they reach it.
   (`spiraldb/apps/spiral-studio/src-tauri/src/scandal.rs`);
 - `spiral connect`, a local ScanDAL host that hosted Studio pairs with
   (`spiraldb/cli/spiral-cli-connect`);
-- the SQL CLI (`default_cached_client_session`, in `spiral-defaults`).
+- the SQL CLI, in the book's words. `spiral-defaults` defines
+  `default_cached_client_session` for it, but nothing in spiraldb calls
+  it, at 4d18993728 or at d7d2e23331 (29 Oct 2026). So in the code,
+  the two hosts above are all, both long-running local servers.
 
 Server query processes, Flight SQL, the worker engines, Python and ADBC
 install none (`book/src/platform/storage/local-io-cache.md`). On the three
@@ -139,7 +144,7 @@ nothing; Kismet's non-unix fallbacks have no user.
 | fetches through Spiral's own GET | t4 GETs from its inner store, carrying each read's `GetOptions::extensions` |
 | fetch-once | yes, within a process |
 | survives a restart | no: a restart loses everything (`03-cache.md`, decision 9); a snapshot is in 03's Later |
-| several processes, one cache | no lock: two processes building on one cache file both write it. The lock and a shared mode existed for the key-value store and went with it (`doc/02-multi-process.md`, removed in 45a0009 on 21 Oct 2026) |
+| several processes, one cache | a lock: a second cache on a cache file fails to build, `Error::Busy` (built 29 Oct 2026). Shared mode, one process owning the cache and the others reading through it, is `11-shared-mode.md`. The key-value store had both, and lost them with it (`doc/02-multi-process.md`, removed in 45a0009 on 21 Oct 2026) |
 | a laptop's footprint | the cache files are allocated in full at build (`fallocate`); a memory capacity is required |
 | a disk error served from the remote | yes: a failed cache-file read goes to the inner store |
 | macOS | built and tested there, for development only until this doc (decision 12): a thread pool, `F_NOCACHE` |
@@ -293,20 +298,21 @@ hosts is one.
    bytes, so a restarted process opens the files it cached before under
    the same names.
 
-8. **One process owns a cache file; another runs without it, at first.**
-   Each cache file takes `flock(LOCK_EX | LOCK_NB)` as the cache is built,
+8. **One process owns the cache; the others read through it.** Each
+   cache file takes `flock(LOCK_EX | LOCK_NB)` as the cache is built,
    held for the cache's life, as the key-value store's mount lock was
    (doc/02 before 45a0009). The kernel drops it when its holder exits,
-   killed or not. A cache that loses it fails to build with
-   `Error::Busy`, and spiral-io runs that process uncached, saying so
-   once, rather than failing the session as a cache that can't be made
-   does now.
+   killed or not. Built: a cache that loses it fails to build with
+   `Error::Busy`.
 
-   Kismet lets Studio and `spiral connect` share one cache; with the
-   lock, whichever starts second reads from the remote. That is accepted
-   at first: they serve one user, Studio carries its own host, and
-   `spiral connect` serves hosted Studio, so both rarely run at once. If
-   they do, t4's shared mode comes back (Later).
+   Kismet lets Studio and `spiral connect` share one cache, and t4 does
+   too, through its owner (`11-shared-mode.md`, the user's call of
+   29 Oct 2026): whichever host takes the lock owns the cache and serves
+   it from a thread of its own; the other reads through it, fetching what
+   the cache doesn't hold with its own Spiral connection. Until that is
+   built, the host that starts second gets `Error::Busy`, and spiral-io
+   runs it uncached, saying so once, rather than failing the session as a
+   cache that can't be made does now.
 
 9. **A user's machine gets a cache file that grows.** t4 allocates its
    cache files in full at build: 20 GiB the first time Studio starts, and
@@ -479,7 +485,10 @@ Phase 1, t4 in Kismet's place:
    1 s; bytes fetched, and CPU.
 3. **The lock in t4** (decision 8): `flock` on each cache file,
    `Error::Busy`, with a test that a second cache on one file fails to
-   build and builds once the first is dropped.
+   build and builds once the first is dropped. Built 29 Oct 2026
+   (`CacheFiles::open_file`; `a_cache_file_has_one_owner`, which reaches
+   the file through a symlink too). Shared mode follows it, by
+   `11-shared-mode.md`'s build order.
 4. **Restarts in t4** (decision 7): the snapshot at a clean shutdown,
    then every minute; `known_size`. Tests: a restart keeps the disk tier
    and its sizes; a process killed keeps the last snapshot's blocks and no
@@ -508,8 +517,6 @@ Phase 2, t4 in the read path:
   t4's defaults there (decision 5), under `CacheAccess::Revalidate`, are
   where its I/O shows, and where a restart that starts cold costs least.
   Where they run, and whether caching there is wanted, is Spiral's to say.
-- **Two hosts at once.** How often Studio and `spiral connect` run
-  together decides whether shared mode comes back (decision 8).
 - **Kismet's old directory.** Removing `spiral-io-cache-v6` gives a user
   20 GiB back, but an older Spiral may still be running against it. The
   book says it can be removed "while Spiral is stopped". Remove it on
@@ -561,11 +568,6 @@ Phase 2, t4 in the read path:
   whole blocks: 1.48 times the bytes on ClickBench (doc/09, step 4). Only
   if phase 2 shows t4's GETs beat Spiral's, and then with exact ranges
   when nothing is kept.
-- **t4's shared mode,** if two hosts at once proves common: a process
-  owns the cache, and others read through it over a Unix socket. doc/02's
-  design (at 45a0009's parent) is the starting point. New since then: who
-  fetches, since a fetch carries the caller's credentials; and how a
-  block's bytes cross processes, a copy or the memory pool mapped.
 - **One cache for both classes,** a placement policy keeping chunks for
   manifests, if two budgets prove wasteful.
 - **A `clear` in t4,** if Spiral wants its cache emptied while running.
@@ -576,7 +578,9 @@ Phase 2, t4 in the read path:
 
 | Repository | Path | What | Built |
 |---|---|---|---|
-| t4 | `src/cache/cache_files.rs` | the lock (decision 8); sparse cache files (decision 9) | no |
+| t4 | `src/cache/cache_files.rs` | the lock (decision 8) | yes |
+| t4 | `src/cache/cache_files.rs` | sparse cache files (decision 9) | no |
+| t4 | `11-shared-mode.md`'s code map | shared mode (decision 8) | no |
 | t4 | `src/cache/snapshot.rs` | the disk tier's snapshot (decision 7) | no |
 | t4 | `src/cache/t4_caching.rs` | `known_size` | no |
 | spiraldb | `spiraldb/spiral-io/src/cache/t4_cache.rs` | `T4Cache`: the names, `SpiralFetch`, `SpiralFetchRouter`, the profiles, the metrics wrappers; its tests | yes, branch `xiangpeng/t4-cache` |
