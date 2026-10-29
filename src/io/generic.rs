@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 
 use crossbeam_channel::{Receiver, Select, Sender, bounded, unbounded};
 
@@ -19,8 +20,11 @@ pub(crate) struct GenericIoDriver {
     files: Arc<[File]>,
     queue_size: usize,
     inflight: usize,
+    // Declared before `_pool`, so it drops first: the pool's threads see the
+    // job channel close and exit before the pool joins them.
     job_tx: Sender<IoJob>,
     completion_rx: Receiver<CompletionEvent>,
+    _pool: IoThreadPool,
 }
 
 impl GenericIoDriver {
@@ -31,12 +35,14 @@ impl GenericIoDriver {
         let (job_tx, job_rx) = bounded::<IoJob>(queue_size);
         let (completion_tx, completion_rx) = unbounded::<CompletionEvent>();
 
-        for _ in 0..num_threads {
-            let job_rx = job_rx.clone();
-            let completion_tx = completion_tx.clone();
-            // The pool stands in for the kernel's asynchronous I/O.
-            std::thread::spawn(move || worker_loop(job_rx, completion_tx));
-        }
+        let threads = (0..num_threads)
+            .map(|_| {
+                let job_rx = job_rx.clone();
+                let completion_tx = completion_tx.clone();
+                // The pool stands in for the kernel's asynchronous I/O.
+                std::thread::spawn(move || worker_loop(job_rx, completion_tx))
+            })
+            .collect();
 
         Ok(Self {
             files: files.into(),
@@ -44,7 +50,23 @@ impl GenericIoDriver {
             inflight: 0,
             job_tx,
             completion_rx,
+            _pool: IoThreadPool(threads),
         })
+    }
+}
+
+/// The threads that run the jobs, joined when dropped: a thread holds the
+/// files a moment past reporting its last job done, so only the join makes
+/// sure no thread still holds them, and their locks, once the driver is
+/// gone.
+struct IoThreadPool(Vec<JoinHandle<()>>);
+
+impl Drop for IoThreadPool {
+    fn drop(&mut self) {
+        for thread in self.0.drain(..) {
+            // A panic on a pool thread was reported where it happened.
+            let _ = thread.join();
+        }
     }
 }
 

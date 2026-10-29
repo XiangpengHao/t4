@@ -193,6 +193,7 @@ impl<D: IoDriver> BackendLoop<D> {
                 }
             };
             if disconnected {
+                self.finish_in_flight();
                 return;
             }
 
@@ -207,7 +208,26 @@ impl<D: IoDriver> BackendLoop<D> {
         }
     }
 
+    /// Waits for every operation in flight to complete, each request
+    /// answered as usual, once no handle is left to send more: the loop
+    /// returns only then, so no buffer a pool thread or the kernel still
+    /// fills is freed, no caller waits forever for its answer, and no file
+    /// closes under an operation. A backend whose wait returns at once,
+    /// io_uring's always and the pool's with no request channel left,
+    /// busy-waits here.
+    fn finish_in_flight(&mut self) {
+        while !self.inflight_requests.is_empty() {
+            self.driver.wait_for_progress(&self.receiver);
+            self.poll_completions();
+        }
+    }
+
+    /// Submits the requests waiting, as many as the queue has room for.
+    /// Returns whether no handle is left to send more: what was pushed
+    /// before that showed is submitted all the same, for the loop to wait
+    /// for ([`Self::finish_in_flight`]).
     fn submit_requests(&mut self, pending_request: &mut Option<WorkerRequest>) -> Result<bool> {
+        let mut disconnected = false;
         let mut submitted_any = false;
 
         loop {
@@ -216,7 +236,10 @@ impl<D: IoDriver> BackendLoop<D> {
                 None => match self.receiver.try_recv() {
                     Ok(request) => request,
                     Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => return Ok(true),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
                 },
             };
             let op_count = request_op_count(&request);
@@ -247,7 +270,7 @@ impl<D: IoDriver> BackendLoop<D> {
             self.driver.submit()?;
         }
 
-        Ok(false)
+        Ok(disconnected)
     }
 
     fn submit_request(&mut self, request: WorkerRequest) -> Result<bool> {

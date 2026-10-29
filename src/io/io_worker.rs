@@ -118,7 +118,9 @@ impl IoWorker {
 
 #[cfg(test)]
 mod test {
+    use std::fs::File;
     use std::num::NonZero;
+    use std::time::Duration;
 
     use pollster::block_on;
     use tempfile::tempfile;
@@ -227,5 +229,53 @@ mod test {
         for h in handles {
             h.join().unwrap();
         }
+    }
+
+    /// Dropping the last handle with reads in flight waits for them: each
+    /// completes with its bytes, and the worker's files are closed by the
+    /// time the drop returns, so a lock on one is free at once.
+    #[test]
+    fn dropping_the_worker_finishes_its_reads_and_closes_its_files() {
+        const READS: u32 = 64;
+        const MIB: u32 = 1 << 20;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .unwrap();
+        file.set_len(u64::from(READS * MIB)).unwrap();
+        file.try_lock().unwrap();
+        let io_worker = IoWorker::new(NonZero::new(READS).unwrap(), vec![file]).unwrap();
+        let reads: Vec<_> = (0..READS)
+            .map(|index| {
+                let buf = AlignedBuf::new_zeroed(NonZero::new(MIB).unwrap()).unwrap();
+                let at = FilePosition::new(0, u64::from(index * MIB));
+                io_worker.read_at(buf, at).unwrap()
+            })
+            .collect();
+
+        drop(io_worker);
+
+        let reopened = File::open(&path).unwrap();
+        reopened
+            .try_lock()
+            .expect("the worker's file is closed once it drops");
+        // A read the worker dropped unanswered would wait forever: the wait
+        // is bounded, so that fails rather than hangs.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for read in reads {
+                let (buf, read_len) = block_on(read).unwrap();
+                assert_eq!(read_len, buf.len());
+            }
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("every read in flight completes");
     }
 }
