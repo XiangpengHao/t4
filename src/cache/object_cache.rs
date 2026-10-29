@@ -772,7 +772,13 @@ pub(super) struct CacheableFile<'p> {
     version: FileVersion,
 }
 
-impl CacheableFile<'_> {
+impl<'p> CacheableFile<'p> {
+    /// The file at `path`, its version as an owner named it to its client
+    /// (`doc/11-shared-mode.md`).
+    pub(super) fn named(path: &'p [u8], version: FileVersion) -> Self {
+        Self { path, version }
+    }
+
     pub(super) fn version(&self) -> FileVersion {
         self.version
     }

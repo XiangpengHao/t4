@@ -37,14 +37,14 @@ use super::ChunkId;
 use super::cache_files::{CacheFiles, DiskFile};
 use super::get_queue::{GetPlace, GetQueue, GetTurn, JoinedParts};
 use super::io_report::IoReport;
-use super::object_cache::{CacheableFile, FetchedBlocks, ObjectCache, PartialRead, TierWork};
+use super::object_cache::ObjectCache;
 #[cfg(feature = "__fuzz")]
 use super::policy::Tier;
 use super::policy::{
     ClockPolicy, FetchRuns, Io, PlacementPolicy, RaceStragglers, ReadIntent, ReadPolicy, TierSizes,
 };
 use super::sharing::{OwnerConnection, OwnerListener};
-use super::storage_link::StorageLink;
+use super::storage_link::{LinkedFetch, LinkedRead, StorageLink};
 use super::{BLOCK_SIZE_U64, InsertOrAbort};
 use crate::io::sync::Arc;
 
@@ -55,13 +55,13 @@ const STORE: &str = "t4";
 /// it, then the read's own blocks.
 struct BodyLanding<'c> {
     joined: JoinedParts,
-    blocks: FetchedBlocks<'c>,
+    blocks: LinkedFetch<'c>,
     /// The body's bytes landed so far.
     received: u64,
 }
 
 impl<'c> BodyLanding<'c> {
-    fn new(joined: JoinedParts, blocks: FetchedBlocks<'c>) -> Self {
+    fn new(joined: JoinedParts, blocks: LinkedFetch<'c>) -> Self {
         Self {
             joined,
             blocks,
@@ -284,10 +284,11 @@ impl T4CachingBuilder {
         let bytes_in_flight = NonZeroU64::new(u64::try_from(bytes).unwrap_or(u64::MAX)).ok_or(
             crate::Error::InvalidArgument("the network's bytes in flight must be > 0"),
         )?;
-        let link = self.link(memory_chunks, queue_depth)?;
         let reads = self
             .reads
+            .take()
             .unwrap_or_else(|| Arc::new(RaceStragglers::default()));
+        let link = self.link(memory_chunks, queue_depth, &reads)?;
         Ok(T4Caching {
             inner: self.inner,
             link: Arc::new(link),
@@ -307,6 +308,7 @@ impl T4CachingBuilder {
         &mut self,
         memory_chunks: NonZeroU32,
         queue_depth: NonZeroU32,
+        reads: &Arc<dyn ReadPolicy>,
     ) -> crate::Result<StorageLink> {
         let deadline = Instant::now() + Self::OWNER_WAIT;
         loop {
@@ -315,7 +317,8 @@ impl T4CachingBuilder {
                 Err(crate::Error::Busy) if self.sharing => {}
                 Err(error) => return Err(error),
             }
-            if let Some(owner) = OwnerConnection::connect(self.disk_files[0].path())? {
+            let first_file = self.disk_files[0].path();
+            if let Some(owner) = OwnerConnection::connect(first_file, Arc::clone(reads))? {
                 return Ok(StorageLink::Client(owner));
             }
             if Instant::now() >= deadline {
@@ -438,38 +441,40 @@ impl T4Caching {
         Ok(self.known.remember(location, meta))
     }
 
-    /// `range` of `file`, from memory, disk and fetches of what only the
+    /// `range` of the version of the file at `location` with `e_tag` and
+    /// `size`, within it, from memory, disk and fetches of what only the
     /// remote holds, each fetch's bytes put into the read's output and cached
     /// as the policy says as they come in; and the blocks other reads are
     /// fetching, taken from where those fetches cache them, or fetched again
-    /// if they don't. `None` if the cache can't serve it: a read of the cache
-    /// file failed, or a fetch found the file changed, which the cache
-    /// forgets then.
+    /// if they don't. The cache is this process's own, or its owner's, whose
+    /// storage half does the same for it (`doc/11-shared-mode.md`). `None` if
+    /// the cache can't serve it: it can't hold the file, a read of the cache
+    /// file failed, a fetch found the file changed, which the cache forgets
+    /// then, or the owner failed the read or went.
     async fn read_through(
         &self,
-        cache: &ObjectCache,
         location: &Path,
-        file: &CacheableFile<'_>,
         e_tag: &str,
+        size: u64,
         range: Range<u64>,
         extensions: &Extensions,
     ) -> object_store::Result<Option<Bytes>> {
         let intent = extensions.get::<ReadIntent>().copied();
-        let reads = &*self.reads;
-        let Ok((mut read, mut work)) = cache.start_read(file, range.clone(), intent, reads) else {
+        let path = location.as_ref().as_bytes();
+        let started = self
+            .link
+            .start_read(path, e_tag, size, range, intent, &*self.reads)
+            .await;
+        let Ok(Some(mut read)) = started else {
             return Ok(None);
         };
         loop {
-            if self.plan_gets(&mut read, &mut work, file, intent).is_err() {
+            if self.plan_gets(&mut read, intent).await.is_err() {
                 return Ok(None);
             }
-            let mut receivers = Vec::new();
-            for fetch in read.fetches() {
-                let Ok(blocks) = cache.receive(&mut read, fetch) else {
-                    return Ok(None);
-                };
-                receivers.push(blocks);
-            }
+            let Ok(receivers) = read.fetches() else {
+                return Ok(None);
+            };
             // Every fetch is in flight at once, a read's remote blocks keeping
             // the NIC busy, and beside the read's work on the tiers: its disk
             // reads, and its waits for the blocks other reads fetch. The GETs
@@ -480,7 +485,7 @@ impl T4Caching {
                     .into_iter()
                     .map(|blocks| self.fetch(location, e_tag, blocks, extensions)),
             );
-            let (fetched, worked) = join(fetches, work.finish(&mut read)).await;
+            let (fetched, worked) = join(fetches, read.finish()).await;
             for fetched in fetched {
                 match fetched {
                     Ok(()) => {}
@@ -491,36 +496,34 @@ impl T4Caching {
                     Err(error) => return Err(error),
                 }
             }
-            let Ok(retry) = worked else {
-                return Ok(None);
-            };
-            if retry.is_empty() {
-                return Ok(read.into_bytes());
+            match worked {
+                // Blocks the read waited for that no fetch cached: it
+                // fetches them itself, or waits again for a read that
+                // fetches them now.
+                Ok(true) => {}
+                Ok(false) => return Ok(read.into_bytes()),
+                Err(_) => return Ok(None),
             }
-            // Blocks the read waited for that no fetch cached: it fetches
-            // them itself, or waits again for a read that fetches them now.
-            work = cache.retry(file, range.clone(), intent, retry, reads);
         }
     }
 
-    /// Plans `read`'s GETs, of `file` for `intent`, run by run as `work`
-    /// locates its blocks: each run's by the read policy, which the work
-    /// takes, claiming the blocks its GETs widen to before it locates the
-    /// next run.
+    /// Plans `read`'s GETs, for `intent`, run by run as the cache locates
+    /// its blocks: each run's by the read policy, which the cache takes,
+    /// claiming the blocks its GETs widen to before it locates the next
+    /// run.
     ///
     /// # Errors
     ///
-    /// If a read from the cache file can't be submitted.
-    fn plan_gets(
+    /// If a read from the cache file can't be submitted, or the owner failed
+    /// the read or went.
+    async fn plan_gets(
         &self,
-        read: &mut PartialRead,
-        work: &mut TierWork<'_>,
-        file: &CacheableFile<'_>,
+        read: &mut LinkedRead<'_>,
         intent: Option<ReadIntent>,
     ) -> crate::Result<()> {
-        while let Some(run) = work.locate_next_run(read)? {
-            let gets = run.planned_by(&*self.reads, file, intent);
-            work.take_gets(read, &gets);
+        while let Some(run) = read.locate_next_run()? {
+            let gets = run.planned_by(&*self.reads, &read.file(), intent);
+            read.take_gets(&gets).await?;
         }
         Ok(())
     }
@@ -542,7 +545,7 @@ impl T4Caching {
         &self,
         location: &Path,
         e_tag: &str,
-        mut blocks: FetchedBlocks<'_>,
+        mut blocks: LinkedFetch<'_>,
         extensions: &Extensions,
     ) -> object_store::Result<()> {
         let waiting = Instant::now();
@@ -639,7 +642,7 @@ impl T4Caching {
     /// that GET failed or was given up on, it waits again.
     async fn turn(
         &self,
-        blocks: &mut FetchedBlocks<'_>,
+        blocks: &mut LinkedFetch<'_>,
     ) -> object_store::Result<Option<(GetPlace, JoinedParts)>> {
         loop {
             match self

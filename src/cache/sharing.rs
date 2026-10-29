@@ -15,15 +15,12 @@ mod address;
 mod client;
 mod client_reads;
 mod frame_socket;
-// The frames of reads are used outside their tests once the socket serves
-// reads (step 3's next commit).
-#[allow(dead_code)]
 mod frames;
 mod handshake;
 mod owner;
 
 pub(super) use address::FileIdentity;
-pub(super) use client::OwnerConnection;
+pub(super) use client::{ClientFetch, ClientRead, OwnerConnection};
 pub(super) use frames::{FrameReader, FrameWriter};
 pub(super) use owner::OwnerListener;
 

@@ -289,6 +289,20 @@ impl ClientFrame {
 }
 
 impl OwnerFrame {
+    /// The number of the call the frame answers; `None` if it answers none.
+    pub(super) fn call(&self) -> Option<u64> {
+        match *self {
+            Self::Started { call, .. }
+            | Self::Uncacheable { call }
+            | Self::Next { call, .. }
+            | Self::Committed { call }
+            | Self::Retry { call, .. }
+            | Self::Served { call, .. }
+            | Self::Failed { call } => Some(call),
+            Self::Welcome { .. } | Self::DiskRead { .. } => None,
+        }
+    }
+
     const WELCOME: u8 = 1;
     const STARTED: u8 = 2;
     const UNCACHEABLE: u8 = 3;

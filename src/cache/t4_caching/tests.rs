@@ -45,6 +45,9 @@ struct CountingStore {
     stalled: Arc<AtomicBool>,
     /// The GETs out: asked, their bodies not yet dropped.
     gets_out: Arc<GetsOut>,
+    /// What the next get, a HEAD's aside, waits for before it is answered,
+    /// blocking its thread: a message, or its sender dropped.
+    gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
 }
 
 /// The GETs a store has out now, and the most it had at once.
@@ -78,6 +81,11 @@ impl CountingStore {
         self.gets_out.most.load(Ordering::Relaxed)
     }
 
+    /// The GETs the store has out now, asked and not answered whole.
+    fn gets_out_now(&self) -> usize {
+        self.gets_out.now.load(Ordering::Relaxed)
+    }
+
     /// `answer` with `out` held until its body is dropped.
     fn held_out(answer: GetResult, out: GetOut) -> GetResult {
         let (meta, range, attributes) = (
@@ -108,6 +116,14 @@ impl CountingStore {
 
     fn answer_gets_late(&self, late: bool) {
         self.answers.0.store(late, Ordering::Relaxed);
+    }
+
+    /// Holds the next get, a HEAD's aside, until the sender returned sends
+    /// or is dropped: the thread that asked it is blocked till then.
+    fn gate_next_get(&self) -> std::sync::mpsc::Sender<()> {
+        let (open, gate) = std::sync::mpsc::channel();
+        *self.gate.lock().unwrap() = Some(gate);
+        open
     }
 
     /// Stops the next get's body after `after` bytes.
@@ -231,6 +247,12 @@ impl ObjectStore for CountingStore {
         let head = options.head;
         self.asked.lock().unwrap().push(asked);
         let out = self.gets_out.sent();
+        if !head {
+            let gate = self.gate.lock().unwrap().take();
+            if let Some(gate) = gate {
+                let _ = gate.recv();
+            }
+        }
         self.answers.arrive().await;
         let answer = self.store.get_opts(location, options).await?;
         if head {
@@ -1495,3 +1517,5 @@ fn an_opened_files_intent_reaches_both_policies() {
         [(0, Some(ReadIntent::Latency), true)]
     );
 }
+
+mod sharing;

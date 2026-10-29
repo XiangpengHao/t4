@@ -1,0 +1,184 @@
+//! A cache shared by an owner and its client (`doc/11-shared-mode.md`),
+//! both in this process, as the lock conflicts within a process too: each
+//! over a store of its own, which holds the same file under the same e_tag,
+//! as two processes' stores reach one bucket.
+
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use super::*;
+use crate::cache::policy::FixedPlacementPolicy;
+
+/// A process's cache, built by `build` over a store of its own that holds
+/// `data` at `path`; the store, and what it says of the file, asked of it
+/// directly.
+fn process(
+    path: &Path,
+    data: &Bytes,
+    build: impl FnOnce(&Arc<CountingStore>) -> T4CachingBuilder,
+) -> (T4Caching, Arc<CountingStore>, ObjectMeta) {
+    let inner = Arc::new(CountingStore::default());
+    put(inner.as_ref(), path, data);
+    let cache = build(&inner).build().unwrap();
+    let meta = listed(&inner, path);
+    (cache, inner, meta)
+}
+
+/// What `store` says of the file at `path`, asked of it directly.
+fn listed(store: &CountingStore, path: &Path) -> ObjectMeta {
+    let meta = block_on(store.head(path)).unwrap();
+    store.take_asked();
+    meta
+}
+
+/// `range` of the file `meta` names, read through `cache`, opened as
+/// listed: no HEAD.
+fn read_listed(cache: &T4Caching, meta: &ObjectMeta, range: Range<u64>) -> Bytes {
+    block_on(cache.open_listed(meta.clone()).read(range, None)).unwrap()
+}
+
+/// A client's cold read fetches through its own store, and the owner caches
+/// what it fetched: the owner's read of it asks its store nothing.
+#[test]
+fn a_clients_cold_read_is_cached_for_its_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(2 * MIB, 1);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let (owner, owners, owners_meta) = process(&path, &data, shared);
+    let (client, clients, clients_meta) = process(&path, &data, shared);
+    assert_eq!(
+        owners_meta.e_tag, clients_meta.e_tag,
+        "one file, one version"
+    );
+    assert!(matches!(client.link(), StorageLink::Client(_)));
+
+    let read = read_listed(&client, &clients_meta, 10..2 * MIB);
+    assert_eq!(read, data.slice(10..));
+    assert_eq!(clients.take_asked(), [bounded(0..2 * MIB)]);
+    assert_eq!(read_listed(&owner, &owners_meta, 0..2 * MIB), data);
+    assert_eq!(
+        owners.take_asked(),
+        [],
+        "the owner holds the client's fetch"
+    );
+}
+
+/// A block the owner holds is served to its client, whose store is asked
+/// nothing; the bytes keep the alignment an owner's read has, their
+/// address agreeing with their file offset mod 4 KiB.
+#[test]
+fn a_block_the_owner_holds_is_served_to_its_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(2 * MIB, 2);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let (owner, owners, owners_meta) = process(&path, &data, shared);
+    let (client, clients, clients_meta) = process(&path, &data, shared);
+    assert_eq!(read_listed(&owner, &owners_meta, 0..2 * MIB), data);
+    assert_eq!(owners.take_asked(), [bounded(0..2 * MIB)]);
+
+    let read = read_listed(&client, &clients_meta, 4097..MIB + 3);
+    assert_eq!(read, data.slice(4097..MIB as usize + 3));
+    assert_eq!(read.as_ptr() as u64 % 4096, 4097 % 4096);
+    assert_eq!(clients.take_asked(), []);
+}
+
+/// Reads of one block in the owner and its client, at once, fetch it once:
+/// the owner's waits for the client's GET, and takes the block from where
+/// it landed.
+#[test]
+fn reads_of_one_block_across_owner_and_client_fetch_it_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(MIB, 3);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let (owner, owners, owners_meta) = process(&path, &data, shared);
+    let (client, clients, clients_meta) = process(&path, &data, shared);
+    let open = clients.gate_next_get();
+    let (client_done, client_read) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = client_done.send(read_listed(&client, &clients_meta, 0..MIB));
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while clients.gets_out_now() == 0 {
+        assert!(Instant::now() < deadline, "the client's GET goes out");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let (owner_done, owner_read) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = owner_done.send(read_listed(&owner, &owners_meta, 0..MIB));
+    });
+    let early = owner_read.recv_timeout(Duration::from_millis(200));
+    assert!(
+        early.is_err(),
+        "the owner's read waits for the client's GET"
+    );
+    drop(open);
+    let timeout = Duration::from_secs(5);
+    assert_eq!(client_read.recv_timeout(timeout).unwrap(), data);
+    assert_eq!(owner_read.recv_timeout(timeout).unwrap(), data);
+    assert_eq!(owners.take_asked(), [], "one GET, the client's");
+}
+
+/// A client's read policy hears its own GETs, and each read from disk its
+/// owner makes for it.
+#[test]
+fn a_clients_read_policy_hears_its_gets_and_its_owners_disk_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("on_disk");
+    let data = file_bytes(MIB, 4);
+    let on_disk = |inner: &Arc<CountingStore>| {
+        builder(inner, &dir)
+            .with_sharing()
+            .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
+    };
+    let (owner, _, owners_meta) = process(&path, &data, on_disk);
+    let reads = ScriptedReads::new(|read| FetchRuns::default().plan(read));
+    let (client, clients, clients_meta) = process(&path, &data, |inner| {
+        on_disk(inner).with_read_policy(reads.clone())
+    });
+    assert_eq!(read_listed(&owner, &owners_meta, 0..MIB), data);
+
+    assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+    let disk_read = |phase| Heard::DiskRead {
+        drive: 0,
+        bytes: MIB as u32,
+        phase,
+    };
+    assert_eq!(reads.heard(), [disk_read("started"), disk_read("finished")]);
+
+    let fetched = Path::from("fetched");
+    let other = file_bytes(MIB, 5);
+    put(clients.as_ref(), &fetched, &other);
+    let meta = listed(&clients, &fetched);
+    reads.heard.lock().unwrap().clear();
+    assert_eq!(read_listed(&client, &meta, 0..MIB), other);
+    let get = |phase| Heard::Get {
+        bytes: 0..MIB,
+        racer: 0,
+        phase,
+    };
+    let phases = ["started", "answered", "finished", "landed"].map(get);
+    assert_eq!(reads.heard(), phases);
+}
+
+/// A client whose owner went reads from its store, the right bytes: the
+/// cache may lose anything, and its callers see none of it.
+#[test]
+fn a_client_whose_owner_went_reads_from_its_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(MIB, 6);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let (owner, _, owners_meta) = process(&path, &data, shared);
+    let (client, clients, clients_meta) = process(&path, &data, shared);
+    assert_eq!(read_listed(&owner, &owners_meta, 0..MIB), data);
+    assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+    assert_eq!(clients.take_asked(), [], "served by its owner");
+
+    drop(owner);
+    assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+    assert_eq!(clients.take_asked(), [bounded(0..MIB)]);
+}
