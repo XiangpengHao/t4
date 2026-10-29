@@ -444,7 +444,7 @@ impl T4Caching {
     ) -> crate::Result<()> {
         while let Some(run) = work.locate_next_run(read)? {
             let gets = run.planned_by(&*self.reads, file, intent);
-            work.take_gets(read, run, &gets);
+            work.take_gets(read, &gets);
         }
         Ok(())
     }

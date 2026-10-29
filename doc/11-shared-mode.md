@@ -98,9 +98,10 @@ decision 9).
      (`LocatedRun::planned_by`), and `TierWork::take_gets` takes the
      plan, claiming the blocks it widens to. Over the socket those are
      the read and claim calls: a read that widens takes two round trips.
-     `take_gets` trusts the plan, which the fetch half checked
-     (`LocatedRead::accepts`); the owner will check a client's where it
-     arrives.
+     `TierWork` holds the run's claims until `take_gets`, which checks
+     the plan where it arrives (`LocatedRead::accepts`) and carries out
+     the default's instead of one it can't: a `LocatedRun` is data alone,
+     and a client's plan is checked in the owner.
    - **A fetched block lands in its chunk on its first byte**
      (`ObjectCache::landing`): a memory chunk or a disk write buffer,
      allocated then, evicting if the tier is full. In the owner, landing

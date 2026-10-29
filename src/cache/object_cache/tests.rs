@@ -673,3 +673,26 @@ fn a_racing_read_joins_a_fetch_in_flight() {
     assert_eq!(racing.into_bytes().unwrap(), data);
     cache.check_at_rest().unwrap();
 }
+
+/// The storage half checks the plan it takes, wherever it was made (a
+/// client's arrives over the socket, `doc/11-shared-mode.md`): one that
+/// leaves a remote block out is carried out as the default's.
+#[test]
+fn a_plan_taken_that_the_cache_cant_carry_out_fetches_as_the_default() {
+    let (_dir, cache, _policy) = cache(4, 1);
+    let reads = FetchRuns::default();
+    let data = file_bytes(2 * MIB);
+    let file = cache.resolve(b"a", Some("v1"), 2 * MIB).unwrap();
+    let (mut read, mut work) = cache.start_read(&file, 0..2 * MIB, None, &reads).unwrap();
+
+    let run = work.locate_next_run(&mut read).unwrap().unwrap();
+    assert_eq!(run.planned_by(&reads, &file, None).gets().len(), 1);
+    work.take_gets(&mut read, &ReadPlan::default());
+    assert!(work.locate_next_run(&mut read).unwrap().is_none());
+    assert_eq!(read.fetches(), [0..2 * MIB], "the default's GET");
+
+    block_on(cache.take_fetched(&mut read, 0..2 * MIB, &data)).unwrap();
+    assert!(block_on(work.finish(&mut read)).unwrap().is_empty());
+    assert_eq!(read.into_bytes().unwrap(), data);
+    cache.check_at_rest().unwrap();
+}
