@@ -94,6 +94,10 @@ impl IoDriver for GenericIoDriver {
         Ok(())
     }
 
+    fn unsubmitted(&mut self) -> usize {
+        0
+    }
+
     fn pop_completion(&mut self) -> Option<CompletionEvent> {
         match self.completion_rx.try_recv() {
             Ok(event) => {

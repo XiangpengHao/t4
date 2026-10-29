@@ -100,6 +100,12 @@ impl IoDriver for UringDriver {
         Ok(())
     }
 
+    /// The entries in the submission queue: a failed `io_uring_enter` takes
+    /// none of those it was asked to.
+    fn unsubmitted(&mut self) -> usize {
+        self.ring.submission().len()
+    }
+
     fn pop_completion(&mut self) -> Option<CompletionEvent> {
         let cqe = self.ring.completion().next()?;
         self.in_flight -= 1;

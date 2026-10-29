@@ -125,6 +125,10 @@ impl IoDriver for SimulatedDriver {
         Ok(())
     }
 
+    fn unsubmitted(&mut self) -> usize {
+        0
+    }
+
     fn pop_completion(&mut self) -> Option<CompletionEvent> {
         self.completions.pop_front()
     }

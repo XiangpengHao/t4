@@ -153,6 +153,11 @@ pub(crate) trait IoDriver {
     /// Flush any staged submissions to the kernel. No-op for backends that
     /// dispatch eagerly inside `push`.
     fn submit(&mut self) -> Result<()>;
+    /// How many of the entries pushed the backend still holds, not taken
+    /// by the kernel yet: the last pushed. After a failed `submit` the loop
+    /// submits nothing more, so these never run, and no one fills their
+    /// buffers. 0 for a backend that dispatches eagerly inside `push`.
+    fn unsubmitted(&mut self) -> usize;
     fn pop_completion(&mut self) -> Option<CompletionEvent>;
     /// Wait until a new request may have landed on `request_rx` or an
     /// inflight op may have completed. Returning early is fine: the loop
@@ -418,6 +423,12 @@ impl<D: IoDriver> BackendLoop<D> {
         }
     }
 
+    /// Fails every request once a submit failed with `err`, after which
+    /// the loop submits nothing more. An operation the kernel took runs on
+    /// into its request's buffer, so the loop first waits for each of
+    /// those, answering its request as usual; only the entries the kernel
+    /// never took are left then, which nothing will fill, and their
+    /// requests fail with the waiting ones and those still to come.
     fn fail_all(&mut self, err: Error, pending_request: Option<WorkerRequest>) {
         let msg = format!("io worker failed: {err}");
 
@@ -425,6 +436,11 @@ impl<D: IoDriver> BackendLoop<D> {
             complete_request_with_error(request, worker_failed_error(msg.clone()));
         }
 
+        let untaken = self.driver.unsubmitted();
+        while self.operations_in_flight() > untaken {
+            self.driver.wait_for_progress(&self.receiver);
+            self.poll_completions();
+        }
         for (_, request) in self.inflight_requests.drain() {
             request.complete_with_error(worker_failed_error(msg.clone()));
         }
@@ -432,6 +448,15 @@ impl<D: IoDriver> BackendLoop<D> {
         while let Ok(request) = self.receiver.try_recv() {
             complete_request_with_error(request, worker_failed_error(msg.clone()));
         }
+    }
+
+    /// The operations pushed whose completions aren't in yet, across every
+    /// request in flight: taken by the kernel or not.
+    fn operations_in_flight(&self) -> usize {
+        self.inflight_requests
+            .values()
+            .map(|request| request.remaining)
+            .sum()
     }
 
     fn finish_single_submit(
@@ -484,5 +509,164 @@ impl<D: IoDriver> BackendLoop<D> {
                 return self.next_request_id;
             }
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "shuttle")))]
+mod tests {
+    use std::collections::VecDeque;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Waker};
+    use std::time::{Duration, Instant};
+
+    use pollster::block_on;
+
+    use super::*;
+    use crate::PAGE_SIZE_NZ_U32;
+    use crate::io::io_task::FileReadTask;
+
+    /// The kernel a [`ScriptedDriver`] stands for, which the test plays: it
+    /// takes the entries pushed at each submit, unless the test made that
+    /// submit fail, and completes those it took when the test says.
+    #[derive(Default)]
+    struct ScriptedKernel {
+        /// Pushed, not taken: each entry's user data and length.
+        queued: Vec<(u64, u32)>,
+        /// Taken, and running until the test completes them.
+        taken: Vec<(u64, u32)>,
+        /// Completions the test let out, for the loop to reap.
+        completed: VecDeque<CompletionEvent>,
+        fail_next_submit: bool,
+        failed: bool,
+        /// Whether the loop waited for progress after a submit failed.
+        waited_after_failure: bool,
+    }
+
+    impl ScriptedKernel {
+        /// Completes every entry taken, each reading its whole length.
+        fn complete_taken(&mut self) {
+            for (user_data, len) in self.taken.drain(..) {
+                let result = i32::try_from(len).unwrap();
+                self.completed
+                    .push_back(CompletionEvent { user_data, result });
+            }
+        }
+    }
+
+    /// The test's hold on a [`ScriptedKernel`].
+    #[derive(Clone, Default)]
+    struct Script(Arc<Mutex<ScriptedKernel>>);
+
+    impl Script {
+        fn with<T>(&self, act: impl FnOnce(&mut ScriptedKernel) -> T) -> T {
+            act(&mut self.0.lock().unwrap())
+        }
+
+        /// Waits, 10 s at most, until `done` holds of the kernel.
+        fn wait_until(&self, what: &str, done: impl Fn(&ScriptedKernel) -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !self.with(|kernel| done(kernel)) {
+                assert!(Instant::now() < deadline, "timed out waiting until {what}");
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    /// A backend over a [`ScriptedKernel`].
+    struct ScriptedDriver(Script);
+
+    impl IoDriver for ScriptedDriver {
+        fn available_submission_slots(&mut self) -> usize {
+            8
+        }
+
+        fn push(&mut self, entry: SubmissionEntry) -> Result<()> {
+            let SubmissionEntry::Read {
+                buf_len, user_data, ..
+            } = entry
+            else {
+                panic!("the test only reads");
+            };
+            self.0
+                .with(|kernel| kernel.queued.push((user_data, buf_len)));
+            Ok(())
+        }
+
+        fn submit(&mut self) -> Result<()> {
+            self.0.with(|kernel| {
+                if std::mem::take(&mut kernel.fail_next_submit) {
+                    kernel.failed = true;
+                    return Err(Error::Io(std::io::Error::other("the submit fails")));
+                }
+                let queued = std::mem::take(&mut kernel.queued);
+                kernel.taken.extend(queued);
+                Ok(())
+            })
+        }
+
+        fn unsubmitted(&mut self) -> usize {
+            self.0.with(|kernel| kernel.queued.len())
+        }
+
+        fn pop_completion(&mut self) -> Option<CompletionEvent> {
+            self.0.with(|kernel| kernel.completed.pop_front())
+        }
+
+        fn wait_for_progress(&mut self, _request_rx: &mpsc::Receiver<WorkerRequest>) {
+            self.0
+                .with(|kernel| kernel.waited_after_failure |= kernel.failed);
+            std::thread::yield_now();
+        }
+    }
+
+    /// A failed submit fails the reads the kernel never took, but waits for
+    /// those it took: their buffers are the kernel's until each completes,
+    /// and each is answered with its bytes.
+    #[test]
+    fn a_failed_submit_waits_for_what_the_kernel_took() {
+        let script = Script::default();
+        let (tx, rx) = mpsc::channel();
+        let driver = ScriptedDriver(script.clone());
+        let backend = std::thread::spawn(move || BackendLoop::new(8, rx, driver).run());
+        let page = || AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
+
+        let mut taken = FileReadTask::new(tx.clone(), page(), FilePosition::new(0, 0)).unwrap();
+        script.wait_until("the kernel takes the first read", |kernel| {
+            kernel.taken.len() == 1
+        });
+        script.with(|kernel| kernel.fail_next_submit = true);
+        let untaken = FileReadTask::new(tx.clone(), page(), FilePosition::new(0, 4096)).unwrap();
+
+        // The loop has handled the failure once it waits on the kernel, or
+        // once it has returned.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !script.with(|kernel| kernel.waited_after_failure) && !backend.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "the loop neither waits nor returns"
+            );
+            std::thread::yield_now();
+        }
+        let answered = Pin::new(&mut taken).poll(&mut Context::from_waker(Waker::noop()));
+        assert!(
+            answered.is_pending(),
+            "a read the kernel holds isn't answered, its buffer dropped: {answered:?}"
+        );
+
+        script.with(ScriptedKernel::complete_taken);
+        let (buf, read_len) = block_on(taken).unwrap();
+        assert_eq!(read_len, buf.len());
+        // A loop that waited for the read never taken would wait forever:
+        // the wait is bounded, so that fails rather than hangs.
+        let (failed_tx, failed_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || failed_tx.send(block_on(untaken).is_err()).unwrap());
+        let failed = failed_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the read never taken is answered");
+        assert!(failed, "a read never taken fails");
+        drop(tx);
+        backend.join().unwrap();
     }
 }
