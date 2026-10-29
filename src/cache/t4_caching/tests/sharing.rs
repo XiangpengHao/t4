@@ -182,3 +182,77 @@ fn a_client_whose_owner_went_reads_from_its_store() {
     assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
     assert_eq!(clients.take_asked(), [bounded(0..MIB)]);
 }
+
+/// Waits until `done`, a few seconds at most, else fails with `what`.
+fn wait_until(done: impl Fn() -> bool, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !done() {
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// `range` of the file `meta` names, read through `cache` on a thread of
+/// its own: its bytes, once read, come through the receiver returned.
+fn read_on_thread(cache: T4Caching, meta: ObjectMeta, range: Range<u64>) -> mpsc::Receiver<Bytes> {
+    let (done, read) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(read_listed(&cache, &meta, range));
+    });
+    read
+}
+
+/// The owner gone while its client's GET is out: the client's read still
+/// returns the right bytes, from its store, as the bytes its GET brought
+/// had nowhere to go but the owner.
+#[test]
+fn a_clients_read_whose_owner_goes_mid_get_reads_from_its_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(MIB, 7);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let (owner, _, _) = process(&path, &data, shared);
+    let (client, clients, clients_meta) = process(&path, &data, shared);
+    let open = clients.gate_next_get();
+    let read = read_on_thread(client, clients_meta, 0..MIB);
+    wait_until(|| clients.gets_out_now() == 1, "the client's GET goes out");
+
+    drop(owner);
+    drop(open);
+    assert_eq!(read.recv_timeout(Duration::from_secs(5)).unwrap(), data);
+    assert_eq!(
+        clients.take_asked(),
+        [bounded(0..MIB), bounded(0..MIB)],
+        "its GET, then the read from its store"
+    );
+}
+
+/// The owner gone while its client waits for a block another client is
+/// fetching: the waiting read's call fails, and it reads from its store at
+/// once; the fetching read, once its GET is in, from its own.
+#[test]
+fn a_clients_read_waiting_on_another_when_the_owner_goes_reads_from_its_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(MIB, 8);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let (owner, _, _) = process(&path, &data, shared);
+    let (fetching, fetchings, fetchings_meta) = process(&path, &data, shared);
+    let (waiting, waitings, waitings_meta) = process(&path, &data, shared);
+    let open = fetchings.gate_next_get();
+    let fetched = read_on_thread(fetching, fetchings_meta, 0..MIB);
+    wait_until(
+        || fetchings.gets_out_now() == 1,
+        "the fetching GET goes out",
+    );
+    let waited = read_on_thread(waiting, waitings_meta, 0..MIB);
+    let early = waited.recv_timeout(Duration::from_millis(200));
+    assert!(early.is_err(), "the read waits for the other client's GET");
+
+    drop(owner);
+    assert_eq!(waited.recv_timeout(Duration::from_secs(5)).unwrap(), data);
+    assert_eq!(waitings.take_asked(), [bounded(0..MIB)]);
+    drop(open);
+    assert_eq!(fetched.recv_timeout(Duration::from_secs(5)).unwrap(), data);
+    assert_eq!(fetchings.take_asked(), [bounded(0..MIB), bounded(0..MIB)]);
+}

@@ -7,7 +7,7 @@ step 2.4, no read policy held by the storage half; step 2.5,
 `StorageLink`; and of step 3, the frames, the owner listening and
 serving a client's reads, and a client connecting (`with_sharing`) and
 reading through its owner, its reads going to the remote once its owner
-goes.
+goes, those in flight too.
 The user's call of 29 Oct 2026, for Spiral
 (`10-spiral-integration.md`, decision 8).
 
@@ -246,7 +246,13 @@ decision 9).
    anything, so nothing a client's caller sees depends on the owner:
    - **The owner goes,** cleanly or killed: calls in flight fail, and
      their reads go to the client's inner store, as a failed cache-file
-     read does now. The next read tries the lock: the client that wins
+     read does now. A read whose GET is out reads from the store again
+     once the GET is in: until the region (step 4) the read's output is
+     the owner's, so the bytes the GET brought went nowhere but to the
+     owner, and the blocks the owner served are gone with it. Serving it
+     from its own GETs would take an output in the client, a copy more
+     for every read, for a read the owner's going costs one GET more.
+     The next read tries the lock: the client that wins
      owns the cache, cold until the snapshot exists
      (`10-spiral-integration.md`, decision 7) and from it after; the
      others connect to it.
@@ -375,9 +381,14 @@ pipelined. The owner's own reads cost what they cost now.
    `a_clients_read_policy_hears_its_gets_and_its_owners_disk_reads`,
    `a_client_whose_owner_went_reads_from_its_store`). A commit whose
    owner has gone is no error of the fetch's: the read finds the owner
-   gone as it finishes, and goes to the remote. Next: the failures in
-   flight to the remote (the owner going mid-read), a client coming to
-   own the cache, and the tests in real processes.
+   gone as it finishes, and goes to the remote. Reads in flight as the
+   owner goes: the reader's end of the connection fails every call
+   waiting and every one after, a frame that takes no answer is dropped,
+   and the read goes to the remote
+   (`a_clients_read_whose_owner_goes_mid_get_reads_from_its_store`,
+   `a_clients_read_waiting_on_another_when_the_owner_goes_reads_from_its_store`).
+   Next: a client coming to own the cache, and the tests in real
+   processes.
 4. **The region,** on Linux: outputs and landings in a sealed memfd; the
    socket when one doesn't fit.
 5. **Polling,** only if measured (Later).
