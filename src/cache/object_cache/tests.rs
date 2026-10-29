@@ -591,7 +591,7 @@ fn a_read_waits_for_a_block_another_is_fetching() {
     let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
     let mut fetching = block_on(cache.read(&file, 0..MIB, None)).unwrap();
     assert_eq!(fetching.fetches(), [0..MIB]);
-    let (mut waiting, work) = cache.start_read(&file, 10..20, None).unwrap();
+    let (mut waiting, work) = cache.start_planned_read(&file, 10..20, None).unwrap();
     assert_eq!(waiting.fetches(), [], "no second fetch");
 
     block_on(cache.take_fetched(&mut fetching, 0..MIB, &data)).unwrap();
@@ -609,13 +609,13 @@ fn a_read_waiting_for_a_fetch_given_up_on_fetches_the_block_itself() {
     let data = file_bytes(MIB);
     let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
     let given_up = block_on(cache.read(&file, 0..MIB, None)).unwrap();
-    let (mut waiting, work) = cache.start_read(&file, 0..MIB, None).unwrap();
+    let (mut waiting, work) = cache.start_planned_read(&file, 0..MIB, None).unwrap();
     drop(given_up);
 
     let retry = block_on(work.finish(&mut waiting)).unwrap();
     assert_eq!(retry.len(), 1, "the fetch ended without the block");
     let work = cache
-        .retry(&mut waiting, &file, 0..MIB, None, &retry)
+        .retry_planned(&mut waiting, &file, 0..MIB, None, &retry)
         .unwrap();
     assert_eq!(waiting.fetches(), [0..MIB]);
     block_on(cache.take_fetched(&mut waiting, 0..MIB, &data)).unwrap();

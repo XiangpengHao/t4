@@ -259,7 +259,12 @@ pipelined. The owner's own reads cost what they cost now.
 2. **The split, in one process,** in pieces, each pinned by the unit,
    shuttle and fuzz tests, behaviour unchanged:
    1. the read policy planned in the fetch half; widened blocks claimed
-      in a call of their own;
+      in a call of their own. Built 29 Oct 2026: `TierWork::locate_next_run`
+      takes a run's hits and hands `T4Caching` a `LocatedRun`, which
+      `LocatedRun::planned_by` plans with `T4Caching`'s read policy and
+      `TierWork::take_gets` takes. A read's runs are located one at a time,
+      each after the GETs of the one before claim what they widen to, as
+      before;
    2. waiters served by the storage half: no `Location` leaves it;
    3. landing and commit behind the storage half's interface;
    4. disk reads reported back with a read's answer;

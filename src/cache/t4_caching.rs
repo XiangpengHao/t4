@@ -37,7 +37,7 @@ use super::ChunkId;
 use super::cache_files::{CacheFiles, DiskFile};
 use super::get_queue::{GetPlace, GetQueue, GetTurn, JoinedParts};
 use super::io_report::IoReport;
-use super::object_cache::{CacheableFile, FetchedBlocks, ObjectCache};
+use super::object_cache::{CacheableFile, FetchedBlocks, ObjectCache, PartialRead, TierWork};
 #[cfg(feature = "__fuzz")]
 use super::policy::Tier;
 use super::policy::{
@@ -95,6 +95,8 @@ type Sleep = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>;
 pub struct T4Caching {
     inner: Arc<dyn ObjectStore>,
     cache: Arc<ObjectCache>,
+    /// What plans each read's GETs, as the cache locates its blocks.
+    reads: Arc<dyn ReadPolicy>,
     /// The GETs to the inner store in flight, and those waiting for room.
     gets: Arc<GetQueue>,
     /// What a GET's late racer waits on; none sent without it.
@@ -264,7 +266,13 @@ impl T4CachingBuilder {
         )?;
         Ok(T4Caching {
             inner: self.inner,
-            cache: Arc::new(ObjectCache::new(memory_chunks, disk, placement, reads)?),
+            cache: Arc::new(ObjectCache::new(
+                memory_chunks,
+                disk,
+                placement,
+                Arc::clone(&reads),
+            )?),
+            reads,
             gets: Arc::new(GetQueue::new(bytes_in_flight, self.merged_up_to)),
             sleep: self.sleep,
             known: Arc::new(KnownFiles::new()),
@@ -377,6 +385,9 @@ impl T4Caching {
             return Ok(None);
         };
         loop {
+            if self.plan_gets(&mut read, &mut work, file, intent).is_err() {
+                return Ok(None);
+            }
             let mut receivers = Vec::new();
             for fetch in read.fetches() {
                 let Ok(blocks) = self.cache.receive(&mut read, fetch) else {
@@ -413,14 +424,30 @@ impl T4Caching {
             }
             // Blocks the read waited for that no fetch cached: it fetches
             // them itself, or waits again for a read that fetches them now.
-            let Ok(again) = self
-                .cache
-                .retry(&mut read, file, range.clone(), intent, &retry)
-            else {
-                return Ok(None);
-            };
-            work = again;
+            work = self.cache.retry(file, range.clone(), intent, &retry);
         }
+    }
+
+    /// Plans `read`'s GETs, of `file` for `intent`, run by run as `work`
+    /// locates its blocks: each run's by the read policy, which the work
+    /// takes, claiming the blocks its GETs widen to before it locates the
+    /// next run.
+    ///
+    /// # Errors
+    ///
+    /// If a read from the cache file can't be submitted.
+    fn plan_gets(
+        &self,
+        read: &mut PartialRead,
+        work: &mut TierWork<'_>,
+        file: &CacheableFile<'_>,
+        intent: Option<ReadIntent>,
+    ) -> crate::Result<()> {
+        while let Some(run) = work.locate_next_run(read)? {
+            let gets = run.planned_by(&*self.reads, file, intent);
+            work.take_gets(read, run, &gets);
+        }
+        Ok(())
     }
 
     /// Fetches the bytes `blocks` holds from the inner store, if the file is

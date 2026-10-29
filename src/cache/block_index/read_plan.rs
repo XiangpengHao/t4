@@ -25,8 +25,14 @@ impl ReadPlan {
     }
 
     /// The blocks the read covers, in order.
+    #[cfg(all(test, not(feature = "shuttle")))]
     pub(in crate::cache) fn blocks(&self) -> &[PlannedBlock] {
         &self.blocks
+    }
+
+    /// The blocks the read covers, in order, taken from the plan.
+    pub(in crate::cache) fn into_blocks(self) -> Vec<PlannedBlock> {
+        self.blocks
     }
 }
 
