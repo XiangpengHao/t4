@@ -595,7 +595,8 @@ fn a_read_waits_for_a_block_another_is_fetching() {
     assert_eq!(waiting.fetches(), [], "no second fetch");
 
     block_on(cache.take_fetched(&mut fetching, 0..MIB, &data)).unwrap();
-    assert_eq!(block_on(work.finish(&mut waiting)).unwrap(), []);
+    let left = block_on(work.finish(&mut waiting)).unwrap();
+    assert!(left.is_empty(), "{left:?}");
     assert_eq!(waiting.into_bytes().unwrap(), data[10..20]);
     assert_eq!(fetching.into_bytes().unwrap(), data);
     cache.check_at_rest().unwrap();
@@ -615,11 +616,12 @@ fn a_read_waiting_for_a_fetch_given_up_on_fetches_the_block_itself() {
     let retry = block_on(work.finish(&mut waiting)).unwrap();
     assert_eq!(retry.len(), 1, "the fetch ended without the block");
     let work = cache
-        .retry_planned(&mut waiting, &file, 0..MIB, None, &retry)
+        .retry_planned(&mut waiting, &file, 0..MIB, None, retry)
         .unwrap();
     assert_eq!(waiting.fetches(), [0..MIB]);
     block_on(cache.take_fetched(&mut waiting, 0..MIB, &data)).unwrap();
-    assert_eq!(block_on(work.finish(&mut waiting)).unwrap(), []);
+    let left = block_on(work.finish(&mut waiting)).unwrap();
+    assert!(left.is_empty(), "{left:?}");
     assert_eq!(waiting.into_bytes().unwrap(), data);
     cache.check_at_rest().unwrap();
 }

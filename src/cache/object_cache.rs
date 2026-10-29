@@ -159,9 +159,10 @@ impl ObjectCache {
         file: &CacheableFile<'c>,
         range: Range<u64>,
         intent: Option<ReadIntent>,
-        blocks: &[PlannedBlock],
+        blocks: BlocksToFetch,
     ) -> TierWork<'c> {
         let relocated: Vec<PlannedBlock> = blocks
+            .0
             .iter()
             .map(|block| block.relocated(self.blocks.get(block.key())))
             .collect();
@@ -204,7 +205,7 @@ impl ObjectCache {
         file: &CacheableFile<'c>,
         range: Range<u64>,
         intent: Option<ReadIntent>,
-        blocks: &[PlannedBlock],
+        blocks: BlocksToFetch,
     ) -> Result<TierWork<'c>> {
         let mut work = self.retry(file, range, intent, blocks);
         self.plan_gets(read, &mut work, file, intent)?;
@@ -247,7 +248,7 @@ impl ObjectCache {
             if retry.is_empty() {
                 return Ok(read);
             }
-            work = self.retry_planned(&mut read, file, range.clone(), intent, &retry)?;
+            work = self.retry_planned(&mut read, file, range.clone(), intent, retry)?;
         }
     }
 
@@ -1070,7 +1071,7 @@ impl<'c> TierWork<'c> {
     /// # Errors
     ///
     /// If a read from the cache file fails.
-    pub(super) async fn finish(mut self, read: &mut PartialRead) -> Result<Vec<PlannedBlock>> {
+    pub(super) async fn finish(mut self, read: &mut PartialRead) -> Result<BlocksToFetch> {
         let waits = std::mem::take(&mut self.waits);
         let page_reads = Self::page_reads_done(std::mem::take(&mut self.page_reads));
         let ends = join_all(waits.iter().map(|(_, fetch)| fetch.ended()));
@@ -1111,7 +1112,7 @@ impl<'c> TierWork<'c> {
                 }
             }
         }
-        Ok(retry)
+        Ok(BlocksToFetch(retry))
     }
 
     /// Waits for `page_reads`, each chunk held until its bytes land. They
@@ -1302,6 +1303,25 @@ impl RemoteBlock {
                 FetchBlockPlan::new(BlockFate::Asked(fetch.admit()), Some(racer))
             }
         }
+    }
+}
+
+/// The blocks a read waited for that no fetch cached, or that left the
+/// cache before the read took them ([`TierWork::finish`]): the read fetches
+/// those itself, its work on the tiers made again for them
+/// ([`ObjectCache::retry`]). Its caller learns only whether any is left;
+/// where each block was stays with the cache, which finds it again.
+#[derive(Debug)]
+pub(super) struct BlocksToFetch(Vec<PlannedBlock>);
+
+impl BlocksToFetch {
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(super) fn len(&self) -> usize {
+        self.0.len()
     }
 }
 

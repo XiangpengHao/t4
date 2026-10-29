@@ -1,8 +1,9 @@
 # 11 — Shared mode: one cache, several processes
 
 Status: design (2026-10-29). Built: build step 1, the lock
-(`CacheFiles::open_file`, `Error::Busy`), and step 2.1, the read policy
-in the fetch half. The user's call of 29 Oct 2026, for Spiral
+(`CacheFiles::open_file`, `Error::Busy`); step 2.1, the read policy
+in the fetch half; and step 2.2, no `Location` held by the fetch half.
+The user's call of 29 Oct 2026, for Spiral
 (`10-spiral-integration.md`, decision 8).
 
 Several processes on one machine read through one cache: Spiral's
@@ -86,8 +87,8 @@ decision 9).
      waiter to fetch it itself once abandoned.
 
    The two halves interleaved in four places (`ObjectCache::start_read`
-   and what it returns). The first is resolved (step 2.1); each of the
-   others is to be resolved so:
+   and what it returns). The first two are resolved (steps 2.1 and 2.2);
+   each of the others is to be resolved so:
 
    - **The read policy planned in the storage half:** `TierWork::plan`
      located a run's blocks, then called `ReadPolicy::plan` itself.
@@ -107,11 +108,16 @@ decision 9).
      the owner allocates the chunk at commit: a copy from the region for
      memory, a direct write from it for disk. The memory pool is a
      private mapping, never shared: a client can't write a chunk.
-   - **A waiter takes a `Location`.** A fetch ends with
-     `FetchEnd::Cached(Location)`, and the waiter pins that chunk
-     itself. Instead the storage half serves the waiter's output, so no
-     chunk, pin or location leaves it; `Passed` bytes are copied there
-     the same way.
+   - **The fetch half held where blocks were.** A fetch ends with
+     `FetchEnd::Cached(Location)`, but the waiter that takes it is the
+     read's work on the tiers (`TierWork::finish`), which pins the chunk
+     and serves the output: the storage half's, which the owner runs for
+     a client's read. What reached the fetch half was the blocks left to
+     fetch, `PlannedBlock`s with where each was when planned, which it
+     handed back to `ObjectCache::retry`. Resolved: they are a
+     `BlocksToFetch`, which the fetch half can only ask whether any is
+     left and hand back; the cache finds each block again, as it did.
+     The fetch half names no `Location`, `PlannedBlock` or `BlockFetch`.
    - **The storage half reports disk reads to the read policy**
      (`report_disk_read`, `promote`). The read policy is the fetch
      half's, so each disk read made for a read comes back with the read's
@@ -280,7 +286,10 @@ pipelined. The owner's own reads cost what they cost now.
       `TierWork::take_gets` takes. A read's runs are located one at a time,
       each after the GETs of the one before claim what they widen to, as
       before;
-   2. waiters served by the storage half: no `Location` leaves it;
+   2. waiters served by the storage half: no `Location` leaves it.
+      Built 29 Oct 2026: the waiters already were (`TierWork::finish`);
+      the blocks left to fetch go to the fetch half as a `BlocksToFetch`,
+      not as `PlannedBlock`s;
    3. landing and commit behind the storage half's interface;
    4. disk reads reported back with a read's answer;
    5. the one type the fetch half reaches the storage half through.

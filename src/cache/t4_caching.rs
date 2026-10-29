@@ -424,7 +424,7 @@ impl T4Caching {
             }
             // Blocks the read waited for that no fetch cached: it fetches
             // them itself, or waits again for a read that fetches them now.
-            work = self.cache.retry(file, range.clone(), intent, &retry);
+            work = self.cache.retry(file, range.clone(), intent, retry);
         }
     }
 
