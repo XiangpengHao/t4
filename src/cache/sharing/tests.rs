@@ -504,6 +504,27 @@ fn the_owner_serves_a_read_into_its_clients_span() {
     assert!(client.closed());
 }
 
+/// An output span off a page boundary breaks the protocol: the owner's
+/// reads from disk land in an output a page at a time, past the page
+/// cache, from page-aligned memory only.
+#[test]
+fn an_output_span_off_a_page_boundary_closes_the_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let (_data, meta) = put_file(&inner, &Path::from("a"), MIB);
+    let _owner = shared(&inner, &dir).build().unwrap();
+    let (client, region) = RawClient::admitted_with_region(&dir);
+
+    let page = crate::PAGE_SIZE_U64;
+    let span = region
+        .span(ReadOutput::padded_len(&(0..MIB)) + page)
+        .unwrap();
+    let whole = span.name();
+    let off_a_page = SpanName::new(whole.offset() + 512, whole.len() - 512);
+    client.send(&start_read_into(1, &meta, 0..MIB, off_a_page));
+    assert!(client.closed());
+}
+
 /// `range` of the file `meta` names, read through `store`'s cache, opened
 /// as listed: no HEAD.
 fn read_listed(

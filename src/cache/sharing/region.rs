@@ -397,13 +397,18 @@ impl OwnerRegion {
     ///
     /// # Errors
     ///
-    /// If the span runs past the region, or is too short for the output.
+    /// If the span runs past the region, is too short for the output, or
+    /// starts off a page boundary: the output lends its pages to reads from
+    /// disk, which land past the page cache in page-aligned memory alone.
     pub(super) fn output(
         self: &Arc<Self>,
         span: SpanName,
         asked: Range<u64>,
         keeper: impl Any + Send + Sync,
     ) -> Result<ReadOutput> {
+        if !span.offset.is_multiple_of(PAGE_SIZE_U64) {
+            return Err(Self::refused("span: off a page boundary"));
+        }
         let memory = self
             .mapping
             .at(span)
