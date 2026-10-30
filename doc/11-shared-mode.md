@@ -111,16 +111,17 @@ decision 9).
    - **A fetched block lands in its chunk on its first byte**
      (`ObjectCache::landing`): a memory chunk or a disk write buffer,
      allocated then, evicting if the tier is full. In the owner, landing
-     stays that. In a client, the landing is a buffer in its region, and
-     the owner allocates the chunk at commit: a copy from the region for
-     memory, a direct write from it for disk. The memory pool is a
-     private mapping, never shared: a client can't write a chunk. Already
+     stays that, and so it does for a client's fetch: the client stages
+     the GET's bytes in its region, and the owner lands them from there
+     as its own fetches' (decision 5). The memory pool is a private
+     mapping, never shared: a client can't write a chunk. Already
      behind the storage half's interface (step 2.3): the fetch half lands
      a fetch's bytes only through `FetchedBlocks`'s `range`, `file`,
      `race`, `late_race`, `land` and `finish`, the commit; where a block
      lands, the eviction it makes and its claim are private to
-     `object_cache.rs`. A client's `FetchedBlocks`, landing in its region
-     and committing over the socket, comes with steps 3 and 4.
+     `object_cache.rs`. The owner runs a client's fetch's
+     `FetchedBlocks`, fed over the socket (step 3) or from the region
+     (step 4).
    - **The fetch half held where blocks were.** A fetch ends with
      `FetchEnd::Cached(Location)`, but the waiter that takes it is the
      read's work on the tiers (`TierWork::finish`), which pins the chunk
@@ -202,26 +203,56 @@ decision 9).
      4), a fetched block's bytes cross the socket twice: to the owner,
      which lands them as its own fetches' (`FetchedBlocks`), and back in
      the read's bytes.
-   - **The region**, on Linux, is a memfd the client makes, sizes to
-     1 GiB, seals (`F_SEAL_SHRINK`, `F_SEAL_GROW`, `F_SEAL_SEAL`) and
-     sends in the handshake; both map it. Pages take memory only once
-     touched. The owner refuses a memfd not sealed against shrinking: a
+   - **The region** is 1 GiB of shared memory the client makes and
+     sends in the handshake, beside its cache file's descriptor; both
+     map it. Pages take memory only once touched. It must not shrink: a
      client that shrank it would crash the owner with `SIGBUS`, and the
      owner is a user's app.
-   - **A client's read outputs and landings come from its region.** The
-     owner fills an output as it fills one now: disk reads land in
-     place, memory hits are copied in once. The client hands it to its
-     caller as `Bytes` over the region, as `ReadOutput::into_bytes`
-     hands out heap memory now (`read_output.rs`), and the space goes
-     back when the last `Bytes` drops. A client's read costs the
-     copies an owner's does; only control crosses the socket.
-   - **Freed space is given back:** the client punches a hole over a
-     large freed buffer (`fallocate`, `PUNCH_HOLE`, which the seals
-     allow), so the region's memory follows what is held.
-   - **A buffer that doesn't fit** goes through the socket: the owner
-     sends a served block's bytes in the reply, and a commit carries its
-     block. So does every buffer on macOS, which has neither memfd nor
-     seals (`00-meta.md`: correct there, not fast).
+     - **Linux:** a memfd, sealed (`F_SEAL_SHRINK`, `F_SEAL_GROW`,
+       `F_SEAL_SEAL`); the owner refuses one whose seals don't forbid
+       shrinking.
+     - **macOS:** a POSIX shared memory object, unlinked once made. XNU
+       sizes one once and refuses every `ftruncate` after, from any
+       descriptor (checked 29 Oct 2026); the owner refuses one that takes
+       an `ftruncate` to its own size, as a regular file does. Spiral's
+       shared processes are a desktop's, so macOS gets the region too,
+       not the socket alone.
+     - A client that can't make one, or an owner that refuses it, reads
+       with the bytes in the frames, as in step 3.
+   - **Spans:** the client hands out its region in page-aligned spans
+     (first fit, freed spans merged). A span it names in a frame is lent
+     to the owner, and comes back only on the owner's word: no span is
+     reused while the owner may still write it or read it.
+   - **A read's output is a span.** `StartRead` names it, sized and
+     aligned as `ReadOutput` makes one (the address agrees with the file
+     offset mod 4 KiB). The owner makes the read's `ReadOutput` over its
+     mapping of the span and fills it as an owner's: disk reads land in
+     place, memory hits are copied in once. `Served` then carries no
+     bytes: the client hands its caller `Bytes` over the span, and the
+     span is free once the last of them drops.
+   - **A fetch's bytes are staged in a span:** the client copies each
+     piece of the GET's body into the fetch's span as it comes, and
+     `Land` names the next bytes staged rather than carrying them. The
+     owner lands them from its mapping as its own fetches' land
+     (`FetchedBlocks`), into the output and the landing. A client's
+     fetched byte is copied once more than an owner's (into the span), in
+     place of twice over the socket; landing from the client's region
+     straight into a chunk at commit, which saves it, would need a
+     client's landing apart from `FetchedBlocks` (Later).
+   - **A read's spans come back at its end.** Every read ends with
+     `EndRead`, which the owner answers `Ended` once the read's task is
+     dropped and every buffer over its spans with it: no I/O is left
+     writing them. Then, or once the owner is gone, the client frees the
+     read's spans: its staging, and its output unless its caller holds
+     it.
+   - **Freed space is given back on Linux:** the client punches a hole
+     over a large freed span (`fallocate`, `PUNCH_HOLE`, which the seals
+     allow), so the region's memory follows what is held. macOS has no
+     hole to punch in shared memory: a region's memory there is the most
+     its client ever held at once, which first fit keeps low.
+   - **A buffer that doesn't fit** goes through the socket, as in step
+     3: an output with no span free comes back in `Served`, a fetch with
+     no span lands its bytes in its frames.
    - **The owner trusts no shared byte it acts on.** It reads every
      field of a request from its frame, never from the region, so a
      client changing the region garbles only its own bytes. It keeps its
@@ -336,6 +367,11 @@ pipelined. The owner's own reads cost what they cost now.
   long as they live.
 - **Polling, and the owner reading sockets on its io_uring loop,** if the
   round trip measures too slow (doc/02's step 4).
+- **A client's fetch landed from its region at commit,** saving the copy
+  into the staging span (decision 5): the client lands each piece in its
+  output and a block's buffer in its region, and the owner copies a
+  block for memory into its chunk, or writes one for disk straight from
+  the region. If a client's GET rate measures the copy.
 
 ## Build order
 
@@ -426,8 +462,9 @@ pipelined. The owner's own reads cost what they cost now.
    reading right, and their stores together sending the file once
    (`eight_processes_starting_at_once_fetch_each_block_once`). They take
    about 0.3 s. Built 29 Oct 2026.
-4. **The region,** on Linux: outputs and landings in a sealed memfd; the
-   socket when one doesn't fit.
+4. **The region,** on Linux and macOS: outputs and staged fetches in
+   spans of a sealed memfd or a POSIX shared memory object; the socket
+   when one doesn't fit.
 5. **Polling,** only if measured (Later).
 
 ## Code map
@@ -447,4 +484,4 @@ pipelined. The owner's own reads cost what they cost now.
 | `src/cache/sharing/client_reads.rs` | a client's reads, each a task of its session's (decision 5) | yes |
 | `src/cache/sharing/client.rs` | a client's connection to its owner, its calls, and its reads through it (decisions 5 to 7) | yes |
 | `src/cache/t4_caching/tests/sharing.rs`, `processes.rs` | an owner and its clients in one process, and in real ones (build step 3) | yes |
-| the region | outputs and landings in a sealed memfd (decision 5) | no: step 4 |
+| `src/cache/sharing/region.rs` | the region, its spans, and the checks the owner makes of it (decision 5) | no: step 4 |
