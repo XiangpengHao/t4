@@ -26,6 +26,7 @@ use super::address::{FileIdentity, OwnerAddress};
 use super::frame_socket::FrameSocket;
 use super::frames::{ClientFrame, FetchSpec, FrameReader, NextStep, OwnerFrame, PROTOCOL_VERSION};
 use super::handshake::Hello;
+use super::region::ClientRegion;
 use crate::cache::FileVersionId;
 use crate::cache::block_index::FileVersion;
 use crate::cache::object_cache::{CacheableFile, LocatedRun};
@@ -39,6 +40,11 @@ use crate::io::sync::Arc;
 /// the client gone, and its threads end.
 pub(in crate::cache) struct OwnerConnection {
     socket: FrameSocket,
+    /// The client's region, if its owner mapped it: its reads' outputs and
+    /// its fetches' bytes are spans of it (decision 5); without it, their
+    /// bytes go in the frames.
+    #[allow(dead_code)] // Read's outputs take spans of it: the next commit.
+    region: Option<std::sync::Arc<ClientRegion>>,
     /// The calls waiting for their answers, shared with the reader.
     calls: std::sync::Arc<CallTable>,
     /// The number the next read takes.
@@ -72,7 +78,7 @@ impl OwnerConnection {
         reads: Arc<dyn ReadPolicy>,
     ) -> Result<Option<Self>> {
         match Self::admitted(first_file) {
-            Ok(socket) => Ok(Some(Self::start(socket, reads)?)),
+            Ok((socket, region)) => Ok(Some(Self::start(socket, region, reads)?)),
             Err(Error::Io(error)) if Self::owner_absent(&error) => Ok(None),
             Err(error) => Err(error),
         }
@@ -80,24 +86,32 @@ impl OwnerConnection {
 
     /// A socket to the owner of the cache whose first cache file is at
     /// `first_file`, which admitted the client: its hello sent, with its
-    /// descriptor of that file, and the owner's welcome taken.
-    fn admitted(first_file: &Path) -> Result<FrameSocket> {
+    /// descriptor of that file and of a region of its own, and the owner's
+    /// welcome taken; and the region, if the owner mapped it. A client that
+    /// can't make a region goes without: its reads' bytes go in the frames.
+    fn admitted(first_file: &Path) -> Result<(FrameSocket, Option<std::sync::Arc<ClientRegion>>)> {
         let cache_file = File::options().read(true).write(true).open(first_file)?;
         let address = OwnerAddress::of(FileIdentity::of(&cache_file)?);
         let socket = FrameSocket::new(address.connect()?)?;
         socket.set_read_timeout(Some(Hello::WAIT))?;
-        Hello::new(PROTOCOL_VERSION, cache_file).send(&socket)?;
+        let region = ClientRegion::make().ok();
+        let mut hello = Hello::new(PROTOCOL_VERSION, cache_file);
+        if let Some(region) = &region {
+            hello = hello.with_region(region.descriptor().try_clone_to_owned()?);
+        }
+        hello.send(&socket)?;
         let welcome = socket
             .receive(Self::WELCOME_BYTES)?
             .ok_or(io::Error::from(io::ErrorKind::UnexpectedEof))?;
-        match OwnerFrame::decode(welcome)? {
-            OwnerFrame::Welcome {
-                version: PROTOCOL_VERSION,
-            } => {}
-            _ => return Err(FrameReader::malformed("welcome")),
-        }
+        let OwnerFrame::Welcome {
+            version: PROTOCOL_VERSION,
+            region: mapped,
+        } = OwnerFrame::decode(welcome)?
+        else {
+            return Err(FrameReader::malformed("welcome"));
+        };
         socket.set_read_timeout(None)?;
-        Ok(socket)
+        Ok((socket, region.filter(|_| mapped)))
     }
 
     /// Whether `error`, met while connecting, means no owner is there to
@@ -120,9 +134,14 @@ impl OwnerConnection {
         )
     }
 
-    /// The connection over `socket`, its threads started: the reader
-    /// answers each call, and tells `reads` of each read from disk.
-    fn start(socket: FrameSocket, reads: Arc<dyn ReadPolicy>) -> Result<Self> {
+    /// The connection over `socket`, its owner having mapped `region` if
+    /// any, its threads started: the reader answers each call, and tells
+    /// `reads` of each read from disk.
+    fn start(
+        socket: FrameSocket,
+        region: Option<std::sync::Arc<ClientRegion>>,
+        reads: Arc<dyn ReadPolicy>,
+    ) -> Result<Self> {
         let (outgoing, frames) = crossbeam_channel::unbounded::<Vec<u8>>();
         let writing = socket.try_clone()?;
         let writer = thread::Builder::new()
@@ -147,6 +166,7 @@ impl OwnerConnection {
             .spawn(move || reader.run())?;
         Ok(Self {
             socket,
+            region,
             calls,
             next_read: AtomicU64::new(0),
             outgoing: Some(outgoing),
@@ -179,6 +199,12 @@ impl OwnerConnection {
     /// every call fails.
     pub(in crate::cache) fn owner_gone(&self) -> bool {
         self.calls.owner_gone()
+    }
+
+    /// Whether the owner mapped the client's region: for tests.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(in crate::cache) fn has_region(&self) -> bool {
+        self.region.is_some()
     }
 
     /// The numbers of the calls waiting for their answers, in order: for

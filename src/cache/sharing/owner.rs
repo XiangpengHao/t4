@@ -15,6 +15,7 @@ use super::client_reads::ClientReads;
 use super::frame_socket::FrameSocket;
 use super::frames::{ClientFrame, OwnerFrame, PROTOCOL_VERSION};
 use super::handshake::Hello;
+use super::region::OwnerRegion;
 use crate::cache::object_cache::ObjectCache;
 use crate::io::error::Result;
 use crate::io::sync::Arc;
@@ -158,8 +159,8 @@ impl ClientSession {
         self.socket.shut_down();
     }
 
-    /// Admits the client, then serves its reads until it closes the
-    /// connection.
+    /// Admits the client, maps its region if it sent one that can't
+    /// shrink, then serves its reads until it closes the connection.
     ///
     /// # Errors
     ///
@@ -167,9 +168,15 @@ impl ClientSession {
     /// the protocol doesn't allow where it comes.
     fn serve(&self) -> Result<()> {
         self.socket.set_read_timeout(Some(Hello::WAIT))?;
-        Hello::receive(&self.socket)?.admit(self.first_file)?;
+        let hello = Hello::receive(&self.socket)?;
+        hello.admit(self.first_file)?;
+        // A region refused, the client's reads' bytes go in the frames.
+        let region = hello
+            .into_region()
+            .and_then(|memory| OwnerRegion::accept(memory).ok());
         let welcome = OwnerFrame::Welcome {
             version: PROTOCOL_VERSION,
+            region: region.is_some(),
         };
         self.socket.send(&welcome.encode())?;
         self.socket.set_read_timeout(None)?;

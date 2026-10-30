@@ -4,7 +4,7 @@
 use std::fs::File;
 use std::io::{IoSlice, IoSliceMut, Read};
 use std::mem::MaybeUninit;
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -19,13 +19,16 @@ use super::frame_socket::FrameSocket;
 use super::frames::{ClientFrame, FrameReader, PROTOCOL_VERSION};
 use crate::io::error::{Error, Result};
 
-/// A client's hello: its protocol's version, and its descriptor of the
-/// first cache file, sent beside the frame by `SCM_RIGHTS`. The owner
-/// admits a client whose descriptor names that file and is open for
-/// writing it: whoever may write the cache file may use the cache.
+/// A client's hello: its protocol's version, its descriptor of the first
+/// cache file, and of its region if it made one, sent beside the frame by
+/// `SCM_RIGHTS`. The owner admits a client whose descriptor names that
+/// file and is open for writing it: whoever may write the cache file may
+/// use the cache. Its region the owner maps if it can't shrink
+/// (`OwnerRegion::accept`).
 pub(super) struct Hello {
     version: u32,
     cache_file: File,
+    region: Option<OwnedFd>,
 }
 
 impl Hello {
@@ -36,7 +39,11 @@ impl Hello {
     /// The bytes of a hello's frame, its length with it: all an owner takes
     /// from a peer it hasn't admitted, so that a peer can't make it
     /// allocate.
-    const FRAME_BYTES: usize = 8 + 1 + 4 + 4;
+    const FRAME_BYTES: usize = 8 + 1 + 4 + 4 + 1;
+
+    /// The most descriptors a hello comes with: the cache file's and the
+    /// region's.
+    const MOST_DESCRIPTORS: usize = 2;
 
     /// How a receive takes the descriptor: closed on `exec` from the first,
     /// where the kernel can.
@@ -49,11 +56,26 @@ impl Hello {
         Self {
             version,
             cache_file,
+            region: None,
         }
     }
 
-    /// Sends the hello on `socket`, the descriptor beside its frame's first
-    /// bytes.
+    /// The hello, with `region`'s memory sent beside it.
+    #[must_use]
+    pub(super) fn with_region(self, region: OwnedFd) -> Self {
+        Self {
+            region: Some(region),
+            ..self
+        }
+    }
+
+    /// The client's region's memory, if it sent one: the owner's to check.
+    pub(super) fn into_region(self) -> Option<OwnedFd> {
+        self.region
+    }
+
+    /// Sends the hello on `socket`, the descriptors beside its frame's
+    /// first bytes.
     ///
     /// # Errors
     ///
@@ -61,32 +83,45 @@ impl Hello {
     pub(super) fn send(&self, socket: &FrameSocket) -> std::io::Result<()> {
         let frame = ClientFrame::Hello {
             version: self.version,
-        }
-        .encode();
+            region: self.region.is_some(),
+        };
+        self.send_as(socket, &frame.encode())
+    }
+
+    /// Sends `frame` on `socket`, the hello's descriptors beside its first
+    /// bytes: the hello's own frame, or, in a test, one of a peer that
+    /// breaks the protocol.
+    pub(super) fn send_as(&self, socket: &FrameSocket, frame: &[u8]) -> std::io::Result<()> {
         debug_assert_eq!(frame.len(), Self::FRAME_BYTES);
-        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut space =
+            [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(Self::MOST_DESCRIPTORS))];
         let mut control = SendAncillaryBuffer::new(&mut space);
-        let descriptors = [self.cache_file.as_fd()];
+        let cache_file = self.cache_file.as_fd();
+        let descriptors = match &self.region {
+            Some(region) => vec![cache_file, region.as_fd()],
+            None => vec![cache_file],
+        };
         let pushed = control.push(SendAncillaryMessage::ScmRights(&descriptors));
-        assert!(pushed, "the buffer has room for one descriptor");
+        assert!(pushed, "the buffer has room for every descriptor");
         let sent = rustix::net::sendmsg(
             socket,
-            &[IoSlice::new(&frame)],
+            &[IoSlice::new(frame)],
             &mut control,
             FrameSocket::SEND_FLAGS,
         )?;
         socket.send(&frame[sent..])
     }
 
-    /// The hello the peer of `socket` sent first, and its descriptor.
+    /// The hello the peer of `socket` sent first, and its descriptors.
     ///
     /// # Errors
     ///
     /// If the socket fails or closes, or the peer sent anything but a
-    /// hello's frame with one descriptor beside it.
+    /// hello's frame with the descriptors it says beside it.
     pub(super) fn receive(socket: &FrameSocket) -> Result<Self> {
         let mut frame = [0; Self::FRAME_BYTES];
-        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut space =
+            [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(Self::MOST_DESCRIPTORS))];
         let mut control = RecvAncillaryBuffer::new(&mut space);
         let received = rustix::net::recvmsg(
             socket,
@@ -99,26 +134,37 @@ impl Hello {
             return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
         }
         if received.flags.contains(ReturnFlags::CTRUNC) {
-            return Err(FrameReader::malformed("hello: more than one descriptor"));
+            return Err(FrameReader::malformed("hello: more than two descriptors"));
         }
-        let cache_file = control.drain().find_map(|message| match message {
-            RecvAncillaryMessage::ScmRights(mut descriptors) => descriptors.next(),
-            _ => None,
-        });
-        let Some(cache_file) = cache_file else {
-            return Err(FrameReader::malformed("hello: no descriptor"));
-        };
+        let mut descriptors: Vec<OwnedFd> = Vec::new();
+        for message in control.drain() {
+            if let RecvAncillaryMessage::ScmRights(sent) = message {
+                descriptors.extend(sent);
+            }
+        }
         (&*socket).read_exact(&mut frame[received.bytes..])?;
         let (length, body) = frame.split_at(size_of::<u64>());
         let length = u64::from_le_bytes(length.try_into().expect("a u64's bytes"));
         if length != body.len() as u64 {
             return Err(FrameReader::malformed("hello's length"));
         }
-        let ClientFrame::Hello { version } = ClientFrame::decode(Bytes::copy_from_slice(body))?
+        let ClientFrame::Hello { version, region } =
+            ClientFrame::decode(Bytes::copy_from_slice(body))?
         else {
             return Err(FrameReader::malformed("hello: another frame"));
         };
-        Ok(Self::new(version, File::from(cache_file)))
+        if descriptors.len() != 1 + usize::from(region) {
+            return Err(FrameReader::malformed(
+                "hello: other descriptors than it says",
+            ));
+        }
+        let mut descriptors = descriptors.into_iter();
+        let cache_file = descriptors.next().expect("one descriptor at least");
+        Ok(Self {
+            version,
+            cache_file: File::from(cache_file),
+            region: descriptors.next(),
+        })
     }
 
     /// Whether the owner of the cache whose first cache file is

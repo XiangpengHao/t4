@@ -19,6 +19,7 @@ use super::address::{FileIdentity, OwnerAddress};
 use super::frame_socket::FrameSocket;
 use super::frames::{ClientFrame, FetchSpec, NextStep, OwnerFrame, PROTOCOL_VERSION};
 use super::handshake::Hello;
+use super::region::ClientRegion;
 use crate::cache::object_cache::LocatedRun;
 use crate::cache::policy::{
     Admit, BlockSource, FixedPlacementPolicy, IoPhase, PlannedGet, ReadPlan,
@@ -78,7 +79,10 @@ fn frames_cross_a_socket_whole() {
         FrameSocket::new(other).unwrap(),
     );
     let frames = [
-        ClientFrame::Hello { version: 7 },
+        ClientFrame::Hello {
+            version: 7,
+            region: false,
+        },
         ClientFrame::Land {
             read: 1,
             fetch: 2,
@@ -130,6 +134,10 @@ fn a_cache_built_for_sharing_on_owned_files_is_their_owners_client() {
     assert!(matches!(*owner.link(), StorageLink::Owner { .. }));
     let client = shared(&inner, &dir).build().unwrap();
     assert!(!owner_gone(&client));
+    match &*client.link() {
+        StorageLink::Client(connection) => assert!(connection.has_region()),
+        StorageLink::Owner { .. } => panic!("a client"),
+    }
     for store in [&owner, &client] {
         let read = block_on(store.get_range(&path, 10..2 * MIB - 10)).unwrap();
         assert_eq!(read, data.slice(10..2 * MIB as usize - 10));
@@ -224,7 +232,8 @@ fn the_owner_admits_only_a_writer_of_its_first_cache_file() {
             .unwrap();
     });
     let version = PROTOCOL_VERSION;
-    assert_eq!(welcome, Some(OwnerFrame::Welcome { version }));
+    let region = false;
+    assert_eq!(welcome, Some(OwnerFrame::Welcome { version, region }));
     let refused = [
         Hello::new(PROTOCOL_VERSION, other),
         Hello::new(PROTOCOL_VERSION, read_only),
@@ -237,11 +246,61 @@ fn the_owner_admits_only_a_writer_of_its_first_cache_file() {
         );
     }
     // A frame with no descriptor, and a length no hello has.
-    let bare = ClientFrame::Hello { version }.encode();
+    let bare = ClientFrame::Hello { version, region }.encode();
     let bare = answer_to(&address, |socket| socket.send(&bare).unwrap());
     assert_eq!(bare, None);
-    let garbage = answer_to(&address, |socket| socket.send(&[0xff; 17]).unwrap());
+    let garbage = answer_to(&address, |socket| socket.send(&[0xff; 18]).unwrap());
     assert_eq!(garbage, None);
+}
+
+/// The owner maps a client's region that can't shrink, and welcomes the
+/// client with it; it welcomes a client whose region could shrink without
+/// it, its reads' bytes in the frames. A hello that says it sent a region
+/// and sent none closes the connection.
+#[test]
+fn the_owner_maps_a_clients_region_that_cannot_shrink() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let _owner = shared(&inner, &dir).build().unwrap();
+    let cache_path = dir.path().join("cache");
+    let writable = || {
+        File::options()
+            .read(true)
+            .write(true)
+            .open(&cache_path)
+            .unwrap()
+    };
+    let address = OwnerAddress::of(FileIdentity::of(&writable()).unwrap());
+    let version = PROTOCOL_VERSION;
+
+    let region = ClientRegion::make().unwrap();
+    let memory = region.descriptor().try_clone_to_owned().unwrap();
+    let welcome = answer_to(&address, |socket| {
+        let hello = Hello::new(version, writable()).with_region(memory);
+        hello.send(socket).unwrap();
+    });
+    let region = true;
+    assert_eq!(welcome, Some(OwnerFrame::Welcome { version, region }));
+
+    let file = tempfile::tempfile().unwrap();
+    file.set_len(1 << 20).unwrap();
+    let welcome = answer_to(&address, |socket| {
+        let hello = Hello::new(version, writable()).with_region(file.into());
+        hello.send(socket).unwrap();
+    });
+    let region = false;
+    assert_eq!(welcome, Some(OwnerFrame::Welcome { version, region }));
+
+    let claimed = answer_to(&address, |socket| {
+        let frame = ClientFrame::Hello {
+            version,
+            region: true,
+        };
+        Hello::new(version, writable())
+            .send_as(socket, &frame.encode())
+            .unwrap();
+    });
+    assert_eq!(claimed, None);
 }
 
 /// A client of an owner's that speaks frames itself, as a test drives it:
@@ -273,7 +332,8 @@ impl RawClient {
             news: Vec::new(),
         };
         let version = PROTOCOL_VERSION;
-        assert_eq!(client.answer(), OwnerFrame::Welcome { version });
+        let region = false;
+        assert_eq!(client.answer(), OwnerFrame::Welcome { version, region });
         client
     }
 
@@ -552,6 +612,7 @@ fn a_clients_misuse_closes_its_connection() {
             vec![],
             ClientFrame::Hello {
                 version: PROTOCOL_VERSION,
+                region: false,
             },
         ),
         (

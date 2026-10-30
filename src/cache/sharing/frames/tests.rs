@@ -7,6 +7,11 @@ fn client_frames() -> Vec<ClientFrame> {
     vec![
         ClientFrame::Hello {
             version: PROTOCOL_VERSION,
+            region: false,
+        },
+        ClientFrame::Hello {
+            version: PROTOCOL_VERSION,
+            region: true,
         },
         ClientFrame::StartRead {
             call: 1,
@@ -115,6 +120,11 @@ fn owner_frames() -> Vec<OwnerFrame> {
     let mut frames = vec![
         OwnerFrame::Welcome {
             version: PROTOCOL_VERSION,
+            region: false,
+        },
+        OwnerFrame::Welcome {
+            version: PROTOCOL_VERSION,
+            region: true,
         },
         OwnerFrame::Started {
             call: 1,
@@ -203,7 +213,13 @@ fn patched(frame: &[u8], at: usize, with: &[u8]) -> Bytes {
 
 #[test]
 fn a_value_no_field_takes_is_malformed() {
-    let hello = ClientFrame::Hello { version: 1 }.encode();
+    let hello = ClientFrame::Hello {
+        version: 1,
+        region: false,
+    }
+    .encode();
+    let flag = patched(&hello, 1 + 4 + 4, &[2]);
+    assert!(ClientFrame::decode(flag).is_err(), "region flag");
     assert!(
         ClientFrame::decode(patched(&hello, 0, &[0])).is_err(),
         "tag"

@@ -7,6 +7,8 @@
 //! - `frame_socket`: a connected socket, which frames cross whole.
 //! - `address`: where an owner listens, named by its first cache file.
 //! - `handshake`: a client's hello, and the owner's check of it.
+//! - `region`: a client's shared memory, mapped by its owner too, handed
+//!   out in spans.
 //! - `owner`: an owner's listener, and a session for each client.
 //! - `client_reads`: a client's reads, as its owner serves them.
 //! - `client`: a client's connection to its owner.
@@ -18,6 +20,7 @@ mod frame_socket;
 mod frames;
 mod handshake;
 mod owner;
+mod region;
 
 pub(super) use address::FileIdentity;
 pub(super) use client::{ClientFetch, ClientRead, OwnerConnection};

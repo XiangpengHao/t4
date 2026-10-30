@@ -21,7 +21,7 @@ use crate::io::error::{Error, Result};
 
 /// The protocol's version: a client and an owner of different versions
 /// don't talk.
-pub(super) const PROTOCOL_VERSION: u32 = 1;
+pub(super) const PROTOCOL_VERSION: u32 = 2;
 
 /// A frame a client sends its owner. A call, which the owner answers,
 /// carries the number the client gave it, `call`; the other frames take no
@@ -30,8 +30,8 @@ pub(super) const PROTOCOL_VERSION: u32 = 1;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ClientFrame {
     /// The first frame: the client's protocol version, sent with its
-    /// descriptor of the first cache file.
-    Hello { version: u32 },
+    /// descriptor of the first cache file, and of its region if `region`.
+    Hello { version: u32, region: bool },
     /// Starts a read of `range` of the version of the file at `path` with
     /// `e_tag` and `size`, for `intent`.
     StartRead {
@@ -67,9 +67,12 @@ pub(super) enum ClientFrame {
 /// news of a read from disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum OwnerFrame {
-    /// The answer to [`ClientFrame::Hello`]: the owner's protocol version.
+    /// The answer to [`ClientFrame::Hello`]: the owner's protocol version,
+    /// and whether it mapped the client's region; if not, the client's
+    /// reads' bytes go in the frames.
     Welcome {
         version: u32,
+        region: bool,
     },
     /// The read started: its file's version, and its next step.
     Started {
@@ -165,10 +168,11 @@ impl ClientFrame {
     /// The frame, its length first.
     pub(super) fn encode(&self) -> Vec<u8> {
         match self {
-            Self::Hello { version } => {
+            Self::Hello { version, region } => {
                 let mut frame = FrameWriter::new(Self::HELLO);
                 frame.raw(&Self::MAGIC);
                 frame.u32(*version);
+                frame.flag(*region);
                 frame.finish()
             }
             Self::StartRead {
@@ -245,6 +249,7 @@ impl ClientFrame {
                 }
                 Self::Hello {
                     version: frame.u32()?,
+                    region: frame.flag()?,
                 }
             }
             Self::START_READ => Self::StartRead {
@@ -316,9 +321,10 @@ impl OwnerFrame {
     /// The frame, its length first.
     pub(super) fn encode(&self) -> Vec<u8> {
         match self {
-            Self::Welcome { version } => {
+            Self::Welcome { version, region } => {
                 let mut frame = FrameWriter::new(Self::WELCOME);
                 frame.u32(*version);
+                frame.flag(*region);
                 frame.finish()
             }
             Self::Started {
@@ -384,6 +390,7 @@ impl OwnerFrame {
         let decoded = match frame.u8()? {
             Self::WELCOME => Self::Welcome {
                 version: frame.u32()?,
+                region: frame.flag()?,
             },
             Self::STARTED => Self::Started {
                 call: frame.u64()?,
@@ -458,6 +465,10 @@ impl FrameWriter {
 
     fn u8(&mut self, value: u8) {
         self.frame.push(value);
+    }
+
+    fn flag(&mut self, value: bool) {
+        self.u8(u8::from(value));
     }
 
     pub(in crate::cache) fn u32(&mut self, value: u32) {
@@ -631,6 +642,14 @@ impl FrameReader {
 
     fn u8(&mut self) -> Result<u8> {
         Ok(self.array::<1>()?[0])
+    }
+
+    fn flag(&mut self) -> Result<bool> {
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(Self::malformed("flag")),
+        }
     }
 
     pub(in crate::cache) fn u32(&mut self) -> Result<u32> {

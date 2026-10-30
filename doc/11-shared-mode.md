@@ -8,8 +8,9 @@ step 2.4, no read policy held by the storage half; step 2.5,
 and serving a client's reads, and a client connecting (`with_sharing`)
 and reading through its owner, its reads going to the remote once its
 owner goes, those in flight too, until a read makes it the owner or a
-client of the next; tested in one process and in real ones. Next: the
-region (step 4).
+client of the next; tested in one process and in real ones. Step 4,
+the region, in part: the region made, sent in the handshake and mapped
+by the owner (`sharing/region.rs`); its spans serve no read yet.
 The user's call of 29 Oct 2026, for Spiral
 (`10-spiral-integration.md`, decision 8).
 
@@ -276,7 +277,11 @@ decision 9).
      read-write descriptor of the first cache file, by `SCM_RIGHTS`,
      which the owner checks names the same file (`fstat`) and is open
      read-write (`F_GETFL`), so whoever may write the cache file may use
-     the cache; then the region. The owner's settings rule: its tiers,
+     the cache; and the client's region's descriptor in the same message,
+     if it made one, which the hello says. The owner's welcome says
+     whether it mapped the region: one refused, the client is admitted
+     without it, its reads' bytes in the frames. Protocol version 2. The
+     owner's settings rule: its tiers,
      its placement policy, its direct I/O. A client's own tier settings
      matter only if it comes to own the cache.
 
@@ -464,7 +469,19 @@ pipelined. The owner's own reads cost what they cost now.
    about 0.3 s. Built 29 Oct 2026.
 4. **The region,** on Linux and macOS: outputs and staged fetches in
    spans of a sealed memfd or a POSIX shared memory object; the socket
-   when one doesn't fit.
+   when one doesn't fit. In three pieces:
+   1. the region and its spans, sent in the handshake and mapped by the
+      owner. Built 29 Oct 2026: `ClientRegion` (memfd, sealed; or POSIX
+      shared memory, unlinked), its spans first fit, merged when given
+      back, large ones hole-punched on Linux; `OwnerRegion::accept` maps
+      only memory that can't shrink. Tested: spans taken and merged
+      (`spans_are_taken_first_fit_and_merged_when_given_back`), a span
+      the client writes read by the owner, no span past the region, a
+      regular file refused (`the_owner_refuses_memory_that_could_shrink`;
+      an unsealed memfd on Linux), the welcome with and without a region
+      (`the_owner_maps_a_clients_region_that_cannot_shrink`);
+   2. a read's output in a span;
+   3. a fetch's bytes staged in a span.
 5. **Polling,** only if measured (Later).
 
 ## Code map
@@ -484,4 +501,4 @@ pipelined. The owner's own reads cost what they cost now.
 | `src/cache/sharing/client_reads.rs` | a client's reads, each a task of its session's (decision 5) | yes |
 | `src/cache/sharing/client.rs` | a client's connection to its owner, its calls, and its reads through it (decisions 5 to 7) | yes |
 | `src/cache/t4_caching/tests/sharing.rs`, `processes.rs` | an owner and its clients in one process, and in real ones (build step 3) | yes |
-| `src/cache/sharing/region.rs` | the region, its spans, and the checks the owner makes of it (decision 5) | no: step 4 |
+| `src/cache/sharing/region.rs` | the region, its spans, and the checks the owner makes of it (decision 5) | made and mapped; serving reads: step 4.2, 4.3 |
