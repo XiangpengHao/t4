@@ -98,7 +98,7 @@ impl OwnerConnection {
     fn admitted(first_file: &Path) -> Result<(FrameSocket, Option<std::sync::Arc<ClientRegion>>)> {
         let cache_file = File::options().read(true).write(true).open(first_file)?;
         let address = OwnerAddress::of(FileIdentity::of(&cache_file)?)?;
-        let socket = FrameSocket::new(address.connect()?)?;
+        let socket = FrameSocket::new(address.connect(rustix::process::geteuid())?)?;
         socket.set_read_timeout(Some(Hello::WAIT))?;
         let region = ClientRegion::make().ok();
         let mut hello = Hello::new(PROTOCOL_VERSION, cache_file);

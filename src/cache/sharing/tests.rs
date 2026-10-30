@@ -13,6 +13,8 @@ use object_store::ObjectStoreExt;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use pollster::block_on;
+use rustix::fs::Uid;
+use rustix::process::geteuid;
 use tempfile::TempDir;
 
 use super::address::{FileIdentity, OwnerAddress};
@@ -180,7 +182,7 @@ fn an_owner_dropped_hands_its_files_to_the_next_cache() {
 /// How the owner answers `hello`, sent on a connection of its own: its
 /// welcome, or `None` if it closed the connection.
 fn answer_to(address: &OwnerAddress, hello: impl FnOnce(&FrameSocket)) -> Option<OwnerFrame> {
-    let socket = FrameSocket::new(address.connect().unwrap()).unwrap();
+    let socket = FrameSocket::new(address.connect(geteuid()).unwrap()).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
@@ -254,6 +256,23 @@ fn the_owner_admits_only_a_writer_of_its_first_cache_file() {
     assert_eq!(garbage, None);
 }
 
+/// A client trusts only an owner of its own user (decision 8): one
+/// listening at the address as another user, as a process of another
+/// could on Linux, it finds `Busy`, and sends it nothing.
+#[test]
+fn a_client_connects_only_to_an_owner_of_its_user() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let _owner = shared(&inner, &dir).build().unwrap();
+    let cache_file = File::open(dir.path().join("cache")).unwrap();
+    let address = OwnerAddress::of(FileIdentity::of(&cache_file).unwrap()).unwrap();
+
+    assert!(address.connect(geteuid()).is_ok());
+    let another = Uid::from_raw(geteuid().as_raw() + 1);
+    let refused = address.connect(another).unwrap_err();
+    assert!(matches!(refused, crate::Error::Busy), "{refused}");
+}
+
 /// The owner refuses a client of another protocol version, but tells it
 /// its own version first, so that the client gives up at once
 /// (decision 6); then it closes the connection.
@@ -268,7 +287,7 @@ fn the_owner_tells_a_client_of_another_version_its_own() {
         .open(dir.path().join("cache"))
         .unwrap();
     let address = OwnerAddress::of(FileIdentity::of(&cache_file).unwrap()).unwrap();
-    let socket = FrameSocket::new(address.connect().unwrap()).unwrap();
+    let socket = FrameSocket::new(address.connect(geteuid()).unwrap()).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
@@ -401,7 +420,7 @@ impl RawClient {
             .open(dir.path().join("cache"))
             .unwrap();
         let address = OwnerAddress::of(FileIdentity::of(&cache_file).unwrap()).unwrap();
-        let socket = FrameSocket::new(address.connect().unwrap()).unwrap();
+        let socket = FrameSocket::new(address.connect(geteuid()).unwrap()).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();

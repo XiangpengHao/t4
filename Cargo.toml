@@ -42,7 +42,7 @@ libc = "0.2"
 # The cache's memory pool, an anonymous mapping, and the cache file's
 # preallocation; a shared cache's handshake, descriptors sent by SCM_RIGHTS,
 # and its region, a memfd (Linux) or POSIX shared memory (macOS).
-rustix = { version = "1.1", features = ["fs", "mm", "net", "shm"] }
+rustix = { version = "1.1", features = ["fs", "mm", "net", "process", "shm"] }
 
 [dev-dependencies]
 pollster = "1.0"

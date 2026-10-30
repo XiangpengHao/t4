@@ -72,7 +72,7 @@ impl Drop for OwnerListener {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
         // Wakes the accept thread, which finds itself stopping.
-        let _ = self.address.connect();
+        self.address.wake();
         if let Some(accepting) = self.accepting.take() {
             let _ = accepting.join();
         }

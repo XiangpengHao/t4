@@ -9,6 +9,10 @@ use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(not(target_os = "linux"))]
 use std::path::PathBuf;
 
+use rustix::fs::Uid;
+
+use crate::io::error::{Error, Result};
+
 /// A file, by whatever path it is reached: its device and inode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::cache) struct FileIdentity {
@@ -109,8 +113,30 @@ impl OwnerAddress {
         }
     }
 
-    /// A connection to the owner listening at the address.
-    pub(super) fn connect(&self) -> io::Result<UnixStream> {
+    /// A connection to the owner listening at the address, which runs as
+    /// `user`. A client trusts no other user's (decision 8): on Linux any
+    /// process may listen at an abstract name, first, and would be sent
+    /// the client's descriptor of the cache file, and serve it any bytes.
+    ///
+    /// # Errors
+    ///
+    /// If the socket fails; [`Error::Busy`] if the process listening runs
+    /// as another user.
+    pub(super) fn connect(&self, user: Uid) -> Result<UnixStream> {
+        let stream = self.stream()?;
+        if Self::peer_user(&stream)? != user {
+            return Err(Error::Busy);
+        }
+        Ok(stream)
+    }
+
+    /// Connects to the address and goes: wakes the owner's thread that
+    /// accepts its clients.
+    pub(super) fn wake(&self) {
+        let _ = self.stream();
+    }
+
+    fn stream(&self) -> io::Result<UnixStream> {
         #[cfg(target_os = "linux")]
         {
             UnixStream::connect_addr(&self.socket_address()?)
@@ -126,6 +152,25 @@ impl OwnerAddress {
     pub(super) fn remove(&self) {
         #[cfg(not(target_os = "linux"))]
         let _ = std::fs::remove_file(&self.path);
+    }
+
+    /// The user the process at the other end of `stream` ran as when it
+    /// connected or listened.
+    #[cfg(target_os = "linux")]
+    fn peer_user(stream: &UnixStream) -> io::Result<Uid> {
+        Ok(rustix::net::sockopt::socket_peercred(stream)?.uid)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn peer_user(stream: &UnixStream) -> io::Result<Uid> {
+        use std::os::fd::AsRawFd;
+        let (mut user, mut group) = (0, 0);
+        // SAFETY: the descriptor is `stream`'s, open while it lives; the
+        // call writes only `user` and `group`.
+        if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut user, &mut group) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Uid::from_raw(user))
     }
 
     #[cfg(target_os = "linux")]

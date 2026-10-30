@@ -337,9 +337,14 @@ decision 9).
      once its I/O into it completes.
    - **A protocol error** closes the connection, as if the owner went.
 
-8. **One user's processes trust each other.** A client may commit any
-   bytes under any name, as any Spiral process of the user may write
-   Kismet's entries now. The owner checks only what keeps the cache
+8. **One user's processes trust each other,** and no others'. A client
+   may commit any bytes under any name, as any Spiral process of the
+   user may write Kismet's entries now. A client connects only to an
+   owner running as its own user (`SO_PEERCRED`, `getpeereid`), and is
+   `Busy` otherwise: on Linux any process may listen at an abstract name,
+   first, and would be sent the client's descriptor of the cache file,
+   and serve its reads any bytes
+   (`a_client_connects_only_to_an_owner_of_its_user`). The owner checks only what keeps the cache
    whole: that a commit's length is its block's, and that it names a
    claim the client holds.
 
