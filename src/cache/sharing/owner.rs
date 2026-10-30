@@ -169,6 +169,14 @@ impl ClientSession {
     fn serve(&self) -> Result<()> {
         self.socket.set_read_timeout(Some(Hello::WAIT))?;
         let hello = Hello::receive(&self.socket)?;
+        if hello.version() != PROTOCOL_VERSION {
+            // Told this version, a client of another gives up at once,
+            // rather than try an owner that won't admit it till its wait
+            // runs out (decision 6).
+            let (version, region) = (PROTOCOL_VERSION, false);
+            self.socket
+                .send(&OwnerFrame::Welcome { version, region }.encode())?;
+        }
         hello.admit(self.first_file)?;
         // A region refused, the client's reads' bytes go in the frames.
         let region = hello

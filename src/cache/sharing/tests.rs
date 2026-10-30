@@ -239,7 +239,6 @@ fn the_owner_admits_only_a_writer_of_its_first_cache_file() {
     let refused = [
         Hello::new(PROTOCOL_VERSION, other),
         Hello::new(PROTOCOL_VERSION, read_only),
-        Hello::new(PROTOCOL_VERSION + 1, writable()),
     ];
     for hello in refused {
         assert_eq!(
@@ -253,6 +252,75 @@ fn the_owner_admits_only_a_writer_of_its_first_cache_file() {
     assert_eq!(bare, None);
     let garbage = answer_to(&address, |socket| socket.send(&[0xff; 18]).unwrap());
     assert_eq!(garbage, None);
+}
+
+/// The owner refuses a client of another protocol version, but tells it
+/// its own version first, so that the client gives up at once
+/// (decision 6); then it closes the connection.
+#[test]
+fn the_owner_tells_a_client_of_another_version_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let _owner = shared(&inner, &dir).build().unwrap();
+    let cache_file = File::options()
+        .read(true)
+        .write(true)
+        .open(dir.path().join("cache"))
+        .unwrap();
+    let address = OwnerAddress::of(FileIdentity::of(&cache_file).unwrap());
+    let socket = FrameSocket::new(address.connect().unwrap()).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+
+    Hello::new(PROTOCOL_VERSION + 1, cache_file)
+        .send(&socket)
+        .unwrap();
+    let welcome = OwnerFrame::decode(socket.receive(64).unwrap().expect("an answer")).unwrap();
+    let (version, region) = (PROTOCOL_VERSION, false);
+    assert_eq!(welcome, OwnerFrame::Welcome { version, region });
+    assert!(
+        matches!(socket.receive(64), Ok(None)),
+        "the owner closes the connection"
+    );
+}
+
+/// A cache built for sharing whose files' owner speaks another protocol
+/// version is `Busy` at once: told the owner's version, it doesn't try
+/// that owner till `OWNER_WAIT` runs out.
+#[test]
+fn a_cache_whose_owner_speaks_another_version_is_busy_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let cache_file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.path().join("cache"))
+        .unwrap();
+    cache_file.try_lock().unwrap();
+    let address = OwnerAddress::of(FileIdentity::of(&cache_file).unwrap());
+    let listener = address.listen().unwrap();
+    let other_owner = std::thread::spawn(move || {
+        let (connection, _) = listener.accept().unwrap();
+        let socket = FrameSocket::new(connection).unwrap();
+        Hello::receive(&socket).unwrap();
+        let (version, region) = (PROTOCOL_VERSION + 1, false);
+        socket
+            .send(&OwnerFrame::Welcome { version, region }.encode())
+            .unwrap();
+    });
+
+    let started = Instant::now();
+    let refused = shared(&inner, &dir).build().unwrap_err();
+    assert!(matches!(refused, crate::Error::Busy), "{refused}");
+    assert!(
+        started.elapsed() < T4CachingBuilder::OWNER_WAIT / 2,
+        "at once"
+    );
+    other_owner.join().unwrap();
+    address.remove();
 }
 
 /// The owner maps a client's region that can't shrink, and welcomes the

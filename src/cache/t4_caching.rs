@@ -148,7 +148,8 @@ impl T4CachingBuilder {
     pub const DEFAULT_MERGED_UP_TO: u64 = FetchRuns::NORMAL_GET_MOST;
     /// How long a cache built for sharing tries to reach the owner of its
     /// files (`Self::with_sharing`) before it fails with `Error::Busy`: an
-    /// owner starting or leaving refuses connections a while.
+    /// owner starting or leaving refuses connections a while. An owner of
+    /// another protocol version says so, and the cache fails at once.
     pub const OWNER_WAIT: Duration = Duration::from_secs(10);
 
     /// Memory for cached bytes, in whole 1 MiB blocks, one at least.
@@ -269,7 +270,8 @@ impl T4CachingBuilder {
     /// made, sized and opened, or the memory mapped. `Error::Busy` if
     /// another cache owns a cache file, and either this one isn't built for
     /// sharing or that one's owner didn't admit it within
-    /// [`Self::OWNER_WAIT`].
+    /// [`Self::OWNER_WAIT`], or speaks another version of the protocol
+    /// between them.
     pub fn build(mut self) -> crate::Result<T4Caching> {
         let memory_chunks =
             Self::chunks(self.memory_capacity, "T4Caching needs a memory capacity")?;

@@ -21,7 +21,10 @@ use crate::cache::policy::{BlockSource, IoPhase, PlannedGet, ReadIntent, ReadPla
 use crate::io::error::{Error, Result};
 
 /// The protocol's version: a client and an owner of different versions
-/// don't talk.
+/// don't talk. They learn each other's from [`ClientFrame::Hello`] and
+/// [`OwnerFrame::Welcome`], which are the same in every version, their
+/// tags and descriptors with them: a version that needs more of a
+/// handshake says it in frames after the welcome.
 pub(super) const PROTOCOL_VERSION: u32 = 3;
 
 /// A frame a client sends its owner. A call, which the owner answers,
@@ -82,7 +85,8 @@ pub(super) enum ClientFrame {
 pub(super) enum OwnerFrame {
     /// The answer to [`ClientFrame::Hello`]: the owner's protocol version,
     /// and whether it mapped the client's region; if not, the client's
-    /// reads' bytes go in the frames.
+    /// reads' bytes go in the frames. A client of another version is told
+    /// it too, then refused.
     Welcome {
         version: u32,
         region: bool,

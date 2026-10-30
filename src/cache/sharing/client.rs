@@ -77,7 +77,8 @@ impl OwnerConnection {
     /// # Errors
     ///
     /// If the cache file can't be opened for writing, or the socket fails
-    /// otherwise.
+    /// otherwise; [`Error::Busy`] if the owner speaks another version of
+    /// the protocol, so that the client gives up at once.
     pub(in crate::cache) fn connect(
         first_file: &Path,
         reads: Arc<dyn ReadPolicy>,
@@ -109,12 +110,16 @@ impl OwnerConnection {
             .receive(Self::WELCOME_BYTES)?
             .ok_or(io::Error::from(io::ErrorKind::UnexpectedEof))?;
         let OwnerFrame::Welcome {
-            version: PROTOCOL_VERSION,
+            version,
             region: mapped,
         } = OwnerFrame::decode(welcome)?
         else {
             return Err(FrameReader::malformed("welcome"));
         };
+        if version != PROTOCOL_VERSION {
+            // An owner of another version admits no try of this client's.
+            return Err(Error::Busy);
+        }
         socket.set_read_timeout(None)?;
         Ok((socket, region.filter(|_| mapped)))
     }

@@ -69,6 +69,11 @@ impl Hello {
         }
     }
 
+    /// The client's protocol version.
+    pub(super) fn version(&self) -> u32 {
+        self.version
+    }
+
     /// The client's region's memory, if it sent one: the owner's to check.
     pub(super) fn into_region(self) -> Option<OwnedFd> {
         self.region

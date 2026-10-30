@@ -198,6 +198,22 @@ fn every_frame_decodes_as_it_was_encoded() {
     }
 }
 
+/// The hello's bytes and the welcome's, which no version may change: from
+/// them a client and an owner of different versions learn each other's
+/// (`PROTOCOL_VERSION`).
+#[test]
+fn the_hello_and_the_welcome_are_every_versions() {
+    let (version, region) = (0x0102_0304, true);
+    let hello = ClientFrame::Hello { version, region }.encode();
+    let mut expected = 10u64.to_le_bytes().to_vec();
+    expected.extend([1, b't', b'4', b's', b'h', 4, 3, 2, 1, 1]);
+    assert_eq!(hello, expected);
+    let welcome = OwnerFrame::Welcome { version, region }.encode();
+    let mut expected = 6u64.to_le_bytes().to_vec();
+    expected.extend([1, 4, 3, 2, 1, 1]);
+    assert_eq!(welcome, expected);
+}
+
 /// A frame cut anywhere short, or with a byte past its end, is malformed:
 /// a field that ends early, or a byte no field takes.
 #[test]

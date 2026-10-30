@@ -288,8 +288,16 @@ decision 9).
      the cache; and the client's region's descriptor in the same message,
      if it made one, which the hello says. The owner's welcome says
      whether it mapped the region: one refused, the client is admitted
-     without it, its reads' bytes in the frames. Protocol version 2. The
-     owner's settings rule: its tiers,
+     without it, its reads' bytes in the frames. The hello and the
+     welcome are the same in every version, so that a client and an
+     owner of different versions, as Studio and `spiral connect` updated
+     apart are, learn each other's: the owner answers a hello of another
+     version with its own welcome, then closes the connection, and the
+     client is `Busy` at once rather than try for 10 s
+     (`a_cache_whose_owner_speaks_another_version_is_busy_at_once`;
+     `the_hello_and_the_welcome_are_every_versions` pins their bytes). A
+     version that needs more of a handshake says it after the welcome.
+     Protocol version 3. The owner's settings rule: its tiers,
      its placement policy, its direct I/O. A client's own tier settings
      matter only if it comes to own the cache.
 
@@ -310,7 +318,9 @@ decision 9).
      no more than every 10 ms: the lock, then the owner, never the 10 s
      a build waits for one. The others read from the remote meanwhile,
      their calls on the dead connection failing at once
-     (`CurrentLink`, `LinkMaker`). A client builds the cache from its own
+     (`CurrentLink`, `LinkMaker`). A client whose next owner speaks
+     another version is refused at each try, and reads from the remote
+     till that owner goes. A client builds the cache from its own
      builder's settings, its placement policy made then: a cache owns at
      most once, as an owner never goes back to being a client, so the
      policy's maker is called once (it is `Send` now, for a read on
