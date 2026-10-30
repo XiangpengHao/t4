@@ -347,7 +347,18 @@ fn a_client_that_finds_no_owner_reads_from_its_store_without_waiting() {
     let (owner, _, _) = process(&path, &data, shared);
     let (client, clients, clients_meta) = process(&path, &data, shared);
     drop(owner);
-    let (_unshared, _, _) = process(&path, &data, |inner| builder(inner, &dir));
+    // A child process another test starts meanwhile holds the dropped
+    // owner's descriptors, and so its lock, until its own program starts:
+    // the files come free within moments.
+    let others = Arc::new(CountingStore::default());
+    let mut _unshared = None;
+    wait_until(
+        || {
+            _unshared = builder(&others, &dir).build().ok();
+            _unshared.is_some()
+        },
+        "the dropped owner's files come free",
+    );
 
     let started = Instant::now();
     for _ in 0..3 {
