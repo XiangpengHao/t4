@@ -44,7 +44,7 @@ impl OwnerListener {
         cache: Arc<ObjectCache>,
         first_file: FileIdentity,
     ) -> Result<Self> {
-        let address = OwnerAddress::of(first_file);
+        let address = OwnerAddress::of(first_file)?;
         let acceptor = Acceptor {
             listener: address.listen()?,
             stopping: std::sync::Arc::default(),

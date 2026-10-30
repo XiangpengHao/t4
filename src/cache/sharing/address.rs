@@ -30,7 +30,7 @@ impl FileIdentity {
 /// The address of the owner of the cache whose first cache file is one
 /// file: on Linux an abstract socket's name, which no file holds and which
 /// is gone with the owner's socket, however the owner exits; elsewhere a
-/// socket file's path, in the temporary directory.
+/// socket file's path, in the user's temporary directory.
 pub(super) struct OwnerAddress {
     #[cfg(target_os = "linux")]
     name: String,
@@ -41,14 +41,54 @@ pub(super) struct OwnerAddress {
 impl OwnerAddress {
     /// The address of the owner of the cache whose first cache file is
     /// `file`.
-    pub(super) fn of(file: FileIdentity) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// If the system doesn't name the user's temporary directory.
+    pub(super) fn of(file: FileIdentity) -> io::Result<Self> {
         let FileIdentity { device, inode } = file;
-        Self {
+        Ok(Self {
             #[cfg(target_os = "linux")]
             name: format!("t4/{device:x}/{inode:x}"),
             #[cfg(not(target_os = "linux"))]
-            path: std::env::temp_dir().join(format!("t4-{device:x}-{inode:x}.sock")),
+            path: Self::user_temp_dir()?.join(format!("t4-{device:x}-{inode:x}.sock")),
+        })
+    }
+
+    /// The user's temporary directory, as the system names it, whatever
+    /// the process's environment says: shells set `TMPDIR` apart (a nix
+    /// shell, `sudo`), and an owner and its client that read it would look
+    /// in different places. Only the user may write in it, so no other
+    /// user can listen at the user's owners' addresses.
+    #[cfg(target_os = "macos")]
+    fn user_temp_dir() -> io::Result<PathBuf> {
+        use std::os::unix::ffi::OsStringExt;
+        let mut path = vec![0_u8; libc::PATH_MAX as usize];
+        // SAFETY: `path` has room for the `path.len()` bytes `confstr`
+        // writes at most.
+        let len = unsafe {
+            libc::confstr(
+                libc::_CS_DARWIN_USER_TEMP_DIR,
+                path.as_mut_ptr().cast(),
+                path.len(),
+            )
+        };
+        // `len` counts the closing NUL; 0 if the system names none.
+        if len == 0 {
+            return Err(io::Error::last_os_error());
         }
+        if len > path.len() {
+            return Err(io::Error::other(
+                "the user's temporary directory's path is too long",
+            ));
+        }
+        path.truncate(len - 1);
+        Ok(PathBuf::from(std::ffi::OsString::from_vec(path)))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn user_temp_dir() -> io::Result<PathBuf> {
+        Ok(std::env::temp_dir())
     }
 
     /// Listens at the address, for the owner. It holds the cache files'

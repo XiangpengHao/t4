@@ -274,7 +274,14 @@ decision 9).
      file to clean up; gone when the owner's socket closes, however it
      exits. Per network namespace: a client in another container doesn't
      see the owner, and runs as without sharing (`Busy`).
-   - **macOS:** a socket file, `$TMPDIR/t4-<dev>-<ino>.sock`. The owner
+   - **macOS:** a socket file, `t4-<dev>-<ino>.sock` in the user's
+     temporary directory as the system names it
+     (`confstr(_CS_DARWIN_USER_TEMP_DIR)`), not as `$TMPDIR` does: shells
+     set `TMPDIR` apart (a nix shell, `sudo`), and a desktop app and a
+     terminal's process that read it would miss each other
+     (`a_client_finds_an_owner_of_another_tmpdir`). Only the user writes
+     in that directory, so no other user listens at the address; the
+     path is 90 bytes at most, under the socket's 104. The owner
      unlinks a stale one before it binds, which is safe since it holds
      the lock: no other process can be binding.
    - **Connecting:** a client opens the file, fails the lock, connects.

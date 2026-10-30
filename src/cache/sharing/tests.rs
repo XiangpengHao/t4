@@ -218,7 +218,7 @@ fn the_owner_admits_only_a_writer_of_its_first_cache_file() {
             .open(&cache_path)
             .unwrap()
     };
-    let address = OwnerAddress::of(FileIdentity::of(&writable()).unwrap());
+    let address = OwnerAddress::of(FileIdentity::of(&writable()).unwrap()).unwrap();
     let other = File::options()
         .read(true)
         .write(true)
@@ -267,7 +267,7 @@ fn the_owner_tells_a_client_of_another_version_its_own() {
         .write(true)
         .open(dir.path().join("cache"))
         .unwrap();
-    let address = OwnerAddress::of(FileIdentity::of(&cache_file).unwrap());
+    let address = OwnerAddress::of(FileIdentity::of(&cache_file).unwrap()).unwrap();
     let socket = FrameSocket::new(address.connect().unwrap()).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -300,7 +300,7 @@ fn a_cache_whose_owner_speaks_another_version_is_busy_at_once() {
         .open(dir.path().join("cache"))
         .unwrap();
     cache_file.try_lock().unwrap();
-    let address = OwnerAddress::of(FileIdentity::of(&cache_file).unwrap());
+    let address = OwnerAddress::of(FileIdentity::of(&cache_file).unwrap()).unwrap();
     let listener = address.listen().unwrap();
     let other_owner = std::thread::spawn(move || {
         let (connection, _) = listener.accept().unwrap();
@@ -340,7 +340,7 @@ fn the_owner_maps_a_clients_region_that_cannot_shrink() {
             .open(&cache_path)
             .unwrap()
     };
-    let address = OwnerAddress::of(FileIdentity::of(&writable()).unwrap());
+    let address = OwnerAddress::of(FileIdentity::of(&writable()).unwrap()).unwrap();
     let version = PROTOCOL_VERSION;
 
     let region = ClientRegion::make().unwrap();
@@ -400,7 +400,7 @@ impl RawClient {
             .write(true)
             .open(dir.path().join("cache"))
             .unwrap();
-        let address = OwnerAddress::of(FileIdentity::of(&cache_file).unwrap());
+        let address = OwnerAddress::of(FileIdentity::of(&cache_file).unwrap()).unwrap();
         let socket = FrameSocket::new(address.connect().unwrap()).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -936,7 +936,7 @@ fn a_clients_read_sends_its_finish_with_its_start() {
         .build()
         .unwrap();
     let first_file = FileIdentity::of(&File::open(dir.path().join("cache")).unwrap()).unwrap();
-    let address = OwnerAddress::of(first_file);
+    let address = OwnerAddress::of(first_file).unwrap();
     let listener = address.listen().unwrap();
     let served = data.clone();
     let stand_in = std::thread::spawn(move || {

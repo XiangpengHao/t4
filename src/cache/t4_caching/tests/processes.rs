@@ -33,16 +33,26 @@ impl ChildProcess {
     /// The test binary run as a child that plays `role` over `dir`: only
     /// [`a_child_process_plays_its_role`] runs in it.
     fn spawn(role: &str, dir: &std::path::Path) -> Self {
+        Self(Self::command(role, dir).spawn().unwrap())
+    }
+
+    /// As [`Self::spawn`], with `temp_dir` the child's `TMPDIR`, as a shell
+    /// that sets its own gives it.
+    fn spawn_with_temp_dir(role: &str, dir: &std::path::Path, temp_dir: &std::path::Path) -> Self {
+        let mut command = Self::command(role, dir);
+        Self(command.env("TMPDIR", temp_dir).spawn().unwrap())
+    }
+
+    fn command(role: &str, dir: &std::path::Path) -> Command {
         let (_crate, module) = module_path!().split_once("::").unwrap();
         let test = format!("{module}::a_child_process_plays_its_role");
-        let child = Command::new(std::env::current_exe().unwrap())
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
             .args([test.as_str(), "--exact", "--nocapture", "--test-threads=1"])
             .env(Self::ROLE, role)
             .env(Self::DIR, dir)
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap();
-        Self(child)
+            .stdout(Stdio::null());
+        command
     }
 
     /// Kills the child, as `SIGKILL` does, and waits for it to end.
@@ -251,6 +261,22 @@ fn an_owner_killed_mid_read_leaves_its_client_the_cache() {
     client.store.take_asked();
     assert_eq!(client.read(0..SharedProcess::SIZE), SharedProcess::data());
     assert_eq!(client.fetched_bytes(), 0, "the read that took over cached");
+}
+
+/// An owner whose `TMPDIR` isn't its client's, as a terminal's in a shell
+/// that sets its own isn't a desktop app's: the client still finds it, and
+/// reads through it (decision 6).
+#[test]
+fn a_client_finds_an_owner_of_another_tmpdir() {
+    let dir = tempfile::tempdir().unwrap();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let markers = Markers::new(dir.path());
+    let _owner = ChildProcess::spawn_with_temp_dir("owner", dir.path(), temp_dir.path());
+    markers.said("owning");
+
+    let client = SharedProcess::start(dir.path());
+    assert!(!client.owns());
+    assert_eq!(client.read(0..SharedProcess::SIZE), SharedProcess::data());
 }
 
 /// A client killed while it holds a claim, its GET out: its connection

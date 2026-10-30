@@ -97,7 +97,7 @@ impl OwnerConnection {
     /// can't make a region goes without: its reads' bytes go in the frames.
     fn admitted(first_file: &Path) -> Result<(FrameSocket, Option<std::sync::Arc<ClientRegion>>)> {
         let cache_file = File::options().read(true).write(true).open(first_file)?;
-        let address = OwnerAddress::of(FileIdentity::of(&cache_file)?);
+        let address = OwnerAddress::of(FileIdentity::of(&cache_file)?)?;
         let socket = FrameSocket::new(address.connect()?)?;
         socket.set_read_timeout(Some(Hello::WAIT))?;
         let region = ClientRegion::make().ok();
