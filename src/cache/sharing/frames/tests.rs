@@ -71,6 +71,11 @@ fn client_frames() -> Vec<ClientFrame> {
             fetch: 1,
             bytes: Bytes::from_static(b"the next bytes"),
         },
+        ClientFrame::LandStaged {
+            read: 2,
+            fetch: 1,
+            staged: SpanName::new(8192, 100),
+        },
         ClientFrame::Commit {
             call: 7,
             read: 2,

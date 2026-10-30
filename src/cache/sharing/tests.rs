@@ -575,6 +575,116 @@ fn the_owner_serves_and_caches_a_clients_cold_read() {
     assert_eq!(read_listed(&owner, &meta, 0..2 * MIB).unwrap(), data);
 }
 
+/// A client's fetch staged in its region: each `LandStaged` names the next
+/// bytes in the span, which the owner lands from its mapping as its own
+/// fetches' bytes, and caches. A span past the region breaks the protocol.
+#[test]
+fn the_owner_lands_a_fetch_staged_in_its_clients_region() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let path = Path::from("a");
+    let (data, meta) = put_file(&inner, &path, 2 * MIB);
+    let (_, other) = put_file(&inner, &Path::from("b"), MIB);
+    let owner = shared(&inner, &dir).build().unwrap();
+    let (mut client, region) = RawClient::admitted_with_region(&dir);
+
+    client.send(&start_read(1, &meta, 10..2 * MIB));
+    assert!(matches!(client.answer(), OwnerFrame::Started { .. }));
+    let plan = ReadPlan::new(vec![PlannedGet::once(0..2)]);
+    client.send(&ClientFrame::TakeGets {
+        call: 2,
+        read: 1,
+        plan,
+    });
+    assert!(matches!(client.answer(), OwnerFrame::Next { .. }));
+    client.send(&ClientFrame::Finish { call: 4, read: 1 });
+    let mut span = region.span(2 * MIB).unwrap();
+    span.copy_in(0, &data);
+    let at = span.name().offset();
+    for piece in [0..MIB / 3, MIB / 3..2 * MIB] {
+        client.send(&ClientFrame::LandStaged {
+            read: 1,
+            fetch: 0,
+            staged: SpanName::new(at + piece.start, piece.end - piece.start),
+        });
+    }
+    client.send(&ClientFrame::Commit {
+        call: 3,
+        read: 1,
+        fetch: 0,
+    });
+    assert_eq!(client.answer(), OwnerFrame::Committed { call: 3 });
+    let bytes = Some(data.slice(10..2 * MIB as usize));
+    assert_eq!(client.answer(), OwnerFrame::Served { call: 4, bytes });
+    client.send(&ClientFrame::EndRead { read: 1 });
+    assert_eq!(client.answer(), OwnerFrame::Ended { read: 1 });
+    drop(span);
+    block_on(inner.delete(&path)).unwrap();
+    assert_eq!(read_listed(&owner, &meta, 0..2 * MIB).unwrap(), data);
+
+    client.send(&start_read(2, &other, 0..MIB));
+    assert!(matches!(client.answer(), OwnerFrame::Started { .. }));
+    let plan = ReadPlan::new(vec![PlannedGet::once(0..1)]);
+    client.send(&ClientFrame::TakeGets {
+        call: 5,
+        read: 2,
+        plan,
+    });
+    assert!(matches!(client.answer(), OwnerFrame::Next { .. }));
+    client.send(&ClientFrame::LandStaged {
+        read: 2,
+        fetch: 0,
+        staged: SpanName::new(ClientRegion::BYTES - 10, 20),
+    });
+    assert!(client.closed());
+}
+
+/// The bytes `cache`'s connection to its owner has sent and taken so far,
+/// `cache` a client.
+fn socket_bytes(cache: &T4Caching) -> (u64, u64) {
+    match &*cache.link() {
+        StorageLink::Client(connection) => connection.socket_bytes(),
+        StorageLink::Owner { .. } => panic!("a client"),
+    }
+}
+
+/// A client's cold read moves only control over its socket: its GET's
+/// bytes are staged in its region, and the read's bytes served in it; the
+/// owner caches the blocks. With no span free, a read's bytes, fetched
+/// and served, go in the frames.
+#[test]
+fn a_clients_cold_read_moves_only_control_over_its_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let (data, meta) = put_file(&inner, &Path::from("a"), 2 * MIB);
+    let owner = shared(&inner, &dir).build().unwrap();
+    let client = shared(&inner, &dir).build().unwrap();
+
+    let (sent, taken) = socket_bytes(&client);
+    assert_eq!(read_listed(&client, &meta, 0..2 * MIB).unwrap(), data);
+    let (sent, taken) = {
+        let (now_sent, now_taken) = socket_bytes(&client);
+        (now_sent - sent, now_taken - taken)
+    };
+    assert!(sent + taken < 64 << 10, "{sent} bytes sent, {taken} taken");
+    block_on(inner.delete(&meta.location)).unwrap();
+    assert_eq!(read_listed(&owner, &meta, 0..2 * MIB).unwrap(), data);
+
+    let (data, meta) = put_file(&inner, &Path::from("b"), 2 * MIB);
+    let link = client.link();
+    let StorageLink::Client(connection) = &*link else {
+        panic!("a client");
+    };
+    let region = connection.region().unwrap();
+    let held: Vec<_> = std::iter::from_fn(|| region.span(1)).collect();
+    let (sent, taken) = socket_bytes(&client);
+    assert_eq!(read_listed(&client, &meta, 0..2 * MIB).unwrap(), data);
+    let (now_sent, now_taken) = socket_bytes(&client);
+    assert!(now_sent - sent > 2 * MIB, "the GET's bytes in frames");
+    assert!(now_taken - taken > 2 * MIB, "the read's bytes in a frame");
+    drop(held);
+}
+
 /// A client's read of blocks the owner holds is served with nothing to
 /// fetch; and a read of blocks on disk tells the client of each read from
 /// disk made for it, for its read policy.

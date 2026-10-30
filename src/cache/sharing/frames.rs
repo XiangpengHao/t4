@@ -55,6 +55,13 @@ pub(super) enum ClientFrame {
     },
     /// The next bytes of the read's fetch `fetch`.
     Land { read: u64, fetch: u32, bytes: Bytes },
+    /// The next bytes of the read's fetch `fetch`, staged in the span
+    /// `staged` of the client's region.
+    LandStaged {
+        read: u64,
+        fetch: u32,
+        staged: SpanName,
+    },
     /// The read's fetch `fetch` is all in: its blocks are cached.
     Commit { call: u64, read: u64, fetch: u32 },
     /// The read's fetch `fetch` failed: its blocks go uncached.
@@ -176,6 +183,7 @@ impl ClientFrame {
     const ABANDON: u8 = 6;
     const FINISH: u8 = 7;
     const END_READ: u8 = 8;
+    const LAND_STAGED: u8 = 9;
 
     /// What a client's first frame starts with.
     const MAGIC: [u8; 4] = *b"t4sh";
@@ -223,6 +231,17 @@ impl ClientFrame {
                 frame.u64(*read);
                 frame.u32(*fetch);
                 frame.bytes(bytes);
+                frame.finish()
+            }
+            Self::LandStaged {
+                read,
+                fetch,
+                staged,
+            } => {
+                let mut frame = FrameWriter::new(Self::LAND_STAGED);
+                frame.u64(*read);
+                frame.u32(*fetch);
+                frame.span(Some(*staged));
                 frame.finish()
             }
             Self::Commit { call, read, fetch } => {
@@ -289,6 +308,13 @@ impl ClientFrame {
                 read: frame.u64()?,
                 fetch: frame.u32()?,
                 bytes: frame.bytes()?,
+            },
+            Self::LAND_STAGED => Self::LandStaged {
+                read: frame.u64()?,
+                fetch: frame.u32()?,
+                staged: frame
+                    .span()?
+                    .ok_or_else(|| FrameReader::malformed("staged bytes: no span"))?,
             },
             Self::COMMIT => Self::Commit {
                 call: frame.u64()?,

@@ -42,10 +42,8 @@ fn a_span_its_client_writes_is_read_by_its_owner() {
     );
     assert_eq!(span.name().len(), 3 * PAGE);
     span.copy_in(PAGE as usize - 2, b"shared");
-    let read = owner.with_bytes(span.name(), |bytes| {
-        bytes[PAGE as usize - 2..][..6].to_vec()
-    });
-    assert_eq!(read.unwrap(), b"shared");
+    let read = owner.staged(span.name()).unwrap();
+    assert_eq!(&read[PAGE as usize - 2..][..6], b"shared");
     assert_eq!(region.free_pages(), pages - 4);
     drop(span);
     assert_eq!(region.free_pages(), pages - 1);
@@ -59,10 +57,10 @@ fn the_owner_takes_no_span_past_the_region() {
     let bytes = ClientRegion::BYTES;
     for (offset, len) in [(bytes, 1), (bytes - PAGE, 2 * PAGE), (u64::MAX - 1, 4)] {
         let span = SpanName::new(offset, len);
-        assert!(owner.with_bytes(span, |_| ()).is_err(), "{span:?}");
+        assert!(owner.staged(span).is_err(), "{span:?}");
     }
     let last = SpanName::new(bytes - PAGE, PAGE);
-    assert!(owner.with_bytes(last, |_| ()).is_ok());
+    assert!(owner.staged(last).is_ok());
 }
 
 /// The owner maps only shared memory that can't shrink under it: not a

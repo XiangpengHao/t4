@@ -26,7 +26,7 @@ use super::address::{FileIdentity, OwnerAddress};
 use super::frame_socket::FrameSocket;
 use super::frames::{ClientFrame, FetchSpec, FrameReader, NextStep, OwnerFrame, PROTOCOL_VERSION};
 use super::handshake::Hello;
-use super::region::{ClientRegion, RegionSpan};
+use super::region::{ClientRegion, RegionSpan, SpanName};
 use crate::PAGE_SIZE_U64;
 use crate::cache::FileVersionId;
 use crate::cache::block_index::FileVersion;
@@ -47,6 +47,9 @@ pub(in crate::cache) struct OwnerConnection {
     region: Option<std::sync::Arc<ClientRegion>>,
     /// The spans of the reads the client ended, until the owner has too.
     lent: std::sync::Arc<LentSpans>,
+    /// The bytes sent and taken on the socket so far: for tests.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    traffic: std::sync::Arc<Traffic>,
     /// The calls waiting for their answers, shared with the reader.
     calls: std::sync::Arc<CallTable>,
     /// The number the next read takes.
@@ -159,11 +162,15 @@ impl OwnerConnection {
             })?;
         let calls = std::sync::Arc::new(CallTable::default());
         let lent = std::sync::Arc::new(LentSpans::default());
+        #[cfg(all(test, not(feature = "shuttle")))]
+        let traffic = std::sync::Arc::new(Traffic::default());
         let reader = OwnerFrames {
             socket: socket.try_clone()?,
             calls: std::sync::Arc::clone(&calls),
             lent: std::sync::Arc::clone(&lent),
             reads,
+            #[cfg(all(test, not(feature = "shuttle")))]
+            traffic: std::sync::Arc::clone(&traffic),
         };
         let reader = thread::Builder::new()
             .name("t4-client-reader".into())
@@ -172,6 +179,8 @@ impl OwnerConnection {
             socket,
             region,
             lent,
+            #[cfg(all(test, not(feature = "shuttle")))]
+            traffic,
             calls,
             next_read: AtomicU64::new(0),
             outgoing: Some(outgoing),
@@ -195,8 +204,11 @@ impl OwnerConnection {
     /// Sends `frame`, which takes no answer; dropped if the owner is gone.
     fn tell(&self, frame: &ClientFrame) {
         if let Some(outgoing) = &self.outgoing {
+            let frame = frame.encode();
+            #[cfg(all(test, not(feature = "shuttle")))]
+            (self.traffic.sent).fetch_add(frame.len() as u64, Ordering::Relaxed);
             // Fails only once the writer has gone with the owner.
-            let _ = outgoing.send(frame.encode());
+            let _ = outgoing.send(frame);
         }
     }
 
@@ -217,6 +229,23 @@ impl OwnerConnection {
     #[cfg(all(test, not(feature = "shuttle")))]
     pub(in crate::cache) fn region_free_pages(&self) -> Option<u64> {
         self.region.as_ref().map(|region| region.free_pages())
+    }
+
+    /// The client's region, if its owner mapped it: for tests.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(super) fn region(&self) -> Option<&std::sync::Arc<ClientRegion>> {
+        self.region.as_ref()
+    }
+
+    /// The bytes the connection has sent and taken so far, its frames whole:
+    /// for tests.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(super) fn socket_bytes(&self) -> (u64, u64) {
+        let traffic = &self.traffic;
+        (
+            traffic.sent.load(Ordering::Relaxed),
+            traffic.taken.load(Ordering::Relaxed),
+        )
     }
 
     /// Whether `bytes` lie in the client's region: for tests.
@@ -397,14 +426,16 @@ impl Default for LentSpans {
 }
 
 impl LentSpans {
-    /// Keeps `spans`, the read `read`'s, until the owner ends the read.
+    /// Keeps `spans`, the read `read`'s, with any kept of it already, until
+    /// the owner ends the read. A read's fetches hand theirs over as they
+    /// drop, before the read ends.
     fn keep_until_ended(&self, read: u64, spans: Vec<RegionSpan>) {
         if spans.is_empty() {
             return;
         }
         let mut reads = self.reads();
         if let Some(reads) = reads.as_mut() {
-            reads.insert(read, spans);
+            reads.entry(read).or_default().extend(spans);
         }
         // The owner gone, the spans drop here, free.
     }
@@ -436,6 +467,16 @@ struct OwnerFrames {
     calls: std::sync::Arc<CallTable>,
     lent: std::sync::Arc<LentSpans>,
     reads: Arc<dyn ReadPolicy>,
+    #[cfg(all(test, not(feature = "shuttle")))]
+    traffic: std::sync::Arc<Traffic>,
+}
+
+/// The bytes a connection has sent and taken, its frames whole: for tests.
+#[cfg(all(test, not(feature = "shuttle")))]
+#[derive(Default)]
+struct Traffic {
+    sent: AtomicU64,
+    taken: AtomicU64,
 }
 
 impl OwnerFrames {
@@ -454,6 +495,8 @@ impl OwnerFrames {
     /// allow.
     fn take_frames(&self) -> Result<()> {
         while let Some(body) = self.socket.receive(FrameSocket::MOST_BYTES)? {
+            #[cfg(all(test, not(feature = "shuttle")))]
+            (self.traffic.taken).fetch_add(8 + body.len() as u64, Ordering::Relaxed);
             match OwnerFrame::decode(body)? {
                 OwnerFrame::DiskRead {
                     drive,
@@ -600,15 +643,24 @@ impl<'c> ClientRead<'c> {
         let Some(NextStep::Fetch(specs)) = self.next.take() else {
             return Vec::new();
         };
+        let owner = self.number.owner;
         (0..)
             .zip(specs)
-            .map(|(fetch, spec)| ClientFetch {
-                owner: self.number.owner,
-                read: self.number.number,
-                fetch,
-                spec,
-                file: self.version.id(),
-                settled: false,
+            .map(|(fetch, spec)| {
+                // No span free, the fetch's bytes go in the frames.
+                let bytes = spec.bytes();
+                let staged =
+                    (owner.region.as_ref()).and_then(|region| region.span(bytes.end - bytes.start));
+                ClientFetch {
+                    owner,
+                    read: self.number.number,
+                    fetch,
+                    spec,
+                    file: self.version.id(),
+                    staged,
+                    landed: 0,
+                    settled: false,
+                }
             })
             .collect()
     }
@@ -714,10 +766,12 @@ impl Drop for ReadNumber<'_> {
 }
 
 /// One of a client's read's fetches (`ClientRead::fetches`): the bytes of
-/// its GET, sent to the owner as they come in, which lands them; then
-/// committed, the blocks cached as the owner said. Dropped before, as when
-/// the GET fails, it is abandoned: the owner caches none of it, and the
-/// reads waiting on its blocks fetch for themselves.
+/// its GET, staged in a span of the client's region as they come in, or
+/// sent in frames, which the owner lands; then committed, the blocks cached
+/// as the owner said. Dropped before, as when the GET fails, it is
+/// abandoned: the owner caches none of it, and the reads waiting on its
+/// blocks fetch for themselves. Dropped either way, its span is kept until
+/// the owner ends the read.
 pub(in crate::cache) struct ClientFetch<'c> {
     owner: &'c OwnerConnection,
     read: u64,
@@ -725,6 +779,10 @@ pub(in crate::cache) struct ClientFetch<'c> {
     fetch: u32,
     spec: FetchSpec,
     file: FileVersionId,
+    /// Where its bytes are staged, if a span was free.
+    staged: Option<RegionSpan>,
+    /// How many of its bytes have landed.
+    landed: u64,
     /// Committed or abandoned.
     settled: bool,
 }
@@ -750,13 +808,32 @@ impl ClientFetch<'_> {
         self.spec.late_race()
     }
 
-    /// Sends `piece`, the fetch's next bytes, to the owner.
+    /// Hands the owner `piece`, the fetch's next bytes: staged in the
+    /// fetch's span, named in the frame; or in the frame, with no span, or
+    /// past the span, as a GET that brings more bytes than it holds, which
+    /// the owner refuses at the commit.
     pub(in crate::cache) fn land(&mut self, piece: &[u8]) {
-        self.owner.tell(&ClientFrame::Land {
-            read: self.read,
-            fetch: self.fetch,
-            bytes: Bytes::copy_from_slice(piece),
-        });
+        let (read, fetch, at) = (self.read, self.fetch, self.landed);
+        let len = piece.len() as u64;
+        let staged = (self.staged.as_mut()).filter(|span| at + len <= span.name().len());
+        let frame = match staged {
+            Some(span) => {
+                span.copy_in(at as usize, piece);
+                let staged = SpanName::new(span.name().offset() + at, len);
+                ClientFrame::LandStaged {
+                    read,
+                    fetch,
+                    staged,
+                }
+            }
+            None => ClientFrame::Land {
+                read,
+                fetch,
+                bytes: Bytes::copy_from_slice(piece),
+            },
+        };
+        self.landed += len;
+        self.owner.tell(&frame);
     }
 
     /// Commits the fetch, every byte in: the owner caches its blocks where
@@ -796,6 +873,10 @@ impl Drop for ClientFetch<'_> {
                 fetch: self.fetch,
             });
         }
+        // The owner may read the span until it ends the read, which comes
+        // after: a read's fetches drop before its number, which ends it.
+        let staged = self.staged.take().into_iter().collect();
+        self.owner.lent.keep_until_ended(self.read, staged);
     }
 }
 

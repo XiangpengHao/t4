@@ -250,7 +250,6 @@ impl RegionSpan {
     /// # Panics
     ///
     /// If they run past the span.
-    #[allow(dead_code)] // A fetch's bytes are staged in a span: the next commit.
     pub(super) fn copy_in(&mut self, at: usize, bytes: &[u8]) {
         let name = self.name();
         assert!(
@@ -371,25 +370,24 @@ impl OwnerRegion {
         }
     }
 
-    /// What `read` makes of the bytes of `span`, read where the region
-    /// holds them, if the region holds the whole span. The slice lives for
-    /// the call alone.
+    /// The bytes of `span`, where the region holds them, if it holds the
+    /// whole span: a fetch's, staged, for the owner to copy where they go
+    /// (decision 5), and to let go of once copied.
     ///
     /// # Errors
     ///
     /// If the span runs past the region.
-    #[allow(dead_code)] // A fetch's bytes are staged in a span: the next commit.
-    pub(super) fn with_bytes<R>(&self, span: SpanName, read: impl FnOnce(&[u8]) -> R) -> Result<R> {
+    pub(super) fn staged(&self, span: SpanName) -> Result<&[u8]> {
         let start = self
             .mapping
             .at(span)
             .ok_or_else(|| Self::refused("span: past its end"))?;
-        // SAFETY: the span lies within the mapping, which outlives the call.
-        // The client may write the bytes meanwhile, breaking its own
-        // protocol: they are bytes either way, and what `read` makes of them
-        // is the client's own read's or block's (decision 8).
-        let bytes = unsafe { std::slice::from_raw_parts(start.as_ptr(), span.len as usize) };
-        Ok(read(bytes))
+        // SAFETY: the span lies within the mapping, which the borrow of the
+        // region keeps. The client wrote the bytes before it named them, and
+        // writes them no more until the owner has ended the read; a client
+        // that does breaks its own protocol: the owner only copies them, so
+        // they garble that client's read and block alone (decision 8).
+        Ok(unsafe { std::slice::from_raw_parts(start.as_ptr(), span.len as usize) })
     }
 
     /// A read's output for the file's bytes `asked`, over `span` of the

@@ -95,6 +95,7 @@ impl<'c> ClientReads<'c> {
                 });
                 let served = ServedRead {
                     cache: self.cache,
+                    region: self.region.clone(),
                     outbox: self.outbox.clone(),
                     frames: Rc::clone(&frames),
                     end: std::sync::Arc::clone(&end),
@@ -127,6 +128,7 @@ impl<'c> ClientReads<'c> {
             }
             ClientFrame::TakeGets { read, .. }
             | ClientFrame::Land { read, .. }
+            | ClientFrame::LandStaged { read, .. }
             | ClientFrame::Commit { read, .. }
             | ClientFrame::Abandon { read, .. }
             | ClientFrame::Finish { read, .. } => {
@@ -328,9 +330,11 @@ impl StepAnswer {
 }
 
 /// One of the client's reads, served: its task, which holds the read's end
-/// until it drops.
+/// until it drops; and the client's region, if the owner mapped it, where
+/// the read's fetches may stage their bytes.
 struct ServedRead<'c> {
     cache: &'c ObjectCache,
+    region: Option<std::sync::Arc<OwnerRegion>>,
     outbox: Outbox,
     frames: Rc<RefCell<ReadFrames>>,
     end: std::sync::Arc<ReadEnd>,
@@ -471,7 +475,8 @@ impl<'c> ServedRead<'c> {
     }
 
     /// Takes the read's frames as the client lands `fetches`, by their
-    /// place in the list: each one's bytes landed in order, committed, or
+    /// place in the list: each one's bytes landed in order, from the frame
+    /// or from where the client staged them in its region, committed, or
     /// abandoned; until the client has asked to finish and every fetch is
     /// committed or abandoned. Returns the finish's call; `None` if the
     /// client sent a frame the protocol doesn't allow.
@@ -485,6 +490,17 @@ impl<'c> ServedRead<'c> {
                     Some(landing) => landing.land(&bytes).await,
                     None => Err("fetch number: of no fetch"),
                 },
+                ClientFrame::LandStaged { fetch, staged, .. } => {
+                    match (fetches.get_mut(fetch as usize), &self.region) {
+                        // Copied where they go as they land, and let go of.
+                        (Some(landing), Some(region)) => match region.staged(staged) {
+                            Ok(bytes) => landing.land(bytes).await,
+                            Err(_) => Err("staged bytes: past the region"),
+                        },
+                        (None, _) => Err("fetch number: of no fetch"),
+                        (Some(_), None) => Err("staged bytes: in no region"),
+                    }
+                }
                 ClientFrame::Commit { call, fetch, .. } => match fetches.get_mut(fetch as usize) {
                     Some(landing) => match landing.commit().await {
                         Ok(committed) => {

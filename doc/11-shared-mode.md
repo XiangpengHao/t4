@@ -8,10 +8,10 @@ step 2.4, no read policy held by the storage half; step 2.5,
 and serving a client's reads, and a client connecting (`with_sharing`)
 and reading through its owner, its reads going to the remote once its
 owner goes, those in flight too, until a read makes it the owner or a
-client of the next; tested in one process and in real ones. Step 4,
-the region, in part: the region made, sent in the handshake and mapped
-by the owner (`sharing/region.rs`), and a read's output a span of it;
-a fetch's bytes still go in the frames.
+client of the next; tested in one process and in real ones; and step
+4, the region: made, sent in the handshake and mapped by the owner
+(`sharing/region.rs`), a read's output a span of it, a fetch's bytes
+staged in one; only control crosses the socket.
 The user's call of 29 Oct 2026, for Spiral
 (`10-spiral-integration.md`, decision 8).
 
@@ -238,7 +238,11 @@ decision 9).
      piece of the GET's body into the fetch's span as it comes, and
      `Land` names the next bytes staged rather than carrying them. The
      owner lands them from its mapping as its own fetches' land
-     (`FetchedBlocks`), into the output and the landing. A client's
+     (`FetchedBlocks`), into the output and the landing. A fetch's span
+     is the read's until the read ends, whatever becomes of the fetch:
+     the fetch hands it over as it drops, before the read's end. A piece
+     past the span, as of a GET that brings more bytes than it holds,
+     goes in a frame, for the owner to refuse at the commit. A client's
      fetched byte is copied once more than an owner's (into the span), in
      place of twice over the socket; landing from the client's region
      straight into a chunk at commit, which saves it, would need a
@@ -500,7 +504,16 @@ pipelined. The owner's own reads cost what they cost now.
       (`spans_lent_come_back_once_the_owner_ends_their_read_or_goes`); an
       output's keeper outliving every buffer it lent
       (`an_output_over_kept_memory_drops_its_keeper_last`);
-   3. a fetch's bytes staged in a span.
+   3. a fetch's bytes staged in a span. Built 29 Oct 2026: a fetch's
+      span (`ClientFetch`), each GET piece copied in and named by
+      `LandStaged`, landed by the owner from its mapping
+      (`OwnerRegion::staged`). Tested: the owner landing and caching a
+      fetch staged in two pieces, and a staged span past the region
+      closing the connection
+      (`the_owner_lands_a_fetch_staged_in_its_clients_region`); a
+      client's 2 MiB cold read moving under 64 KiB over its socket, the
+      owner caching it, and, no span free, the bytes in the frames
+      (`a_clients_cold_read_moves_only_control_over_its_socket`).
 5. **Polling,** only if measured (Later).
 
 ## Code map
@@ -520,4 +533,4 @@ pipelined. The owner's own reads cost what they cost now.
 | `src/cache/sharing/client_reads.rs` | a client's reads, each a task of its session's (decision 5) | yes |
 | `src/cache/sharing/client.rs` | a client's connection to its owner, its calls, and its reads through it (decisions 5 to 7) | yes |
 | `src/cache/t4_caching/tests/sharing.rs`, `processes.rs` | an owner and its clients in one process, and in real ones (build step 3) | yes |
-| `src/cache/sharing/region.rs` | the region, its spans, and the checks the owner makes of it (decision 5) | yes, outputs in spans; fetches staged: step 4.3 |
+| `src/cache/sharing/region.rs` | the region, its spans, and the checks the owner makes of it (decision 5) | yes |
