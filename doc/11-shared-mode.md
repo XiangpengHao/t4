@@ -273,7 +273,13 @@ decision 9).
      file's `stat`: one name whatever path reaches the file; no socket
      file to clean up; gone when the owner's socket closes, however it
      exits. Per network namespace: a client in another container doesn't
-     see the owner, and runs as without sharing (`Busy`).
+     see the owner, and runs as without sharing (`Busy`). Any process
+     may hold a name first, so an owner that can't bind its own owns its
+     cache unshared rather than fail to build
+     (`an_owner_whose_address_is_held_still_owns_its_cache`): the name
+     held by a process of another user, whom its clients don't trust
+     (decision 8), or by an owner of a deleted cache file whose inode
+     this one's took.
    - **macOS:** a socket file, `t4-<dev>-<ino>.sock` in the user's
      temporary directory as the system names it
      (`confstr(_CS_DARWIN_USER_TEMP_DIR)`), not as `$TMPDIR` does: shells

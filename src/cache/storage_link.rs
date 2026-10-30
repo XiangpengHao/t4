@@ -25,8 +25,8 @@ pub(super) use current_link::{CurrentLink, LinkMaker, PlacementMaker};
 
 pub(super) enum StorageLink {
     /// This process holds the cache files' lock: it runs the storage half,
-    /// and serves it to clients if it was built for sharing, as long as the
-    /// listener lives. The listener goes first as it drops, and with it its
+    /// and serves it to clients if it was built for sharing and could
+    /// listen, as long as the listener lives. The listener goes first as it drops, and with it its
     /// sessions' handles on the cache.
     Owner {
         _listener: Option<OwnerListener>,

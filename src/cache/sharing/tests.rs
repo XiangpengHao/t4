@@ -273,6 +273,30 @@ fn a_client_connects_only_to_an_owner_of_its_user() {
     assert!(matches!(refused, crate::Error::Busy), "{refused}");
 }
 
+/// An owner whose address another process holds, as a process of another
+/// user may on Linux, still owns its cache, unshared: no other user keeps
+/// a user from caching. On macOS the owner replaces the socket file.
+#[test]
+fn an_owner_whose_address_is_held_still_owns_its_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let (data, meta) = put_file(&inner, &Path::from("a"), 2 * MIB);
+    let cache_file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.path().join("cache"))
+        .unwrap();
+    let address = OwnerAddress::of(FileIdentity::of(&cache_file).unwrap()).unwrap();
+    let _holder = address.listen().unwrap();
+
+    let owner = shared(&inner, &dir).build().unwrap();
+    assert!(matches!(*owner.link(), StorageLink::Owner { .. }));
+    let read = block_on(owner.get_range(&meta.location, 0..MIB)).unwrap();
+    assert_eq!(read, data.slice(..MIB as usize));
+}
+
 /// The owner refuses a client of another protocol version, but tells it
 /// its own version first, so that the client gives up at once
 /// (decision 6); then it closes the connection.

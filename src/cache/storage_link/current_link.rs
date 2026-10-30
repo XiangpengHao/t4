@@ -177,12 +177,12 @@ impl LinkMaker {
 
     /// The cache of the memory's chunks and the chunks of `disk`, its
     /// files' lock taken: this process's own, served to clients if built
-    /// for sharing.
+    /// for sharing and it can listen.
     ///
     /// # Errors
     ///
-    /// If the memory can't be mapped, or the listener started; or if the
-    /// caller's placement policy was spent on a cache that failed so.
+    /// If the memory can't be mapped; or if the caller's placement policy
+    /// was spent on a cache that failed so.
     fn own(&mut self, disk: CacheFiles) -> Result<StorageLink> {
         let disk_chunks = NonZeroU32::new(disk.chunks().chunk_count())
             .expect("a disk file holds a chunk at least");
@@ -202,8 +202,12 @@ impl LinkMaker {
         let first_file = disk.first_file();
         let cache = Arc::new(ObjectCache::new(self.memory_chunks, disk, placement)?);
         let listener = match first_file {
+            // An owner that can't listen owns its cache unshared, its
+            // address held by another process: one of another user, as any
+            // may hold an abstract name on Linux, or an owner of a deleted
+            // cache file whose inode this one's took (decision 6).
             Some(first_file) if self.sharing => {
-                Some(OwnerListener::listen(Arc::clone(&cache), first_file)?)
+                OwnerListener::listen(Arc::clone(&cache), first_file).ok()
             }
             _ => None,
         };
