@@ -340,6 +340,25 @@ It shows on small reads served from memory, a few hundred ns in the
 owner. A read is one call however many blocks it spans, and calls are
 pipelined. The owner's own reads cost what they cost now.
 
+**Measured** on a MacBook (Apple silicon, a desktop's load, 30 Oct 2026;
+`benches/shared_reads.rs`, both caches in one process, the file gone from
+the store so that only the cache can serve it), median of 100:
+
+| a hot read of | the owner's own | its client's |
+|---|---|---|
+| 4 KiB | 406 ns (slowest 0.57 µs) | 43 µs (slowest 150 µs) |
+| 1 MiB | 12.7 µs | 56 µs |
+
+A client's read of hits took two round trips, not the one the table
+above counts: `StartRead` answered `Started`, then `Finish` answered
+`ServedInSpan`. A round trip is about 21 µs: five threads woken in turn
+(the client's writer, the owner's session reader, its session thread, the
+client's reader, the caller), about 4 µs each. The 1 MiB read's 13 µs
+more is the owner's copy into the span, as in its own read. So the cost
+is wakeups, and the first cut is fewer round trips (`Finish` sent with
+`StartRead`), not polling, which would spin a desktop's CPU to save
+them.
+
 ## Rejected
 
 - **A server process apart from the apps** (doc/02's `t4-server`):

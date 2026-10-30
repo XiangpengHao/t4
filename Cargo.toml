@@ -55,3 +55,9 @@ verify = true
 [lints.rust]
 # Verus sets `verus_only` while it verifies; ghost-only imports sit behind it.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }
+
+# A hot read's time through a shared cache's owner and its client
+# (`doc/11-shared-mode.md`, Cost).
+[[bench]]
+name = "shared_reads"
+harness = false
