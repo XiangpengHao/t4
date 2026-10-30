@@ -12,6 +12,7 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{Mutex, PoisonError};
 use std::task::{Context, Poll, Waker};
+use std::thread::{self, Thread};
 
 use bytes::Bytes;
 use futures_util::FutureExt;
@@ -19,15 +20,20 @@ use futures_util::future::{AbortHandle, Abortable, LocalBoxFuture, join};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use super::frames::{ClientFrame, FetchSpec, FrameReader, NextStep, OwnerFrame};
+use super::region::{OwnerRegion, SpanName};
 use crate::cache::block_index::FileVersion;
 use crate::cache::object_cache::{FetchedBlocks, ObjectCache, PartialRead, TierWork};
 use crate::cache::policy::{FetchRuns, Io, IoEvent, LocatedRead, ReadIntent, ReadPlan, ReadPolicy};
+use crate::cache::read_output::ReadOutput;
 use crate::io::error::Result;
 
 /// The reads of one client in flight, each a task, by the number the
 /// client gave it; and the frames they send it, queued.
 pub(super) struct ClientReads<'c> {
     cache: &'c ObjectCache,
+    /// The client's region, if the owner mapped it: its reads' outputs are
+    /// spans of it.
+    region: Option<std::sync::Arc<OwnerRegion>>,
     outbox: Outbox,
     /// Each read the client started and hasn't ended. A read's task may
     /// have ended before: the frames the client sent it since are dropped.
@@ -36,10 +42,14 @@ pub(super) struct ClientReads<'c> {
 }
 
 impl<'c> ClientReads<'c> {
-    pub(super) fn new(cache: &'c ObjectCache) -> Self {
+    /// No reads yet, of a client whose region, if any, is `region`; made
+    /// on the session's thread, which a read's end wakes, from whatever
+    /// thread it comes.
+    pub(super) fn new(cache: &'c ObjectCache, region: Option<std::sync::Arc<OwnerRegion>>) -> Self {
         Self {
             cache,
-            outbox: Outbox::default(),
+            region,
+            outbox: Outbox::new(thread::current()),
             reads: HashMap::new(),
             tasks: FuturesUnordered::new(),
         }
@@ -65,16 +75,29 @@ impl<'c> ClientReads<'c> {
                 size,
                 range,
                 intent,
+                output,
             } => {
                 if self.reads.contains_key(&read) {
                     return Err(FrameReader::malformed("read number: started twice"));
                 }
+                let output = match (output, &self.region) {
+                    (Some(span), Some(region)) => Some((std::sync::Arc::clone(region), span)),
+                    (Some(_), None) => {
+                        return Err(FrameReader::malformed("output: a span of no region"));
+                    }
+                    (None, _) => None,
+                };
                 let (abort, registration) = AbortHandle::new_pair();
                 let frames = Rc::default();
+                let end = std::sync::Arc::new(ReadEnd {
+                    read,
+                    outbox: self.outbox.clone(),
+                });
                 let served = ServedRead {
                     cache: self.cache,
                     outbox: self.outbox.clone(),
                     frames: Rc::clone(&frames),
+                    end: std::sync::Arc::clone(&end),
                 };
                 let start = ReadStart {
                     call,
@@ -83,13 +106,21 @@ impl<'c> ClientReads<'c> {
                     size,
                     range,
                     intent,
+                    output,
                 };
                 let task = served.serve(start).boxed_local();
                 self.tasks.push(Abortable::new(task, registration));
-                self.reads.insert(read, ReadInbox { frames, abort });
+                let inbox = ReadInbox {
+                    frames,
+                    abort,
+                    _end: end,
+                };
+                self.reads.insert(read, inbox);
                 Ok(())
             }
             ClientFrame::EndRead { read } => {
+                // The read's end goes with the last of its inbox, its task
+                // and the buffers over its spans.
                 let ended = self.reads.remove(&read).ok_or_else(Self::no_read)?;
                 ended.abort.abort();
                 Ok(())
@@ -129,10 +160,12 @@ impl<'c> ClientReads<'c> {
 }
 
 /// Where the frames of one of the client's reads wait for its task, and
-/// what ends the task.
+/// what ends the task; and a hold on the read's end, until the client ends
+/// it.
 struct ReadInbox {
     frames: Rc<RefCell<ReadFrames>>,
     abort: AbortHandle,
+    _end: std::sync::Arc<ReadEnd>,
 }
 
 impl ReadInbox {
@@ -159,12 +192,32 @@ struct ReadFrames {
     waker: Option<Waker>,
 }
 
+/// The end of one of the client's reads: once the client has ended it, its
+/// task has dropped, and so has every buffer over its spans, which the last
+/// I/O into them may drop on another thread, the owner tells the client so
+/// ([`OwnerFrame::Ended`]), which then takes the spans back.
+struct ReadEnd {
+    read: u64,
+    outbox: Outbox,
+}
+
+impl Drop for ReadEnd {
+    fn drop(&mut self) {
+        self.outbox
+            .send_waking(OwnerFrame::Ended { read: self.read });
+    }
+}
+
 /// The frames a session sends its client, queued as its reads make them:
 /// answers, and news of the reads from disk made for them, which the read
 /// policy of a read hears deep in a poll; and whether a read found the
-/// client breaking the protocol.
-#[derive(Clone, Default)]
-struct Outbox(std::sync::Arc<Mutex<OutboxFrames>>);
+/// client breaking the protocol. The session's thread sends them; a frame
+/// queued from another thread wakes it.
+#[derive(Clone)]
+struct Outbox {
+    frames: std::sync::Arc<Mutex<OutboxFrames>>,
+    session: Thread,
+}
 
 #[derive(Default)]
 struct OutboxFrames {
@@ -174,8 +227,21 @@ struct OutboxFrames {
 }
 
 impl Outbox {
+    fn new(session: Thread) -> Self {
+        Self {
+            frames: std::sync::Arc::default(),
+            session,
+        }
+    }
+
     fn send(&self, frame: OwnerFrame) {
         self.frames().frames.push(frame);
+    }
+
+    /// Sends `frame` from any thread: the session's wakes to send it.
+    fn send_waking(&self, frame: OwnerFrame) {
+        self.send(frame);
+        self.session.unpark();
     }
 
     /// Notes the client sent `frame`, a frame the protocol doesn't allow
@@ -193,7 +259,7 @@ impl Outbox {
     }
 
     fn frames(&self) -> std::sync::MutexGuard<'_, OutboxFrames> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.frames.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -220,7 +286,8 @@ impl ReadPolicy for ForwardedDiskReads {
     }
 }
 
-/// What a client's read starts as: [`ClientFrame::StartRead`]'s fields.
+/// What a client's read starts as: [`ClientFrame::StartRead`]'s fields,
+/// its output's span with the region it is of.
 struct ReadStart {
     call: u64,
     path: Bytes,
@@ -228,6 +295,7 @@ struct ReadStart {
     size: u64,
     range: Range<u64>,
     intent: Option<ReadIntent>,
+    output: Option<(std::sync::Arc<OwnerRegion>, SpanName)>,
 }
 
 /// The call a read's next step answers: its start, its GETs taken, or its
@@ -259,11 +327,13 @@ impl StepAnswer {
     }
 }
 
-/// One of the client's reads, served: its task.
+/// One of the client's reads, served: its task, which holds the read's end
+/// until it drops.
 struct ServedRead<'c> {
     cache: &'c ObjectCache,
     outbox: Outbox,
     frames: Rc<RefCell<ReadFrames>>,
+    end: std::sync::Arc<ReadEnd>,
 }
 
 impl<'c> ServedRead<'c> {
@@ -281,6 +351,7 @@ impl<'c> ServedRead<'c> {
             size,
             range,
             intent,
+            output,
         } = start;
         let Ok(file) = self.cache.resolve(&path, Some(&e_tag), size) else {
             self.outbox.send(OwnerFrame::Uncacheable { call });
@@ -289,10 +360,27 @@ impl<'c> ServedRead<'c> {
         let reads = ForwardedDiskReads {
             outbox: self.outbox.clone(),
         };
-        let started = self.cache.start_read(&file, range.clone(), intent, &reads);
-        let Ok((mut read, mut work)) = started else {
-            self.outbox.send(OwnerFrame::Failed { call });
-            return;
+        let in_span = output.is_some();
+        let make_output = |asked: Range<u64>| match output {
+            Some((region, span)) => region.output(span, asked, std::sync::Arc::clone(&self.end)),
+            None => ReadOutput::new(asked),
+        };
+        let started = self
+            .cache
+            .start_read_into(&file, range.clone(), intent, &reads, make_output);
+        let (mut read, mut work) = match started {
+            Ok(started) => started,
+            // A span past the client's region, or too short for the read,
+            // is the client's mistake: it breaks the protocol.
+            Err(_) if in_span => {
+                self.outbox
+                    .break_protocol("output: a span that can't hold it");
+                return;
+            }
+            Err(_) => {
+                self.outbox.send(OwnerFrame::Failed { call });
+                return;
+            }
         };
         let mut answer = StepAnswer::Started {
             call,
@@ -308,8 +396,17 @@ impl<'c> ServedRead<'c> {
             };
             match worked {
                 Ok(left) if left.is_empty() => {
-                    let bytes = read.into_bytes();
-                    self.outbox.send(OwnerFrame::Served { call, bytes });
+                    let served = if !in_span {
+                        let bytes = read.into_bytes();
+                        OwnerFrame::Served { call, bytes }
+                    } else {
+                        let asked = read.bytes();
+                        match read.filled_in_place() {
+                            true => OwnerFrame::ServedInSpan { call, asked },
+                            false => OwnerFrame::Served { call, bytes: None },
+                        }
+                    };
+                    self.outbox.send(served);
                     return;
                 }
                 Ok(left) => {

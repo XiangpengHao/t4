@@ -21,6 +21,7 @@ fn client_frames() -> Vec<ClientFrame> {
             size: 5 << 20,
             range: 100..3 << 20,
             intent: Some(ReadIntent::Throughput),
+            output: Some(SpanName::new(4096, 3 << 20)),
         },
         ClientFrame::StartRead {
             call: 3,
@@ -30,6 +31,7 @@ fn client_frames() -> Vec<ClientFrame> {
             size: 0,
             range: 0..0,
             intent: None,
+            output: None,
         },
         ClientFrame::StartRead {
             call: 4,
@@ -39,6 +41,7 @@ fn client_frames() -> Vec<ClientFrame> {
             size: 1,
             range: 0..1,
             intent: Some(ReadIntent::Latency),
+            output: None,
         },
         ClientFrame::StartRead {
             call: 5,
@@ -48,6 +51,7 @@ fn client_frames() -> Vec<ClientFrame> {
             size: 1,
             range: 0..1,
             intent: Some(ReadIntent::Warm),
+            output: None,
         },
         ClientFrame::TakeGets {
             call: 5,
@@ -155,6 +159,11 @@ fn owner_frames() -> Vec<OwnerFrame> {
             bytes: None,
         },
         OwnerFrame::Failed { call: 9 },
+        OwnerFrame::ServedInSpan {
+            call: 10,
+            asked: 4096 + 7..3 << 20,
+        },
+        OwnerFrame::Ended { read: 11 },
     ];
     frames.extend(phases.map(|phase| OwnerFrame::DiskRead {
         drive: 2,
@@ -235,6 +244,7 @@ fn a_value_no_field_takes_is_malformed() {
         size: 9,
         range: 1..5,
         intent: None,
+        output: None,
     }
     .encode();
     // The tag, call and read; the path's length and its byte; the e_tag's

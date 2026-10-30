@@ -10,7 +10,8 @@ and reading through its owner, its reads going to the remote once its
 owner goes, those in flight too, until a read makes it the owner or a
 client of the next; tested in one process and in real ones. Step 4,
 the region, in part: the region made, sent in the handshake and mapped
-by the owner (`sharing/region.rs`); its spans serve no read yet.
+by the owner (`sharing/region.rs`), and a read's output a span of it;
+a fetch's bytes still go in the frames.
 The user's call of 29 Oct 2026, for Spiral
 (`10-spiral-integration.md`, decision 8).
 
@@ -228,9 +229,11 @@ decision 9).
      aligned as `ReadOutput` makes one (the address agrees with the file
      offset mod 4 KiB). The owner makes the read's `ReadOutput` over its
      mapping of the span and fills it as an owner's: disk reads land in
-     place, memory hits are copied in once. `Served` then carries no
-     bytes: the client hands its caller `Bytes` over the span, and the
-     span is free once the last of them drops.
+     place, memory hits are copied in once. `ServedInSpan` answers then,
+     naming the file's bytes the output holds (the read clamped to the
+     file), and carries none: the client hands its caller `Bytes` over
+     the span, and the span is free once the last of them drops. A span
+     past the region, or too short for the read, breaks the protocol.
    - **A fetch's bytes are staged in a span:** the client copies each
      piece of the GET's body into the fetch's span as it comes, and
      `Land` names the next bytes staged rather than carrying them. The
@@ -480,7 +483,23 @@ pipelined. The owner's own reads cost what they cost now.
       regular file refused (`the_owner_refuses_memory_that_could_shrink`;
       an unsealed memfd on Linux), the welcome with and without a region
       (`the_owner_maps_a_clients_region_that_cannot_shrink`);
-   2. a read's output in a span;
+   2. a read's output in a span. Built 29 Oct 2026: `StartRead` names
+      the span, the owner makes the read's `ReadOutput` over it
+      (`OwnerRegion::output`, `ReadOutput::over`), and answers
+      `ServedInSpan`; `EndRead` is answered `Ended` once the read's task
+      and every buffer over its span have dropped (`ReadEnd`), and the
+      client keeps a read's spans until then (`LentSpans`). Tested: the
+      owner serving into a span, no `Ended` before the client ends the
+      read, a span too short closing the connection
+      (`the_owner_serves_a_read_into_its_clients_span`); a client's
+      reads, cold and hot, served in its region, aligned, every span free
+      once they drop (`a_clients_reads_are_served_in_its_region`); the
+      spans back once the owner goes
+      (`a_clients_spans_come_back_once_its_owner_goes`); spans lent kept
+      until the read's end or the owner gone
+      (`spans_lent_come_back_once_the_owner_ends_their_read_or_goes`); an
+      output's keeper outliving every buffer it lent
+      (`an_output_over_kept_memory_drops_its_keeper_last`);
    3. a fetch's bytes staged in a span.
 5. **Polling,** only if measured (Later).
 
@@ -501,4 +520,4 @@ pipelined. The owner's own reads cost what they cost now.
 | `src/cache/sharing/client_reads.rs` | a client's reads, each a task of its session's (decision 5) | yes |
 | `src/cache/sharing/client.rs` | a client's connection to its owner, its calls, and its reads through it (decisions 5 to 7) | yes |
 | `src/cache/t4_caching/tests/sharing.rs`, `processes.rs` | an owner and its clients in one process, and in real ones (build step 3) | yes |
-| `src/cache/sharing/region.rs` | the region, its spans, and the checks the owner makes of it (decision 5) | made and mapped; serving reads: step 4.2, 4.3 |
+| `src/cache/sharing/region.rs` | the region, its spans, and the checks the owner makes of it (decision 5) | yes, outputs in spans; fetches staged: step 4.3 |

@@ -135,8 +135,26 @@ impl ObjectCache {
         intent: Option<ReadIntent>,
         reads: &'c dyn ReadPolicy,
     ) -> Result<(PartialRead, TierWork<'c>)> {
+        self.start_read_into(file, range, intent, reads, ReadOutput::new)
+    }
+
+    /// [`Self::start_read`], the read's output made by `output` for the
+    /// file's bytes it takes: one over a span of a client's region, say
+    /// (`doc/11-shared-mode.md`, decision 5).
+    ///
+    /// # Errors
+    ///
+    /// If `output` fails.
+    pub(super) fn start_read_into<'c>(
+        &'c self,
+        file: &CacheableFile<'c>,
+        range: Range<u64>,
+        intent: Option<ReadIntent>,
+        reads: &'c dyn ReadPolicy,
+        output: impl FnOnce(Range<u64>) -> Result<ReadOutput>,
+    ) -> Result<(PartialRead, TierWork<'c>)> {
         let plan = self.blocks.plan_read(file.version, range.clone());
-        let read = PartialRead::new(file.version, plan.bytes())?;
+        let read = PartialRead::new(file.version, output(plan.bytes())?);
         let work = TierWork::new(
             self,
             reads,
@@ -1188,12 +1206,12 @@ pub(super) struct PartialRead {
 }
 
 impl PartialRead {
-    fn new(version: FileVersion, bytes: Range<u64>) -> Result<Self> {
-        Ok(Self {
+    fn new(version: FileVersion, output: ReadOutput) -> Self {
+        Self {
             version,
-            output: ReadOutput::new(bytes)?,
+            output,
             fetches: Vec::new(),
-        })
+        }
     }
 
     /// The file's bytes the read takes, which its output holds.
@@ -1227,6 +1245,14 @@ impl PartialRead {
     /// failed.
     pub(super) fn into_bytes(self) -> Option<Bytes> {
         self.output.into_bytes()
+    }
+
+    /// Whether the read's bytes are all in its output, in place, once the
+    /// caller has filled what came remote: false while a read from disk it
+    /// started is still writing them. For an output over a span of a
+    /// client's region, which the client then takes.
+    pub(super) fn filled_in_place(self) -> bool {
+        self.output.filled_in_place()
     }
 
     /// Copies the part of `block` the read takes from `chunk`, the whole of

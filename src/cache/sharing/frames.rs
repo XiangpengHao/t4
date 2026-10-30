@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
+use super::region::SpanName;
 use crate::cache::FileVersionId;
 use crate::cache::block_index::FileVersion;
 use crate::cache::object_cache::LocatedRun;
@@ -33,7 +34,8 @@ pub(super) enum ClientFrame {
     /// descriptor of the first cache file, and of its region if `region`.
     Hello { version: u32, region: bool },
     /// Starts a read of `range` of the version of the file at `path` with
-    /// `e_tag` and `size`, for `intent`.
+    /// `e_tag` and `size`, for `intent`; its output the span `output` of
+    /// the client's region, if it names one.
     StartRead {
         call: u64,
         read: u64,
@@ -42,6 +44,7 @@ pub(super) enum ClientFrame {
         size: u64,
         range: Range<u64>,
         intent: Option<ReadIntent>,
+        output: Option<SpanName>,
     },
     /// The GETs the client's read policy planned for the run of the read
     /// the owner located last.
@@ -59,7 +62,8 @@ pub(super) enum ClientFrame {
     /// The read's work on the tiers, answered once it is done and the
     /// read's fetches are committed or abandoned.
     Finish { call: u64, read: u64 },
-    /// The client is done with the read, or gave it up.
+    /// The client is done with the read, or gave it up; the owner answers
+    /// [`OwnerFrame::Ended`] once it is done with the read's spans.
     EndRead { read: u64 },
 }
 
@@ -107,6 +111,17 @@ pub(super) enum OwnerFrame {
     /// The cache failed the call: the read is over, and goes to the remote.
     Failed {
         call: u64,
+    },
+    /// The read's bytes, `asked` of the file, and its end: in its output's
+    /// span, where an output of them has them.
+    ServedInSpan {
+        call: u64,
+        asked: Range<u64>,
+    },
+    /// The owner is done with the read `read`, ended, and with its spans:
+    /// nothing of the owner's writes them, or reads them, any more.
+    Ended {
+        read: u64,
     },
     /// A read from cache file `drive`, of `bytes`, made for one of the
     /// client's reads, went on: for the client's read policy to hear.
@@ -183,6 +198,7 @@ impl ClientFrame {
                 size,
                 range,
                 intent,
+                output,
             } => {
                 let mut frame = FrameWriter::new(Self::START_READ);
                 frame.u64(*call);
@@ -192,6 +208,7 @@ impl ClientFrame {
                 frame.u64(*size);
                 frame.range(range);
                 frame.intent(*intent);
+                frame.span(*output);
                 frame.finish()
             }
             Self::TakeGets { call, read, plan } => {
@@ -261,6 +278,7 @@ impl ClientFrame {
                 size: frame.u64()?,
                 range: frame.range()?,
                 intent: frame.intent()?,
+                output: frame.span()?,
             },
             Self::TAKE_GETS => Self::TakeGets {
                 call: frame.u64()?,
@@ -303,8 +321,9 @@ impl OwnerFrame {
             | Self::Committed { call }
             | Self::Retry { call, .. }
             | Self::Served { call, .. }
-            | Self::Failed { call } => Some(call),
-            Self::Welcome { .. } | Self::DiskRead { .. } => None,
+            | Self::Failed { call }
+            | Self::ServedInSpan { call, .. } => Some(call),
+            Self::Welcome { .. } | Self::DiskRead { .. } | Self::Ended { .. } => None,
         }
     }
 
@@ -317,6 +336,8 @@ impl OwnerFrame {
     const SERVED: u8 = 7;
     const FAILED: u8 = 8;
     const DISK_READ: u8 = 9;
+    const SERVED_IN_SPAN: u8 = 10;
+    const ENDED: u8 = 11;
 
     /// The frame, its length first.
     pub(super) fn encode(&self) -> Vec<u8> {
@@ -339,14 +360,14 @@ impl OwnerFrame {
                 frame.next_step(next);
                 frame.finish()
             }
-            Self::Uncacheable { call } => FrameWriter::call(Self::UNCACHEABLE, *call),
+            Self::Uncacheable { call } => FrameWriter::numbered(Self::UNCACHEABLE, *call),
             Self::Next { call, next } => {
                 let mut frame = FrameWriter::new(Self::NEXT);
                 frame.u64(*call);
                 frame.next_step(next);
                 frame.finish()
             }
-            Self::Committed { call } => FrameWriter::call(Self::COMMITTED, *call),
+            Self::Committed { call } => FrameWriter::numbered(Self::COMMITTED, *call),
             Self::Retry { call, next } => {
                 let mut frame = FrameWriter::new(Self::RETRY);
                 frame.u64(*call);
@@ -365,7 +386,14 @@ impl OwnerFrame {
                 }
                 frame.finish()
             }
-            Self::Failed { call } => FrameWriter::call(Self::FAILED, *call),
+            Self::Failed { call } => FrameWriter::numbered(Self::FAILED, *call),
+            Self::ServedInSpan { call, asked } => {
+                let mut frame = FrameWriter::new(Self::SERVED_IN_SPAN);
+                frame.u64(*call);
+                frame.range(asked);
+                frame.finish()
+            }
+            Self::Ended { read } => FrameWriter::numbered(Self::ENDED, *read),
             Self::DiskRead {
                 drive,
                 bytes,
@@ -416,6 +444,11 @@ impl OwnerFrame {
                 },
             },
             Self::FAILED => Self::Failed { call: frame.u64()? },
+            Self::SERVED_IN_SPAN => Self::ServedInSpan {
+                call: frame.u64()?,
+                asked: frame.range()?,
+            },
+            Self::ENDED => Self::Ended { read: frame.u64()? },
             Self::DISK_READ => Self::DiskRead {
                 drive: frame.u32()?,
                 bytes: frame.u32()?,
@@ -445,10 +478,10 @@ impl FrameWriter {
         Self { frame }
     }
 
-    /// A frame of `tag` whose one field is `call`.
-    fn call(tag: u8, call: u64) -> Vec<u8> {
+    /// A frame of `tag` whose one field is `number`: a call's, or a read's.
+    fn numbered(tag: u8, number: u64) -> Vec<u8> {
         let mut frame = Self::new(tag);
-        frame.u64(call);
+        frame.u64(number);
         frame.finish()
     }
 
@@ -469,6 +502,15 @@ impl FrameWriter {
 
     fn flag(&mut self, value: bool) {
         self.u8(u8::from(value));
+    }
+
+    /// A span of the client's region, if any.
+    fn span(&mut self, span: Option<SpanName>) {
+        self.flag(span.is_some());
+        if let Some(span) = span {
+            self.u64(span.offset());
+            self.u64(span.len());
+        }
     }
 
     pub(in crate::cache) fn u32(&mut self, value: u32) {
@@ -650,6 +692,15 @@ impl FrameReader {
             1 => Ok(true),
             _ => Err(Self::malformed("flag")),
         }
+    }
+
+    /// A span of the client's region, if the frame names one: the owner
+    /// checks it against the region it mapped.
+    fn span(&mut self) -> Result<Option<SpanName>> {
+        Ok(match self.flag()? {
+            true => Some(SpanName::new(self.u64()?, self.u64()?)),
+            false => None,
+        })
     }
 
     pub(in crate::cache) fn u32(&mut self) -> Result<u32> {

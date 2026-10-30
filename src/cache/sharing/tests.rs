@@ -19,11 +19,12 @@ use super::address::{FileIdentity, OwnerAddress};
 use super::frame_socket::FrameSocket;
 use super::frames::{ClientFrame, FetchSpec, NextStep, OwnerFrame, PROTOCOL_VERSION};
 use super::handshake::Hello;
-use super::region::ClientRegion;
+use super::region::{ClientRegion, SpanName};
 use crate::cache::object_cache::LocatedRun;
 use crate::cache::policy::{
     Admit, BlockSource, FixedPlacementPolicy, IoPhase, PlannedGet, ReadPlan,
 };
+use crate::cache::read_output::ReadOutput;
 use crate::cache::storage_link::StorageLink;
 use crate::cache::{T4Caching, T4CachingBuilder};
 use crate::io::sync::Arc;
@@ -314,6 +315,17 @@ struct RawClient {
 impl RawClient {
     /// A client of the owner of the cache file in `dir`, admitted.
     fn admitted(dir: &TempDir) -> Self {
+        Self::admitted_with(dir, None)
+    }
+
+    /// A client of the owner of the cache file in `dir`, admitted with a
+    /// region of its own, which the owner mapped.
+    fn admitted_with_region(dir: &TempDir) -> (Self, std::sync::Arc<ClientRegion>) {
+        let region = ClientRegion::make().unwrap();
+        (Self::admitted_with(dir, Some(&region)), region)
+    }
+
+    fn admitted_with(dir: &TempDir, region: Option<&std::sync::Arc<ClientRegion>>) -> Self {
         let cache_file = File::options()
             .read(true)
             .write(true)
@@ -324,17 +336,35 @@ impl RawClient {
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        Hello::new(PROTOCOL_VERSION, cache_file)
-            .send(&socket)
-            .unwrap();
+        let mut hello = Hello::new(PROTOCOL_VERSION, cache_file);
+        if let Some(region) = region {
+            hello = hello.with_region(region.descriptor().try_clone_to_owned().unwrap());
+        }
+        hello.send(&socket).unwrap();
         let mut client = Self {
             socket,
             news: Vec::new(),
         };
         let version = PROTOCOL_VERSION;
-        let region = false;
+        let region = region.is_some();
         assert_eq!(client.answer(), OwnerFrame::Welcome { version, region });
         client
+    }
+
+    /// Whether the owner sends nothing for 100 ms.
+    fn quiet(&self) -> bool {
+        let short = Some(Duration::from_millis(100));
+        self.socket.set_read_timeout(short).unwrap();
+        let quiet = match self.socket.receive(FrameSocket::MOST_BYTES) {
+            Err(error) => matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+            Ok(_) => false,
+        };
+        let usual = Some(Duration::from_secs(5));
+        self.socket.set_read_timeout(usual).unwrap();
+        quiet
     }
 
     fn send(&self, frame: &ClientFrame) {
@@ -388,7 +418,90 @@ fn start_read(read: u64, meta: &ObjectMeta, range: Range<u64>) -> ClientFrame {
         size: meta.size,
         range,
         intent: None,
+        output: None,
     }
+}
+
+/// The same start of a read, its output the span `output`.
+fn start_read_into(
+    read: u64,
+    meta: &ObjectMeta,
+    range: Range<u64>,
+    output: SpanName,
+) -> ClientFrame {
+    let ClientFrame::StartRead {
+        call,
+        read,
+        path,
+        e_tag,
+        size,
+        range,
+        intent,
+        ..
+    } = start_read(read, meta, range)
+    else {
+        unreachable!("a start");
+    };
+    ClientFrame::StartRead {
+        call,
+        read,
+        path,
+        e_tag,
+        size,
+        range,
+        intent,
+        output: Some(output),
+    }
+}
+
+/// A client's read served into the span it named for its output: the
+/// bytes in the span, where an output of the read has them, and none in
+/// the frame. The owner ends the read, and says so, only once the client
+/// ends it. A span too short for its read breaks the protocol.
+#[test]
+fn the_owner_serves_a_read_into_its_clients_span() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let path = Path::from("a");
+    let (data, meta) = put_file(&inner, &path, 2 * MIB);
+    let _owner = shared(&inner, &dir).build().unwrap();
+    let (mut client, region) = RawClient::admitted_with_region(&dir);
+
+    let range = 100..MIB + 50;
+    let span = region.span(ReadOutput::padded_len(&range)).unwrap();
+    client.send(&start_read_into(1, &meta, range.clone(), span.name()));
+    assert!(matches!(client.answer(), OwnerFrame::Started { .. }));
+    let plan = ReadPlan::new(vec![PlannedGet::once(0..2)]);
+    client.send(&ClientFrame::TakeGets {
+        call: 2,
+        read: 1,
+        plan,
+    });
+    assert!(matches!(client.answer(), OwnerFrame::Next { .. }));
+    client.send(&ClientFrame::Finish { call: 4, read: 1 });
+    client.send(&ClientFrame::Land {
+        read: 1,
+        fetch: 0,
+        bytes: data.clone(),
+    });
+    client.send(&ClientFrame::Commit {
+        call: 3,
+        read: 1,
+        fetch: 0,
+    });
+    assert_eq!(client.answer(), OwnerFrame::Committed { call: 3 });
+    let asked = range.clone();
+    assert_eq!(client.answer(), OwnerFrame::ServedInSpan { call: 4, asked });
+    let within = 100..100 + (range.end - range.start) as usize;
+    assert_eq!(span.into_bytes(within), data.slice(100..MIB as usize + 50));
+
+    assert!(client.quiet(), "no end before the client's");
+    client.send(&ClientFrame::EndRead { read: 1 });
+    assert_eq!(client.answer(), OwnerFrame::Ended { read: 1 });
+
+    let short = region.span(1).unwrap();
+    client.send(&start_read_into(2, &meta, 0..2 * MIB, short.name()));
+    assert!(client.closed());
 }
 
 /// `range` of the file `meta` names, read through `store`'s cache, opened

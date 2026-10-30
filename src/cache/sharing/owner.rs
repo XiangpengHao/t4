@@ -173,7 +173,8 @@ impl ClientSession {
         // A region refused, the client's reads' bytes go in the frames.
         let region = hello
             .into_region()
-            .and_then(|memory| OwnerRegion::accept(memory).ok());
+            .and_then(|memory| OwnerRegion::accept(memory).ok())
+            .map(std::sync::Arc::new);
         let welcome = OwnerFrame::Welcome {
             version: PROTOCOL_VERSION,
             region: region.is_some(),
@@ -181,7 +182,7 @@ impl ClientSession {
         self.socket.send(&welcome.encode())?;
         self.socket.set_read_timeout(None)?;
         let (frames, reader) = self.start_reader()?;
-        let served = self.serve_reads(&frames);
+        let served = self.serve_reads(&frames, region);
         // The reader ends at the close, if the client hasn't closed first.
         self.socket.shut_down();
         let _ = reader.join();
@@ -216,17 +217,22 @@ impl ClientSession {
         Ok((frames, reader))
     }
 
-    /// Serves the client's reads, `frames` as they come: runs each read as
-    /// far as it goes, sends what the reads answer, and sleeps until a
-    /// frame comes or a read can go on. Every read is dropped as it ends,
-    /// with all it holds.
+    /// Serves the client's reads, `frames` as they come, their outputs in
+    /// spans of `region` if the client named them: runs each read as far as
+    /// it goes, sends what the reads answer, and sleeps until a frame comes
+    /// or a read can go on. Every read is dropped as it ends, with all it
+    /// holds.
     ///
     /// # Errors
     ///
     /// If the socket fails, or the client sends a frame the protocol
     /// doesn't allow where it comes.
-    fn serve_reads(&self, frames: &Receiver<Result<ClientFrame>>) -> Result<()> {
-        let mut reads = ClientReads::new(&self.cache);
+    fn serve_reads(
+        &self,
+        frames: &Receiver<Result<ClientFrame>>,
+        region: Option<std::sync::Arc<OwnerRegion>>,
+    ) -> Result<()> {
+        let mut reads = ClientReads::new(&self.cache, region);
         let waker = Waker::from(std::sync::Arc::new(SessionWaker(thread::current())));
         let mut context = Context::from_waker(&waker);
         loop {

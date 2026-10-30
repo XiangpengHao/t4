@@ -9,19 +9,19 @@
 //! - **macOS:** a POSIX shared memory object, unlinked once made: XNU sizes
 //!   one once, and refuses every `ftruncate` after, from any descriptor.
 
-// Its spans serve a read's output and a fetch's bytes from the next two
-// commits.
-#![allow(dead_code)]
-
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::io;
+use std::ops::Range;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use bytes::Bytes;
 use rustix::mm::{MapFlags, ProtFlags};
 
 use crate::PAGE_SIZE_U64;
+use crate::cache::read_output::ReadOutput;
 use crate::io::error::{Error, Result};
 
 /// A span of a region as a frame names it: `len` bytes from byte `offset`.
@@ -217,6 +217,14 @@ impl ClientRegion {
         self.free().runs.values().sum()
     }
 
+    /// Whether `bytes` lie in the region: for tests.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(super) fn holds(&self, bytes: &[u8]) -> bool {
+        let start = self.mapping.ptr.as_ptr() as usize;
+        let at = bytes.as_ptr() as usize;
+        start <= at && at + bytes.len() <= start + self.mapping.len
+    }
+
     fn free(&self) -> std::sync::MutexGuard<'_, FreeSpans> {
         self.free.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -242,6 +250,7 @@ impl RegionSpan {
     /// # Panics
     ///
     /// If they run past the span.
+    #[allow(dead_code)] // A fetch's bytes are staged in a span: the next commit.
     pub(super) fn copy_in(&mut self, at: usize, bytes: &[u8]) {
         let name = self.name();
         assert!(
@@ -265,9 +274,46 @@ impl RegionSpan {
     }
 }
 
+impl RegionSpan {
+    /// The span's bytes `within` it, as `Bytes` that hold the span until
+    /// the last of them drops: a read's, served in it.
+    ///
+    /// # Panics
+    ///
+    /// If `within` runs past the span.
+    pub(super) fn into_bytes(self, within: Range<usize>) -> Bytes {
+        assert!(
+            within.end <= self.name().len() as usize,
+            "{within:?} lie within the span"
+        );
+        Bytes::from_owner(ServedSpan(self)).slice(within)
+    }
+}
+
 impl Drop for RegionSpan {
     fn drop(&mut self) {
         self.region.give_back(self.first_page, self.pages);
+    }
+}
+
+/// A span its owner has served a read in, done with it: its client's
+/// caller's bytes.
+struct ServedSpan(RegionSpan);
+
+impl AsRef<[u8]> for ServedSpan {
+    fn as_ref(&self) -> &[u8] {
+        let name = self.0.name();
+        let start = self
+            .0
+            .region
+            .mapping
+            .at(name)
+            .expect("a span lies within its region");
+        // SAFETY: the span lies within the mapping, which it holds. Its
+        // owner served the read, and writes it no more; its client never
+        // does: an owner that broke the protocol would garble the bytes,
+        // not more (decision 8).
+        unsafe { std::slice::from_raw_parts(start.as_ptr(), name.len() as usize) }
     }
 }
 
@@ -332,6 +378,7 @@ impl OwnerRegion {
     /// # Errors
     ///
     /// If the span runs past the region.
+    #[allow(dead_code)] // A fetch's bytes are staged in a span: the next commit.
     pub(super) fn with_bytes<R>(&self, span: SpanName, read: impl FnOnce(&[u8]) -> R) -> Result<R> {
         let start = self
             .mapping
@@ -343,6 +390,34 @@ impl OwnerRegion {
         // is the client's own read's or block's (decision 8).
         let bytes = unsafe { std::slice::from_raw_parts(start.as_ptr(), span.len as usize) };
         Ok(read(bytes))
+    }
+
+    /// A read's output for the file's bytes `asked`, over `span` of the
+    /// region, which the region's mapping and `keeper` are kept for until
+    /// the output and every buffer it lends have dropped: the owner tells
+    /// its client it is done with the span then.
+    ///
+    /// # Errors
+    ///
+    /// If the span runs past the region, or is too short for the output.
+    pub(super) fn output(
+        self: &Arc<Self>,
+        span: SpanName,
+        asked: Range<u64>,
+        keeper: impl Any + Send + Sync,
+    ) -> Result<ReadOutput> {
+        let memory = self
+            .mapping
+            .at(span)
+            .ok_or_else(|| Self::refused("span: past its end"))?;
+        let kept = Box::new((Arc::clone(self), keeper));
+        // SAFETY: the span lies within the mapping, page-aligned as the
+        // mapping and every span are, and the keeper holds the mapping.
+        // Nothing of the owner's but the output touches the span: its client
+        // lent it for this read alone. The client may write it meanwhile,
+        // breaking its own protocol: the owner only writes the output, so
+        // that garbles the client's bytes alone (decision 8).
+        unsafe { ReadOutput::over(asked, memory, span.len() as usize, kept) }
     }
 
     /// The error of a region refused, or a span of one, `why`.

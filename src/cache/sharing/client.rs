@@ -26,7 +26,8 @@ use super::address::{FileIdentity, OwnerAddress};
 use super::frame_socket::FrameSocket;
 use super::frames::{ClientFrame, FetchSpec, FrameReader, NextStep, OwnerFrame, PROTOCOL_VERSION};
 use super::handshake::Hello;
-use super::region::ClientRegion;
+use super::region::{ClientRegion, RegionSpan};
+use crate::PAGE_SIZE_U64;
 use crate::cache::FileVersionId;
 use crate::cache::block_index::FileVersion;
 use crate::cache::object_cache::{CacheableFile, LocatedRun};
@@ -43,8 +44,9 @@ pub(in crate::cache) struct OwnerConnection {
     /// The client's region, if its owner mapped it: its reads' outputs and
     /// its fetches' bytes are spans of it (decision 5); without it, their
     /// bytes go in the frames.
-    #[allow(dead_code)] // Read's outputs take spans of it: the next commit.
     region: Option<std::sync::Arc<ClientRegion>>,
+    /// The spans of the reads the client ended, until the owner has too.
+    lent: std::sync::Arc<LentSpans>,
     /// The calls waiting for their answers, shared with the reader.
     calls: std::sync::Arc<CallTable>,
     /// The number the next read takes.
@@ -156,9 +158,11 @@ impl OwnerConnection {
                 }
             })?;
         let calls = std::sync::Arc::new(CallTable::default());
+        let lent = std::sync::Arc::new(LentSpans::default());
         let reader = OwnerFrames {
             socket: socket.try_clone()?,
             calls: std::sync::Arc::clone(&calls),
+            lent: std::sync::Arc::clone(&lent),
             reads,
         };
         let reader = thread::Builder::new()
@@ -167,6 +171,7 @@ impl OwnerConnection {
         Ok(Self {
             socket,
             region,
+            lent,
             calls,
             next_read: AtomicU64::new(0),
             outgoing: Some(outgoing),
@@ -205,6 +210,21 @@ impl OwnerConnection {
     #[cfg(all(test, not(feature = "shuttle")))]
     pub(in crate::cache) fn has_region(&self) -> bool {
         self.region.is_some()
+    }
+
+    /// How many of the region's pages are free, if the owner mapped it:
+    /// for tests.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(in crate::cache) fn region_free_pages(&self) -> Option<u64> {
+        self.region.as_ref().map(|region| region.free_pages())
+    }
+
+    /// Whether `bytes` lie in the client's region: for tests.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(in crate::cache) fn region_holds(&self, bytes: &[u8]) -> bool {
+        self.region
+            .as_ref()
+            .is_some_and(|region| region.holds(bytes))
     }
 
     /// The numbers of the calls waiting for their answers, in order: for
@@ -360,13 +380,61 @@ impl Drop for WaitingCall<'_> {
     }
 }
 
+/// The spans of the client's reads that the client has ended and its owner
+/// may still touch, by read: each read's freed once the owner ends it too
+/// ([`OwnerFrame::Ended`]); every one once the owner is gone, and those
+/// lent after at once (`None`).
+struct LentSpans {
+    reads: Mutex<Option<HashMap<u64, Vec<RegionSpan>>>>,
+}
+
+impl Default for LentSpans {
+    fn default() -> Self {
+        Self {
+            reads: Mutex::new(Some(HashMap::new())),
+        }
+    }
+}
+
+impl LentSpans {
+    /// Keeps `spans`, the read `read`'s, until the owner ends the read.
+    fn keep_until_ended(&self, read: u64, spans: Vec<RegionSpan>) {
+        if spans.is_empty() {
+            return;
+        }
+        let mut reads = self.reads();
+        if let Some(reads) = reads.as_mut() {
+            reads.insert(read, spans);
+        }
+        // The owner gone, the spans drop here, free.
+    }
+
+    /// Frees the spans of the read `read`, which the owner ended.
+    fn ended(&self, read: u64) {
+        let spans = self.reads().as_mut().and_then(|reads| reads.remove(&read));
+        drop(spans);
+    }
+
+    /// Frees every span, and every one lent after: the owner is gone.
+    fn owner_gone(&self) {
+        let reads = self.reads().take();
+        drop(reads);
+    }
+
+    fn reads(&self) -> std::sync::MutexGuard<'_, Option<HashMap<u64, Vec<RegionSpan>>>> {
+        self.reads.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// The connection's reader: it takes the owner's frames, each answer
-/// completing its call and each read from disk told to the client's read
-/// policy, until the owner goes or breaks the protocol; then it fails the
-/// calls waiting, and every call after.
+/// completing its call, each read from disk told to the client's read
+/// policy, and each read's end freeing its spans, until the owner goes or
+/// breaks the protocol; then it fails the calls waiting, and every call
+/// after, and frees every span.
 struct OwnerFrames {
     socket: FrameSocket,
     calls: std::sync::Arc<CallTable>,
+    lent: std::sync::Arc<LentSpans>,
     reads: Arc<dyn ReadPolicy>,
 }
 
@@ -374,6 +442,7 @@ impl OwnerFrames {
     fn run(self) {
         let _ = self.take_frames();
         self.calls.fail_all();
+        self.lent.owner_gone();
         self.socket.shut_down();
     }
 
@@ -394,6 +463,7 @@ impl OwnerFrames {
                     let read = Io::DiskRead { drive, bytes };
                     self.reads.on_io(&IoEvent::new(read, phase));
                 }
+                OwnerFrame::Ended { read } => self.lent.ended(read),
                 answer => self.calls.answer(answer)?,
             }
         }
@@ -403,16 +473,26 @@ impl OwnerFrames {
 
 /// A client's read through its owner (`doc/11-shared-mode.md`, decision
 /// 5): its number on the connection, the read's next step as the owner
-/// answered it, and, once served, its bytes. Its client plans its GETs and
-/// makes them; the owner does the rest.
+/// answered it, and, once served, where its bytes are. Its client plans its
+/// GETs and makes them; the owner does the rest.
 pub(in crate::cache) struct ClientRead<'c> {
     number: ReadNumber<'c>,
     path: &'c [u8],
     version: FileVersion,
-    /// Where the read's bytes start in the file.
-    start: u64,
+    /// The file's bytes the client asked for.
+    asked: Range<u64>,
     next: Option<NextStep>,
-    served: Option<Bytes>,
+    served: Option<Served>,
+}
+
+/// Where the owner served a read's bytes.
+enum Served {
+    /// In its answer's frame; none if a read from disk was still writing
+    /// them, as after one failed.
+    InFrame(Option<Bytes>),
+    /// In the read's output's span: the file's bytes `asked`, where an
+    /// output of them has them.
+    InSpan(Range<u64>),
 }
 
 impl<'c> ClientRead<'c> {
@@ -439,8 +519,12 @@ impl<'c> ClientRead<'c> {
         if range.end - range.start > Self::MOST_BYTES {
             return Ok(None);
         }
-        let number = ReadNumber::take(owner);
-        let start = range.start;
+        let mut number = ReadNumber::take(owner);
+        // No span free, the read's bytes come in the frame.
+        number.output =
+            (owner.region.as_ref()).and_then(|region| region.span(ReadOutput::padded_len(&range)));
+        let output = number.output.as_ref().map(RegionSpan::name);
+        let asked = range.clone();
         let answer = owner
             .call(|call| ClientFrame::StartRead {
                 call,
@@ -450,6 +534,7 @@ impl<'c> ClientRead<'c> {
                 size,
                 range,
                 intent,
+                output,
             })
             .await?;
         match answer {
@@ -457,7 +542,7 @@ impl<'c> ClientRead<'c> {
                 number,
                 path,
                 version,
-                start,
+                asked,
                 next: Some(next),
                 served: None,
             })),
@@ -549,23 +634,43 @@ impl<'c> ClientRead<'c> {
                 Ok(true)
             }
             OwnerFrame::Served { bytes, .. } => {
-                self.served = bytes;
+                self.served = Some(Served::InFrame(bytes));
+                Ok(false)
+            }
+            OwnerFrame::ServedInSpan { asked, .. } => {
+                self.served = Some(Served::InSpan(asked));
                 Ok(false)
             }
             answer => Err(Self::failed(&answer)),
         }
     }
 
-    /// The read's bytes, once served: in an output of the client's own, so
-    /// that their address agrees with their file offset mod 4 KiB, as an
-    /// owner's read's does. `None` if the owner served none, as after a read
-    /// from disk failed, or the output can't be made.
-    pub(in crate::cache) fn into_bytes(self) -> Option<Bytes> {
-        let served = self.served.as_ref()?;
-        let bytes = self.start..self.start + served.len() as u64;
-        let mut output = ReadOutput::new(bytes).ok()?;
-        output.copy_in(self.start, served);
-        output.into_bytes()
+    /// The read's bytes, once served, their address agreeing with their
+    /// file offset mod 4 KiB, as an owner's read's does: in the read's
+    /// output's span, which they hold until the last of them drops; or, from
+    /// a frame, copied into an output of the client's own. `None` if the
+    /// owner served none, as after a read from disk failed, or served them
+    /// where they can't be.
+    pub(in crate::cache) fn into_bytes(mut self) -> Option<Bytes> {
+        match self.served.take()? {
+            Served::InFrame(served) => {
+                let served = served?;
+                let start = self.asked.start;
+                let mut output = ReadOutput::new(start..start + served.len() as u64).ok()?;
+                output.copy_in(start, &served);
+                output.into_bytes()
+            }
+            Served::InSpan(asked) => {
+                // An output's bytes start in its first page, where the
+                // file's first asked would.
+                let at = usize::try_from(asked.start % PAGE_SIZE_U64).ok()?;
+                let len = usize::try_from(asked.end - asked.start).ok()?;
+                let span = self.number.output.take()?;
+                let within = self.asked.start <= asked.start && asked.end <= self.asked.end;
+                let fits = (at + len) as u64 <= span.name().len();
+                (within && fits).then(|| span.into_bytes(at..at + len))
+            }
+        }
     }
 
     /// The error of a read the owner answered `answer`: failed it, or
@@ -578,11 +683,15 @@ impl<'c> ClientRead<'c> {
     }
 }
 
-/// A read's number on its connection, from its start: dropped, it ends
-/// the read in the owner, served or not, which drops all it holds of it.
+/// A read's number on its connection, from its start, and the spans it
+/// lent the owner: dropped, it ends the read in the owner, served or not,
+/// which drops all it holds of it, and keeps the spans until the owner
+/// says it has ([`LentSpans`]).
 struct ReadNumber<'c> {
     owner: &'c OwnerConnection,
     number: u64,
+    /// The read's output's span, until its caller takes it, served.
+    output: Option<RegionSpan>,
 }
 
 impl<'c> ReadNumber<'c> {
@@ -590,12 +699,16 @@ impl<'c> ReadNumber<'c> {
         Self {
             owner,
             number: owner.next_read.fetch_add(1, Ordering::Relaxed),
+            output: None,
         }
     }
 }
 
 impl Drop for ReadNumber<'_> {
     fn drop(&mut self) {
+        // Kept before the read ends: the owner's end comes after.
+        let spans = self.output.take().into_iter().collect();
+        self.owner.lent.keep_until_ended(self.number, spans);
         self.owner.tell(&ClientFrame::EndRead { read: self.number });
     }
 }

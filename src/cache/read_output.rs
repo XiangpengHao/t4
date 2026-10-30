@@ -2,6 +2,7 @@
 //! as `Bytes` with no copy (`doc/03-cache.md`, decision 3).
 
 use std::alloc::{Layout, alloc, dealloc};
+use std::any::Any;
 use std::num::NonZeroU32;
 use std::ops::Range;
 use std::ptr::NonNull;
@@ -41,9 +42,57 @@ pub(super) struct ReadOutput {
 impl ReadOutput {
     /// A buffer for `asked`, the file's bytes a read takes: a page at least.
     pub(super) fn new(asked: Range<u64>) -> Result<Self> {
+        let memory = OutputMemory::new(Self::index(Self::padded_len(&asked)))?;
+        Self::over_memory(asked, memory)
+    }
+
+    /// A buffer for `asked` over `len` bytes at `memory`, another's memory,
+    /// which `keeper` keeps valid: a span of a client's region
+    /// (`doc/11-shared-mode.md`, decision 5). It isn't freed when the output
+    /// and the buffers it lent drop; `keeper` is dropped then.
+    ///
+    /// # Errors
+    ///
+    /// If `len` is shorter than an output of `asked` takes
+    /// ([`Self::padded_len`]).
+    ///
+    /// # Safety
+    ///
+    /// `memory` is page-aligned, and valid for reads and writes of `len`
+    /// bytes as long as `keeper` lives. Nothing of this process's but the
+    /// output and the buffers it lends touches them meanwhile.
+    pub(super) unsafe fn over(
+        asked: Range<u64>,
+        memory: NonNull<u8>,
+        len: usize,
+        keeper: Box<dyn Any + Send + Sync>,
+    ) -> Result<Self> {
+        if (len as u64) < Self::padded_len(&asked) {
+            return Err(Error::InvalidArgument(
+                "an output's memory is shorter than its bytes",
+            ));
+        }
+        let memory = OutputMemory {
+            ptr: memory,
+            len,
+            place: OutputPlace::Kept { _keeper: keeper },
+        };
+        Self::over_memory(asked, memory)
+    }
+
+    /// The bytes an output of `asked` takes: the file's bytes asked rounded
+    /// out to whole pages, a page at least.
+    pub(super) fn padded_len(asked: &Range<u64>) -> u64 {
         let start = asked.start / PAGE_SIZE_U64 * PAGE_SIZE_U64;
         let end = (asked.end.div_ceil(PAGE_SIZE_U64) * PAGE_SIZE_U64).max(start + PAGE_SIZE_U64);
-        let memory = OutputMemory::new(Self::index(end - start))?;
+        end - start
+    }
+
+    /// The output of `asked` over `memory`, its bytes from the page that
+    /// holds the first asked, its padding zeroed.
+    fn over_memory(asked: Range<u64>, memory: OutputMemory) -> Result<Self> {
+        let start = asked.start / PAGE_SIZE_U64 * PAGE_SIZE_U64;
+        let end = start + Self::padded_len(&asked);
         memory.fault_in();
         // The rounding's bytes, which nothing reads into: zeroed, so the
         // buffer is initialized throughout once every byte asked is written.
@@ -122,6 +171,15 @@ impl ReadOutput {
         }
     }
 
+    /// Whether every byte asked for is written, in place, and no buffer the
+    /// output lent is left: so for an output over another's memory, whose
+    /// keeper goes with it.
+    pub(super) fn filled_in_place(self) -> bool {
+        #[cfg(debug_assertions)]
+        self.assert_asked_written();
+        Arc::try_unwrap(self.memory).is_ok()
+    }
+
     /// The bytes asked for, once every one is written: `None` while a
     /// buffer the output lent isn't back, as after a read given up on.
     pub(super) fn into_bytes(self) -> Option<Bytes> {
@@ -139,7 +197,7 @@ impl ReadOutput {
     }
 
     fn end(&self) -> u64 {
-        self.start + self.memory.layout.size() as u64
+        self.start + Self::padded_len(&self.asked)
     }
 
     /// A length or an offset within the output, as a `usize`: the output is
@@ -180,12 +238,30 @@ impl ReadOutput {
     }
 }
 
-/// The allocation under a [`ReadOutput`], freed when the last of the
-/// output and the buffers it lent drops.
+/// The memory under a [`ReadOutput`]: an allocation, freed when the last
+/// of the output and the buffers it lent drops, or another's memory.
 #[derive(Debug)]
 struct OutputMemory {
     ptr: NonNull<u8>,
-    layout: Layout,
+    len: usize,
+    place: OutputPlace,
+}
+
+/// Whose memory an output's is.
+enum OutputPlace {
+    /// The output's own, allocated with this layout.
+    Allocated(Layout),
+    /// Another's, which the keeper keeps valid until it drops.
+    Kept { _keeper: Box<dyn Any + Send + Sync> },
+}
+
+impl std::fmt::Debug for OutputPlace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Allocated(layout) => f.debug_tuple("Allocated").field(layout).finish(),
+            Self::Kept { .. } => f.debug_struct("Kept").finish_non_exhaustive(),
+        }
+    }
 }
 
 // SAFETY: the bytes are written through disjoint ranges, each by one
@@ -206,7 +282,11 @@ impl OutputMemory {
                 "output allocation failed",
             ))
         })?;
-        Ok(Self { ptr, layout })
+        Ok(Self {
+            ptr,
+            len,
+            place: OutputPlace::Allocated(layout),
+        })
     }
 
     /// Faults the pages in, here, on the reading task. A direct read pins
@@ -215,13 +295,13 @@ impl OutputMemory {
     /// then caps the disk tier (`doc/04-multi-device.md`, "Measured").
     fn fault_in(&self) {
         #[cfg(target_os = "linux")]
-        // SAFETY: the range is this allocation's, page-aligned. Populating
-        // its pages changes no byte a caller could see: they are not yet
-        // written, and fresh anonymous pages read as zeros either way.
+        // SAFETY: the range is the output's memory, page-aligned. Populating
+        // its pages changes no byte of them: fresh anonymous or shared pages
+        // read as zeros either way, and a page already there keeps its bytes.
         unsafe {
             libc::madvise(
                 self.ptr.as_ptr().cast(),
-                self.layout.size(),
+                self.len,
                 libc::MADV_POPULATE_WRITE,
             );
         }
@@ -230,8 +310,11 @@ impl OutputMemory {
 
 impl Drop for OutputMemory {
     fn drop(&mut self) {
-        // SAFETY: allocated with this layout, and freed once, here.
-        unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
+        // Another's memory goes back with its keeper.
+        if let OutputPlace::Allocated(layout) = self.place {
+            // SAFETY: allocated with this layout, and freed once, here.
+            unsafe { dealloc(self.ptr.as_ptr(), layout) };
+        }
     }
 }
 
@@ -244,7 +327,7 @@ impl AsRef<[u8]> for FilledOutput {
         // SAFETY: every byte is written (`ReadOutput::new` and the reads and
         // copies it took), and nothing writes it any more: no buffer it lent
         // is left, or `into_bytes` couldn't have taken it.
-        unsafe { std::slice::from_raw_parts(self.0.ptr.as_ptr(), self.0.layout.size()) }
+        unsafe { std::slice::from_raw_parts(self.0.ptr.as_ptr(), self.0.len) }
     }
 }
 
@@ -276,6 +359,45 @@ mod tests {
         let lent = output.lend(0..PAGE).unwrap();
         assert!(output.into_bytes().is_none(), "a read may still write them");
         drop(lent);
+    }
+
+    /// An output over another's memory keeps its keeper until the output
+    /// and every buffer it lent have dropped: what the owner waits for
+    /// before it gives a client its span back (`doc/11-shared-mode.md`).
+    #[test]
+    fn an_output_over_kept_memory_drops_its_keeper_last() {
+        struct Keeper {
+            _memory: OutputMemory,
+            dropped: std::sync::mpsc::Sender<()>,
+        }
+        impl Drop for Keeper {
+            fn drop(&mut self) {
+                let _ = self.dropped.send(());
+            }
+        }
+        let memory = OutputMemory::new(2 * PAGE as usize).unwrap();
+        let ptr = memory.ptr;
+        let (dropped, keeper_gone) = std::sync::mpsc::channel();
+        let keeper = Box::new(Keeper {
+            _memory: memory,
+            dropped,
+        });
+        // SAFETY: the keeper holds the two pages, page-aligned, and nothing
+        // else touches them.
+        let output = unsafe { ReadOutput::over(0..2 * PAGE, ptr, 2 * PAGE as usize, keeper) };
+        let mut output = output.unwrap();
+        output.copy_in(0, &[1; PAGE as usize]);
+        let lent = output.lend(PAGE..2 * PAGE).unwrap();
+        drop(output);
+        assert!(keeper_gone.try_recv().is_err(), "the lent buffer holds it");
+        drop(lent);
+        assert!(keeper_gone.try_recv().is_ok());
+
+        let short = OutputMemory::new(PAGE as usize).unwrap();
+        let ptr = short.ptr;
+        // SAFETY: as above, a page.
+        let refused = unsafe { ReadOutput::over(0..2 * PAGE, ptr, PAGE as usize, Box::new(short)) };
+        assert!(refused.is_err(), "a page holds no two");
     }
 
     #[test]

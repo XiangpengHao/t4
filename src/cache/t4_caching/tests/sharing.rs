@@ -358,6 +358,79 @@ fn a_client_that_finds_no_owner_reads_from_its_store_without_waiting() {
     assert_eq!(clients.take_asked().len(), 3, "each read from its store");
 }
 
+/// The pages of `cache`'s region free, `cache` a client whose owner mapped
+/// its region.
+fn region_free_pages(cache: &T4Caching) -> u64 {
+    match &*cache.link() {
+        StorageLink::Client(owner) => owner.region_free_pages().expect("a region mapped"),
+        StorageLink::Owner { .. } => panic!("a client"),
+    }
+}
+
+/// Whether `bytes` lie in `cache`'s region, `cache` a client.
+fn in_region(cache: &T4Caching, bytes: &Bytes) -> bool {
+    match &*cache.link() {
+        StorageLink::Client(owner) => owner.region_holds(bytes),
+        StorageLink::Owner { .. } => panic!("a client"),
+    }
+}
+
+/// A client's reads are served in its region: their bytes are in spans of
+/// it, where an output has them (their address agrees with their file
+/// offset mod 4 KiB), and right; a span is the caller's while it holds the
+/// bytes, and every span is free once the reads are dropped.
+#[test]
+fn a_clients_reads_are_served_in_its_region() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(3 * MIB, 21);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let (_owner, _, _) = process(&path, &data, shared);
+    let (client, _, clients_meta) = process(&path, &data, shared);
+    let all = region_free_pages(&client);
+
+    let cold = 10..2 * MIB + 20;
+    let hot = 4096 + 3..MIB;
+    let reads: Vec<_> = [cold, hot]
+        .into_iter()
+        .map(|range| {
+            let read = read_listed(&client, &clients_meta, range.clone());
+            assert_eq!(read, data.slice(range.start as usize..range.end as usize));
+            assert!(in_region(&client, &read), "{range:?} in a span");
+            assert_eq!(read.as_ptr() as u64 % 4096, range.start % 4096);
+            read
+        })
+        .collect();
+    assert!(
+        region_free_pages(&client) < all,
+        "the reads hold their spans"
+    );
+    drop(reads);
+    wait_until(|| region_free_pages(&client) == all, "every span is free");
+}
+
+/// A client's read in flight when its owner goes: the read goes to its
+/// store, and its spans come back with the owner gone.
+#[test]
+fn a_clients_spans_come_back_once_its_owner_goes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(MIB, 22);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let (owner, _, _) = process(&path, &data, shared);
+    let (client, clients, clients_meta) = process(&path, &data, shared);
+    let all = region_free_pages(&client);
+    let open = clients.gate_next_get();
+    let read = read_on_thread(client.clone(), clients_meta, 0..MIB);
+    wait_until(|| clients.gets_out_now() == 1, "the client's GET goes out");
+    assert!(region_free_pages(&client) < all, "the read's span is lent");
+
+    drop(owner);
+    drop(open);
+    assert_eq!(read.recv_timeout(Duration::from_secs(5)).unwrap(), data);
+    wait_until(|| region_free_pages(&client) == all, "every span is free");
+}
+
 /// The calls `cache`, a client, waits on its owner for, by number.
 fn calls_waiting(cache: &T4Caching) -> Vec<u64> {
     match &*cache.link() {
