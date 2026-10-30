@@ -12,7 +12,7 @@ use crossbeam_channel::{Receiver, TryRecvError};
 
 use super::address::{FileIdentity, OwnerAddress};
 use super::client_reads::ClientReads;
-use super::frame_socket::FrameSocket;
+use super::frame_socket::{FrameReceiver, FrameSocket};
 use super::frames::{ClientFrame, OwnerFrame, PROTOCOL_VERSION};
 use super::handshake::Hello;
 use super::region::OwnerRegion;
@@ -198,11 +198,12 @@ impl ClientSession {
     }
 
     /// Starts the thread that takes the client's frames as they come, each
-    /// decoded, and hands them to this one, which it wakes; the channel
-    /// closes once the client closes the connection, or a frame breaks.
+    /// decoded, and hands them to this one, which it wakes once it has
+    /// handed every frame one read of the socket took; the channel closes
+    /// once the client closes the connection, or a frame breaks.
     fn start_reader(&self) -> Result<(Receiver<Result<ClientFrame>>, JoinHandle<()>)> {
         let (handing, frames) = crossbeam_channel::unbounded();
-        let reading = self.socket.try_clone()?;
+        let mut reading = FrameReceiver::new(self.socket.try_clone()?);
         let session = thread::current();
         let reader = thread::Builder::new()
             .name("t4-session-reader".into())
@@ -217,7 +218,9 @@ impl ClientSession {
                     if handing.send(frame).is_err() || broken {
                         break;
                     }
-                    session.unpark();
+                    if !reading.holds_frame() {
+                        session.unpark();
+                    }
                 }
                 drop(handing);
                 session.unpark();
@@ -252,9 +255,12 @@ impl ClientSession {
                 }
             }
             reads.run(&mut context);
-            for frame in reads.take_outgoing()? {
-                self.socket.send(&frame.encode())?;
-            }
+            let outgoing: Vec<Vec<u8>> = reads
+                .take_outgoing()?
+                .iter()
+                .map(OwnerFrame::encode)
+                .collect();
+            self.socket.send_all(&outgoing)?;
             // Returns at once if a frame came, or a read was woken, since
             // the last park.
             thread::park();

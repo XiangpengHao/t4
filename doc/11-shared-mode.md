@@ -397,13 +397,39 @@ median and slowest of 100:
 | 4 KiB | 406 ns | 43 µs | 20.1, 25.1, 96.6 µs |
 | 1 MiB | 12.6 µs | 56 µs | 30.4, 35.7, 99.3 µs |
 
-The model held: each read lost 18 to 20 µs, one round trip. The one left
-is the five wakeups: the client's writer thread, the owner's session
-reader, its session thread, the client's reader, the caller. Two are
-hops between threads of one side, which a later change could cut: the
-caller writing its frames to the socket itself, and the session thread
-reading its socket itself. Three would be left, about 13 µs by the same
-count.
+The model held: each read lost 18 to 20 µs, one round trip.
+
+**What a round trip is made of** (30 Oct 2026). Spiral's two processes
+on one cache measured a hot 32 MiB scan 15 ms slower through the client
+than through the owner, about 586 reads of one round trip each. The
+"five wakeups of 4 µs" above was a guess; measured on this Mac, a hop
+between threads costs 1 µs (park and unpark) and one across a Unix
+socket 3 µs, about 9 µs for the round trip's five. Timestamps of each
+step of a 4 KiB read (median of 3000, total 25.7 µs) showed the rest:
+frames crossed one at a time. A read's frames are three each way (the
+last read's `EndRead`, `StartRead`, `Finish`; then `Ended`, `Started`,
+`ServedInSpan`), and each took a syscall to send and two to take, the
+owner's reader handing each to the session on its own.
+
+**Batched,** each side sends the frames it has waiting in one write
+(`FrameSocket::send_all`), and takes all that has come in one read, 64
+KiB at most, handing them out one at a time (`FrameReceiver`); the
+owner's reader wakes the session once for them all. Predicted 7 µs less;
+measured with `main`'s copy right before, under a load of 3 to 6
+(fastest and median of 100):
+
+| a client's hot read of | before | batched |
+|---|---|---|
+| 4 KiB | 22.4, 28.1 µs | 14.0, 22.1 µs |
+| 1 MiB | 32.4, 39.7 µs | 27.2, 33.9 µs |
+
+The timestamps agree: the three frames leave in one write and come
+within 0.5 µs of each other, and the read takes 21.8 µs. Batching
+showed the session thread's wakeup, 3 µs, which taking the frames one at
+a time had hidden. The hops between threads of one side left are the
+caller's to the client's writer, 2.5 µs, and the owner's reader's to its
+session, 3 µs: the caller writing its frames to the socket itself, and
+the session thread reading its socket itself, would cut them. Not built.
 
 ## Rejected
 

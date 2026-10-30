@@ -18,7 +18,7 @@ use rustix::process::geteuid;
 use tempfile::TempDir;
 
 use super::address::{FileIdentity, OwnerAddress};
-use super::frame_socket::FrameSocket;
+use super::frame_socket::{FrameReceiver, FrameSocket};
 use super::frames::{ClientFrame, FetchSpec, NextStep, OwnerFrame, PROTOCOL_VERSION};
 use super::handshake::Hello;
 use super::region::{ClientRegion, SpanName};
@@ -73,15 +73,14 @@ fn owner_gone(store: &T4Caching) -> bool {
     }
 }
 
-/// Frames go whole, each answered as it was sent; the peer's close between
-/// frames ends them, and anything else is an error.
+/// Frames go whole, in the order sent, those sent in one write too, a
+/// frame longer than the receiver reads ahead among them; the peer's close
+/// between frames ends them, and anything else is an error.
 #[test]
 fn frames_cross_a_socket_whole() {
     let (one, other) = UnixStream::pair().unwrap();
-    let (one, other) = (
-        FrameSocket::new(one).unwrap(),
-        FrameSocket::new(other).unwrap(),
-    );
+    let one = FrameSocket::new(one).unwrap();
+    let mut other = FrameReceiver::new(FrameSocket::new(other).unwrap());
     let frames = [
         ClientFrame::Hello {
             version: 7,
@@ -92,12 +91,14 @@ fn frames_cross_a_socket_whole() {
             fetch: 2,
             bytes: Bytes::from(vec![9; 3 << 20]),
         },
+        ClientFrame::EndRead { read: 3 },
+        ClientFrame::Finish { call: 4, read: 3 },
     ];
     let sent = frames.clone();
     let sending = std::thread::spawn(move || {
-        for frame in &sent {
-            one.send(&frame.encode()).unwrap();
-        }
+        let encoded: Vec<Vec<u8>> = sent.iter().map(ClientFrame::encode).collect();
+        one.send_all(&encoded[..2]).unwrap();
+        one.send_all(&encoded[2..]).unwrap();
         one
     });
     for frame in frames {
@@ -108,19 +109,62 @@ fn frames_cross_a_socket_whole() {
     assert!(other.receive(FrameSocket::MOST_BYTES).unwrap().is_none());
 
     // A frame longer than the receiver takes, or cut short by a close.
-    let (one, other) = UnixStream::pair().unwrap();
-    let (mut one, other) = (one, FrameSocket::new(other).unwrap());
+    let (mut one, other) = UnixStream::pair().unwrap();
+    let mut other = FrameReceiver::new(FrameSocket::new(other).unwrap());
     one.write_all(&ClientFrame::EndRead { read: 1 }.encode())
         .unwrap();
     assert!(other.receive(4).is_err(), "longer than taken");
-    let (mut one, other) = {
-        let (one, other) = UnixStream::pair().unwrap();
-        (one, FrameSocket::new(other).unwrap())
-    };
+    let (mut one, other) = UnixStream::pair().unwrap();
+    let mut other = FrameReceiver::new(FrameSocket::new(other).unwrap());
     let frame = ClientFrame::EndRead { read: 1 }.encode();
     one.write_all(&frame[..frame.len() - 1]).unwrap();
     drop(one);
     assert!(other.receive(FrameSocket::MOST_BYTES).is_err(), "cut short");
+}
+
+/// Frames sent in one write are taken from one read: once the first is
+/// taken, the receiver holds the others, and takes them without reading
+/// the socket, so that a batch costs a syscall on each side.
+#[test]
+fn frames_sent_together_are_taken_from_one_read() {
+    let (one, other) = UnixStream::pair().unwrap();
+    let one = FrameSocket::new(one).unwrap();
+    let mut other = FrameReceiver::new(FrameSocket::new(other).unwrap());
+    let frames = [
+        ClientFrame::EndRead { read: 1 },
+        ClientFrame::Finish { call: 2, read: 3 },
+        ClientFrame::EndRead { read: 3 },
+    ];
+    let encoded: Vec<Vec<u8>> = frames.iter().map(ClientFrame::encode).collect();
+    one.send_all(&encoded).unwrap();
+    for (taken, frame) in frames.iter().enumerate() {
+        let body = other.receive(FrameSocket::MOST_BYTES).unwrap().unwrap();
+        assert_eq!(&ClientFrame::decode(body).unwrap(), frame);
+        assert_eq!(other.holds_frame(), taken + 1 < frames.len());
+    }
+}
+
+/// More frames than one write takes go too, in order: a batch is as long
+/// as the reads in flight make it.
+#[test]
+fn a_batch_longer_than_a_write_takes_goes_whole() {
+    let (one, other) = UnixStream::pair().unwrap();
+    let one = FrameSocket::new(one).unwrap();
+    let mut other = FrameReceiver::new(FrameSocket::new(other).unwrap());
+    let frames: Vec<ClientFrame> = (0..5000)
+        .map(|read| ClientFrame::EndRead { read })
+        .collect();
+    let sent = frames.clone();
+    let sending = std::thread::spawn(move || {
+        let encoded: Vec<Vec<u8>> = sent.iter().map(ClientFrame::encode).collect();
+        one.send_all(&encoded).unwrap();
+        one
+    });
+    for frame in frames {
+        let body = other.receive(FrameSocket::MOST_BYTES).unwrap().unwrap();
+        assert_eq!(ClientFrame::decode(body).unwrap(), frame);
+    }
+    drop(sending.join().unwrap());
 }
 
 /// A cache built for sharing on files another owns is its client: it
@@ -187,7 +231,7 @@ fn answer_to(address: &OwnerAddress, hello: impl FnOnce(&FrameSocket)) -> Option
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     hello(&socket);
-    match socket.receive(64) {
+    match FrameReceiver::new(socket.try_clone().unwrap()).receive(64) {
         Ok(Some(answer)) => Some(OwnerFrame::decode(answer).unwrap()),
         Ok(None) => None,
         Err(error) => {
@@ -319,11 +363,12 @@ fn the_owner_tells_a_client_of_another_version_its_own() {
     Hello::new(PROTOCOL_VERSION + 1, cache_file)
         .send(&socket)
         .unwrap();
-    let welcome = OwnerFrame::decode(socket.receive(64).unwrap().expect("an answer")).unwrap();
+    let mut frames = FrameReceiver::new(socket.try_clone().unwrap());
+    let welcome = OwnerFrame::decode(frames.receive(64).unwrap().expect("an answer")).unwrap();
     let (version, region) = (PROTOCOL_VERSION, false);
     assert_eq!(welcome, OwnerFrame::Welcome { version, region });
     assert!(
-        matches!(socket.receive(64), Ok(None)),
+        matches!(frames.receive(64), Ok(None)),
         "the owner closes the connection"
     );
 }
@@ -420,6 +465,7 @@ fn the_owner_maps_a_clients_region_that_cannot_shrink() {
 /// admitted, then each frame sent and each answer taken by hand.
 struct RawClient {
     socket: FrameSocket,
+    frames: FrameReceiver,
     /// The news of disk reads taken so far, between answers.
     news: Vec<OwnerFrame>,
 }
@@ -454,6 +500,7 @@ impl RawClient {
         }
         hello.send(&socket).unwrap();
         let mut client = Self {
+            frames: FrameReceiver::new(socket.try_clone().unwrap()),
             socket,
             news: Vec::new(),
         };
@@ -464,10 +511,10 @@ impl RawClient {
     }
 
     /// Whether the owner sends nothing for 100 ms.
-    fn quiet(&self) -> bool {
+    fn quiet(&mut self) -> bool {
         let short = Some(Duration::from_millis(100));
         self.socket.set_read_timeout(short).unwrap();
-        let quiet = match self.socket.receive(FrameSocket::MOST_BYTES) {
+        let quiet = match self.frames.receive(FrameSocket::MOST_BYTES) {
             Err(error) => matches!(
                 error.kind(),
                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
@@ -486,7 +533,7 @@ impl RawClient {
     /// The owner's next answer, the news before it kept.
     fn answer(&mut self) -> OwnerFrame {
         loop {
-            let body = self.socket.receive(FrameSocket::MOST_BYTES).unwrap();
+            let body = self.frames.receive(FrameSocket::MOST_BYTES).unwrap();
             let frame = OwnerFrame::decode(body.expect("an answer, not a close")).unwrap();
             if !matches!(frame, OwnerFrame::DiskRead { .. }) {
                 return frame;
@@ -497,9 +544,9 @@ impl RawClient {
 
     /// Whether the owner closes the connection within 5 s, whatever it
     /// sends before.
-    fn closed(&self) -> bool {
+    fn closed(&mut self) -> bool {
         loop {
-            match self.socket.receive(FrameSocket::MOST_BYTES) {
+            match self.frames.receive(FrameSocket::MOST_BYTES) {
                 Ok(Some(_)) => {}
                 Ok(None) => return true,
                 Err(error) => {
@@ -625,7 +672,7 @@ fn an_output_span_off_a_page_boundary_closes_the_connection() {
     let inner = Arc::new(InMemory::new());
     let (_data, meta) = put_file(&inner, &Path::from("a"), MIB);
     let _owner = shared(&inner, &dir).build().unwrap();
-    let (client, region) = RawClient::admitted_with_region(&dir);
+    let (mut client, region) = RawClient::admitted_with_region(&dir);
 
     let page = crate::PAGE_SIZE_U64;
     let span = region
@@ -956,7 +1003,7 @@ fn a_second_finish_in_a_round_closes_the_connection() {
     let inner = Arc::new(InMemory::new());
     let (_data, meta) = put_file(&inner, &Path::from("a"), 2 * MIB);
     let _owner = shared(&inner, &dir).build().unwrap();
-    let client = RawClient::admitted(&dir);
+    let mut client = RawClient::admitted(&dir);
 
     client.send(&start_read(1, &meta, 0..2 * MIB));
     client.send(&ClientFrame::Finish { call: 1, read: 1 });
@@ -992,8 +1039,9 @@ fn a_clients_read_sends_its_finish_with_its_start() {
             region: false,
         };
         socket.send(&welcome.encode()).unwrap();
-        let frame = || {
-            let body = socket.receive(FrameSocket::MOST_BYTES).ok().flatten()?;
+        let mut frames = FrameReceiver::new(socket.try_clone().unwrap());
+        let mut frame = || {
+            let body = frames.receive(FrameSocket::MOST_BYTES).ok().flatten()?;
             Some(ClientFrame::decode(body).unwrap())
         };
         let Some(ClientFrame::StartRead {
@@ -1019,7 +1067,7 @@ fn a_clients_read_sends_its_finish_with_its_start() {
                 .encode(),
             )
             .unwrap();
-        let Some(ClientFrame::Finish { call, .. }) = before_any_answer.clone().or_else(frame)
+        let Some(ClientFrame::Finish { call, .. }) = before_any_answer.clone().or_else(&mut frame)
         else {
             panic!("the read's finish");
         };

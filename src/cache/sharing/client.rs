@@ -23,7 +23,7 @@ use bytes::Bytes;
 use crossbeam_channel::Sender;
 
 use super::address::{FileIdentity, OwnerAddress};
-use super::frame_socket::FrameSocket;
+use super::frame_socket::{FrameReceiver, FrameSocket};
 use super::frames::{ClientFrame, FetchSpec, FrameReader, NextStep, OwnerFrame, PROTOCOL_VERSION};
 use super::handshake::Hello;
 use super::region::{ClientRegion, RegionSpan, SpanName};
@@ -84,7 +84,7 @@ impl OwnerConnection {
         reads: Arc<dyn ReadPolicy>,
     ) -> Result<Option<Self>> {
         match Self::admitted(first_file) {
-            Ok((socket, region)) => Ok(Some(Self::start(socket, region, reads)?)),
+            Ok((socket, frames, region)) => Ok(Some(Self::start(socket, frames, region, reads)?)),
             Err(Error::Io(error)) if Self::owner_absent(&error) => Ok(None),
             Err(error) => Err(error),
         }
@@ -93,9 +93,16 @@ impl OwnerConnection {
     /// A socket to the owner of the cache whose first cache file is at
     /// `first_file`, which admitted the client: its hello sent, with its
     /// descriptor of that file and of a region of its own, and the owner's
-    /// welcome taken; and the region, if the owner mapped it. A client that
-    /// can't make a region goes without: its reads' bytes go in the frames.
-    fn admitted(first_file: &Path) -> Result<(FrameSocket, Option<std::sync::Arc<ClientRegion>>)> {
+    /// welcome taken; what takes the owner's frames after; and the region,
+    /// if the owner mapped it. A client that can't make a region goes
+    /// without: its reads' bytes go in the frames.
+    fn admitted(
+        first_file: &Path,
+    ) -> Result<(
+        FrameSocket,
+        FrameReceiver,
+        Option<std::sync::Arc<ClientRegion>>,
+    )> {
         let cache_file = File::options().read(true).write(true).open(first_file)?;
         let address = OwnerAddress::of(FileIdentity::of(&cache_file)?)?;
         let socket = FrameSocket::new(address.connect(rustix::process::geteuid())?)?;
@@ -106,7 +113,8 @@ impl OwnerConnection {
             hello = hello.with_region(region.descriptor().try_clone_to_owned()?);
         }
         hello.send(&socket)?;
-        let welcome = socket
+        let mut frames = FrameReceiver::new(socket.try_clone()?);
+        let welcome = frames
             .receive(Self::WELCOME_BYTES)?
             .ok_or(io::Error::from(io::ErrorKind::UnexpectedEof))?;
         let OwnerFrame::Welcome {
@@ -121,7 +129,7 @@ impl OwnerConnection {
             return Err(Error::Busy);
         }
         socket.set_read_timeout(None)?;
-        Ok((socket, region.filter(|_| mapped)))
+        Ok((socket, frames, region.filter(|_| mapped)))
     }
 
     /// Whether `error`, met while connecting, means no owner is there to
@@ -144,21 +152,25 @@ impl OwnerConnection {
         )
     }
 
-    /// The connection over `socket`, its owner having mapped `region` if
-    /// any, its threads started: the reader answers each call, and tells
-    /// `reads` of each read from disk.
+    /// The connection over `socket`, the owner's frames taken by `frames`,
+    /// its owner having mapped `region` if any, its threads started: the
+    /// writer sends the frames queued, each batch in one write; the reader
+    /// answers each call, and tells `reads` of each read from disk.
     fn start(
         socket: FrameSocket,
+        frames: FrameReceiver,
         region: Option<std::sync::Arc<ClientRegion>>,
         reads: Arc<dyn ReadPolicy>,
     ) -> Result<Self> {
-        let (outgoing, frames) = crossbeam_channel::unbounded::<Vec<u8>>();
+        let (outgoing, queued) = crossbeam_channel::unbounded::<Vec<u8>>();
         let writing = socket.try_clone()?;
         let writer = thread::Builder::new()
             .name("t4-client-writer".into())
             .spawn(move || {
-                for frame in frames {
-                    if writing.send(&frame).is_err() {
+                for frame in &queued {
+                    let mut batch = vec![frame];
+                    batch.extend(queued.try_iter());
+                    if writing.send_all(&batch).is_err() {
                         // The owner is gone: the reader sees it too.
                         writing.shut_down();
                         return;
@@ -170,7 +182,7 @@ impl OwnerConnection {
         #[cfg(all(test, not(feature = "shuttle")))]
         let traffic = std::sync::Arc::new(Traffic::default());
         let reader = OwnerFrames {
-            socket: socket.try_clone()?,
+            frames,
             calls: std::sync::Arc::clone(&calls),
             lent: std::sync::Arc::clone(&lent),
             reads,
@@ -478,7 +490,7 @@ impl LentSpans {
 /// breaks the protocol; then it fails the calls waiting, and every call
 /// after, and frees every span.
 struct OwnerFrames {
-    socket: FrameSocket,
+    frames: FrameReceiver,
     calls: std::sync::Arc<CallTable>,
     lent: std::sync::Arc<LentSpans>,
     reads: Arc<dyn ReadPolicy>,
@@ -495,11 +507,11 @@ struct Traffic {
 }
 
 impl OwnerFrames {
-    fn run(self) {
+    fn run(mut self) {
         let _ = self.take_frames();
         self.calls.fail_all();
         self.lent.owner_gone();
-        self.socket.shut_down();
+        self.frames.shut_down();
     }
 
     /// Takes the owner's frames until it closes the connection.
@@ -508,8 +520,8 @@ impl OwnerFrames {
     ///
     /// If the socket fails, or the owner sends a frame the protocol doesn't
     /// allow.
-    fn take_frames(&self) -> Result<()> {
-        while let Some(body) = self.socket.receive(FrameSocket::MOST_BYTES)? {
+    fn take_frames(&mut self) -> Result<()> {
+        while let Some(body) = self.frames.receive(FrameSocket::MOST_BYTES)? {
             #[cfg(all(test, not(feature = "shuttle")))]
             (self.traffic.taken).fetch_add(8 + body.len() as u64, Ordering::Relaxed);
             match OwnerFrame::decode(body)? {
