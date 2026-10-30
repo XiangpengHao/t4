@@ -20,13 +20,14 @@ use super::frame_socket::FrameSocket;
 use super::frames::{ClientFrame, FetchSpec, NextStep, OwnerFrame, PROTOCOL_VERSION};
 use super::handshake::Hello;
 use super::region::{ClientRegion, SpanName};
+use crate::cache::block_index::FileVersion;
 use crate::cache::object_cache::LocatedRun;
 use crate::cache::policy::{
     Admit, BlockSource, FixedPlacementPolicy, IoPhase, PlannedGet, ReadPlan,
 };
 use crate::cache::read_output::ReadOutput;
 use crate::cache::storage_link::StorageLink;
-use crate::cache::{T4Caching, T4CachingBuilder};
+use crate::cache::{FileVersionId, T4Caching, T4CachingBuilder};
 use crate::io::sync::Arc;
 
 const MIB: u64 = 1 << 20;
@@ -751,6 +752,181 @@ fn the_owner_serves_a_clients_hits_and_tells_it_of_its_disk_reads() {
         })
         .collect();
     assert_eq!(phases, ["started", "started", "finished", "finished"]);
+}
+
+/// A client sends a read's finish with its start, before any answer: the
+/// owner holds it, and a read of hits is one round trip, answered
+/// `Started`, then served, in the frame or, with a region, in the span.
+#[test]
+fn the_owner_answers_a_hot_read_started_and_finished_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let (data, meta) = put_file(&inner, &Path::from("a"), 2 * MIB);
+    let owner = shared(&inner, &dir).build().unwrap();
+    assert_eq!(read_listed(&owner, &meta, 0..2 * MIB).unwrap(), data);
+    let started_with_nothing_to_fetch = |answer: OwnerFrame, call| match answer {
+        OwnerFrame::Started { call: of, next, .. } => of == call && next == NextStep::Fetch(vec![]),
+        _ => false,
+    };
+
+    let mut client = RawClient::admitted(&dir);
+    client.send(&start_read(1, &meta, 5..MIB));
+    client.send(&ClientFrame::Finish { call: 1, read: 1 });
+    assert!(started_with_nothing_to_fetch(client.answer(), 100));
+    let bytes = Some(data.slice(5..MIB as usize));
+    assert_eq!(client.answer(), OwnerFrame::Served { call: 1, bytes });
+
+    let (mut client, region) = RawClient::admitted_with_region(&dir);
+    let span = region.span(ReadOutput::padded_len(&(5..MIB))).unwrap();
+    client.send(&start_read_into(2, &meta, 5..MIB, span.name()));
+    client.send(&ClientFrame::Finish { call: 3, read: 2 });
+    assert!(started_with_nothing_to_fetch(client.answer(), 200));
+    let asked = 5..MIB;
+    assert_eq!(client.answer(), OwnerFrame::ServedInSpan { call: 3, asked });
+    assert_eq!(
+        span.into_bytes(5..MIB as usize),
+        data.slice(5..MIB as usize)
+    );
+}
+
+/// A finish sent while the owner plans a read is held for the round, not
+/// a frame out of place: the read is planned, fetched and served.
+#[test]
+fn the_owner_holds_a_finish_sent_while_it_plans() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let (data, meta) = put_file(&inner, &Path::from("a"), 2 * MIB);
+    let _owner = shared(&inner, &dir).build().unwrap();
+    let mut client = RawClient::admitted(&dir);
+
+    client.send(&start_read(1, &meta, 10..2 * MIB));
+    client.send(&ClientFrame::Finish { call: 1, read: 1 });
+    let OwnerFrame::Started {
+        call: 100,
+        next: NextStep::Plan(_),
+        ..
+    } = client.answer()
+    else {
+        panic!("a run to plan");
+    };
+    let plan = ReadPlan::new(vec![PlannedGet::once(0..2)]);
+    client.send(&ClientFrame::TakeGets {
+        call: 2,
+        read: 1,
+        plan,
+    });
+    let OwnerFrame::Next {
+        call: 2,
+        next: NextStep::Fetch(fetches),
+    } = client.answer()
+    else {
+        panic!("the read's GETs");
+    };
+    assert_eq!(fetches.len(), 1);
+    client.send(&ClientFrame::Land {
+        read: 1,
+        fetch: 0,
+        bytes: data.clone(),
+    });
+    client.send(&ClientFrame::Commit {
+        call: 3,
+        read: 1,
+        fetch: 0,
+    });
+    assert_eq!(client.answer(), OwnerFrame::Committed { call: 3 });
+    let bytes = Some(data.slice(10..2 * MIB as usize));
+    assert_eq!(client.answer(), OwnerFrame::Served { call: 1, bytes });
+}
+
+/// A round of a read finishes once: a second finish breaks the protocol.
+#[test]
+fn a_second_finish_in_a_round_closes_the_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let (_data, meta) = put_file(&inner, &Path::from("a"), 2 * MIB);
+    let _owner = shared(&inner, &dir).build().unwrap();
+    let client = RawClient::admitted(&dir);
+
+    client.send(&start_read(1, &meta, 0..2 * MIB));
+    client.send(&ClientFrame::Finish { call: 1, read: 1 });
+    client.send(&ClientFrame::Finish { call: 2, read: 1 });
+    assert!(client.closed());
+}
+
+/// A client's read sends its finish right after its start, before any
+/// answer: a read of hits takes one round trip. A stand-in owner listens
+/// at the files' address, a cache not built for sharing holding them, and
+/// answers the client's frames by hand once it has seen what came first.
+#[test]
+fn a_clients_read_sends_its_finish_with_its_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let (data, meta) = put_file(&inner, &Path::from("a"), MIB);
+    let _holder = T4Caching::builder(Arc::clone(&inner) as Arc<dyn ObjectStore>)
+        .with_memory_capacity(4 * MIB)
+        .with_disk_file(dir.path().join("cache"), 8 * MIB)
+        .build()
+        .unwrap();
+    let first_file = FileIdentity::of(&File::open(dir.path().join("cache")).unwrap()).unwrap();
+    let address = OwnerAddress::of(first_file);
+    let listener = address.listen().unwrap();
+    let served = data.clone();
+    let stand_in = std::thread::spawn(move || {
+        let socket = FrameSocket::new(listener.accept().unwrap().0).unwrap();
+        let waiting = |wait| socket.set_read_timeout(Some(wait)).unwrap();
+        waiting(Duration::from_secs(5));
+        Hello::receive(&socket).unwrap().admit(first_file).unwrap();
+        let welcome = OwnerFrame::Welcome {
+            version: PROTOCOL_VERSION,
+            region: false,
+        };
+        socket.send(&welcome.encode()).unwrap();
+        let frame = || {
+            let body = socket.receive(FrameSocket::MOST_BYTES).ok().flatten()?;
+            Some(ClientFrame::decode(body).unwrap())
+        };
+        let Some(ClientFrame::StartRead {
+            call, read, size, ..
+        }) = frame()
+        else {
+            panic!("a read's start");
+        };
+        // What follows the start before any answer: the finish, or
+        // nothing within a second.
+        waiting(Duration::from_secs(1));
+        let before_any_answer = frame();
+        waiting(Duration::from_secs(5));
+        let version = FileVersion::named(FileVersionId::new(0), size).unwrap();
+        let next = NextStep::Fetch(Vec::new());
+        socket
+            .send(
+                &OwnerFrame::Started {
+                    call,
+                    version,
+                    next,
+                }
+                .encode(),
+            )
+            .unwrap();
+        let Some(ClientFrame::Finish { call, .. }) = before_any_answer.clone().or_else(frame)
+        else {
+            panic!("the read's finish");
+        };
+        let bytes = Some(served);
+        socket
+            .send(&OwnerFrame::Served { call, bytes }.encode())
+            .unwrap();
+        (read, before_any_answer)
+    });
+    let client = shared(&inner, &dir).build().unwrap();
+    let bytes = within_5s(move || read_listed(&client, &meta, 0..MIB).unwrap());
+    assert_eq!(bytes, Some(data), "served by the stand-in");
+    let (read, before_any_answer) = stand_in.join().unwrap();
+    address.remove();
+    assert!(
+        matches!(before_any_answer, Some(ClientFrame::Finish { read: of, .. }) if of == read),
+        "the finish went before any answer: {before_any_answer:?}"
+    );
 }
 
 /// A client gone mid-read, holding the claims of its GETs, gives them up:

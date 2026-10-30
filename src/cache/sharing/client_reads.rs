@@ -391,10 +391,14 @@ impl<'c> ServedRead<'c> {
             version: file.version(),
         };
         loop {
-            let Some(fetches) = self.plan(&mut read, &mut work, answer).await else {
+            // The round's finish: the client may send it with the round's
+            // start, before its runs are planned.
+            let mut finish = None;
+            let Some(fetches) = self.plan(&mut read, &mut work, answer, &mut finish).await else {
                 return;
             };
-            let (finish, worked) = join(self.land(fetches), work.finish(&mut read)).await;
+            let landed = self.land(fetches, finish);
+            let (finish, worked) = join(landed, work.finish(&mut read)).await;
             let Some(call) = finish else {
                 return;
             };
@@ -427,31 +431,29 @@ impl<'c> ServedRead<'c> {
 
     /// Locates `work`'s runs one at a time, each sent to the client, the
     /// first in `answer`, and the GETs it plans for each taken; then takes
-    /// the read's fetches, sent in the answer to the last call. `None` if
-    /// the read ends: the cache failed it, or the client sent a frame other
-    /// than a run's GETs.
+    /// the read's fetches, sent in the answer to the last call. The round's
+    /// finish, if the client sends it meanwhile, is held in `finish`. `None`
+    /// if the read ends: the cache failed it, which fails the finish held
+    /// too, or the client sent a frame other than a run's GETs or the
+    /// round's one finish.
     async fn plan(
         &self,
         read: &mut PartialRead,
         work: &mut TierWork<'_>,
         mut answer: StepAnswer,
+        finish: &mut Option<u64>,
     ) -> Option<Vec<FetchedBlocks<'c>>> {
         loop {
             match work.locate_next_run(read) {
                 Ok(Some(run)) => {
                     self.outbox.send(answer.with(NextStep::Plan(run)));
-                    let ClientFrame::TakeGets { call, plan, .. } = self.next_frame().await else {
-                        self.outbox.break_protocol("frame: a run's GETs were due");
-                        return None;
-                    };
+                    let (call, plan) = self.run_gets(finish).await?;
                     work.take_gets(read, &plan);
                     answer = StepAnswer::Next { call };
                 }
                 Ok(None) => break,
                 Err(_) => {
-                    self.outbox.send(OwnerFrame::Failed {
-                        call: answer.call(),
-                    });
+                    self.fail(answer, *finish);
                     return None;
                 }
             }
@@ -459,9 +461,7 @@ impl<'c> ServedRead<'c> {
         let mut fetches = Vec::new();
         for bytes in read.fetches() {
             let Ok(blocks) = self.cache.receive(read, bytes) else {
-                self.outbox.send(OwnerFrame::Failed {
-                    call: answer.call(),
-                });
+                self.fail(answer, *finish);
                 return None;
             };
             fetches.push(blocks);
@@ -474,15 +474,40 @@ impl<'c> ServedRead<'c> {
         Some(fetches)
     }
 
+    /// The GETs the client planned for the run located last: the call
+    /// that sent them, and the plan. The round's finish, if it comes first,
+    /// is held in `finish`. `None` if the client sent another frame, or a
+    /// second finish: it broke the protocol.
+    async fn run_gets(&self, finish: &mut Option<u64>) -> Option<(u64, ReadPlan)> {
+        loop {
+            match self.next_frame().await {
+                ClientFrame::TakeGets { call, plan, .. } => return Some((call, plan)),
+                ClientFrame::Finish { call, .. } if finish.is_none() => *finish = Some(call),
+                _ => {
+                    self.outbox.break_protocol("frame: a run's GETs were due");
+                    return None;
+                }
+            }
+        }
+    }
+
+    /// Answers `answer`'s call, and the round's `finish` if the client sent
+    /// it already, `Failed`: the cache failed the read, which ends.
+    fn fail(&self, answer: StepAnswer, finish: Option<u64>) {
+        for call in std::iter::once(answer.call()).chain(finish) {
+            self.outbox.send(OwnerFrame::Failed { call });
+        }
+    }
+
     /// Takes the read's frames as the client lands `fetches`, by their
     /// place in the list: each one's bytes landed in order, from the frame
     /// or from where the client staged them in its region, committed, or
-    /// abandoned; until the client has asked to finish and every fetch is
-    /// committed or abandoned. Returns the finish's call; `None` if the
-    /// client sent a frame the protocol doesn't allow.
-    async fn land(&self, fetches: Vec<FetchedBlocks<'c>>) -> Option<u64> {
+    /// abandoned; until the client has asked to finish, in `finish` already
+    /// or in a frame now, and every fetch is committed or abandoned. Returns
+    /// the finish's call; `None` if the client sent a frame the protocol
+    /// doesn't allow.
+    async fn land(&self, fetches: Vec<FetchedBlocks<'c>>, mut finish: Option<u64>) -> Option<u64> {
         let mut fetches: Vec<_> = fetches.into_iter().map(LandingFetch::Landing).collect();
-        let mut finish = None;
         while finish.is_none() || fetches.iter().any(LandingFetch::is_open) {
             let frame = self.next_frame().await;
             let landed = match frame {

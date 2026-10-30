@@ -196,9 +196,19 @@ impl OwnerConnection {
     ///
     /// If the owner is gone, or goes before it answers.
     async fn call(&self, call: impl FnOnce(u64) -> ClientFrame) -> Result<OwnerFrame> {
+        self.send_call(call)?.await
+    }
+
+    /// Sends the frame `call` makes of a new call's number: the call, its
+    /// answer awaited later, or given up if it drops first.
+    ///
+    /// # Errors
+    ///
+    /// If the owner is gone.
+    fn send_call(&self, call: impl FnOnce(u64) -> ClientFrame) -> Result<WaitingCall<'_>> {
         let waiting = self.calls.wait()?;
         self.tell(&call(waiting.number));
-        waiting.await
+        Ok(waiting)
     }
 
     /// Sends `frame`, which takes no answer; dropped if the owner is gone.
@@ -516,8 +526,8 @@ impl OwnerFrames {
 
 /// A client's read through its owner (`doc/11-shared-mode.md`, decision
 /// 5): its number on the connection, the read's next step as the owner
-/// answered it, and, once served, where its bytes are. Its client plans its
-/// GETs and makes them; the owner does the rest.
+/// answered it, its round's finish, and, once served, where its bytes are.
+/// Its client plans its GETs and makes them; the owner does the rest.
 pub(in crate::cache) struct ClientRead<'c> {
     number: ReadNumber<'c>,
     path: &'c [u8],
@@ -525,6 +535,10 @@ pub(in crate::cache) struct ClientRead<'c> {
     /// The file's bytes the client asked for.
     asked: Range<u64>,
     next: Option<NextStep>,
+    /// The round's finish, sent as the round starts, with the read's start
+    /// or once the owner answers `Retry`: the owner holds it till the
+    /// round's work is done, so that a read of hits is one round trip.
+    finish: Option<WaitingCall<'c>>,
     served: Option<Served>,
 }
 
@@ -544,9 +558,9 @@ impl<'c> ClientRead<'c> {
     const MOST_BYTES: u64 = 1 << 30;
 
     /// Starts a read through `owner` of `range` of the version of the file
-    /// at `path` with `e_tag` and `size`, within it, for `intent`. `None`
-    /// if the cache can't hold the file, or a client's read of that many
-    /// bytes.
+    /// at `path` with `e_tag` and `size`, within it, for `intent`, its first
+    /// round's finish sent with it. `None` if the cache can't hold the file,
+    /// or a client's read of that many bytes.
     ///
     /// # Errors
     ///
@@ -568,25 +582,26 @@ impl<'c> ClientRead<'c> {
             (owner.region.as_ref()).and_then(|region| region.span(ReadOutput::padded_len(&range)));
         let output = number.output.as_ref().map(RegionSpan::name);
         let asked = range.clone();
-        let answer = owner
-            .call(|call| ClientFrame::StartRead {
-                call,
-                read: number.number,
-                path: Bytes::copy_from_slice(path),
-                e_tag: e_tag.to_owned(),
-                size,
-                range,
-                intent,
-                output,
-            })
-            .await?;
-        match answer {
+        let read = number.number;
+        let started = owner.send_call(|call| ClientFrame::StartRead {
+            call,
+            read,
+            path: Bytes::copy_from_slice(path),
+            e_tag: e_tag.to_owned(),
+            size,
+            range,
+            intent,
+            output,
+        })?;
+        let finish = owner.send_call(|call| ClientFrame::Finish { call, read })?;
+        match started.await? {
             OwnerFrame::Started { version, next, .. } => Ok(Some(Self {
                 number,
                 path,
                 version,
                 asked,
                 next: Some(next),
+                finish: Some(finish),
                 served: None,
             })),
             OwnerFrame::Uncacheable { .. } => Ok(None),
@@ -668,21 +683,27 @@ impl<'c> ClientRead<'c> {
     /// Waits for the read's work in the owner, done once the owner has
     /// served what it holds and the read's fetches are committed or
     /// abandoned: whether blocks are left to fetch, those it waited for
-    /// that no fetch cached, its next step.
+    /// that no fetch cached, its next step. The finish was sent as the
+    /// round started; the next round's goes at once.
     ///
     /// # Errors
     ///
     /// If the owner failed the read, or is gone.
+    ///
+    /// # Panics
+    ///
+    /// If the read was served already: it has no round left to finish.
     pub(in crate::cache) async fn finish(&mut self) -> Result<bool> {
-        let read = self.number.number;
-        let answer = self
-            .number
-            .owner
-            .call(|call| ClientFrame::Finish { call, read })
-            .await?;
-        match answer {
+        let finish = self
+            .finish
+            .take()
+            .expect("a round's finish, sent as it starts");
+        match finish.await? {
             OwnerFrame::Retry { next, .. } => {
                 self.next = Some(next);
+                let owner = self.number.owner;
+                let read = self.number.number;
+                self.finish = Some(owner.send_call(|call| ClientFrame::Finish { call, read })?);
                 Ok(true)
             }
             OwnerFrame::Served { bytes, .. } => {

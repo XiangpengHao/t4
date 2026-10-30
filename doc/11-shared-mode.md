@@ -178,7 +178,8 @@ decision 9).
        `Next`: the next run, or the GETs.
      - `Land` (a GET's next bytes) and `Abandon` (a GET failed) take no
        answer; `Commit` (a GET all in) is answered `Committed`.
-     - `Finish`, sent with the GETs, is answered once the read's work on
+     - `Finish`, sent as the round starts (with `StartRead`, or once
+       `Retry` answers), once a round, is answered once the read's work on
        the tiers is done and its GETs are committed or abandoned:
        `Retry`, the next step for the blocks it waited for that no fetch
        cached, or `Served`, the read's bytes.
@@ -359,6 +360,23 @@ is wakeups, and the first cut is fewer round trips (`Finish` sent with
 `StartRead`), not polling, which would spin a desktop's CPU to save
 them.
 
+**With `Finish` sent with `StartRead`** (protocol version 3), predicted
+one round trip less, 22 µs and 35 µs; measured the same way, fastest,
+median and slowest of 100:
+
+| a hot read of | the owner's own | its client's, before | its client's, now |
+|---|---|---|---|
+| 4 KiB | 406 ns | 43 µs | 20.1, 25.1, 96.6 µs |
+| 1 MiB | 12.6 µs | 56 µs | 30.4, 35.7, 99.3 µs |
+
+The model held: each read lost 18 to 20 µs, one round trip. The one left
+is the five wakeups: the client's writer thread, the owner's session
+reader, its session thread, the client's reader, the caller. Two are
+hops between threads of one side, which a later change could cut: the
+caller writing its frames to the socket itself, and the session thread
+reading its socket itself. Three would be left, about 13 µs by the same
+count.
+
 ## Rejected
 
 - **A server process apart from the apps** (doc/02's `t4-server`):
@@ -533,7 +551,10 @@ them.
       client's 2 MiB cold read moving under 64 KiB over its socket, the
       owner caching it, and, no span free, the bytes in the frames
       (`a_clients_cold_read_moves_only_control_over_its_socket`).
-5. **Polling,** only if measured (Later).
+5. **Polling,** only if measured (Later). Measured 30 Oct 2026 (Cost):
+   a client's round trip is thread wakeups, cut first by fewer round
+   trips (`Finish` with `StartRead`, built: a read of hits is one); not
+   polling, which would spin a desktop's CPU.
 
 ## Code map
 

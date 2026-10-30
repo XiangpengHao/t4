@@ -22,7 +22,7 @@ use crate::io::error::{Error, Result};
 
 /// The protocol's version: a client and an owner of different versions
 /// don't talk.
-pub(super) const PROTOCOL_VERSION: u32 = 2;
+pub(super) const PROTOCOL_VERSION: u32 = 3;
 
 /// A frame a client sends its owner. A call, which the owner answers,
 /// carries the number the client gave it, `call`; the other frames take no
@@ -66,8 +66,10 @@ pub(super) enum ClientFrame {
     Commit { call: u64, read: u64, fetch: u32 },
     /// The read's fetch `fetch` failed: its blocks go uncached.
     Abandon { read: u64, fetch: u32 },
-    /// The read's work on the tiers, answered once it is done and the
-    /// read's fetches are committed or abandoned.
+    /// The read's round: its work on the tiers, answered once it is done
+    /// and the round's fetches are committed or abandoned. Sent any time
+    /// after the round starts, with `StartRead` or after `Retry`, once a
+    /// round.
     Finish { call: u64, read: u64 },
     /// The client is done with the read, or gave it up; the owner answers
     /// [`OwnerFrame::Ended`] once it is done with the read's spans.

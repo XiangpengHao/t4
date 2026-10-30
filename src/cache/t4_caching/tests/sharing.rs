@@ -450,6 +450,49 @@ fn calls_waiting(cache: &T4Caching) -> Vec<u64> {
     }
 }
 
+/// A client's read that waited for the owner's fetch of a block, which
+/// failed: the round ends `Retry`, the next round's finish goes at once,
+/// and the client fetches the block itself.
+#[test]
+fn a_clients_read_whose_wait_ends_uncached_fetches_in_a_second_round() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(MIB, 17);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let (owner, owners, owners_meta) = process(&path, &data, shared);
+    let (client, clients, clients_meta) = process(&path, &data, shared);
+    let open = owners.gate_next_get();
+    let (owned, owners_read) = mpsc::channel();
+    let file = owner.open_listed(owners_meta.clone());
+    std::thread::spawn(move || {
+        let _ = owned.send(block_on(file.read(0..MIB, None)).is_err());
+    });
+    wait_until(|| owners.gets_out_now() == 1, "the owner's GET goes out");
+
+    let clients_read = read_on_thread(client.clone(), clients_meta, 0..MIB);
+    wait_until(
+        || calls_waiting(&client) == [1],
+        "the client's finish waits",
+    );
+    // The owner's GET finds the file gone: its fetch ends with no block
+    // cached, and the client's read fetches it in a round of its own.
+    block_on(owners.delete(&path)).unwrap();
+    drop(open);
+    assert_eq!(owners_read.recv_timeout(Duration::from_secs(5)), Ok(true));
+    let read = clients_read.recv_timeout(Duration::from_secs(5));
+    assert_eq!(read.unwrap(), data);
+    assert_eq!(
+        clients.take_asked(),
+        [bounded(0..MIB)],
+        "fetched once, itself"
+    );
+    assert!(reads_through_an_owner(&client));
+    // Through its owner, not the store: the owner holds the block, which
+    // only the client's fetch could have brought, the file gone from the
+    // owner's store.
+    assert_eq!(read_listed(&owner, &owners_meta, 0..MIB), data);
+}
+
 /// A client's read given up while it waits for its owner, its `Finish`
 /// unanswered: the call leaves the client's table with the read, and the
 /// connection serves the client's next read.
@@ -468,12 +511,12 @@ fn a_clients_read_given_up_leaves_no_call_waiting() {
     let file = client.open_listed(clients_meta.clone());
     let mut read = Box::pin(file.read(0..MIB, None));
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    // Its start and its GETs answered, its `Finish` waits on the owner's
-    // GET.
+    // Its start (call 0) and its GETs (2) answered, its `Finish` (1), sent
+    // with its start, waits on the owner's GET.
     wait_until(
         || {
             assert!(read.as_mut().poll(&mut context).is_pending());
-            calls_waiting(&client) == [2]
+            calls_waiting(&client) == [1]
         },
         "the read's Finish waits",
     );
