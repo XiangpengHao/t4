@@ -279,9 +279,13 @@ hosts is one.
      across restarts (`03-cache.md`, decision 5). A temporary file,
      flushed, renamed into place, the directory flushed. About 8 bytes a
      block and each version's path: some 160 KiB at 20 GiB. A cache never
-     dropped, in a process that exits around it, keeps nothing: Studio
-     and `spiral connect` have to drop their caches as they shut down
-     (to be checked in the adapter, plan step 6).
+     dropped, in a process that exits around it, keeps nothing. Checked at
+     develop's 38c61bd33f (2 Nov 2026): `spiral connect` drops its host
+     once Ctrl-C ends its serve, and so keeps its snapshot; Studio doesn't.
+     Its host lives in Tauri's managed state and serves on Tauri's runtime,
+     and Tauri exits the process after `RunEvent::Exit` without dropping
+     either. So Studio starts cold each time until its exit hook keeps the
+     disk tier (Open questions).
    - **As the next cache on the files builds,** its lock taken, it reads
      the snapshot and removes it, durably, before it writes a chunk: a
      running cache reuses a chunk as soon as it frees it, so a crash must
@@ -519,6 +523,25 @@ Phase 1, t4 in Kismet's place:
    test on a Mac (decision 9). `clear_caches` refuses on t4 (decision 10).
    t4's counters go to the metrics of the session that installed the cache
    last; sessions sharing one cache share them.
+
+   Moved 2 Nov 2026 onto develop at 38c61bd33f, t4 by git at 2b7f093,
+   still not committed: `with_multiprocess_sharing`; a user's machine's
+   file grows (`with_growing_disk_files`, decision 9); an object's size
+   from `known_size` rather than a HEAD of t4 itself, which a restarted
+   cache refused (decision 7). New test: a session built again on a
+   dropped one's directory reads what it cached with no HEAD and no read
+   of the provider (`a_restarted_session_reads_what_it_cached`). The
+   ScanDAL disk-cache test reads a split with `read_split_request`, as
+   develop's ScanDAL API now has it (plan 122). Passing: spiral-io's 122,
+   the I/O plugin's 103, Hugging Face's 20, Arbor's 138 unit tests, the
+   ScanDAL disk-cache cases (none, Kismet, t4), spiral-table's cache
+   tests; clippy (`-D warnings`, all targets and features) on the six
+   crates the adapter touches. Arbor's integration tests fail at develop's
+   38c61bd33f with or without the adapter, all with "Arbor storage is not
+   configured for the exact operation session". t4 takes `bbtree` 0.2.0
+   (bumped 2 Nov 2026), the same `vstd` pin as 0.1.x: Spiral had resolved
+   t4's `bbtree = "0.1.4"` to 0.1.7, untested by t4's own lockfile, which
+   held 0.1.4. The adapter takes the version with t4's next commit.
 2. **Measured on Linux: Kismet and t4 in the same seat,** a user's
    machine's profile, the same drive, OS defaults. A ClickBench subset
    from S3 through Spiral's engine: engine-bench, if it reads through
@@ -575,6 +598,13 @@ Phase 2, t4 in the read path:
    reads through t4.
 
 ## Open questions
+
+- **Keeping the disk tier from Studio's exit hook** (decision 7). Studio
+  never drops its cache, so it keeps nothing. Either t4 gains a call that
+  writes no more to disk and keeps the snapshot, safe while the process
+  lives on, which Studio's `RunEvent::Exit` reaches through its host's
+  `IoSession`; or Studio stops its host and drops it at exit, which needs
+  every clone of the session gone first.
 
 - **Servers.** Server query processes, Flight SQL and the worker engines
   cache nothing today. If they run long on machines with NVMe drives,
