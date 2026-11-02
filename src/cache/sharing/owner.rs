@@ -215,15 +215,13 @@ impl ClientSession {
         let mut context = Context::from_waker(&task_waker);
         loop {
             if waker.wait_for(&self.socket)? {
-                // One read of the socket, and every frame it took.
-                loop {
-                    let Some(body) = frames.receive(FrameSocket::MOST_BYTES)? else {
-                        return Ok(());
-                    };
+                // What has come, and every frame it completes: a frame half
+                // come waits for its rest, not the session.
+                if !frames.fill()? {
+                    return Ok(());
+                }
+                while let Some(body) = frames.next_frame(FrameSocket::MOST_BYTES)? {
                     reads.take(ClientFrame::decode(body)?)?;
-                    if !frames.holds_frame() {
-                        break;
-                    }
                 }
             }
             reads.run(&mut context);

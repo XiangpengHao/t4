@@ -299,7 +299,10 @@ decision 9).
      which the owner checks names the same file (`fstat`) and is open
      read-write (`F_GETFL`), so whoever may write the cache file may use
      the cache; and the client's region's descriptor in the same message,
-     if it made one, which the hello says. The owner's welcome says
+     if it made one, which the hello says. The owner closes them on
+     `exec` as they come, where the receive can't (macOS), so that a
+     process it starts inherits neither
+     (`a_hellos_descriptors_close_on_exec`). The owner's welcome says
      whether it mapped the region: one refused, the client is admitted
      without it, its reads' bytes in the frames. The hello and the
      welcome are the same in every version, so that a client and an
@@ -432,19 +435,25 @@ session, 3 µs.
 
 **No thread between** (2 Nov 2026): a caller sends its own frames, and
 the session thread takes its own; predicted 5 µs less.
-- A caller writes its frames while the socket has room
-  (`FrameSender`); a frame it has no room for, and every frame after it
-  till they have gone, goes by the writer thread, so that frames keep
-  their order. macOS ignores `MSG_DONTWAIT` on a Unix socket (checked),
-  and `O_NONBLOCK` is every clone's, the reader's too, so a caller's
+- A caller writes its frames while the socket has room and no other is
+  writing (`FrameSender`); what doesn't fit, and every frame sent
+  meanwhile or after, till they have gone, goes by the writer thread, so
+  that frames keep their order. A caller holds no lock while it sends, so
+  that it holds up no other (`a_caller_waiting_for_room_holds_up_no_other`).
+  On Linux a caller's send takes what fits at once (`MSG_DONTWAIT`).
+  macOS ignores `MSG_DONTWAIT` on a Unix socket (checked), and
+  `O_NONBLOCK` is every clone's, the reader's too, so there a caller's
   send waits 200 µs at most, the socket's write timeout, then leaves its
-  frame to the writer, which waits for room with `poll`. A read's
+  frames to the writer, which waits for room with `poll`. A read's
   `StartRead` and `Finish` go in one write.
 - The session thread waits on its client's socket and on a bell, a
   socket of its own that a read's wakeup rings once between two waits
-  (`SessionWaker`), and takes the frames that came. A frame queued on the
-  session's own thread rings no bell: the thread sends what is queued
-  before it waits.
+  (`SessionWaker`). It takes what has come with one read, and the frames
+  it completes: a frame half come waits for its rest, not the session
+  (`a_frame_half_come_is_held_till_the_rest_comes`). A frame goes out of
+  the read as its own bytes, not a copy. A frame queued on the session's
+  own thread rings no bell: the thread sends what is queued before it
+  waits.
 
 The benchmark now drops each read's bytes within its time, as a client's
 read ends then with a frame to its owner: divan drops a bench's output
@@ -619,7 +628,10 @@ session ending the last read before it takes the next's frames, 1 µs.
       (`OwnerRegion::output`, `ReadOutput::over`), and answers
       `ServedInSpan`; `EndRead` is answered `Ended` once the read's task
       and every buffer over its span have dropped (`ReadEnd`), and the
-      client keeps a read's spans until then (`LentSpans`). Tested: the
+      client keeps a read's spans until then (`LentSpans`). The client
+      ends a read once the read and every fetch of it have dropped, so
+      that no frame of the read's follows its end
+      (`a_fetch_dropped_after_its_read_gives_its_span_back`). Tested: the
       owner serving into a span, no `Ended` before the client ends the
       read, a span too short closing the connection
       (`the_owner_serves_a_read_into_its_clients_span`); a client's

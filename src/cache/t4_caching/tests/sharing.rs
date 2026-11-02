@@ -442,6 +442,48 @@ fn a_clients_spans_come_back_once_its_owner_goes() {
     wait_until(|| region_free_pages(&client) == all, "every span is free");
 }
 
+/// A fetch dropped after its read still gives its span back, and keeps
+/// the connection: the read ends in the owner only once its last fetch has
+/// dropped, so a fetch neither abandons a read the owner has ended, which
+/// breaks the protocol, nor keeps a span for one.
+#[test]
+fn a_fetch_dropped_after_its_read_gives_its_span_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(MIB, 23);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let (_owner, _, _) = process(&path, &data, shared);
+    let (client, _, meta) = process(&path, &data, shared);
+    let all = region_free_pages(&client);
+    let link = client.link();
+    let StorageLink::Client(owner) = &*link else {
+        panic!("a client");
+    };
+    let e_tag = meta.e_tag.clone().unwrap();
+    let started = crate::cache::sharing::ClientRead::start(
+        owner,
+        path.as_ref().as_bytes(),
+        &e_tag,
+        meta.size,
+        0..MIB,
+        None,
+    );
+    let mut read = block_on(started).unwrap().expect("a cacheable file");
+    while let Some(run) = read.locate_next_run() {
+        let gets = run.planned_by(&FetchRuns::default(), &read.file(), None);
+        block_on(read.take_gets(&gets)).unwrap();
+    }
+    let fetches = read.fetches();
+    assert!(!fetches.is_empty(), "the read fetches its block");
+
+    drop(read);
+    // Time for the owner to end the read, had the client ended it.
+    std::thread::sleep(Duration::from_millis(100));
+    drop(fetches);
+    wait_until(|| region_free_pages(&client) == all, "every span is free");
+    assert!(!owner.owner_gone(), "the connection kept");
+}
+
 /// The calls `cache`, a client, waits on its owner for, by number.
 fn calls_waiting(cache: &T4Caching) -> Vec<u64> {
     match &*cache.link() {

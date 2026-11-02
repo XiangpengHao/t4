@@ -160,7 +160,7 @@ impl OwnerConnection {
         region: Option<std::sync::Arc<ClientRegion>>,
         reads: Arc<dyn ReadPolicy>,
     ) -> Result<Self> {
-        let outgoing = FrameSender::start(socket.try_clone()?)?;
+        let outgoing = FrameSender::start(socket.try_clone()?, FrameSender::SEND_WAIT)?;
         let calls = std::sync::Arc::new(CallTable::default());
         let lent = std::sync::Arc::new(LentSpans::default());
         #[cfg(all(test, not(feature = "shuttle")))]
@@ -449,9 +449,9 @@ impl Default for LentSpans {
 }
 
 impl LentSpans {
-    /// Keeps `spans`, the read `read`'s, with any kept of it already, until
-    /// the owner ends the read. A read's fetches hand theirs over as they
-    /// drop, before the read ends.
+    /// Keeps `spans`, the read `read`'s, until the owner ends the read: the
+    /// read's number hands them over as it drops, the last of the read and
+    /// its fetches, before it ends the read.
     fn keep_until_ended(&self, read: u64, spans: Vec<RegionSpan>) {
         if spans.is_empty() {
             return;
@@ -542,7 +542,7 @@ impl OwnerFrames {
 /// answered it, its round's finish, and, once served, where its bytes are.
 /// Its client plans its GETs and makes them; the owner does the rest.
 pub(in crate::cache) struct ClientRead<'c> {
-    number: ReadNumber<'c>,
+    number: std::sync::Arc<ReadNumber<'c>>,
     path: &'c [u8],
     version: FileVersion,
     /// The file's bytes the client asked for.
@@ -589,11 +589,11 @@ impl<'c> ClientRead<'c> {
         if range.end - range.start > Self::MOST_BYTES {
             return Ok(None);
         }
-        let mut number = ReadNumber::take(owner);
+        let number = ReadNumber::take(owner);
         // No span free, the read's bytes come in the frame.
-        number.output =
+        let output =
             (owner.region.as_ref()).and_then(|region| region.span(ReadOutput::padded_len(&range)));
-        let output = number.output.as_ref().map(RegionSpan::name);
+        let output = number.lend_output(output);
         let asked = range.clone();
         let read = number.number;
         let (started, finish) = owner.send_calls(
@@ -611,7 +611,7 @@ impl<'c> ClientRead<'c> {
         )?;
         match started.await? {
             OwnerFrame::Started { version, next, .. } => Ok(Some(Self {
-                number,
+                number: std::sync::Arc::new(number),
                 path,
                 version,
                 asked,
@@ -682,8 +682,7 @@ impl<'c> ClientRead<'c> {
                 let staged =
                     (owner.region.as_ref()).and_then(|region| region.span(bytes.end - bytes.start));
                 ClientFetch {
-                    owner,
-                    read: self.number.number,
+                    read: std::sync::Arc::clone(&self.number),
                     fetch,
                     spec,
                     file: self.version.id(),
@@ -753,7 +752,7 @@ impl<'c> ClientRead<'c> {
                 // file's first asked would.
                 let at = usize::try_from(asked.start % PAGE_SIZE_U64).ok()?;
                 let len = usize::try_from(asked.end - asked.start).ok()?;
-                let span = self.number.output.take()?;
+                let span = self.number.take_output()?;
                 let within = self.asked.start <= asked.start && asked.end <= self.asked.end;
                 let fits = (at + len) as u64 <= span.name().len();
                 (within && fits).then(|| span.into_bytes(at..at + len))
@@ -771,15 +770,19 @@ impl<'c> ClientRead<'c> {
     }
 }
 
-/// A read's number on its connection, from its start, and the spans it
-/// lent the owner: dropped, it ends the read in the owner, served or not,
-/// which drops all it holds of it, and keeps the spans until the owner
-/// says it has ([`LentSpans`]).
+/// A read's number on its connection, from its start, held by the read and
+/// each of its fetches; and the spans they lent the owner. Dropped with the
+/// last of them, it ends the read in the owner, served or not, which drops
+/// all it holds of it, and keeps the spans until the owner says it has
+/// ([`LentSpans`]): no frame of the read's goes after its end, which would
+/// break the protocol.
 struct ReadNumber<'c> {
     owner: &'c OwnerConnection,
     number: u64,
     /// The read's output's span, until its caller takes it, served.
-    output: Option<RegionSpan>,
+    output: Mutex<Option<RegionSpan>>,
+    /// The spans its fetches staged their bytes in, as they drop.
+    staged: Mutex<Vec<RegionSpan>>,
 }
 
 impl<'c> ReadNumber<'c> {
@@ -787,15 +790,43 @@ impl<'c> ReadNumber<'c> {
         Self {
             owner,
             number: owner.next_read.fetch_add(1, Ordering::Relaxed),
-            output: None,
+            output: Mutex::default(),
+            staged: Mutex::default(),
         }
+    }
+
+    /// Keeps `output`, the read's output's span if one was free, and names
+    /// it for the read's start.
+    fn lend_output(&self, output: Option<RegionSpan>) -> Option<SpanName> {
+        let name = output.as_ref().map(RegionSpan::name);
+        *self.output.lock().unwrap_or_else(PoisonError::into_inner) = output;
+        name
+    }
+
+    /// The read's output's span, served: its caller's now.
+    fn take_output(&self) -> Option<RegionSpan> {
+        self.output
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+
+    /// Keeps `staged`, a fetch's span, until the owner ends the read.
+    fn keep_staged(&self, staged: Option<RegionSpan>) {
+        (self.staged.lock().unwrap_or_else(PoisonError::into_inner)).extend(staged);
     }
 }
 
 impl Drop for ReadNumber<'_> {
     fn drop(&mut self) {
         // Kept before the read ends: the owner's end comes after.
-        let spans = self.output.take().into_iter().collect();
+        let output = self.take_output();
+        let mut spans = std::mem::take(
+            self.staged
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        spans.extend(output);
         self.owner.lent.keep_until_ended(self.number, spans);
         self.owner
             .tell(&[ClientFrame::EndRead { read: self.number }]);
@@ -808,10 +839,9 @@ impl Drop for ReadNumber<'_> {
 /// as the owner said. Dropped before, as when the GET fails, it is
 /// abandoned: the owner caches none of it, and the reads waiting on its
 /// blocks fetch for themselves. Dropped either way, its span is kept until
-/// the owner ends the read.
+/// the owner ends the read, which it holds open until then.
 pub(in crate::cache) struct ClientFetch<'c> {
-    owner: &'c OwnerConnection,
-    read: u64,
+    read: std::sync::Arc<ReadNumber<'c>>,
     /// Its place in the read's fetches.
     fetch: u32,
     spec: FetchSpec,
@@ -850,7 +880,7 @@ impl ClientFetch<'_> {
     /// past the span, as a GET that brings more bytes than it holds, which
     /// the owner refuses at the commit.
     pub(in crate::cache) fn land(&mut self, piece: &[u8]) {
-        let (read, fetch, at) = (self.read, self.fetch, self.landed);
+        let (read, fetch, at) = (self.read.number, self.fetch, self.landed);
         let len = piece.len() as u64;
         let staged = (self.staged.as_mut()).filter(|span| at + len <= span.name().len());
         let frame = match staged {
@@ -870,7 +900,7 @@ impl ClientFetch<'_> {
             },
         };
         self.landed += len;
-        self.owner.tell(&[frame]);
+        self.read.owner.tell(&[frame]);
     }
 
     /// Commits the fetch, every byte in: the owner caches its blocks where
@@ -883,8 +913,9 @@ impl ClientFetch<'_> {
     /// more: nothing is cached.
     pub(in crate::cache) async fn finish(mut self) -> Result<()> {
         self.settled = true;
-        let (read, fetch) = (self.read, self.fetch);
+        let (read, fetch) = (self.read.number, self.fetch);
         let answer = self
+            .read
             .owner
             .call(|call| ClientFrame::Commit { call, read, fetch })
             .await;
@@ -905,15 +936,15 @@ impl ClientFetch<'_> {
 impl Drop for ClientFetch<'_> {
     fn drop(&mut self) {
         if !self.settled {
-            self.owner.tell(&[ClientFrame::Abandon {
-                read: self.read,
+            self.read.owner.tell(&[ClientFrame::Abandon {
+                read: self.read.number,
                 fetch: self.fetch,
             }]);
         }
-        // The owner may read the span until it ends the read, which comes
-        // after: a read's fetches drop before its number, which ends it.
-        let staged = self.staged.take().into_iter().collect();
-        self.owner.lent.keep_until_ended(self.read, staged);
+        // The owner may read the span until it ends the read, which the
+        // read's number, as the last of the read and its fetches drops,
+        // asks for after.
+        self.read.keep_staged(self.staged.take());
     }
 }
 

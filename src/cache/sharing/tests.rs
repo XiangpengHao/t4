@@ -124,9 +124,9 @@ fn frames_cross_a_socket_whole() {
     assert!(other.receive(FrameSocket::MOST_BYTES).is_err(), "cut short");
 }
 
-/// Frames sent in one write are taken from one read: once the first is
-/// taken, the receiver holds the others, and takes them without reading
-/// the socket, so that a batch costs a syscall on each side.
+/// Frames sent in one write are taken from one read, which the receiver
+/// hands out one at a time with no read more, each the read's own bytes,
+/// not a copy of them.
 #[test]
 fn frames_sent_together_are_taken_from_one_read() {
     let (one, other) = UnixStream::pair().unwrap();
@@ -139,11 +139,57 @@ fn frames_sent_together_are_taken_from_one_read() {
     ];
     let encoded: Vec<Vec<u8>> = frames.iter().map(ClientFrame::encode).collect();
     one.send_all(&encoded).unwrap();
-    for (taken, frame) in frames.iter().enumerate() {
-        let body = other.receive(FrameSocket::MOST_BYTES).unwrap().unwrap();
-        assert_eq!(&ClientFrame::decode(body).unwrap(), frame);
-        assert_eq!(other.holds_frame(), taken + 1 < frames.len());
+
+    assert!(other.fill().unwrap());
+    let mut bodies = Vec::new();
+    for frame in &frames {
+        let body = other.next_frame(FrameSocket::MOST_BYTES).unwrap();
+        let body = body.expect("the frame came with the read");
+        assert_eq!(&ClientFrame::decode(body.clone()).unwrap(), frame);
+        bodies.push(body);
     }
+    assert!(other.next_frame(FrameSocket::MOST_BYTES).unwrap().is_none());
+    for pair in bodies.windows(2) {
+        let after_first = pair[0].as_ptr_range().end;
+        // The next frame's body follows its length.
+        assert_eq!(after_first.wrapping_add(size_of::<u64>()), pair[1].as_ptr());
+    }
+}
+
+/// A frame half come is held, and taken once the rest comes: a read of
+/// the socket takes what has come, and waits for no more, so that a
+/// session that takes its client's frames never waits mid-frame.
+#[test]
+fn a_frame_half_come_is_held_till_the_rest_comes() {
+    let (mut one, other) = UnixStream::pair().unwrap();
+    let mut other = FrameReceiver::new(FrameSocket::new(other).unwrap());
+    let frame = ClientFrame::Land {
+        read: 1,
+        fetch: 0,
+        bytes: Bytes::from(vec![7; 3 << 20]),
+    };
+    let encoded = frame.encode();
+    one.write_all(&encoded[..5]).unwrap();
+
+    let mut other = within_5s(move || {
+        assert!(other.fill().unwrap());
+        assert!(other.next_frame(FrameSocket::MOST_BYTES).unwrap().is_none());
+        other
+    })
+    .expect("a read waits for no more than has come");
+    let sending = std::thread::spawn(move || {
+        one.write_all(&encoded[5..]).unwrap();
+        one
+    });
+    let body = loop {
+        if let Some(body) = other.next_frame(FrameSocket::MOST_BYTES).unwrap() {
+            break body;
+        }
+        assert!(other.fill().unwrap(), "the rest comes");
+    };
+    assert_eq!(ClientFrame::decode(body).unwrap(), frame);
+    drop(sending.join().unwrap());
+    assert!(!other.fill().unwrap(), "closed between frames");
 }
 
 /// A sender's frames go in order, whether its caller writes them, while
@@ -153,7 +199,8 @@ fn frames_sent_together_are_taken_from_one_read() {
 #[test]
 fn a_senders_frames_go_in_order_whoever_writes_them() {
     let (one, other) = UnixStream::pair().unwrap();
-    let sender = FrameSender::start(FrameSocket::new(one).unwrap()).unwrap();
+    let sender =
+        FrameSender::start(FrameSocket::new(one).unwrap(), Duration::from_micros(200)).unwrap();
     let mut other = FrameReceiver::new(FrameSocket::new(other).unwrap());
     // 8 MiB, far more than the socket holds unread: most wait for the
     // writer.
@@ -265,6 +312,56 @@ fn a_frame_queued_wakes_the_session_from_another_thread_only() {
     assert!(waker.wait_for(&socket).unwrap(), "not woken by its own");
     assert!(waited.elapsed() >= Duration::from_millis(10));
     drop(sending.join().unwrap());
+}
+
+/// A caller waiting for room on the socket holds up no other caller: the
+/// other's frame waits behind the first's, and goes after it.
+#[test]
+fn a_caller_waiting_for_room_holds_up_no_other() {
+    let (one, other) = UnixStream::pair().unwrap();
+    let wait = Duration::from_secs(1);
+    let sender =
+        std::sync::Arc::new(FrameSender::start(FrameSocket::new(one).unwrap(), wait).unwrap());
+    let mut other = FrameReceiver::new(FrameSocket::new(other).unwrap());
+    // Far more than the socket holds unread: its caller waits for room.
+    let first = ClientFrame::Land {
+        read: 1,
+        fetch: 0,
+        bytes: Bytes::from(vec![7; 4 << 20]),
+    };
+    let then = ClientFrame::EndRead { read: 1 };
+
+    let waiting = std::sync::Arc::clone(&sender);
+    let encoded = first.encode();
+    let first_sent = std::thread::spawn(move || waiting.send(vec![encoded]));
+    std::thread::sleep(Duration::from_millis(50));
+    let sent = Instant::now();
+    sender.send(vec![then.encode()]);
+    assert!(sent.elapsed() < wait / 2, "{:?}", sent.elapsed());
+    first_sent.join().unwrap();
+
+    for frame in [first, then] {
+        let body = other.receive(FrameSocket::MOST_BYTES).unwrap().unwrap();
+        assert_eq!(ClientFrame::decode(body).unwrap(), frame);
+    }
+}
+
+/// On Linux, a caller never waits for room: the socket takes what fits at
+/// once, and the writer the rest.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_callers_send_waits_for_no_room_on_linux() {
+    let (one, _other) = UnixStream::pair().unwrap();
+    let wait = Duration::from_secs(1);
+    let sender = FrameSender::start(FrameSocket::new(one).unwrap(), wait).unwrap();
+    let frame = ClientFrame::Land {
+        read: 1,
+        fetch: 0,
+        bytes: Bytes::from(vec![7; 4 << 20]),
+    };
+    let sent = Instant::now();
+    sender.send(vec![frame.encode()]);
+    assert!(sent.elapsed() < wait / 2, "{:?}", sent.elapsed());
 }
 
 /// More frames than one write takes go too, in order: a batch is as long
@@ -464,6 +561,30 @@ fn an_owner_whose_address_is_held_still_owns_its_cache() {
     assert_eq!(read, data.slice(..MIB as usize));
 }
 
+/// The descriptors a hello brings close on `exec`, on macOS too, where the
+/// receive can't ask for it: a process the owner starts inherits neither
+/// its client's cache file nor its region.
+#[test]
+fn a_hellos_descriptors_close_on_exec() {
+    let (client, owner) = UnixStream::pair().unwrap();
+    let (client, owner) = (
+        FrameSocket::new(client).unwrap(),
+        FrameSocket::new(owner).unwrap(),
+    );
+    let region = ClientRegion::make().unwrap();
+    let memory = region.descriptor().try_clone_to_owned().unwrap();
+    let file = tempfile::tempfile().unwrap();
+    Hello::new(PROTOCOL_VERSION, file)
+        .with_region(memory)
+        .send(&client)
+        .unwrap();
+
+    let hello = Hello::receive(&owner).unwrap();
+    let memory = hello.into_region().expect("the region came");
+    let flags = rustix::io::fcntl_getfd(&memory).unwrap();
+    assert!(flags.contains(rustix::io::FdFlags::CLOEXEC), "{flags:?}");
+}
+
 /// The owner refuses a client of another protocol version, but tells it
 /// its own version first, so that the client gives up at once
 /// (decision 6); then it closes the connection.
@@ -490,9 +611,10 @@ fn the_owner_tells_a_client_of_another_version_its_own() {
     let welcome = OwnerFrame::decode(frames.receive(64).unwrap().expect("an answer")).unwrap();
     let (version, region) = (PROTOCOL_VERSION, false);
     assert_eq!(welcome, OwnerFrame::Welcome { version, region });
+    let closed = frames.receive(64);
     assert!(
-        matches!(frames.receive(64), Ok(None)),
-        "the owner closes the connection"
+        matches!(closed, Ok(None)),
+        "the owner closes the connection: {closed:?}"
     );
 }
 

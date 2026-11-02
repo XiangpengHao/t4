@@ -45,8 +45,8 @@ impl Hello {
     /// region's.
     const MOST_DESCRIPTORS: usize = 2;
 
-    /// How a receive takes the descriptor: closed on `exec` from the first,
-    /// where the kernel can.
+    /// How a receive takes the descriptors: closed on `exec` from the first,
+    /// where the kernel can; elsewhere `Self::receive` sets it after.
     #[cfg(target_os = "linux")]
     const RECEIVE_FLAGS: RecvFlags = RecvFlags::CMSG_CLOEXEC;
     #[cfg(not(target_os = "linux"))]
@@ -146,6 +146,13 @@ impl Hello {
             if let RecvAncillaryMessage::ScmRights(sent) = message {
                 descriptors.extend(sent);
             }
+        }
+        // Where the receive can't close them on `exec`, at once after: a
+        // process this one starts meanwhile still could inherit them.
+        #[cfg(not(target_os = "linux"))]
+        for descriptor in &descriptors {
+            rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC)
+                .map_err(std::io::Error::from)?;
         }
         (&*socket).read_exact(&mut frame[received.bytes..])?;
         let (length, body) = frame.split_at(size_of::<u64>());
