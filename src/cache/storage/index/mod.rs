@@ -11,6 +11,6 @@ mod blocks;
 mod paths;
 mod read_plan;
 
-pub(super) use blocks::{BlockTable, Location};
-pub(super) use paths::{FileVersion, PathTable, UncacheableObject};
-pub(super) use read_plan::PlannedBlock;
+pub(in crate::cache) use blocks::{BlockTable, Location};
+pub(in crate::cache) use paths::{FileVersion, PathTable, UncacheableObject};
+pub(in crate::cache) use read_plan::PlannedBlock;

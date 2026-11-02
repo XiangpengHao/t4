@@ -211,7 +211,7 @@ impl ReadPlanner {
 mod tests {
     use super::*;
     use crate::cache::ChunkId;
-    use crate::cache::block_index::{BlockTable, PathTable};
+    use crate::cache::storage::index::{BlockTable, PathTable};
 
     const MIB: u64 = BLOCK_SIZE_U64;
     const MIB_U32: u32 = crate::cache::BLOCK_SIZE as u32;

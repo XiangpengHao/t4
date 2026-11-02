@@ -1,16 +1,14 @@
 //! The object store cache (`doc/03-cache.md`): aligned blocks of objects,
 //! held in memory chunks and disk chunks, found through an index on bbtree.
 //!
+//! - `storage`: the storage half (`doc/11-shared-mode.md`, decision 2): the
+//!   index of which blocks are cached where, the blocks being fetched, and
+//!   reads, fills and evictions over the tiers.
 //! - `chunk_pool`: each tier's chunks, which of them are free, and what
 //!   each holds (build step 1).
-//! - `block_index`: which blocks of which objects are cached, and where
-//!   (build step 2).
 //! - `cache_files`: the disk tier, its chunks striped over its cache files,
 //!   read and written by direct I/O (`doc/04-multi-device.md`).
 //! - `policy`: what the cache asks of its policy, and the default one.
-//! - `in_flight`: the blocks being fetched, which a read that needs one
-//!   waits for rather than fetching again.
-//! - `object_cache`: reads, fills and evictions over them all.
 //! - `read_output`: the buffer a read's bytes land in, the caller's as
 //!   `Bytes` with no copy.
 //! - `t4_caching`: the front end over another `ObjectStore`: files opened
@@ -20,16 +18,14 @@
 //! - `storage_link`: how the front end reaches the cache: its own, or its
 //!   owner's.
 
-mod block_index;
 mod cache_files;
 mod chunk_pool;
 mod get_queue;
-mod in_flight;
 mod io_report;
-mod object_cache;
 pub mod policy;
 mod read_output;
 mod sharing;
+mod storage;
 mod storage_link;
 mod t4_caching;
 

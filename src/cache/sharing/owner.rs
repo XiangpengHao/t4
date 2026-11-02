@@ -15,7 +15,7 @@ use super::frames::{ClientFrame, OwnerFrame, PROTOCOL_VERSION};
 use super::handshake::Hello;
 use super::region::OwnerRegion;
 use super::session_waker::SessionWaker;
-use crate::cache::object_cache::ObjectCache;
+use crate::cache::storage::ObjectCache;
 use crate::io::error::Result;
 use crate::io::sync::Arc;
 

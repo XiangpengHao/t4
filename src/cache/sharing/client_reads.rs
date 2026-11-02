@@ -21,10 +21,10 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use super::frames::{ClientFrame, FetchSpec, FrameReader, NextStep, OwnerFrame};
 use super::region::{OwnerRegion, SpanName};
 use super::session_waker::SessionWaker;
-use crate::cache::block_index::FileVersion;
-use crate::cache::object_cache::{FetchedBlocks, ObjectCache, PartialRead, TierWork};
 use crate::cache::policy::{FetchRuns, Io, IoEvent, LocatedRead, ReadIntent, ReadPlan, ReadPolicy};
 use crate::cache::read_output::ReadOutput;
+use crate::cache::storage::FileVersion;
+use crate::cache::storage::{FetchedBlocks, ObjectCache, PartialRead, TierWork};
 use crate::io::error::Result;
 
 /// The reads of one client in flight, each a task, by the number the

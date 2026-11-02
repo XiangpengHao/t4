@@ -21,27 +21,27 @@ use std::task::{Poll, Waker};
 
 use bytes::Bytes;
 
-use super::BlockKey;
-use super::block_index::Location;
-use super::policy::Admit;
+use super::index::Location;
+use crate::cache::BlockKey;
+use crate::cache::policy::Admit;
 use crate::io::sync::{Arc, Mutex, MutexGuard};
 
 /// The blocks being fetched, each with its fetch.
 #[derive(Debug, Default)]
-pub(super) struct InFlight {
+pub(in crate::cache) struct InFlight {
     fetches: Mutex<HashMap<u64, Arc<BlockFetch>>>,
 }
 
 impl InFlight {
     /// The fetch of `key`'s block, if one is in flight.
-    pub(super) fn get(&self, key: BlockKey) -> Option<Arc<BlockFetch>> {
+    pub(in crate::cache) fn get(&self, key: BlockKey) -> Option<Arc<BlockFetch>> {
         Self::live(&self.fetches(), key).cloned()
     }
 
     /// Claims the fetch of `key`'s block, which goes where `admit` says: the
     /// claim, one request in flight for the block, if none was fetching it;
     /// else the fetch in flight.
-    pub(super) fn claim(
+    pub(in crate::cache) fn claim(
         self: &Arc<Self>,
         key: BlockKey,
         admit: Admit,
@@ -69,7 +69,7 @@ impl InFlight {
 
     /// Whether no block is being fetched, as once every read is done.
     #[cfg(any(test, feature = "__fuzz"))]
-    pub(super) fn is_empty(&self) -> bool {
+    pub(in crate::cache) fn is_empty(&self) -> bool {
         self.fetches().is_empty()
     }
 
@@ -105,7 +105,7 @@ impl InFlight {
 /// One block's fetch: where the block goes, the requests in flight for it,
 /// how the fetch ended once it has, and the reads waiting for that.
 #[derive(Debug)]
-pub(super) struct BlockFetch {
+pub(in crate::cache) struct BlockFetch {
     key: BlockKey,
     admit: Admit,
     state: Mutex<FetchState>,
@@ -122,7 +122,7 @@ struct FetchState {
 
 /// How a block's fetch ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum FetchEnd {
+pub(in crate::cache) enum FetchEnd {
     /// A request cached the block, here.
     Cached(Location),
     /// A request had the block all in, which no tier keeps: its bytes, for
@@ -136,17 +136,21 @@ pub(super) enum FetchEnd {
 impl BlockFetch {
     /// Where the block goes once fetched, as the placement policy told the
     /// read that claimed it: where a racing read's requests put it too.
-    pub(super) fn admit(&self) -> Admit {
+    pub(in crate::cache) fn admit(&self) -> Admit {
         self.admit
     }
 
     /// The requests in flight for the block.
-    pub(super) fn requests(&self) -> u32 {
+    pub(in crate::cache) fn requests(&self) -> u32 {
         self.state().requests
     }
 
     /// Joins the fetch with `requests` of a racing read's own.
-    pub(super) fn join(self: &Arc<Self>, in_flight: &Arc<InFlight>, requests: u32) -> FetchClaim {
+    pub(in crate::cache) fn join(
+        self: &Arc<Self>,
+        in_flight: &Arc<InFlight>,
+        requests: u32,
+    ) -> FetchClaim {
         self.state().requests += requests;
         FetchClaim {
             in_flight: Arc::clone(in_flight),
@@ -156,7 +160,7 @@ impl BlockFetch {
     }
 
     /// How the fetch ended, once it has.
-    pub(super) async fn ended(&self) -> FetchEnd {
+    pub(in crate::cache) async fn ended(&self) -> FetchEnd {
         poll_fn(|cx| {
             let mut state = self.state();
             if let Some(ended) = &state.ended {
@@ -212,7 +216,7 @@ impl BlockFetch {
 /// dropped first, as when that fetch fails or its read is given up on, they
 /// end with the block cached nowhere.
 #[derive(Debug)]
-pub(super) struct FetchClaim {
+pub(in crate::cache) struct FetchClaim {
     in_flight: Arc<InFlight>,
     fetch: Arc<BlockFetch>,
     requests: u32,
@@ -226,7 +230,7 @@ impl FetchClaim {
 
     /// The claim's requests are the racers of the GET that fetches the
     /// block.
-    pub(super) fn fetched_by(&mut self, race: NonZeroU8) {
+    pub(in crate::cache) fn fetched_by(&mut self, race: NonZeroU8) {
         let race = u32::from(race.get());
         let mut state = self.fetch.state();
         state.requests = state.requests - self.requests + race;
@@ -235,13 +239,13 @@ impl FetchClaim {
 
     /// The read's fetch of the block ended, the block cached at `location`,
     /// by this fetch or another, or nowhere.
-    pub(super) fn ended(mut self, location: Option<Location>) {
+    pub(in crate::cache) fn ended(mut self, location: Option<Location>) {
         self.end(location.map(FetchEnd::Cached));
     }
 
     /// The read's fetch of the block, which no tier keeps, has it all in:
     /// `bytes`, for the readers waiting.
-    pub(super) fn passed(mut self, bytes: Bytes) {
+    pub(in crate::cache) fn passed(mut self, bytes: Bytes) {
         self.end(Some(FetchEnd::Passed(bytes)));
     }
 

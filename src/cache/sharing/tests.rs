@@ -24,12 +24,12 @@ use super::frames::{ClientFrame, FetchSpec, NextStep, OwnerFrame, PROTOCOL_VERSI
 use super::handshake::Hello;
 use super::region::{ClientRegion, SpanName};
 use super::session_waker::SessionWaker;
-use crate::cache::block_index::FileVersion;
-use crate::cache::object_cache::LocatedRun;
 use crate::cache::policy::{
     Admit, BlockSource, FixedPlacementPolicy, IoPhase, PlannedGet, ReadPlan,
 };
 use crate::cache::read_output::ReadOutput;
+use crate::cache::storage::FileVersion;
+use crate::cache::storage::LocatedRun;
 use crate::cache::storage_link::StorageLink;
 use crate::cache::{FileVersionId, T4Caching, T4CachingBuilder};
 use crate::io::sync::Arc;

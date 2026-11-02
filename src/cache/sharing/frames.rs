@@ -15,9 +15,9 @@ use bytes::Bytes;
 
 use super::region::SpanName;
 use crate::cache::FileVersionId;
-use crate::cache::block_index::FileVersion;
-use crate::cache::object_cache::LocatedRun;
 use crate::cache::policy::{BlockSource, IoPhase, PlannedGet, ReadIntent, ReadPlan};
+use crate::cache::storage::FileVersion;
+use crate::cache::storage::LocatedRun;
 use crate::io::error::{Error, Result};
 
 /// The protocol's version: a client and an owner of different versions

@@ -11,11 +11,11 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use super::FileVersionId;
-use super::object_cache::{
-    CacheableFile, FetchedBlocks, LocatedRun, ObjectCache, PartialRead, TierWork,
-};
 use super::policy::{ReadIntent, ReadPlan, ReadPolicy};
 use super::sharing::{ClientFetch, ClientRead, OwnerConnection, OwnerListener};
+use super::storage::{
+    CacheableFile, FetchedBlocks, LocatedRun, ObjectCache, PartialRead, TierWork,
+};
 use crate::io::error::Result;
 use crate::io::sync::Arc;
 

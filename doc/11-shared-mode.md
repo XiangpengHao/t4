@@ -674,7 +674,7 @@ session ending the last read before it takes the next's frames, 1 µs.
 | Module | What | Built |
 |---|---|---|
 | `src/cache/cache_files.rs` | the lock (decision 1) | yes |
-| `src/cache/object_cache.rs` | the storage half (decision 2) | yes |
+| `src/cache/storage/object_cache.rs` | the storage half (decision 2) | yes |
 | `src/cache/t4_caching.rs` | the fetch half (decision 2), and `with_multiprocess_sharing` (decision 1) | yes |
 | `src/cache/storage_link.rs` | how the fetch half reaches the storage half: its own, or its owner's (decision 2) | yes |
 | `src/cache/storage_link/current_link.rs` | the link a cache reads through now, and what makes it: at build, and anew once a client's owner goes (decisions 1, 7) | yes |

@@ -31,31 +31,29 @@ use bytes::Bytes;
 use futures_util::FutureExt;
 use futures_util::future::{BoxFuture, join, join_all};
 
-use super::block_index::{
-    BlockTable, FileVersion, Location, PathTable, PlannedBlock, UncacheableObject,
-};
-use super::cache_files::CacheFiles;
-use super::chunk_pool::disk_chunks::{DiskChunkReader, DiskChunkWriter};
-use super::chunk_pool::memory_pool::{
+use super::in_flight::{BlockFetch, FetchClaim, FetchEnd, InFlight};
+use super::index::{BlockTable, FileVersion, Location, PathTable, PlannedBlock, UncacheableObject};
+use crate::PAGE_SIZE_U32;
+use crate::buffer::AlignedBuf;
+use crate::cache::cache_files::CacheFiles;
+use crate::cache::chunk_pool::disk_chunks::{DiskChunkReader, DiskChunkWriter};
+use crate::cache::chunk_pool::memory_pool::{
     LentMemoryChunk, MemoryChunkReader, MemoryChunkWriter, MemoryPool,
 };
-use super::in_flight::{BlockFetch, FetchClaim, FetchEnd, InFlight};
-use super::io_report::IoReport;
-use super::policy::{
+use crate::cache::io_report::IoReport;
+use crate::cache::policy::{
     Admit, BlockRead, BlockSource, DiskHit, FetchRuns, Io, LocatedRead, MemoryVictim,
     PlacementPolicy, PlannedGet, ReadIntent, ReadPlan, ReadPolicy, Tier, VictimAction,
 };
-use super::read_output::ReadOutput;
-use super::sharing::{FrameReader, FrameWriter};
-use super::{BLOCK_SIZE_U64, BlockKey, ChunkId, FileVersionId};
-use crate::PAGE_SIZE_U32;
-use crate::buffer::AlignedBuf;
+use crate::cache::read_output::ReadOutput;
+use crate::cache::sharing::{FrameReader, FrameWriter};
+use crate::cache::{BLOCK_SIZE_U64, BlockKey, ChunkId, FileVersionId};
 use crate::io::error::{Error, Result};
 use crate::io::sync::Arc;
 
 /// A cache of file versions' blocks in memory and disk chunks, found
 /// through the index, placed and evicted by its policy.
-pub(super) struct ObjectCache {
+pub(in crate::cache) struct ObjectCache {
     paths: PathTable,
     blocks: BlockTable,
     /// Shared with the I/O in flight that lends its chunks.
@@ -79,7 +77,7 @@ impl ObjectCache {
     /// A cache of `memory_chunks` chunks of memory and the chunks of
     /// `disk`, all free, holding nothing: its blocks placed by `placement`,
     /// which is built for both counts.
-    pub(super) fn new(
+    pub(in crate::cache) fn new(
         memory_chunks: NonZeroU32,
         disk: CacheFiles,
         placement: Arc<dyn PlacementPolicy>,
@@ -97,7 +95,7 @@ impl ObjectCache {
     /// The file at `path`, the version of it with `e_tag` and `size`, as
     /// reads name it; or why the cache can't hold the file, whose reads then
     /// go to the object store alone.
-    pub(super) fn resolve<'p>(
+    pub(in crate::cache) fn resolve<'p>(
         &self,
         path: &'p [u8],
         e_tag: Option<&str>,
@@ -128,7 +126,7 @@ impl ObjectCache {
     /// # Errors
     ///
     /// If the read's output can't be made.
-    pub(super) fn start_read<'c>(
+    pub(in crate::cache) fn start_read<'c>(
         &'c self,
         file: &CacheableFile<'c>,
         range: Range<u64>,
@@ -145,7 +143,7 @@ impl ObjectCache {
     /// # Errors
     ///
     /// If `output` fails.
-    pub(super) fn start_read_into<'c>(
+    pub(in crate::cache) fn start_read_into<'c>(
         &'c self,
         file: &CacheableFile<'c>,
         range: Range<u64>,
@@ -173,7 +171,7 @@ impl ObjectCache {
     /// cached by now, or in flight again, and the read fetches the rest,
     /// its GETs the caller's to plan and make, its reads from disk heard by
     /// `reads`.
-    pub(super) fn retry<'c>(
+    pub(in crate::cache) fn retry<'c>(
         &'c self,
         file: &CacheableFile<'c>,
         range: Range<u64>,
@@ -201,7 +199,7 @@ impl ObjectCache {
     /// If the read's output can't be made, or a read from the cache file
     /// can't be submitted.
     #[cfg(test)]
-    pub(super) fn start_planned_read<'c>(
+    pub(in crate::cache) fn start_planned_read<'c>(
         &'c self,
         file: &CacheableFile<'c>,
         range: Range<u64>,
@@ -219,7 +217,7 @@ impl ObjectCache {
     ///
     /// If a read from the cache file can't be submitted.
     #[cfg(test)]
-    pub(super) fn retry_planned<'c>(
+    pub(in crate::cache) fn retry_planned<'c>(
         &'c self,
         read: &mut PartialRead,
         file: &CacheableFile<'c>,
@@ -256,7 +254,7 @@ impl ObjectCache {
     /// block another read is fetching waits until another test thread fills
     /// that read.
     #[cfg(test)]
-    pub(super) async fn read(
+    pub(in crate::cache) async fn read(
         &self,
         file: &CacheableFile<'_>,
         range: Range<u64>,
@@ -383,7 +381,7 @@ impl ObjectCache {
     /// # Panics
     ///
     /// If `fetch` isn't the bytes of one of the read's GETs not taken yet.
-    pub(super) fn receive(
+    pub(in crate::cache) fn receive(
         &self,
         read: &mut PartialRead,
         fetch: Range<u64>,
@@ -432,7 +430,7 @@ impl ObjectCache {
     /// fetch whose answer comes in one does: for tests, which have the
     /// bytes at hand.
     #[cfg(test)]
-    pub(super) async fn take_fetched(
+    pub(in crate::cache) async fn take_fetched(
         &self,
         read: &mut PartialRead,
         fetch: Range<u64>,
@@ -714,7 +712,9 @@ impl ObjectCache {
     /// entry naming it, and every other chunk is free. If so, the chunks
     /// that hold a block, each with its tier; `Err` says where they don't.
     #[cfg(any(test, feature = "__fuzz"))]
-    pub(super) fn check_at_rest(&self) -> std::result::Result<Vec<(Tier, ChunkId)>, String> {
+    pub(in crate::cache) fn check_at_rest(
+        &self,
+    ) -> std::result::Result<Vec<(Tier, ChunkId)>, String> {
         if !self.in_flight.is_empty() {
             return Err("a block is still in flight".to_owned());
         }
@@ -785,7 +785,7 @@ impl ObjectCache {
 
 /// A file the cache can hold: its path, and the version of it reads name.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct CacheableFile<'p> {
+pub(in crate::cache) struct CacheableFile<'p> {
     path: &'p [u8],
     version: FileVersion,
 }
@@ -793,11 +793,11 @@ pub(super) struct CacheableFile<'p> {
 impl<'p> CacheableFile<'p> {
     /// The file at `path`, its version as an owner named it to its client
     /// (`doc/11-shared-mode.md`).
-    pub(super) fn named(path: &'p [u8], version: FileVersion) -> Self {
+    pub(in crate::cache) fn named(path: &'p [u8], version: FileVersion) -> Self {
         Self { path, version }
     }
 
-    pub(super) fn version(&self) -> FileVersion {
+    pub(in crate::cache) fn version(&self) -> FileVersion {
         self.version
     }
 }
@@ -875,7 +875,7 @@ enum MoveToDisk {
 /// a time; its page reads, submitted as they are located, the blocks it
 /// moves to memory, and those it waits for another read to fetch. Its
 /// caller awaits it beside the read's GETs.
-pub(super) struct TierWork<'c> {
+pub(in crate::cache) struct TierWork<'c> {
     cache: &'c ObjectCache,
     /// The caller's read policy, which hears of the read's reads from disk
     /// as they go.
@@ -939,7 +939,10 @@ impl<'c> TierWork<'c> {
     /// # Panics
     ///
     /// If the GETs of the run located last weren't taken.
-    pub(super) fn locate_next_run(&mut self, read: &mut PartialRead) -> Result<Option<LocatedRun>> {
+    pub(in crate::cache) fn locate_next_run(
+        &mut self,
+        read: &mut PartialRead,
+    ) -> Result<Option<LocatedRun>> {
         assert!(
             self.held.is_none(),
             "a run's GETs are taken before the next run is located"
@@ -1003,7 +1006,7 @@ impl<'c> TierWork<'c> {
     /// # Panics
     ///
     /// If no run is located, or its GETs were taken already.
-    pub(super) fn take_gets(&mut self, read: &mut PartialRead, gets: &ReadPlan) {
+    pub(in crate::cache) fn take_gets(&mut self, read: &mut PartialRead, gets: &ReadPlan) {
         let cache = self.cache;
         let HeldRun {
             located: run,
@@ -1135,7 +1138,10 @@ impl<'c> TierWork<'c> {
     /// # Errors
     ///
     /// If a read from the cache file fails.
-    pub(super) async fn finish(mut self, read: &mut PartialRead) -> Result<BlocksToFetch> {
+    pub(in crate::cache) async fn finish(
+        mut self,
+        read: &mut PartialRead,
+    ) -> Result<BlocksToFetch> {
         let waits = std::mem::take(&mut self.waits);
         let page_reads = Self::page_reads_done(std::mem::take(&mut self.page_reads));
         let ends = join_all(waits.iter().map(|(_, fetch)| fetch.ended()));
@@ -1198,7 +1204,7 @@ impl<'c> TierWork<'c> {
 /// land in, and the GETs that fetch the rest, as the read policy planned
 /// them, with what becomes of each block they fetch.
 #[derive(Debug)]
-pub(super) struct PartialRead {
+pub(in crate::cache) struct PartialRead {
     version: FileVersion,
     /// Where the read's bytes land, the caller's once filled.
     output: ReadOutput,
@@ -1215,12 +1221,12 @@ impl PartialRead {
     }
 
     /// The file's bytes the read takes, which its output holds.
-    pub(super) fn bytes(&self) -> Range<u64> {
+    pub(in crate::cache) fn bytes(&self) -> Range<u64> {
         self.output.asked()
     }
 
     /// The file's bytes each GET fetches, in the order planned.
-    pub(super) fn fetches(&self) -> Vec<Range<u64>> {
+    pub(in crate::cache) fn fetches(&self) -> Vec<Range<u64>> {
         self.fetches
             .iter()
             .map(|planned| planned.bytes.clone())
@@ -1243,7 +1249,7 @@ impl PartialRead {
     /// The read's bytes, once the caller has filled what came remote: `None`
     /// if a read from disk it started is still writing them, as after one
     /// failed.
-    pub(super) fn into_bytes(self) -> Option<Bytes> {
+    pub(in crate::cache) fn into_bytes(self) -> Option<Bytes> {
         self.output.into_bytes()
     }
 
@@ -1251,7 +1257,7 @@ impl PartialRead {
     /// caller has filled what came remote: false while a read from disk it
     /// started is still writing them. For an output over a span of a
     /// client's region, which the client then takes.
-    pub(super) fn filled_in_place(self) -> bool {
+    pub(in crate::cache) fn filled_in_place(self) -> bool {
         self.output.filled_in_place()
     }
 
@@ -1382,15 +1388,15 @@ impl RemoteBlock {
 /// ([`ObjectCache::retry`]). Its caller learns only whether any is left;
 /// where each block was stays with the cache, which finds it again.
 #[derive(Debug)]
-pub(super) struct BlocksToFetch(Vec<PlannedBlock>);
+pub(in crate::cache) struct BlocksToFetch(Vec<PlannedBlock>);
 
 impl BlocksToFetch {
-    pub(super) fn is_empty(&self) -> bool {
+    pub(in crate::cache) fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     #[cfg(all(test, not(feature = "shuttle")))]
-    pub(super) fn len(&self) -> usize {
+    pub(in crate::cache) fn len(&self) -> usize {
         self.0.len()
     }
 }
@@ -1400,7 +1406,7 @@ impl BlocksToFetch {
 /// read policy plans the run's GETs by ([`Self::planned_by`]). Data alone,
 /// so that a client's crosses the socket (`doc/11-shared-mode.md`).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct LocatedRun {
+pub(in crate::cache) struct LocatedRun {
     /// The number of the run's first block.
     first: u32,
     /// The file's bytes the read asked for within the run.
@@ -1426,7 +1432,7 @@ impl LocatedRun {
     /// A run of `sources`, from block `first`, the read's `asked` bytes of
     /// it: for tests.
     #[cfg(all(test, not(feature = "shuttle")))]
-    pub(super) fn new(first: u32, asked: Range<u64>, sources: Vec<BlockSource>) -> Self {
+    pub(in crate::cache) fn new(first: u32, asked: Range<u64>, sources: Vec<BlockSource>) -> Self {
         Self {
             first,
             asked,
@@ -1435,7 +1441,7 @@ impl LocatedRun {
     }
 
     /// Writes the run into `frame`, for a client to plan its GETs by.
-    pub(super) fn write_to(&self, frame: &mut FrameWriter) {
+    pub(in crate::cache) fn write_to(&self, frame: &mut FrameWriter) {
         frame.u32(self.first);
         frame.range(&self.asked);
         frame.sources(&self.sources);
@@ -1447,7 +1453,7 @@ impl LocatedRun {
     ///
     /// If the frame ends first, or the run holds no block or one past the
     /// last a file has.
-    pub(super) fn read_from(frame: &mut FrameReader) -> Result<Self> {
+    pub(in crate::cache) fn read_from(frame: &mut FrameReader) -> Result<Self> {
         let first = frame.u32()?;
         let asked = frame.range()?;
         let sources = frame.sources()?;
@@ -1466,7 +1472,7 @@ impl LocatedRun {
     /// The GETs `policy` plans for the run, of a read of `file` for
     /// `intent`; the cache checks them as it takes them
     /// ([`TierWork::take_gets`]).
-    pub(super) fn planned_by(
+    pub(in crate::cache) fn planned_by(
         &self,
         policy: &dyn ReadPolicy,
         file: &CacheableFile<'_>,
@@ -1501,7 +1507,7 @@ impl LocatedRun {
 ///
 /// Each byte is copied twice: into the output, and into the cache. The
 /// output is the caller's, never the cache's memory.
-pub(super) struct FetchedBlocks<'c> {
+pub(in crate::cache) struct FetchedBlocks<'c> {
     cache: &'c ObjectCache,
     version: FileVersion,
     /// The file's bytes the fetch holds: whole blocks, from a block's start.
@@ -1528,22 +1534,22 @@ struct FetchedBlock<'c> {
 
 impl FetchedBlocks<'_> {
     /// The file's bytes the fetch holds.
-    pub(super) fn range(&self) -> Range<u64> {
+    pub(in crate::cache) fn range(&self) -> Range<u64> {
         self.range.clone()
     }
 
     /// The version of the file they are of.
-    pub(super) fn file(&self) -> FileVersionId {
+    pub(in crate::cache) fn file(&self) -> FileVersionId {
         self.version.id()
     }
 
     /// How many identical requests race for them.
-    pub(super) fn race(&self) -> NonZeroU8 {
+    pub(in crate::cache) fn race(&self) -> NonZeroU8 {
         self.race
     }
 
     /// When one more request races them, if they aren't all in.
-    pub(super) fn late_race(&self) -> Option<Duration> {
+    pub(in crate::cache) fn late_race(&self) -> Option<Duration> {
         self.late
     }
 
@@ -1552,7 +1558,7 @@ impl FetchedBlocks<'_> {
     /// # Errors
     ///
     /// If the fetch brings more bytes than it holds.
-    pub(super) async fn land(&mut self, mut piece: &[u8]) -> Result<()> {
+    pub(in crate::cache) async fn land(&mut self, mut piece: &[u8]) -> Result<()> {
         let len = self.range.end - self.range.start;
         if self.received + piece.len() as u64 > len {
             return Err(Self::wrong_length(&self.range, "more"));
@@ -1582,7 +1588,7 @@ impl FetchedBlocks<'_> {
     /// # Errors
     ///
     /// If the fetch brought fewer bytes than it holds: nothing is cached.
-    pub(super) async fn finish(self) -> Result<()> {
+    pub(in crate::cache) async fn finish(self) -> Result<()> {
         if self.received != self.range.end - self.range.start {
             return Err(Self::wrong_length(&self.range, "fewer"));
         }
