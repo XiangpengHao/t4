@@ -91,7 +91,18 @@ impl ChunkTable {
         slot.state.store(Self::PUBLISHED, Ordering::Release);
     }
 
-    /// A free chunk, leased to one writer; `None` when every chunk is taken.
+    /// Leases no chunk from now on, for good. A lease taken before this
+    /// goes on; one asked for after it, under the same lock, finds none.
+    pub(in crate::cache::storage) fn close(&self) {
+        self.free_chunks().close();
+    }
+
+    pub(in crate::cache::storage) fn is_closed(&self) -> bool {
+        self.free_chunks().is_closed()
+    }
+
+    /// A free chunk, leased to one writer; `None` when every chunk is
+    /// taken, or the table is closed.
     pub(in crate::cache::storage) fn allocate(&self) -> Option<ChunkLease<'_>> {
         let chunk = self.free_chunks().allocate()?;
         // The lease is the chunk's one holder, and it is unpublished: no pin

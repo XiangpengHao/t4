@@ -162,6 +162,10 @@ impl CacheStore for InProcessCacheStore {
         Box::pin(std::future::ready(self.cache.known_size(path)))
     }
 
+    fn shut_down(&self) -> Result<()> {
+        Ok(self.cache.shut_down()?)
+    }
+
     #[cfg(any(all(test, not(feature = "shuttle")), feature = "__fuzz"))]
     fn owned(&self) -> Option<&ObjectCache> {
         Some(&self.cache)

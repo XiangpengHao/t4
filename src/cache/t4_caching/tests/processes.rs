@@ -141,11 +141,27 @@ impl SharedProcess {
     }
 
     fn start(dir: &std::path::Path) -> Self {
+        Self::start_with(dir, |builder| builder)
+    }
+
+    /// A process whose fetched blocks go to disk, and stay there.
+    fn start_on_disk(dir: &std::path::Path) -> Self {
+        Self::start_with(dir, |builder| {
+            builder.with_placement_policy(|sizes| {
+                crate::cache::policy::FixedPlacementPolicy::new(sizes, Admit::Disk)
+            })
+        })
+    }
+
+    /// A process whose cache, built for sharing, `customize` sets up too.
+    fn start_with(
+        dir: &std::path::Path,
+        customize: impl FnOnce(T4CachingBuilder) -> T4CachingBuilder,
+    ) -> Self {
         let store = Arc::new(CountingStore::default());
         let path = Path::from("shared");
         put(store.as_ref(), &path, &Self::data());
-        let cache = builder(&store, dir)
-            .with_multiprocess_sharing()
+        let cache = customize(builder(&store, dir).with_multiprocess_sharing())
             .build()
             .unwrap();
         let meta = block_on(store.head(&path)).unwrap();
@@ -195,7 +211,10 @@ fn a_child_process_plays_its_role() {
     };
     let dir = PathBuf::from(std::env::var(ChildProcess::DIR).unwrap());
     let markers = Markers::new(&dir);
-    let process = SharedProcess::start(&dir);
+    let process = match role.as_str() {
+        "shut-down-owner" => SharedProcess::start_on_disk(&dir),
+        _ => SharedProcess::start(&dir),
+    };
     // A gate held till the process ends: the GET it holds is never
     // answered.
     let mut held = None;
@@ -204,6 +223,15 @@ fn a_child_process_plays_its_role() {
         "owner" => {
             assert!(process.owns());
             markers.set("owning", "");
+        }
+        // Owns the cache, reads the file to disk, and shuts the cache down,
+        // as an app's exit hook does; then is killed, the cache never
+        // dropped, as the app's process ends around it.
+        "shut-down-owner" => {
+            assert!(process.owns());
+            assert_eq!(process.read(0..SharedProcess::SIZE), SharedProcess::data());
+            process.cache.shut_down().unwrap();
+            markers.set("shut-down", "");
         }
         // Reads through its owner, its GET never answered, until killed.
         "stalled-client" => {
@@ -264,6 +292,28 @@ fn an_owner_killed_mid_read_leaves_its_client_the_cache() {
     client.store.take_asked();
     assert_eq!(client.read(0..SharedProcess::SIZE), SharedProcess::data());
     assert_eq!(client.fetched_bytes(), 0, "the read that took over cached");
+}
+
+/// An owner shut down, then killed, its cache never dropped, as an app's
+/// exit hook and its exit are (`doc/10-spiral-integration.md`, decision 7):
+/// the next cache on its files takes back its disk tier, and reads what it
+/// held with nothing from its store.
+#[test]
+fn an_owner_shut_down_then_killed_leaves_its_disk_tier() {
+    let dir = tempfile::tempdir().unwrap();
+    let markers = Markers::new(dir.path());
+    let mut owner = ChildProcess::spawn("shut-down-owner", dir.path());
+    markers.said("shut-down");
+    owner.kill();
+
+    let next = SharedProcess::start_on_disk(dir.path());
+    wait_until(
+        || next.owns() || (next.read(0..1) == SharedProcess::data().slice(..1) && next.owns()),
+        "the next cache owns the files",
+    );
+    next.fetched_bytes();
+    assert_eq!(next.read(0..SharedProcess::SIZE), SharedProcess::data());
+    assert_eq!(next.fetched_bytes(), 0, "the killed owner's disk tier");
 }
 
 /// An owner whose `TMPDIR` isn't its client's, as a terminal's in a shell

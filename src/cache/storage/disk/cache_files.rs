@@ -159,12 +159,15 @@ impl CacheFiles {
         self.snapshot.as_ref()
     }
 
-    /// Whether a block may be written now: always to files allocated
-    /// whole; to files that grow, while every drive keeps its room.
-    pub(in crate::cache) fn has_room_for_a_block(&self) -> bool {
-        self.headroom
-            .as_ref()
-            .is_none_or(DriveHeadroom::allows_a_block)
+    /// Whether a block may be written now: never once the tier is closed;
+    /// always to files allocated whole; to files that grow, while every
+    /// drive keeps its room.
+    pub(in crate::cache) fn takes_a_block(&self) -> bool {
+        !self.chunks.is_closed()
+            && self
+                .headroom
+                .as_ref()
+                .is_none_or(DriveHeadroom::allows_a_block)
     }
 
     /// Writes `pages` at the start of the chunk `writer` holds.

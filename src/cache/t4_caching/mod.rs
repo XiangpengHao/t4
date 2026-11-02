@@ -364,6 +364,23 @@ impl T4Caching {
         self.cache_store.known_size(path).await
     }
 
+    /// Writes no more to disk, and keeps the disk tier for the next cache on
+    /// these files, as dropping the cache does (`doc/10-spiral-integration.md`,
+    /// decision 7): for a process that exits without dropping its cache, as
+    /// an app's exit hook runs before the process ends around it. Reads go
+    /// on, from memory, disk and the inner store, but no block is written to
+    /// disk again. A client of a shared cache keeps nothing, as its owner
+    /// holds the disk tier, and takes over no cache once its owner goes.
+    /// Blocks while it flushes the cache files.
+    ///
+    /// # Errors
+    ///
+    /// If the snapshot can't be kept: the next cache on these files starts
+    /// cold.
+    pub fn shut_down(&self) -> crate::Result<()> {
+        self.cache_store.shut_down()
+    }
+
     /// The bytes `range` asks of a file of `file_size`, as the inner store
     /// takes them: a bounded range clamped to the file's end, an error if
     /// it starts past it.

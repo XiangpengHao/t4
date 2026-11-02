@@ -66,7 +66,18 @@ impl DiskChunks {
         self.table.restore(chunk, block);
     }
 
-    /// A free chunk for one writer to fill; `None` when every chunk is taken.
+    /// Hands out no chunk to write from now on, for good
+    /// ([`ChunkTable::close`]): what the tier holds is written no more.
+    pub(in crate::cache) fn close(&self) {
+        self.table.close();
+    }
+
+    pub(in crate::cache) fn is_closed(&self) -> bool {
+        self.table.is_closed()
+    }
+
+    /// A free chunk for one writer to fill; `None` when every chunk is
+    /// taken, or the tier is closed.
     pub(in crate::cache) fn allocate(&self) -> Option<DiskChunkWriter<'_>> {
         let lease = self.table.allocate()?;
         Some(DiskChunkWriter {

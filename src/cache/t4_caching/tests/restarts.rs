@@ -129,3 +129,47 @@ fn a_file_written_over_between_caches_is_fetched_again() {
     assert_eq!(inner.take_asked(), [Asked::Head, bounded(0..3 * MIB)]);
     assert_eq!(block_on(again.known_size(&path)), Some(3 * MIB));
 }
+
+/// A cache shut down keeps its disk tier at once, as an app's exit hook
+/// asks before the process ends around a cache it never drops; it goes on
+/// serving reads, what it holds from disk, but writes no block to disk
+/// again. The next cache on its files takes back what it held.
+#[test]
+fn a_cache_shut_down_keeps_its_disk_tier_and_writes_no_more() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(CountingStore::default());
+    let (a, b) = (Path::from("a"), Path::from("b"));
+    let (a_data, b_data) = (file_bytes(2 * MIB, 26), file_bytes(MIB, 27));
+    put(inner.as_ref(), &a, &a_data);
+    put(inner.as_ref(), &b, &b_data);
+    let (a_meta, b_meta) = (
+        block_on(inner.head(&a)).unwrap(),
+        block_on(inner.head(&b)).unwrap(),
+    );
+    let cache = on_disk(&inner, &dir).build().unwrap();
+    assert_eq!(read_whole(&cache, &a_meta), a_data);
+    cache.shut_down().unwrap();
+    assert!(snapshot_at(&dir).exists(), "kept at once");
+    inner.take_asked();
+
+    assert_eq!(read_whole(&cache, &a_meta), a_data);
+    assert_eq!(inner.take_asked(), [], "served from disk still");
+    for _ in 0..2 {
+        assert_eq!(read_whole(&cache, &b_meta), b_data);
+        assert_eq!(
+            inner.take_asked(),
+            [bounded(0..MIB)],
+            "written to disk no more"
+        );
+    }
+    drop(cache);
+
+    let again = on_disk(&inner, &dir).build().unwrap();
+    assert_eq!(read_whole(&again, &a_meta), a_data);
+    assert_eq!(read_whole(&again, &b_meta), b_data);
+    assert_eq!(
+        inner.take_asked(),
+        [bounded(0..MIB)],
+        "a kept, b never cached"
+    );
+}

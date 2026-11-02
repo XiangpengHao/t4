@@ -463,6 +463,34 @@ fn a_client_asks_its_owner_the_size_it_knows() {
     assert_eq!(clients.take_asked(), [], "asked of the owner alone");
 }
 
+/// A client shut down leaves its owner be: the owner still caches what
+/// either reads. And once its owner goes, the client takes over nothing: it
+/// is exiting, and reads from its store.
+#[test]
+fn a_client_shut_down_leaves_its_owner_be_and_takes_over_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(MIB, 19);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
+    let (owner, owners, owners_meta) = process(&path, &data, shared);
+    let (client, clients, clients_meta) = process(&path, &data, shared);
+    client.shut_down().unwrap();
+    assert!(reads_through_an_owner(&client));
+
+    assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+    assert_eq!(clients.take_asked(), [bounded(0..MIB)]);
+    assert_eq!(read_listed(&owner, &owners_meta, 0..MIB), data);
+    assert_eq!(owners.take_asked(), [], "the owner caches still");
+
+    drop(owner);
+    wait_until(|| !reads_through_an_owner(&client), "the owner goes");
+    for _ in 0..5 {
+        assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!owns(&client), "it took over nothing");
+}
+
 /// A client whose files a cache not built for sharing took once its owner
 /// went: it can neither own them nor reach an owner, and reads from its
 /// store, no read waiting long for an owner.

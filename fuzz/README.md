@@ -10,8 +10,9 @@ an in-memory `object_store`:
   `Suffix`, some joined so they interleave at each I/O, and some given up
   on after a few polls, their futures dropped midway through a fetch, a
   fill, an eviction or a promotion;
-- restarts: the cache dropped, keeping its disk tier in a snapshot, and
-  built again on its files, taking it back. Where the cache files' file
+- shutdowns, after which the cache serves reads but writes no more to
+  disk, and restarts: the cache dropped, keeping its disk tier in a
+  snapshot, and built again on its files, taking it back. Where the cache files' file
   system reports no creation time, the cache keeps none, and a restart
   starts cold.
 

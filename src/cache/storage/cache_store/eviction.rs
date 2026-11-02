@@ -96,11 +96,11 @@ impl ObjectCache {
     }
 
     /// [`Self::allocate_memory`] for a disk chunk. Disk victims are dropped:
-    /// no I/O. `None` at once if a drive of files that grow is short of
-    /// room: evicting would give it none back, as a freed chunk keeps its
-    /// room in the file.
+    /// no I/O. `None` at once if the tier is closed, or a drive of files
+    /// that grow is short of room: evicting would give neither a chunk to
+    /// write, as a freed chunk keeps its room in the file.
     pub(super) fn allocate_disk(&self) -> Option<DiskChunkWriter<'_>> {
-        if !self.disk.has_room_for_a_block() {
+        if !self.disk.takes_a_block() {
             return None;
         }
         for _ in 0..Self::EVICTION_ROUNDS {

@@ -284,8 +284,21 @@ hosts is one.
      once Ctrl-C ends its serve, and so keeps its snapshot; Studio doesn't.
      Its host lives in Tauri's managed state and serves on Tauri's runtime,
      and Tauri exits the process after `RunEvent::Exit` without dropping
-     either. So Studio starts cold each time until its exit hook keeps the
-     disk tier (Open questions).
+     either. So its exit hook shuts the cache down (next).
+   - **Shutting down without a drop** (the user's call, 2 Nov 2026; built
+     in t4, `T4Caching::shut_down`): the disk tier is closed, so that it
+     hands out no chunk to write again, then the snapshot is kept as at a
+     drop. The cache goes on serving reads, from both tiers and the
+     remote, but writes no block to disk. Closing comes first, under the
+     free chunks' lock: an allocation in flight took its chunk before, and
+     no block is published in it, so the snapshot can't name it; or it
+     finds the tier closed. So no chunk the snapshot names is written
+     after it, and the snapshot stays true while the process lives on,
+     until it exits, killed or not. A drop after keeps the snapshot again.
+     A client of a shared cache keeps nothing, as its owner holds the
+     tier, and takes over no cache once its owner goes. Studio calls it
+     from `RunEvent::Exit` through its host's `IoSession` (the adapter, to
+     do).
    - **As the next cache on the files builds,** its lock taken, it reads
      the snapshot and removes it, durably, before it writes a chunk: a
      running cache reuses a chunk as soon as it frees it, so a crash must
@@ -566,7 +579,14 @@ Phase 1, t4 in Kismet's place:
    two caches is fetched again (`t4_caching/tests/restarts.rs`); a client
    that comes to own the cache takes its owner's disk tier, and asks its
    owner the sizes it knows (`sharing.rs`); the fuzz target restarts the
-   cache between operations. Stage 2, a crash: a snapshot every minute,
+   cache between operations. `T4Caching::shut_down`, built 2 Nov 2026:
+   a closed tier hands out no chunk (`a_closed_tier_hands_out_no_chunk`); a
+   cache shut down serves reads, writes no more to disk, and the next takes
+   back what it held (`a_cache_shut_down_keeps_its_disk_tier_and_writes_no_more`);
+   a client shut down leaves its owner be and takes over nothing; an owner
+   shut down, then killed, leaves its disk tier
+   (`an_owner_shut_down_then_killed_leaves_its_disk_tier`, real
+   processes). Stage 2, a crash: a snapshot every minute,
    freed chunks held back, a reserve of free disk chunks; tests that a
    process killed keeps the last snapshot's blocks and no others. Later,
    once stage 1 is measured in Studio.
@@ -599,12 +619,6 @@ Phase 2, t4 in the read path:
 
 ## Open questions
 
-- **Keeping the disk tier from Studio's exit hook** (decision 7). Studio
-  never drops its cache, so it keeps nothing. Either t4 gains a call that
-  writes no more to disk and keeps the snapshot, safe while the process
-  lives on, which Studio's `RunEvent::Exit` reaches through its host's
-  `IoSession`; or Studio stops its host and drops it at exit, which needs
-  every clone of the session gone first.
 
 - **Servers.** Server query processes, Flight SQL and the worker engines
   cache nothing today. If they run long on machines with NVMe drives,

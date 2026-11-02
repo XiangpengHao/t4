@@ -143,11 +143,12 @@ chunk table the frame table.
 ### Persistence
 
 9. **A clean restart keeps the disk tier; a crash loses the whole
-   cache.** The index lives in memory. As the cache drops, its files
-   flushed, it writes a snapshot of the index's disk half beside its first
-   cache file, and the next cache on those files takes it back and
-   removes it before it writes a chunk (`10-spiral-integration.md`,
-   decision 7, built 2 Nov 2026). After a crash there is none: the cache
+   cache.** The index lives in memory. As the cache drops, or is shut
+   down for good (`T4Caching::shut_down`), its files flushed, it writes a
+   snapshot of the index's disk half beside its first cache file, and the
+   next cache on those files takes it back and removes it before it
+   writes a chunk (`10-spiral-integration.md`, decision 7, built 2 Nov
+   2026). After a crash there is none: the cache
    starts cold, every chunk free, and refills from the object store, which
    costs time and egress, never correctness. So nothing is logged while
    the cache runs: no WAL, no tombstones, no `O_DSYNC`. A block reaches

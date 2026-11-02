@@ -60,6 +60,15 @@ pub(super) trait CacheStore: Send + Sync {
     /// a restart. `None` too if the owner is gone.
     fn known_size<'s>(&'s self, path: &'s [u8]) -> BoxFuture<'s, Option<u64>>;
 
+    /// Writes no more to disk, and keeps the disk tier for the next cache
+    /// on the files, if this process runs the storage half; reads go on
+    /// ([`T4Caching::shut_down`](super::T4Caching::shut_down)).
+    ///
+    /// # Errors
+    ///
+    /// If the snapshot can't be kept.
+    fn shut_down(&self) -> Result<()>;
+
     /// The storage half, if this process runs it.
     #[cfg(any(all(test, not(feature = "shuttle")), feature = "__fuzz"))]
     fn owned(&self) -> Option<&ObjectCache> {

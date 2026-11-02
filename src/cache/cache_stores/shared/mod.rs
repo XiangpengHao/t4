@@ -68,6 +68,9 @@ struct HandOff {
     /// The connections tried so far: the next one's number, which tells
     /// the version ids its owner gives apart from the last owner's.
     connections: u64,
+    /// Set once this process shut its cache down: it takes over none once
+    /// its owner goes, as it is exiting.
+    shut_down: bool,
 }
 
 /// What serves a read: this process's own store, or its owner, through
@@ -106,6 +109,7 @@ impl SharedCacheStore {
                 reads,
                 next_try: Instant::now(),
                 connections: 0,
+                shut_down: false,
             }),
         };
         let deadline = Instant::now() + wait;
@@ -180,13 +184,15 @@ impl SharedCacheStore {
     ///
     /// As [`Self::open`]'s, but for an owner that didn't answer.
     fn try_once(&self, hand_off: &mut HandOff) -> Result<bool> {
-        match InProcessCacheStore::open(&mut hand_off.tiers) {
-            Ok(store) => {
-                self.own(store);
-                return Ok(true);
+        if !hand_off.shut_down {
+            match InProcessCacheStore::open(&mut hand_off.tiers) {
+                Ok(store) => {
+                    self.own(store);
+                    return Ok(true);
+                }
+                Err(Error::Busy) => {}
+                Err(error) => return Err(error),
             }
-            Err(Error::Busy) => {}
-            Err(error) => return Err(error),
         }
         hand_off.connections += 1;
         let first_file = hand_off.tiers.first_file();
@@ -245,6 +251,18 @@ impl CacheStore for SharedCacheStore {
                 let read = ClientRead::start(owner, path, e_tag, size, range, intent).await?;
                 Ok(read.map(|read| Box::new(read) as Box<dyn CacheStoreRead<'s> + 's>))
             }),
+        }
+    }
+
+    /// This process's own store shut down, if it owns the cache; nothing of
+    /// its owner's otherwise. Either way, it takes over no cache from now
+    /// on: the flag is set under the hand-off's lock, which a process takes
+    /// the cache under, so a hand-off is done before it or never comes.
+    fn shut_down(&self) -> Result<()> {
+        self.hand_off().shut_down = true;
+        match self.owned.get() {
+            Some(owned) => owned.store.shut_down(),
+            None => Ok(()),
         }
     }
 

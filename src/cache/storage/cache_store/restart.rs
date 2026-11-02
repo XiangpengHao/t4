@@ -51,6 +51,26 @@ impl ObjectCache {
         }
     }
 
+    /// Writes no more to disk, and keeps the disk tier for the next cache on
+    /// its files, as dropping the cache does: for a process that exits
+    /// without dropping it. Reads go on, from both tiers and the remote,
+    /// but no block is written to disk again. The tier is closed first, so
+    /// that the snapshot names only chunks no write will touch: an
+    /// allocation in flight either took its chunk before, a chunk the
+    /// snapshot can't name, as no block is published in it, or finds the
+    /// tier closed. Blocks: it flushes the cache files.
+    ///
+    /// # Errors
+    ///
+    /// If the snapshot can't be kept: the next cache starts cold.
+    pub(in crate::cache) fn shut_down(&self) -> std::io::Result<()> {
+        self.disk.chunks().close();
+        match self.disk.snapshot() {
+            Some(snapshot) => snapshot.keep(&self.capture_snapshot()),
+            None => Ok(()),
+        }
+    }
+
     /// The size of the version the cache holds of the file at `path`, if it
     /// holds one: resolved by a read since it opened, or restored.
     pub(in crate::cache) fn known_size(&self, path: &[u8]) -> Option<u64> {
@@ -61,7 +81,8 @@ impl ObjectCache {
 /// The disk tier kept as the cache drops, for the next cache on its files,
 /// before the files close and their lock goes with them: the cache drops
 /// when nothing reads through it any more. A snapshot that can't be kept
-/// leaves the next cache cold.
+/// leaves the next cache cold. Kept again after [`ObjectCache::shut_down`]:
+/// the writes in flight then may have published blocks since.
 impl Drop for ObjectCache {
     fn drop(&mut self) {
         if let Some(snapshot) = self.disk.snapshot() {

@@ -2,8 +2,8 @@
 
 //! `T4Caching` against the store under it: random writes through the cache
 //! and behind its back, reads of every shape, some at once, some given up
-//! on midway, and restarts, with tiers of a few blocks, under the default
-//! policy or one the input scripts.
+//! on midway, shutdowns and restarts, with tiers of a few blocks, under the
+//! default policy or one the input scripts.
 //!
 //! Every answer must be one the cache may give: the file as the store holds
 //! it, or, after a write behind its back, a version the cache may still
@@ -153,13 +153,16 @@ enum Operation {
     /// The cache dropped, keeping its disk tier, and built again on its
     /// files, taking it back.
     Restart,
+    /// The cache shut down: its disk tier kept, and written no more, while
+    /// it goes on serving reads, until a restart.
+    ShutDown,
 }
 
 impl<'a> Arbitrary<'a> for Operation {
     /// An operation in a byte or so: reads two times in five, as they
     /// fill, evict and promote.
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        Ok(match u.choose_index(18)? {
+        Ok(match u.choose_index(19)? {
             0 | 1 => Self::Put {
                 file: u.arbitrary()?,
                 size: u.arbitrary()?,
@@ -192,6 +195,7 @@ impl<'a> Arbitrary<'a> for Operation {
             10..=12 => Self::Get(u.arbitrary()?),
             13 | 14 => Self::GetAtOnce(u.arbitrary()?),
             17 => Self::Restart,
+            18 => Self::ShutDown,
             _ => Self::GiveUp {
                 read: u.arbitrary()?,
                 polls: u.int_in_range(1..=4)?,
@@ -621,6 +625,7 @@ impl Harness {
                     }
                 }
             }
+            Operation::ShutDown => self.cache().shut_down().unwrap(),
             Operation::Restart => {
                 // Dropped first: it keeps its disk tier, and its files'
                 // lock goes with it.

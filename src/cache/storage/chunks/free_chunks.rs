@@ -13,6 +13,8 @@ pub(super) struct FreeChunks {
     /// The word the last allocation or free touched: where the next
     /// allocation starts looking.
     cursor: usize,
+    /// Set once the tier hands out no chunk any more ([`Self::close`]).
+    closed: bool,
 }
 
 impl FreeChunks {
@@ -31,13 +33,15 @@ impl FreeChunks {
             chunk_count,
             free_count: chunk_count,
             cursor: 0,
+            closed: false,
         }
     }
 
-    /// Takes a free chunk, `None` if every chunk is taken: the first clear
-    /// bit from the cursor on, wrapping around, skipping full words.
+    /// Takes a free chunk, `None` if every chunk is taken, or the tier is
+    /// closed: the first clear bit from the cursor on, wrapping around,
+    /// skipping full words.
     pub(super) fn allocate(&mut self) -> Option<ChunkId> {
-        if self.free_count == 0 {
+        if self.free_count == 0 || self.closed {
             return None;
         }
         let word_index = (self.cursor..self.taken.len())
@@ -50,6 +54,16 @@ impl FreeChunks {
         self.cursor = word_index;
         // Below `chunk_count`, a `u32`: the bits past it are never clear.
         Some(ChunkId::new((word_index * Self::WORD_BITS) as u32 + bit))
+    }
+
+    /// Hands out no chunk from now on, for good: chunks freed still come
+    /// back, but none is written again.
+    pub(super) fn close(&mut self) {
+        self.closed = true;
+    }
+
+    pub(super) fn is_closed(&self) -> bool {
+        self.closed
     }
 
     /// Takes free `chunk` itself: one a snapshot says holds a block, as the
@@ -132,6 +146,19 @@ mod tests {
         }
         assert_eq!(free.free_count(), 3);
         assert_eq!(allocate_all(&mut free), BTreeSet::from([3, 64, CHUNKS - 1]));
+    }
+
+    /// A closed tier hands out no chunk, not even one freed since; and
+    /// takes its frees back all the same.
+    #[test]
+    fn a_closed_tier_hands_out_no_chunk() {
+        let mut free = FreeChunks::new(CHUNKS);
+        let chunk = free.allocate().unwrap();
+        free.close();
+        assert_eq!(free.allocate(), None);
+        free.free(chunk);
+        assert_eq!(free.free_count(), CHUNKS);
+        assert_eq!(free.allocate(), None);
     }
 
     #[test]
