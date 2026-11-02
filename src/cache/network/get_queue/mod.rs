@@ -23,7 +23,7 @@ use std::task::{Poll, Waker};
 
 use bytes::Bytes;
 
-use super::FileVersionId;
+use crate::cache::FileVersionId;
 use crate::io::sync::{Arc, Mutex, MutexGuard};
 
 /// The GETs in flight, at most `most` bytes of them, a GET's racers' each

@@ -205,7 +205,7 @@ High-Performance Analytics", PVLDB 16(11), 2023):
     faster than that wants its own and Parquet's big GETs may wait for
     room as they did on the i7i (below; Later). t4 caps its GETs'
     bytes in flight, a racer's each counted, at what fills the NIC, the
-    two multiplied (`src/cache/get_queue/`): 200 MB for 50 Gbit/s and
+    two multiplied (`src/cache/network/get_queue/`): 200 MB for 50 Gbit/s and
     32 ms. Past it a GET waits its turn, first come, first served, until
     another's body is in; its time then includes the wait, which it
     reports as `waited`. A GET bigger than the cap goes once nothing else
@@ -388,5 +388,5 @@ them (decision 9).
 | `src/cache/policy/stragglers.rs` | `RaceStragglers`: GETs raced late at a quantile of the GET times heard | yes |
 | `src/cache/storage/cache_store/` | `start_read` and `TierWork`: the drives' work and the waits for blocks in flight awaited beside the GETs; `retry`, for blocks whose fetch cached nothing | yes |
 | `src/cache/storage/in_flight.rs` | `InFlight`: the blocks being fetched, each fetch's requests, claimed, joined by racers, ended where the block landed or abandoned | yes |
-| `src/cache/get_queue/` | `GetQueue`: the cap on bytes in flight, from the network's rate; waiting GETs first come, first served, a file's adjacent ones merged; a late racer beside it | yes |
+| `src/cache/network/get_queue/` | `GetQueue`: the cap on bytes in flight, from the network's rate; waiting GETs first come, first served, a file's adjacent ones merged; a late racer beside it | yes |
 | `src/cache/storage/index/` | an entry naming several chunks, for mirrors | with mirroring |

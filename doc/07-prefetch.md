@@ -286,7 +286,7 @@ read rather than only those with a remote block.
 
 | Path | What | Built |
 |---|---|---|
-| `src/cache/get_queue/` | demand and prefetch GETs; a queued prefetch bumped | no |
+| `src/cache/network/get_queue/` | demand and prefetch GETs; a queued prefetch bumped | no |
 | `src/io/common.rs` | the I/O worker's queue: demand and prefetch disk reads; a queued prefetch bumped | no |
 | `src/cache/storage/in_flight.rs` | a promotion in progress, held on as a fetch is | no |
 | `src/cache/storage/cache_store/` | a prefetch: blocks fetched or promoted, no output; `LocatedRead` for every read | no |

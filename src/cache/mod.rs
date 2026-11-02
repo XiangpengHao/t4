@@ -4,18 +4,21 @@
 //! - `storage`: the storage half (`doc/11-shared-mode.md`, decision 2): the
 //!   memory and disk tiers, the index of which blocks are cached where, the
 //!   blocks being fetched, and reads, fills and evictions over them all.
+//! - `network`: the network half (decision 2's fetch half): the GETs of
+//!   what only the remote holds, their queue and their races, and the read
+//!   policy that plans them.
 //! - `policy`: what the cache asks of its policy, and the default one.
 //! - `read_output`: the buffer a read's bytes land in, the caller's as
 //!   `Bytes` with no copy.
-//! - `t4_caching`: the front end over another `ObjectStore`: files opened
-//!   and read through the cache, and an `ObjectStore` itself.
+//! - `t4_caching`: the front end over another `ObjectStore`: files opened,
+//!   a read run through both halves, and an `ObjectStore` itself.
 //! - `sharing`: one cache read by several processes, through the one that
 //!   owns it (`doc/11-shared-mode.md`).
 //! - `storage_link`: how the front end reaches the cache: its own, or its
 //!   owner's.
 
-mod get_queue;
 mod io_report;
+mod network;
 pub mod policy;
 mod read_output;
 mod sharing;

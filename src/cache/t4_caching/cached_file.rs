@@ -8,7 +8,8 @@ use bytes::Bytes;
 use futures_util::stream::TryStreamExt;
 use object_store::{Extensions, GetOptions, GetRange, ObjectMeta, ObjectStore};
 
-use super::{STORE, T4Caching};
+use super::T4Caching;
+use crate::cache::network::Network;
 use crate::cache::policy::ReadIntent;
 use crate::cache::read_output::ReadOutput;
 use crate::io::sync::Arc;
@@ -97,7 +98,7 @@ impl CachedFile {
             .inner
             .get_opts(&self.meta.location, options)
             .await?;
-        let mut output = ReadOutput::new(range.clone()).map_err(T4Caching::cache_error)?;
+        let mut output = ReadOutput::new(range.clone()).map_err(Network::cache_error)?;
         let mut body = answer.into_stream();
         let mut at = range.start;
         while let Some(piece) = body.try_next().await? {
@@ -119,7 +120,7 @@ impl CachedFile {
     /// it asked.
     fn body_not_asked(range: &Range<u64>) -> object_store::Error {
         object_store::Error::Generic {
-            store: STORE,
+            store: Network::STORE,
             source: format!("the inner store's body for {range:?} held other bytes").into(),
         }
     }

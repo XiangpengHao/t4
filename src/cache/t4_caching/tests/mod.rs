@@ -4,18 +4,19 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::Poll;
 
 use async_trait::async_trait;
+use futures_util::future::pending;
 use futures_util::{FutureExt, TryStreamExt, stream};
 use object_store::memory::InMemory;
 use object_store::{
-    CopyOptions, GetResultPayload, ListResult, MultipartUpload, ObjectStoreExt,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult, UploadPart,
+    CopyOptions, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload,
+    ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult, UploadPart,
 };
 use pollster::block_on;
 use tempfile::TempDir;
 
 use super::*;
 use crate::cache::policy::{
-    Admit, BlockKey, BlockRead, ChunkId, ClockPolicy, DiskHit, FetchRuns, IoEvent, IoPhase,
+    Admit, BlockKey, BlockRead, ChunkId, ClockPolicy, DiskHit, FetchRuns, Io, IoEvent, IoPhase,
     LocatedRead, MemoryVictim, PlannedGet, ReadPlan, Tier,
 };
 
