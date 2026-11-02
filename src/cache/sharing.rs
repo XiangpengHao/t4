@@ -21,6 +21,7 @@ mod frames;
 mod handshake;
 mod owner;
 mod region;
+mod session_waker;
 
 pub(super) use address::FileIdentity;
 pub(super) use client::{ClientFetch, ClientRead, OwnerConnection};

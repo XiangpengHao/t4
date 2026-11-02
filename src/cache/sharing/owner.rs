@@ -5,10 +5,8 @@
 use std::os::unix::net::UnixListener;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
-use std::task::{Context, Wake, Waker};
-use std::thread::{self, JoinHandle, Thread};
-
-use crossbeam_channel::{Receiver, TryRecvError};
+use std::task::{Context, Waker};
+use std::thread::{self, JoinHandle};
 
 use super::address::{FileIdentity, OwnerAddress};
 use super::client_reads::ClientReads;
@@ -16,6 +14,7 @@ use super::frame_socket::{FrameReceiver, FrameSocket};
 use super::frames::{ClientFrame, OwnerFrame, PROTOCOL_VERSION};
 use super::handshake::Hello;
 use super::region::OwnerRegion;
+use super::session_waker::SessionWaker;
 use crate::cache::object_cache::ObjectCache;
 use crate::io::error::Result;
 use crate::io::sync::Arc;
@@ -189,49 +188,16 @@ impl ClientSession {
         };
         self.socket.send(&welcome.encode())?;
         self.socket.set_read_timeout(None)?;
-        let (frames, reader) = self.start_reader()?;
-        let served = self.serve_reads(&frames, region);
-        // The reader ends at the close, if the client hasn't closed first.
-        self.socket.shut_down();
-        let _ = reader.join();
-        served
+        let mut frames = FrameReceiver::new(self.socket.try_clone()?);
+        self.serve_reads(&mut frames, region)
     }
 
-    /// Starts the thread that takes the client's frames as they come, each
-    /// decoded, and hands them to this one, which it wakes once it has
-    /// handed every frame one read of the socket took; the channel closes
-    /// once the client closes the connection, or a frame breaks.
-    fn start_reader(&self) -> Result<(Receiver<Result<ClientFrame>>, JoinHandle<()>)> {
-        let (handing, frames) = crossbeam_channel::unbounded();
-        let mut reading = FrameReceiver::new(self.socket.try_clone()?);
-        let session = thread::current();
-        let reader = thread::Builder::new()
-            .name("t4-session-reader".into())
-            .spawn(move || {
-                loop {
-                    let frame = match reading.receive(FrameSocket::MOST_BYTES) {
-                        Ok(Some(body)) => ClientFrame::decode(body),
-                        Ok(None) => break,
-                        Err(error) => Err(error.into()),
-                    };
-                    let broken = frame.is_err();
-                    if handing.send(frame).is_err() || broken {
-                        break;
-                    }
-                    if !reading.holds_frame() {
-                        session.unpark();
-                    }
-                }
-                drop(handing);
-                session.unpark();
-            })?;
-        Ok((frames, reader))
-    }
-
-    /// Serves the client's reads, `frames` as they come, their outputs in
-    /// spans of `region` if the client named them: runs each read as far as
-    /// it goes, sends what the reads answer, and sleeps until a frame comes
-    /// or a read can go on. Every read is dropped as it ends, with all it
+    /// Serves the client's reads, taking their frames from `frames` as they
+    /// come, their outputs in spans of `region` if the client named them:
+    /// runs each read as far as it goes, sends what the reads answer, and
+    /// sleeps until a frame comes or a read can go on. The thread takes the
+    /// frames itself, as it would wait to be woken by a thread that did
+    /// (`SessionWaker`). Every read is dropped as it ends, with all it
     /// holds.
     ///
     /// # Errors
@@ -240,18 +206,24 @@ impl ClientSession {
     /// doesn't allow where it comes.
     fn serve_reads(
         &self,
-        frames: &Receiver<Result<ClientFrame>>,
+        frames: &mut FrameReceiver,
         region: Option<std::sync::Arc<OwnerRegion>>,
     ) -> Result<()> {
-        let mut reads = ClientReads::new(&self.cache, region);
-        let waker = Waker::from(std::sync::Arc::new(SessionWaker(thread::current())));
-        let mut context = Context::from_waker(&waker);
+        let waker = std::sync::Arc::new(SessionWaker::new()?);
+        let mut reads = ClientReads::new(&self.cache, region, std::sync::Arc::clone(&waker));
+        let task_waker = Waker::from(std::sync::Arc::clone(&waker));
+        let mut context = Context::from_waker(&task_waker);
         loop {
-            loop {
-                match frames.try_recv() {
-                    Ok(frame) => reads.take(frame?)?,
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => return Ok(()),
+            if waker.wait_for(&self.socket)? {
+                // One read of the socket, and every frame it took.
+                loop {
+                    let Some(body) = frames.receive(FrameSocket::MOST_BYTES)? else {
+                        return Ok(());
+                    };
+                    reads.take(ClientFrame::decode(body)?)?;
+                    if !frames.holds_frame() {
+                        break;
+                    }
                 }
             }
             reads.run(&mut context);
@@ -261,18 +233,6 @@ impl ClientSession {
                 .map(OwnerFrame::encode)
                 .collect();
             self.socket.send_all(&outgoing)?;
-            // Returns at once if a frame came, or a read was woken, since
-            // the last park.
-            thread::park();
         }
-    }
-}
-
-/// Wakes a session's thread, parked until a read can go on.
-struct SessionWaker(Thread);
-
-impl Wake for SessionWaker {
-    fn wake(self: std::sync::Arc<Self>) {
-        self.0.unpark();
     }
 }

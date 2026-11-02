@@ -4,6 +4,7 @@ use std::num::NonZeroU8;
 use std::ops::Range;
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
+use std::task::Wake;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -18,10 +19,11 @@ use rustix::process::geteuid;
 use tempfile::TempDir;
 
 use super::address::{FileIdentity, OwnerAddress};
-use super::frame_socket::{FrameReceiver, FrameSocket};
+use super::frame_socket::{FrameReceiver, FrameSender, FrameSocket};
 use super::frames::{ClientFrame, FetchSpec, NextStep, OwnerFrame, PROTOCOL_VERSION};
 use super::handshake::Hello;
 use super::region::{ClientRegion, SpanName};
+use super::session_waker::SessionWaker;
 use crate::cache::block_index::FileVersion;
 use crate::cache::object_cache::LocatedRun;
 use crate::cache::policy::{
@@ -142,6 +144,127 @@ fn frames_sent_together_are_taken_from_one_read() {
         assert_eq!(&ClientFrame::decode(body).unwrap(), frame);
         assert_eq!(other.holds_frame(), taken + 1 < frames.len());
     }
+}
+
+/// A sender's frames go in order, whether its caller writes them, while
+/// the socket takes them at once, or its writer thread does, once the
+/// socket would block a caller; no caller waits on the socket. Once the
+/// peer has gone, frames are dropped.
+#[test]
+fn a_senders_frames_go_in_order_whoever_writes_them() {
+    let (one, other) = UnixStream::pair().unwrap();
+    let sender = FrameSender::start(FrameSocket::new(one).unwrap()).unwrap();
+    let mut other = FrameReceiver::new(FrameSocket::new(other).unwrap());
+    // 8 MiB, far more than the socket holds unread: most wait for the
+    // writer.
+    let frames: Vec<ClientFrame> = (0..2048)
+        .map(|read| ClientFrame::Land {
+            read,
+            fetch: 0,
+            bytes: Bytes::from(vec![read as u8; 4096]),
+        })
+        .collect();
+    let encoded: Vec<Vec<u8>> = frames.iter().map(ClientFrame::encode).collect();
+    let sender = within_5s(move || {
+        // One, two, then three at a time, cut anywhere by a full socket.
+        let mut rest = &encoded[..];
+        for together in [1, 2, 3].into_iter().cycle() {
+            if rest.is_empty() {
+                break;
+            }
+            let (now, later) = rest.split_at(together.min(rest.len()));
+            sender.send(now.to_vec());
+            rest = later;
+        }
+        sender
+    })
+    .expect("no send waits on the socket");
+    for frame in frames {
+        let body = other.receive(FrameSocket::MOST_BYTES).unwrap().unwrap();
+        assert_eq!(ClientFrame::decode(body).unwrap(), frame);
+    }
+
+    drop(other);
+    let sender = within_5s(move || {
+        for read in 0..64 {
+            sender.send(vec![ClientFrame::EndRead { read }.encode()]);
+        }
+        sender
+    })
+    .expect("a send to a peer gone is dropped");
+    drop(sender);
+}
+
+/// A session waits for its client's socket or a wake, whichever comes
+/// first: a wake that came before the wait ends it at once, as does one
+/// from another thread while it waits; many wakes before a wait end one
+/// wait, not the next; and a frame, or the client's close, ends a wait
+/// with the socket ready.
+#[test]
+fn a_session_waits_for_its_socket_or_a_wake() {
+    let (mut client, socket) = UnixStream::pair().unwrap();
+    let socket = FrameSocket::new(socket).unwrap();
+    let waker = std::sync::Arc::new(SessionWaker::new().unwrap());
+
+    waker.wake_by_ref();
+    assert!(
+        !waker.wait_for(&socket).unwrap(),
+        "woken, the socket not ready"
+    );
+    let waking = std::sync::Arc::clone(&waker);
+    let woken = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        waking.wake_by_ref();
+    });
+    assert!(!waker.wait_for(&socket).unwrap());
+    woken.join().unwrap();
+
+    for _ in 0..100_000 {
+        waker.wake_by_ref();
+    }
+    assert!(!waker.wait_for(&socket).unwrap());
+    let sending = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        client
+            .write_all(&ClientFrame::EndRead { read: 1 }.encode())
+            .unwrap();
+        client
+    });
+    let waited = Instant::now();
+    assert!(waker.wait_for(&socket).unwrap(), "the frame came");
+    assert!(waited.elapsed() >= Duration::from_millis(10), "it waited");
+    drop(sending.join().unwrap());
+    assert!(waker.wait_for(&socket).unwrap(), "the close came");
+}
+
+/// A frame queued for the client wakes the session from another thread,
+/// and not from its own, which sends what is queued before it waits.
+#[test]
+fn a_frame_queued_wakes_the_session_from_another_thread_only() {
+    let (mut client, socket) = UnixStream::pair().unwrap();
+    let socket = FrameSocket::new(socket).unwrap();
+    let waker = std::sync::Arc::new(SessionWaker::new().unwrap());
+
+    let waking = std::sync::Arc::clone(&waker);
+    std::thread::spawn(move || waking.wake_to_send())
+        .join()
+        .unwrap();
+    assert!(
+        !waker.wait_for(&socket).unwrap(),
+        "woken from another thread"
+    );
+    waker.wake_to_send();
+    let sending = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        client
+            .write_all(&ClientFrame::EndRead { read: 1 }.encode())
+            .unwrap();
+        client
+    });
+    let waited = Instant::now();
+    assert!(waker.wait_for(&socket).unwrap(), "not woken by its own");
+    assert!(waited.elapsed() >= Duration::from_millis(10));
+    drop(sending.join().unwrap());
 }
 
 /// More frames than one write takes go too, in order: a batch is as long

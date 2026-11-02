@@ -6,7 +6,8 @@
 //! the region are a client's in another process.
 //!
 //! The file leaves the store once the owner holds it: a read the cache
-//! didn't serve fails, rather than time the store.
+//! didn't serve fails, rather than time the store. Each read's bytes drop
+//! within its time: a client's read ends then, with a frame to its owner.
 
 use std::path::Path as FsPath;
 use std::sync::Arc;
@@ -74,9 +75,10 @@ impl SharedHotFile {
             .unwrap()
     }
 
-    /// The file's first `len` bytes, read through `file`.
-    fn read(file: &CachedFile, len: u64) -> Bytes {
-        block_on(file.read(0..len, None)).unwrap()
+    /// Reads the file's first `len` bytes through `file`, and drops them.
+    fn read(file: &CachedFile, len: u64) {
+        let bytes: Bytes = block_on(file.read(0..len, None)).unwrap();
+        assert_eq!(bytes.len() as u64, len);
     }
 }
 

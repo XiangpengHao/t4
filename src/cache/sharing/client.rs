@@ -20,10 +20,9 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use bytes::Bytes;
-use crossbeam_channel::Sender;
 
 use super::address::{FileIdentity, OwnerAddress};
-use super::frame_socket::{FrameReceiver, FrameSocket};
+use super::frame_socket::{FrameReceiver, FrameSender, FrameSocket};
 use super::frames::{ClientFrame, FetchSpec, FrameReader, NextStep, OwnerFrame, PROTOCOL_VERSION};
 use super::handshake::Hello;
 use super::region::{ClientRegion, RegionSpan, SpanName};
@@ -54,10 +53,8 @@ pub(in crate::cache) struct OwnerConnection {
     calls: std::sync::Arc<CallTable>,
     /// The number the next read takes.
     next_read: AtomicU64,
-    /// The frames the writer sends, in order; taken as the connection
-    /// drops, so that the writer's channel closes.
-    outgoing: Option<Sender<Vec<u8>>>,
-    writer: Option<JoinHandle<()>>,
+    /// Sends the client's frames, in order.
+    outgoing: FrameSender,
     /// Takes the owner's frames until the owner goes, or breaks the
     /// protocol.
     reader: Option<JoinHandle<()>>,
@@ -154,29 +151,16 @@ impl OwnerConnection {
 
     /// The connection over `socket`, the owner's frames taken by `frames`,
     /// its owner having mapped `region` if any, its threads started: the
-    /// writer sends the frames queued, each batch in one write; the reader
-    /// answers each call, and tells `reads` of each read from disk.
+    /// sender's writer sends the frames a caller couldn't, each batch in one
+    /// write; the reader answers each call, and tells `reads` of each read
+    /// from disk.
     fn start(
         socket: FrameSocket,
         frames: FrameReceiver,
         region: Option<std::sync::Arc<ClientRegion>>,
         reads: Arc<dyn ReadPolicy>,
     ) -> Result<Self> {
-        let (outgoing, queued) = crossbeam_channel::unbounded::<Vec<u8>>();
-        let writing = socket.try_clone()?;
-        let writer = thread::Builder::new()
-            .name("t4-client-writer".into())
-            .spawn(move || {
-                for frame in &queued {
-                    let mut batch = vec![frame];
-                    batch.extend(queued.try_iter());
-                    if writing.send_all(&batch).is_err() {
-                        // The owner is gone: the reader sees it too.
-                        writing.shut_down();
-                        return;
-                    }
-                }
-            })?;
+        let outgoing = FrameSender::start(socket.try_clone()?)?;
         let calls = std::sync::Arc::new(CallTable::default());
         let lent = std::sync::Arc::new(LentSpans::default());
         #[cfg(all(test, not(feature = "shuttle")))]
@@ -200,8 +184,7 @@ impl OwnerConnection {
             traffic,
             calls,
             next_read: AtomicU64::new(0),
-            outgoing: Some(outgoing),
-            writer: Some(writer),
+            outgoing,
             reader: Some(reader),
         })
     }
@@ -224,19 +207,35 @@ impl OwnerConnection {
     /// If the owner is gone.
     fn send_call(&self, call: impl FnOnce(u64) -> ClientFrame) -> Result<WaitingCall<'_>> {
         let waiting = self.calls.wait()?;
-        self.tell(&call(waiting.number));
+        self.tell(&[call(waiting.number)]);
         Ok(waiting)
     }
 
-    /// Sends `frame`, which takes no answer; dropped if the owner is gone.
-    fn tell(&self, frame: &ClientFrame) {
-        if let Some(outgoing) = &self.outgoing {
-            let frame = frame.encode();
-            #[cfg(all(test, not(feature = "shuttle")))]
+    /// Sends the frames `first` and `then` make of two new calls' numbers,
+    /// in one write: the calls, their answers awaited later.
+    ///
+    /// # Errors
+    ///
+    /// If the owner is gone.
+    fn send_calls(
+        &self,
+        first: impl FnOnce(u64) -> ClientFrame,
+        then: impl FnOnce(u64) -> ClientFrame,
+    ) -> Result<(WaitingCall<'_>, WaitingCall<'_>)> {
+        let (one, other) = (self.calls.wait()?, self.calls.wait()?);
+        self.tell(&[first(one.number), then(other.number)]);
+        Ok((one, other))
+    }
+
+    /// Sends `frames`, in one write if the socket has room; dropped if the
+    /// owner is gone.
+    fn tell(&self, frames: &[ClientFrame]) {
+        let frames: Vec<Vec<u8>> = frames.iter().map(ClientFrame::encode).collect();
+        #[cfg(all(test, not(feature = "shuttle")))]
+        for frame in &frames {
             (self.traffic.sent).fetch_add(frame.len() as u64, Ordering::Relaxed);
-            // Fails only once the writer has gone with the owner.
-            let _ = outgoing.send(frame);
         }
+        self.outgoing.send(frames);
     }
 
     /// Whether the owner has gone: the connection closed, or broke, and
@@ -304,13 +303,10 @@ impl OwnerConnection {
 
 impl Drop for OwnerConnection {
     fn drop(&mut self) {
-        self.outgoing.take();
+        // The sender, a field, stops its writer as it drops after.
         self.socket.shut_down();
-        for thread in [self.writer.take(), self.reader.take()]
-            .into_iter()
-            .flatten()
-        {
-            let _ = thread.join();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
         }
     }
 }
@@ -600,17 +596,19 @@ impl<'c> ClientRead<'c> {
         let output = number.output.as_ref().map(RegionSpan::name);
         let asked = range.clone();
         let read = number.number;
-        let started = owner.send_call(|call| ClientFrame::StartRead {
-            call,
-            read,
-            path: Bytes::copy_from_slice(path),
-            e_tag: e_tag.to_owned(),
-            size,
-            range,
-            intent,
-            output,
-        })?;
-        let finish = owner.send_call(|call| ClientFrame::Finish { call, read })?;
+        let (started, finish) = owner.send_calls(
+            |call| ClientFrame::StartRead {
+                call,
+                read,
+                path: Bytes::copy_from_slice(path),
+                e_tag: e_tag.to_owned(),
+                size,
+                range,
+                intent,
+                output,
+            },
+            |call| ClientFrame::Finish { call, read },
+        )?;
         match started.await? {
             OwnerFrame::Started { version, next, .. } => Ok(Some(Self {
                 number,
@@ -799,7 +797,8 @@ impl Drop for ReadNumber<'_> {
         // Kept before the read ends: the owner's end comes after.
         let spans = self.output.take().into_iter().collect();
         self.owner.lent.keep_until_ended(self.number, spans);
-        self.owner.tell(&ClientFrame::EndRead { read: self.number });
+        self.owner
+            .tell(&[ClientFrame::EndRead { read: self.number }]);
     }
 }
 
@@ -871,7 +870,7 @@ impl ClientFetch<'_> {
             },
         };
         self.landed += len;
-        self.owner.tell(&frame);
+        self.owner.tell(&[frame]);
     }
 
     /// Commits the fetch, every byte in: the owner caches its blocks where
@@ -906,10 +905,10 @@ impl ClientFetch<'_> {
 impl Drop for ClientFetch<'_> {
     fn drop(&mut self) {
         if !self.settled {
-            self.owner.tell(&ClientFrame::Abandon {
+            self.owner.tell(&[ClientFrame::Abandon {
                 read: self.read,
                 fetch: self.fetch,
-            });
+            }]);
         }
         // The owner may read the span until it ends the read, which comes
         // after: a read's fetches drop before its number, which ends it.

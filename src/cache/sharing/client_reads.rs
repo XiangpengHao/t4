@@ -12,7 +12,6 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{Mutex, PoisonError};
 use std::task::{Context, Poll, Waker};
-use std::thread::{self, Thread};
 
 use bytes::Bytes;
 use futures_util::FutureExt;
@@ -21,6 +20,7 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use super::frames::{ClientFrame, FetchSpec, FrameReader, NextStep, OwnerFrame};
 use super::region::{OwnerRegion, SpanName};
+use super::session_waker::SessionWaker;
 use crate::cache::block_index::FileVersion;
 use crate::cache::object_cache::{FetchedBlocks, ObjectCache, PartialRead, TierWork};
 use crate::cache::policy::{FetchRuns, Io, IoEvent, LocatedRead, ReadIntent, ReadPlan, ReadPolicy};
@@ -42,14 +42,18 @@ pub(super) struct ClientReads<'c> {
 }
 
 impl<'c> ClientReads<'c> {
-    /// No reads yet, of a client whose region, if any, is `region`; made
-    /// on the session's thread, which a read's end wakes, from whatever
+    /// No reads yet, of a client whose region, if any, is `region`; a
+    /// read's end wakes the session's thread by `session`, from whatever
     /// thread it comes.
-    pub(super) fn new(cache: &'c ObjectCache, region: Option<std::sync::Arc<OwnerRegion>>) -> Self {
+    pub(super) fn new(
+        cache: &'c ObjectCache,
+        region: Option<std::sync::Arc<OwnerRegion>>,
+        session: std::sync::Arc<SessionWaker>,
+    ) -> Self {
         Self {
             cache,
             region,
-            outbox: Outbox::new(thread::current()),
+            outbox: Outbox::new(session),
             reads: HashMap::new(),
             tasks: FuturesUnordered::new(),
         }
@@ -218,7 +222,7 @@ impl Drop for ReadEnd {
 #[derive(Clone)]
 struct Outbox {
     frames: std::sync::Arc<Mutex<OutboxFrames>>,
-    session: Thread,
+    session: std::sync::Arc<SessionWaker>,
 }
 
 #[derive(Default)]
@@ -229,7 +233,7 @@ struct OutboxFrames {
 }
 
 impl Outbox {
-    fn new(session: Thread) -> Self {
+    fn new(session: std::sync::Arc<SessionWaker>) -> Self {
         Self {
             frames: std::sync::Arc::default(),
             session,
@@ -243,7 +247,7 @@ impl Outbox {
     /// Sends `frame` from any thread: the session's wakes to send it.
     fn send_waking(&self, frame: OwnerFrame) {
         self.send(frame);
-        self.session.unpark();
+        self.session.wake_to_send();
     }
 
     /// Notes the client sent `frame`, a frame the protocol doesn't allow

@@ -428,8 +428,44 @@ within 0.5 µs of each other, and the read takes 21.8 µs. Batching
 showed the session thread's wakeup, 3 µs, which taking the frames one at
 a time had hidden. The hops between threads of one side left are the
 caller's to the client's writer, 2.5 µs, and the owner's reader's to its
-session, 3 µs: the caller writing its frames to the socket itself, and
-the session thread reading its socket itself, would cut them. Not built.
+session, 3 µs.
+
+**No thread between** (2 Nov 2026): a caller sends its own frames, and
+the session thread takes its own; predicted 5 µs less.
+- A caller writes its frames while the socket has room
+  (`FrameSender`); a frame it has no room for, and every frame after it
+  till they have gone, goes by the writer thread, so that frames keep
+  their order. macOS ignores `MSG_DONTWAIT` on a Unix socket (checked),
+  and `O_NONBLOCK` is every clone's, the reader's too, so a caller's
+  send waits 200 µs at most, the socket's write timeout, then leaves its
+  frame to the writer, which waits for room with `poll`. A read's
+  `StartRead` and `Finish` go in one write.
+- The session thread waits on its client's socket and on a bell, a
+  socket of its own that a read's wakeup rings once between two waits
+  (`SessionWaker`), and takes the frames that came. A frame queued on the
+  session's own thread rings no bell: the thread sends what is queued
+  before it waits.
+
+The benchmark now drops each read's bytes within its time, as a client's
+read ends then with a frame to its owner: divan drops a bench's output
+after timing it, which hid the `EndRead` a caller now sends itself.
+Measured with timestamps, a read and its drop, start to start, p10 and
+median of 3000, two runs of each, back to back:
+
+| a client's hot 4 KiB read | p10 | median |
+|---|---|---|
+| batched | 16.6, 14.8 µs | 21.3, 17.9 µs |
+| no thread between | 11.6, 11.0 µs | 13.9, 14.6 µs |
+
+The model held at p10, 4 to 5 µs less. Runs vary by several µs at the
+median, the slowest of one version's beating the fastest of the
+other's: t4's threads run at the default quality of service, which
+macOS may wake on an efficiency core or a performance one (threads a
+user-interactive thread starts don't inherit its class; checked). Left
+on a read's path: a send that wakes a peer blocked on the socket costs 1
+to 2 µs inside the syscall, the caller's `EndRead` among them, 1.9 µs as
+its bytes drop; the client's reader waking its caller, 3 µs; and the
+session ending the last read before it takes the next's frames, 1 µs.
 
 ## Rejected
 
@@ -620,7 +656,8 @@ the session thread reading its socket itself, would cut them. Not built.
 | `src/cache/storage_link.rs` | how the fetch half reaches the storage half: its own, or its owner's (decision 2) | yes |
 | `src/cache/storage_link/current_link.rs` | the link a cache reads through now, and what makes it: at build, and anew once a client's owner goes (decisions 1, 7) | yes |
 | `src/cache/sharing/frames.rs` | the frames, each checked as it arrives (decision 5) | yes |
-| `src/cache/sharing/frame_socket.rs` | a socket frames cross whole, raising no `SIGPIPE` (decision 5) | yes |
+| `src/cache/sharing/frame_socket.rs` | a socket frames cross whole, raising no `SIGPIPE` (decision 5); the frames that came taken from one read (`FrameReceiver`), and many callers' frames sent with no thread between while the socket has room (`FrameSender`) (Cost) | yes |
+| `src/cache/sharing/session_waker.rs` | what wakes a session's thread, waiting on its client's socket and its reads at once (Cost) | yes |
 | `src/cache/sharing/address.rs` | the owner's address, by the first cache file's identity (decision 6) | yes |
 | `src/cache/sharing/handshake.rs` | a client's hello, its descriptor by `SCM_RIGHTS`, and the owner's check (decision 6) | yes |
 | `src/cache/sharing/owner.rs` | the owner's listener and a session for each client (decisions 1, 5) | yes |
