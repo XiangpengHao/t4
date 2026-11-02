@@ -373,6 +373,33 @@ fn a_builder_needs_a_memory_capacity_and_a_disk_file() {
         .unwrap();
 }
 
+/// A cache file takes its whole capacity on its drive as the cache is
+/// built, unless built to grow, when it is only sized.
+#[test]
+fn a_cache_file_takes_its_room_at_build_unless_it_grows() {
+    use std::os::unix::fs::MetadataExt;
+    let inner = Arc::new(CountingStore::default());
+    for growing in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = match growing {
+            true => builder(&inner, &dir).with_growing_disk_files(),
+            false => builder(&inner, &dir),
+        }
+        .build()
+        .unwrap();
+        let file = std::fs::metadata(dir.path().join("cache")).unwrap();
+        assert_eq!(file.len(), 8 * MIB);
+        // `st_blocks` counts 512-byte units.
+        let allocated = file.blocks() * 512;
+        assert_eq!(
+            allocated >= 8 * MIB,
+            !growing,
+            "{allocated} bytes allocated"
+        );
+        drop(cache);
+    }
+}
+
 /// A cache file has one owner: a second cache on it fails to build, by
 /// any path that reaches the file, until the first is dropped.
 #[test]

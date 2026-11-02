@@ -38,7 +38,7 @@ use super::policy::Tier;
 use super::policy::{
     FetchRuns, PlacementPolicy, RaceStragglers, ReadIntent, ReadPolicy, TierSizes,
 };
-use super::storage::DiskFile;
+use super::storage::{DiskFile, FileAllocation};
 use super::{BLOCK_SIZE_U64, InsertOrAbort};
 use crate::io::sync::Arc;
 
@@ -77,6 +77,7 @@ pub struct T4CachingBuilder {
     disk_files: Vec<DiskFile>,
     queue_depth: u32,
     direct_io: bool,
+    growing_disk_files: bool,
     placement: Option<PlacementMaker>,
     reads: Option<Arc<dyn ReadPolicy>>,
     sleep: Option<Sleep>,
@@ -130,6 +131,18 @@ impl T4CachingBuilder {
     /// unless set.
     pub fn with_direct_io(mut self, direct_io: bool) -> Self {
         self.direct_io = direct_io;
+        self
+    }
+
+    /// The cache files grow as blocks are written, rather than each taking
+    /// its whole capacity on its drive as the cache is built; and a block
+    /// is cached on disk only while every drive keeps 64 MiB and two blocks
+    /// free, as Kismet's rule is. For a user's machine, whose drive the
+    /// cache shares (`doc/10-spiral-integration.md`, decision 9). Unless
+    /// set, each file takes its capacity at build, and no write finds its
+    /// drive full.
+    pub fn with_growing_disk_files(mut self) -> Self {
+        self.growing_disk_files = true;
         self
     }
 
@@ -237,11 +250,17 @@ impl T4CachingBuilder {
             .reads
             .take()
             .unwrap_or_else(|| Arc::new(RaceStragglers::default()));
+        let allocation = if self.growing_disk_files {
+            FileAllocation::growing()
+        } else {
+            FileAllocation::Whole
+        };
         let mut tiers = TierSettings::new(
             memory_chunks,
             self.disk_files,
             queue_depth,
             self.direct_io,
+            allocation,
             self.placement,
         );
         let cache_store: Arc<dyn CacheStore> = if self.sharing {
@@ -282,6 +301,7 @@ impl fmt::Debug for T4CachingBuilder {
             .field("disk_files", &self.disk_files)
             .field("queue_depth", &self.queue_depth)
             .field("direct_io", &self.direct_io)
+            .field("growing_disk_files", &self.growing_disk_files)
             .field("network_rate", &self.network_rate)
             .field("merged_up_to", &self.merged_up_to)
             .field("sharing", &self.sharing)
@@ -298,6 +318,7 @@ impl T4Caching {
             disk_files: Vec::new(),
             queue_depth: 64,
             direct_io: true,
+            growing_disk_files: false,
             placement: None,
             reads: None,
             sleep: None,

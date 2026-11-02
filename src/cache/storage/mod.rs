@@ -24,7 +24,7 @@ mod index;
 mod memory;
 mod snapshot;
 
-pub(in crate::cache) use disk::{CacheFiles, DiskFile, FileIdentity};
+pub(in crate::cache) use disk::{CacheFiles, DiskFile, FileAllocation, FileIdentity};
 
 pub(in crate::cache) use cache_store::{
     CacheableFile, FetchedBlocks, LocatedRun, ObjectCache, PartialRead, TierWork,

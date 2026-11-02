@@ -8,6 +8,7 @@ use std::num::NonZeroU32;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use super::allocation::{DriveHeadroom, FileAllocation};
 use super::disk_chunks::{DiskChunkReader, DiskChunkWriter, DiskChunks};
 use crate::buffer::AlignedBuf;
 use crate::cache::BLOCK_SIZE_U64;
@@ -80,21 +81,25 @@ pub(in crate::cache) struct CacheFiles {
     /// Where the disk tier is kept across a restart; `None` for simulated
     /// files, and files that don't say when they were made.
     snapshot: Option<SnapshotFile>,
+    /// The room files that grow leave their drives; `None` for files
+    /// allocated whole, and simulated ones.
+    headroom: Option<DriveHeadroom>,
 }
 
 impl CacheFiles {
     /// Opens `files`, each made if missing, with `queue_depth` I/Os in
     /// flight across them. Each holds as many chunks as the smallest has
     /// room for (`doc/04-multi-device.md`, decision 3), one at least, and
-    /// takes only those. Every chunk starts free, but those a snapshot the
-    /// cache takes back names (`SnapshotFile`). Direct I/O unless
-    /// `direct_io` is off, and no `O_DSYNC`: a snapshot flushes the files
-    /// before it is kept, and nothing else on disk has to outlast a
-    /// crash.
+    /// takes only those, allocated on the drive as `allocation` says. Every
+    /// chunk starts free, but those a snapshot the cache takes back names
+    /// (`SnapshotFile`). Direct I/O unless `direct_io` is off, and no
+    /// `O_DSYNC`: a snapshot flushes the files before it is kept, and
+    /// nothing else on disk has to outlast a crash.
     pub(in crate::cache) fn open(
         files: &[DiskFile],
         queue_depth: NonZeroU32,
         direct_io: bool,
+        allocation: FileAllocation,
     ) -> Result<Self> {
         let count = u32::try_from(files.len())
             .ok()
@@ -109,19 +114,17 @@ impl CacheFiles {
             .iter()
             .map(|file| {
                 let opened = Self::open_file(&file.path, direct_io)?;
-                // Room for every chunk now, so that no write finds the drive
-                // full.
-                let len = u64::from(chunks_per_file) * BLOCK_SIZE_U64;
-                rustix::fs::fallocate(&opened, rustix::fs::FallocateFlags::empty(), 0, len)
-                    .map_err(std::io::Error::from)?;
+                allocation.size(&opened, u64::from(chunks_per_file) * BLOCK_SIZE_U64)?;
                 Ok(opened)
             })
             .collect::<Result<Vec<_>>>()?;
         let first_file = FileIdentity::of(&opened[0])?;
         let snapshot = SnapshotFile::beside(&files[0].path, &opened, chunks_per_file);
+        let headroom = allocation.headroom(&opened)?;
         let mut files = Self::on(IoWorker::new(queue_depth, opened)?, count, chunks_per_file)?;
         files.first_file = Some(first_file);
         files.snapshot = snapshot;
+        files.headroom = headroom;
         Ok(files)
     }
 
@@ -137,6 +140,7 @@ impl CacheFiles {
             chunks: Arc::new(DiskChunks::new(files, chunks_per_file)?),
             first_file: None,
             snapshot: None,
+            headroom: None,
         })
     }
 
@@ -153,6 +157,14 @@ impl CacheFiles {
     /// Where the disk tier is kept across a restart; `None` if it isn't.
     pub(in crate::cache) fn snapshot(&self) -> Option<&SnapshotFile> {
         self.snapshot.as_ref()
+    }
+
+    /// Whether a block may be written now: always to files allocated
+    /// whole; to files that grow, while every drive keeps its room.
+    pub(in crate::cache) fn has_room_for_a_block(&self) -> bool {
+        self.headroom
+            .as_ref()
+            .is_none_or(DriveHeadroom::allows_a_block)
     }
 
     /// Writes `pages` at the start of the chunk `writer` holds.

@@ -57,8 +57,9 @@ chunk table the frame table.
    chunk buys nothing. Free chunks are a bitmap: any free chunk serves any
    block, so nothing fragments and nothing merges. The memory pool is taken
    once, at startup, and never given back; the cache files are
-   preallocated to the disk budget, the chunks striped over them
-   (`04-multi-device.md`). The block is the smallest unit: an object's last
+   preallocated to the disk budget, or, built to grow, sized and filled
+   as blocks are written (`10-spiral-integration.md`, decision 9), the
+   chunks striped over them (`04-multi-device.md`). The block is the smallest unit: an object's last
    block, and an object smaller than a block, still take a whole chunk,
    and a block moves to disk as its whole chunk.
 3. **Reads can be partial.** A read inside a block takes only the 4 KB

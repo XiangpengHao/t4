@@ -8,7 +8,8 @@ naming each file as a path (decision 2). macOS runs t4 for real, untuned
 (decision 12). Revised 29 Oct 2026: Spiral's processes share one cache
 through its owner, `11-shared-mode.md` (decision 8); the lock is built
 (plan step 3), and shared mode with it. Revised 2 Nov 2026: the disk tier
-survives a clean restart, built (decision 7, stage 1); a crash, Later.
+survives a clean restart, built (decision 7, stage 1); a crash, Later. A
+user's machine's cache file grows, built (decision 9).
 
 The goal: t4 replaces spiraldb's local I/O cache, Kismet, and then
 takes over the rest of the work `spiral-io` does to read fast. The rest
@@ -146,7 +147,7 @@ nothing; Kismet's non-unix fallbacks have no user.
 | fetch-once | yes, within a process |
 | survives a restart | a clean one: the disk tier, kept in a snapshot as the cache drops (decision 7, built 2 Nov 2026); a crash loses everything |
 | several processes, one cache | shared mode: one process owns the cache and the others read through it (`11-shared-mode.md`, built); a cache not built for sharing on owned files fails to build, `Error::Busy` |
-| a laptop's footprint | the cache files are allocated in full at build (`fallocate`); a memory capacity is required |
+| a laptop's footprint | cache files that grow, each write leaving its drive Kismet's room (`with_growing_disk_files`, decision 9, built 2 Nov 2026); a memory capacity is required |
 | a disk error served from the remote | yes: a failed cache-file read goes to the inner store |
 | macOS | built and tested there, for development only until this doc (decision 12): a thread pool, `F_NOCACHE` |
 
@@ -250,8 +251,9 @@ hosts is one.
      `FixedPlacementPolicy` admitting every fetched block to disk, a disk
      hit staying there; direct I/O off, so the OS's page cache serves
      repeated reads as it serves Kismet's files; a memory tier of one
-     chunk, the least t4 takes. The disk tier is what survives a restart
-     (decision 7), so admitting straight to it loses nothing at exit.
+     chunk, the least t4 takes; a cache file that grows (decision 9). The
+     disk tier is what survives a restart (decision 7), so admitting
+     straight to it loses nothing at exit.
    - **A server**, if one opts in (Open questions): t4's defaults: the
      CLOCK, fetched blocks to memory and memory's victims to disk, direct
      I/O, a cache file on each drive.
@@ -344,15 +346,27 @@ hosts is one.
    and spiral-io runs it uncached, saying so once, rather than failing
    the session as a cache that can't be made does now.
 
-9. **A user's machine gets a cache file that grows.** t4 allocates its
-   cache files in full at build: 20 GiB the first time Studio starts, and
-   a failed build, so a failed session, on a disk with less. On a user's
-   machine the cache file is sparse instead, sized but not allocated, and
-   before each write the drive must keep 64 MiB plus twice the block
-   free, as Kismet's rule is. A block that finds too little isn't cached,
-   as a block that finds no free chunk isn't now (`03-cache.md`, decision
-   8). A server's cache files stay allocated in full. Unlike Kismet's
-   target, t4's budget is never exceeded.
+9. **A user's machine gets a cache file that grows.** t4 allocated its
+   cache files in full at build: 20 GiB the first time Studio starts,
+   about 2 s on a Mac, and a failed build, so a failed session, on a disk
+   with less. Built 2 Nov 2026 (`T4CachingBuilder::with_growing_disk_files`,
+   `storage/disk/allocation.rs`):
+
+   - **The file is sized, not allocated** (`set_len`, never shortened): it
+     takes the room of the chunks written to it, and a chunk written once
+     keeps its room, as t4 never punches a hole.
+   - **Before each block is written,** every cache file's drive must keep
+     64 MiB plus twice the block free (`fstatvfs`), as Kismet's rule is. A
+     block that finds too little isn't cached, as a block that finds no
+     free chunk isn't (`03-cache.md`, decision 8); and a full tier evicts
+     nothing for it, since a freed chunk gives the drive no room back. A
+     drive that can't say its free room takes no block. Memory's victims
+     that can't move to disk stay, and go back to the policy, as when the
+     disk tier has no room.
+   - **A server's cache files stay allocated in full,** the default: no
+     check, and no write finds its drive full.
+
+   Unlike Kismet's target, t4's budget is never exceeded.
 
 10. **Spiral's settings stay Spiral's.**
 
@@ -533,8 +547,18 @@ Phase 1, t4 in Kismet's place:
    freed chunks held back, a reserve of free disk chunks; tests that a
    process killed keeps the last snapshot's blocks and no others. Later,
    once stage 1 is measured in Studio.
-5. **The sparse cache file in t4** (decision 9), with a test of the free
-   space rule on a small file system.
+5. **The cache file that grows, in t4** (decision 9). Built 2 Nov 2026.
+   Tests: a file that grows is sized but takes room only as blocks are
+   written, and one allocated whole takes it all at build
+   (`a_cache_file_takes_its_room_at_build_unless_it_grows`,
+   `a_cache_file_that_grows_takes_room_as_blocks_are_written`); a drive
+   short of room takes no block, evicts no victim for one, and its blocks
+   still serve (`a_drive_short_of_room_takes_no_block_and_evicts_none`,
+   the room the rule keeps set past any drive's, the tier filled by a
+   cache with room and taken back from its snapshot). A test on a small
+   file system was the plan; it needs a mount, so CI's root, and the
+   rule's room is a setting of the storage half's, which the test sets
+   instead.
 6. **Studio and the CLI on t4:** checked on a Mac against Kismet as in
    step 2, and across a restart, for no worse, not tuned (decision 12);
    then t4 the default. The first start removes Kismet's
@@ -619,7 +643,7 @@ Phase 2, t4 in the read path:
 | Repository | Path | What | Built |
 |---|---|---|---|
 | t4 | `src/cache/storage/disk/cache_files.rs` | the lock (decision 8) | yes |
-| t4 | `src/cache/storage/disk/cache_files.rs` | sparse cache files (decision 9) | no |
+| t4 | `src/cache/storage/disk/allocation.rs` | cache files that grow, and the room they leave their drives (decision 9) | yes |
 | t4 | `11-shared-mode.md`'s code map | shared mode (decision 8) | yes |
 | t4 | `src/cache/storage/snapshot/` | the disk tier's snapshot: its bytes and checks, and its file (decision 7) | stage 1 |
 | t4 | `src/cache/storage/cache_store/restart.rs` | the disk tier captured as the cache drops, restored as the next builds (decision 7) | stage 1 |

@@ -15,8 +15,8 @@ use crate::cache::policy::{
     ClockPolicy, PlacementPolicy, ReadIntent, ReadPlan, ReadPolicy, TierSizes,
 };
 use crate::cache::storage::{
-    CacheFiles, CacheableFile, DiskFile, FetchedBlocks, LocatedRun, ObjectCache, PartialRead,
-    TierWork,
+    CacheFiles, CacheableFile, DiskFile, FetchedBlocks, FileAllocation, LocatedRun, ObjectCache,
+    PartialRead, TierWork,
 };
 use crate::io::error::{Error, Result};
 use crate::io::sync::Arc;
@@ -37,12 +37,14 @@ enum PlacementSource {
 }
 
 /// What a cache's tiers are made of, as its builder said: the memory's
-/// chunks, the cache files and how they are read, and the placement policy.
+/// chunks, the cache files, how they are read and take room on their
+/// drives, and the placement policy.
 pub(in crate::cache) struct TierSettings {
     memory_chunks: NonZeroU32,
     disk_files: Vec<DiskFile>,
     queue_depth: NonZeroU32,
     direct_io: bool,
+    allocation: FileAllocation,
     placement: PlacementSource,
 }
 
@@ -52,6 +54,7 @@ impl TierSettings {
         disk_files: Vec<DiskFile>,
         queue_depth: NonZeroU32,
         direct_io: bool,
+        allocation: FileAllocation,
         placement: Option<PlacementMaker>,
     ) -> Self {
         Self {
@@ -59,6 +62,7 @@ impl TierSettings {
             disk_files,
             queue_depth,
             direct_io,
+            allocation,
             placement: placement.map_or(PlacementSource::Clock, PlacementSource::Given),
         }
     }
@@ -105,7 +109,12 @@ impl InProcessCacheStore {
     /// cache file can't be made, sized and opened, or the memory mapped; or
     /// if the caller's placement policy was spent on a cache that failed so.
     pub(in crate::cache) fn open(tiers: &mut TierSettings) -> Result<Self> {
-        let disk = CacheFiles::open(&tiers.disk_files, tiers.queue_depth, tiers.direct_io)?;
+        let disk = CacheFiles::open(
+            &tiers.disk_files,
+            tiers.queue_depth,
+            tiers.direct_io,
+            tiers.allocation,
+        )?;
         let disk_chunks = NonZeroU32::new(disk.chunks().chunk_count())
             .expect("a disk file holds a chunk at least");
         let placement = tiers.placement(disk_chunks)?;

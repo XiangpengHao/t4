@@ -11,8 +11,8 @@ use crate::cache::policy::{
     Admit, BlockSource, DiskHit, FetchRuns, IoEvent, LocatedRead, PlannedGet, ReadPlan, Tier,
     VictimAction,
 };
-use crate::cache::storage::DiskFile;
 use crate::cache::storage::index::Location;
+use crate::cache::storage::{DiskFile, FileAllocation};
 use crate::cache::{BLOCK_SIZE_U64, BlockKey, ChunkId};
 use std::num::NonZeroU8;
 
@@ -24,7 +24,13 @@ const MIB: u64 = BLOCK_SIZE_U64;
 fn cache(memory_chunks: u32, disk_chunks: u32) -> (TempDir, ObjectCache, Arc<TestPolicy>) {
     let dir = tempfile::tempdir().unwrap();
     let file = DiskFile::new(dir.path().join("cache"), u64::from(disk_chunks) * MIB);
-    let disk = CacheFiles::open(&[file], NonZeroU32::new(8).unwrap(), true).unwrap();
+    let disk = CacheFiles::open(
+        &[file],
+        NonZeroU32::new(8).unwrap(),
+        true,
+        FileAllocation::Whole,
+    )
+    .unwrap();
     let policy = Arc::new(TestPolicy::new());
     let memory = NonZeroU32::new(memory_chunks).unwrap();
     let cache = ObjectCache::new(
@@ -91,7 +97,13 @@ fn the_default_policy_streams_blocks_through_both_tiers() {
         .iter()
         .map(|name| DiskFile::new(dir.path().join(name), MIB))
         .collect();
-    let disk = CacheFiles::open(&files, NonZeroU32::new(8).unwrap(), true).unwrap();
+    let disk = CacheFiles::open(
+        &files,
+        NonZeroU32::new(8).unwrap(),
+        true,
+        FileAllocation::Whole,
+    )
+    .unwrap();
     let (memory, disk_chunks) = (NonZeroU32::new(2).unwrap(), NonZeroU32::new(3).unwrap());
     let policy = Arc::new(crate::cache::policy::ClockPolicy::new(memory, disk_chunks));
     let cache = ObjectCache::new(memory, disk, policy).unwrap();
@@ -702,5 +714,87 @@ fn a_plan_taken_that_the_cache_cant_carry_out_fetches_as_the_default() {
     block_on(cache.take_fetched(&mut read, 0..2 * MIB, &data)).unwrap();
     assert!(block_on(work.finish(&mut read)).unwrap().is_empty());
     assert_eq!(read.into_bytes().unwrap(), data);
+    cache.check_at_rest().unwrap();
+}
+
+/// A cache over a file of `disk_chunks` chunks in `dir` that grows, each
+/// write leaving its drive `keep_free` bytes, and a chunk of memory; run by
+/// a [`TestPolicy`] that admits each fetched block to disk.
+fn growing_cache(
+    dir: &TempDir,
+    disk_chunks: u32,
+    keep_free: u64,
+) -> (ObjectCache, Arc<TestPolicy>) {
+    let file = DiskFile::new(dir.path().join("cache"), u64::from(disk_chunks) * MIB);
+    let growing = FileAllocation::Growing { keep_free };
+    let disk = CacheFiles::open(&[file], NonZeroU32::new(8).unwrap(), true, growing).unwrap();
+    let policy = Arc::new(TestPolicy::new());
+    policy.set_admit(Admit::Disk);
+    let placement = Arc::clone(&policy) as Arc<dyn PlacementPolicy>;
+    let cache = ObjectCache::new(NonZeroU32::MIN, disk, placement).unwrap();
+    (cache, policy)
+}
+
+/// The bytes the file at `path` takes on its drive.
+fn allocated(path: &std::path::Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    // `st_blocks` counts 512-byte units, whatever the file system's blocks.
+    std::fs::metadata(path).unwrap().blocks() * 512
+}
+
+/// A cache file that grows is sized as the cache is built, but takes room
+/// on its drive only as blocks are written to it (`doc/10-spiral-integration.md`,
+/// decision 9).
+#[test]
+fn a_cache_file_that_grows_takes_room_as_blocks_are_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cache, _policy) = growing_cache(&dir, 8, 0);
+    let path = dir.path().join("cache");
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 8 * MIB, "sized");
+    assert!(
+        allocated(&path) < MIB,
+        "not allocated: {}",
+        allocated(&path)
+    );
+
+    let data = file_bytes(3 * MIB);
+    let file = cache.resolve(b"a", Some("v1"), 3 * MIB).unwrap();
+    let (out, _) = read_through(&cache, &file, &data, 0..3 * MIB);
+    assert_eq!(out, data);
+    for index in 0..3 {
+        disk_chunk(&cache, &file, index);
+    }
+    assert!(allocated(&path) >= 3 * MIB, "{}", allocated(&path));
+}
+
+/// A drive short of room takes no block, and its full tier evicts none for
+/// one: a freed chunk would give the drive no room back. What it holds
+/// still serves.
+#[test]
+fn a_drive_short_of_room_takes_no_block_and_evicts_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = file_bytes(4 * MIB);
+    {
+        // A cache with room fills the tier, and keeps it as it drops.
+        let (cache, _policy) = growing_cache(&dir, 4, 0);
+        let file = cache.resolve(b"a", Some("v1"), 4 * MIB).unwrap();
+        read_through(&cache, &file, &a, 0..4 * MIB);
+        assert_eq!(cache.disk.chunks().free_count(), 0);
+    }
+    let (cache, policy) = growing_cache(&dir, 4, u64::MAX);
+    let kept = policy.queued(Tier::Disk);
+    assert_eq!(kept.len(), 4, "taken back");
+
+    let b = file_bytes(MIB);
+    let other = cache.resolve(b"b", Some("v1"), MIB).unwrap();
+    let (out, _) = read_through(&cache, &other, &b, 0..MIB);
+    assert_eq!(out, b);
+    assert_eq!(location(&cache, &other, 0), None, "not cached");
+    assert_eq!(policy.queued(Tier::Disk), kept, "no victim picked");
+
+    let file = cache.resolve(b"a", Some("v1"), 4 * MIB).unwrap();
+    let (out, fetches) = read_through(&cache, &file, &a, 0..4 * MIB);
+    assert_eq!(out, a);
+    assert_eq!(fetches, Vec::<Range<u64>>::new(), "served from disk");
     cache.check_at_rest().unwrap();
 }
