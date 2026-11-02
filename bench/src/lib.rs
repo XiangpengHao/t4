@@ -20,7 +20,10 @@
 //!   remote one, after a first-byte latency and at a bandwidth.
 //! - [`synthetic_objects`]: an object store whose objects' bytes are
 //!   computed, not stored, for the simulated store to serve.
+//! - [`disk_caches`]: t4, foyer and Kismet each holding the same 1 MiB
+//!   blocks on disk, for `cold_reads` to read cold.
 
+pub mod disk_caches;
 pub mod host_counters;
 pub mod io_latency;
 // Only Linux builds `ktls_transport`, its user; it is tested everywhere.

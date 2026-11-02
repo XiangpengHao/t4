@@ -14,6 +14,18 @@ clap = { version = "4", features = ["derive"] }
 # from; on object_store 0.13, as t4 is.
 datafusion = "55.2.0"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# The disk caches `cold_reads` compares t4 with (`disk_caches`): foyer's
+# hybrid cache, without its `serde` feature so `Bytes` takes foyer's own
+# codec; and Kismet, as spiraldb's `shared/spiral-kismet-cache` runs it,
+# whose envelope wants a CRC32 and whose keys a SHA-256 in hex.
+crc32fast = "1"
+foyer = "0.22"
+hex = "0.4"
+kismet-cache = "0.2.4"
+# The page-cache reference reads into a buffer nothing zeroes first, with
+# pread (`disk_caches::FreshRead`).
+libc = "0.2"
+sha2 = "0.10"
 http = "1"
 http-body-util = "0.1"
 httparse = "1"
