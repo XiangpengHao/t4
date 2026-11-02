@@ -11,10 +11,12 @@ use futures_util::future::BoxFuture;
 use super::connection::{OwnerConnection, WaitingCall};
 use super::fetch::ClientFetch;
 use crate::PAGE_SIZE_U64;
+use crate::cache::cache_stores::shared::protocol::{
+    ClientFrame, NextStep, OwnerFrame, RegionSpan, SpanName,
+};
 use crate::cache::cache_stores::{CacheStoreFetch, CacheStoreRead};
 use crate::cache::policy::{ReadIntent, ReadPlan};
 use crate::cache::read_output::ReadOutput;
-use crate::cache::sharing::{ClientFrame, NextStep, OwnerFrame, RegionSpan, SpanName};
 use crate::cache::storage::{CacheableFile, FileVersion, LocatedRun};
 use crate::io::error::{Error, Result};
 
@@ -22,8 +24,8 @@ use crate::io::error::{Error, Result};
 /// 5): its number on the connection, the read's next step as the owner
 /// answered it, its round's finish, and, once served, where its bytes are.
 /// Its client plans its GETs and makes them; the owner does the rest.
-pub(super) struct ClientRead<'c> {
-    number: std::sync::Arc<ReadNumber<'c>>,
+pub(in crate::cache::cache_stores::shared) struct ClientRead<'c> {
+    number: std::sync::Arc<ReadNumber>,
     path: &'c [u8],
     version: FileVersion,
     /// The file's bytes the client asked for.
@@ -32,7 +34,7 @@ pub(super) struct ClientRead<'c> {
     /// The round's finish, sent as the round starts, with the read's start
     /// or once the owner answers `Retry`: the owner holds it till the
     /// round's work is done, so that a read of hits is one round trip.
-    finish: Option<WaitingCall<'c>>,
+    finish: Option<WaitingCall>,
     served: Option<Served>,
 }
 
@@ -59,8 +61,8 @@ impl<'c> ClientRead<'c> {
     /// # Errors
     ///
     /// If the owner failed the read, or is gone.
-    pub(super) async fn start(
-        owner: &'c OwnerConnection,
+    pub(in crate::cache::cache_stores::shared) async fn start(
+        owner: std::sync::Arc<OwnerConnection>,
         path: &'c [u8],
         e_tag: &str,
         size: u64,
@@ -70,7 +72,7 @@ impl<'c> ClientRead<'c> {
         if range.end - range.start > Self::MOST_BYTES {
             return Ok(None);
         }
-        let number = ReadNumber::take(owner);
+        let number = ReadNumber::take(std::sync::Arc::clone(&owner));
         // No span free, the read's bytes come in the frame.
         let output = owner.span(ReadOutput::padded_len(&range));
         let output = number.lend_output(output);
@@ -199,7 +201,7 @@ impl<'c> CacheStoreRead<'c> for ClientRead<'c> {
             match finish.await? {
                 OwnerFrame::Retry { next, .. } => {
                     self.next = Some(next);
-                    let owner = self.number.owner;
+                    let owner = &self.number.owner;
                     let read = self.number.number;
                     self.finish = Some(owner.send_call(|call| ClientFrame::Finish { call, read })?);
                     Ok(true)
@@ -252,8 +254,10 @@ impl<'c> CacheStoreRead<'c> for ClientRead<'c> {
 /// all it holds of it, and keeps the spans until the owner says it has
 /// (`OwnerConnection::keep_until_ended`): no frame of the read's goes after
 /// its end, which would break the protocol.
-pub(super) struct ReadNumber<'c> {
-    owner: &'c OwnerConnection,
+pub(super) struct ReadNumber {
+    /// The read's own handle on the connection: it outlives the store's,
+    /// replaced once its owner goes.
+    owner: std::sync::Arc<OwnerConnection>,
     number: u64,
     /// The read's output's span, until its caller takes it, served.
     output: Mutex<Option<RegionSpan>>,
@@ -261,11 +265,11 @@ pub(super) struct ReadNumber<'c> {
     staged: Mutex<Vec<RegionSpan>>,
 }
 
-impl<'c> ReadNumber<'c> {
-    fn take(owner: &'c OwnerConnection) -> Self {
+impl ReadNumber {
+    fn take(owner: std::sync::Arc<OwnerConnection>) -> Self {
         Self {
-            owner,
             number: owner.take_read_number(),
+            owner,
             output: Mutex::default(),
             staged: Mutex::default(),
         }
@@ -293,8 +297,8 @@ impl<'c> ReadNumber<'c> {
     }
 
     /// The connection the read goes through.
-    pub(super) fn owner(&self) -> &'c OwnerConnection {
-        self.owner
+    pub(super) fn owner(&self) -> &OwnerConnection {
+        &self.owner
     }
 
     /// Keeps `staged`, a fetch's span, until the owner ends the read.
@@ -303,7 +307,7 @@ impl<'c> ReadNumber<'c> {
     }
 }
 
-impl Drop for ReadNumber<'_> {
+impl Drop for ReadNumber {
     fn drop(&mut self) {
         // Kept before the read ends: the owner's end comes after.
         let output = self.take_output();

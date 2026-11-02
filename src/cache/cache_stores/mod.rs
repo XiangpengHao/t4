@@ -1,13 +1,13 @@
-//! The cache stores a process reads through (`doc/11-shared-mode.md`,
-//! decision 2): its own, [`InProcessCacheStore`], once it holds the cache
-//! files' lock; or its owner's, [`SharedCacheStore`], over a socket, when
-//! another process holds it. The front end and the network half read
-//! through either as a `dyn` [`CacheStore`], which [`CurrentCacheStore`]
-//! swaps for a new one once a client's owner goes.
+//! The cache store a process reads through, picked as the cache is built
+//! (`doc/11-shared-mode.md`, decision 2): [`InProcessCacheStore`], the
+//! process's own, which it reads alone; or [`SharedCacheStore`], one cache
+//! read by several processes. Either is a [`CacheStore`], which the front
+//! end and the network half read through as a `dyn`.
 //!
-//! - `in_process`: this process's own cache store, run here.
-//! - `shared`: its owner's, through the client's connection.
-//! - `current`: the store a process reads through now, and what makes it.
+//! - `in_process`: a process's own cache store, and what its tiers are made
+//!   of.
+//! - `shared`: shared mode, all of it: the owner serving its clients, a
+//!   client reading through its owner, and the hand-off once it goes.
 
 use std::num::NonZeroU8;
 use std::ops::Range;
@@ -23,23 +23,17 @@ use super::storage::ObjectCache;
 use super::storage::{CacheableFile, LocatedRun};
 use crate::io::error::Result;
 
-mod current;
 mod in_process;
 mod shared;
 
-pub(super) use current::{CacheStoreMaker, CurrentCacheStore, PlacementMaker};
-use in_process::InProcessCacheStore;
+pub(super) use in_process::{InProcessCacheStore, PlacementMaker, TierSettings};
 #[cfg(all(test, not(feature = "shuttle")))]
 use shared::OwnerConnection;
-use shared::SharedCacheStore;
+pub(super) use shared::SharedCacheStore;
 
 /// A cache store a process reads through: the storage half, run in this
 /// process or in its owner's.
 pub(super) trait CacheStore: Send + Sync {
-    /// Whether the store's owner has gone: its calls fail, and a new store
-    /// is due (decision 7). Never so for this process's own.
-    fn owner_gone(&self) -> bool;
-
     /// Starts a read of `range` of the version of the file at `path` with
     /// `e_tag` and `size`, within it, for `intent`, its reads from disk
     /// heard by `reads`: the bytes the cache holds served or on their way,
@@ -70,7 +64,7 @@ pub(super) trait CacheStore: Send + Sync {
     /// The connection to the owner, if another process runs the storage
     /// half: for tests.
     #[cfg(all(test, not(feature = "shuttle")))]
-    fn owner_connection(&self) -> Option<&OwnerConnection> {
+    fn owner_connection(&self) -> Option<std::sync::Arc<OwnerConnection>> {
         None
     }
 }

@@ -3,10 +3,7 @@
 
 use std::ops::Range;
 
-use crate::cache::BlockKey;
 use crate::cache::policy::{BlockSource, LocatedRead, ReadIntent, ReadPlan, ReadPolicy};
-use crate::cache::sharing::{FrameReader, FrameWriter};
-use crate::io::error::Result;
 
 use super::CacheableFile;
 
@@ -27,8 +24,7 @@ pub(in crate::cache) struct LocatedRun {
 
 impl LocatedRun {
     /// A run of `sources`, from block `first`, the read's `asked` bytes of
-    /// it: for tests.
-    #[cfg(all(test, not(feature = "shuttle")))]
+    /// it: as a client takes one its owner located.
     pub(in crate::cache) fn new(first: u32, asked: Range<u64>, sources: Vec<BlockSource>) -> Self {
         Self {
             first,
@@ -37,33 +33,19 @@ impl LocatedRun {
         }
     }
 
-    /// Writes the run into `frame`, for a client to plan its GETs by.
-    pub(in crate::cache) fn write_to(&self, frame: &mut FrameWriter) {
-        frame.u32(self.first);
-        frame.range(&self.asked);
-        frame.sources(&self.sources);
+    /// The number of the run's first block.
+    pub(in crate::cache) fn first(&self) -> u32 {
+        self.first
     }
 
-    /// The run `frame` holds next, as [`Self::write_to`] wrote it.
-    ///
-    /// # Errors
-    ///
-    /// If the frame ends first, or the run holds no block or one past the
-    /// last a file has.
-    pub(in crate::cache) fn read_from(frame: &mut FrameReader) -> Result<Self> {
-        let first = frame.u32()?;
-        let asked = frame.range()?;
-        let sources = frame.sources()?;
-        let blocks = u32::try_from(sources.len()).ok();
-        let end = blocks.and_then(|blocks| first.checked_add(blocks));
-        if sources.is_empty() || end.is_none_or(|end| end > BlockKey::INDEX_LIMIT) {
-            return Err(FrameReader::malformed("a located run's blocks"));
-        }
-        Ok(Self {
-            first,
-            asked,
-            sources,
-        })
+    /// The file's bytes the read asked for within the run.
+    pub(in crate::cache) fn asked(&self) -> Range<u64> {
+        self.asked.clone()
+    }
+
+    /// Where each block is, the run's first block's first.
+    pub(in crate::cache) fn sources(&self) -> &[BlockSource] {
+        &self.sources
     }
 
     /// The GETs `policy` plans for the run, of a read of `file` for

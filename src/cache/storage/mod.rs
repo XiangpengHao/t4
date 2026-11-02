@@ -22,7 +22,7 @@ mod in_flight;
 mod index;
 mod memory;
 
-pub(in crate::cache) use disk::{CacheFiles, DiskFile};
+pub(in crate::cache) use disk::{CacheFiles, DiskFile, FileIdentity};
 
 pub(in crate::cache) use cache_store::{
     CacheableFile, FetchedBlocks, LocatedRun, ObjectCache, PartialRead, TierWork,

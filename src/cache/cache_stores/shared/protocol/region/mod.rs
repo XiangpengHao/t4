@@ -26,21 +26,21 @@ use crate::io::error::{Error, Result};
 
 /// A span of a region as a frame names it: `len` bytes from byte `offset`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::cache) struct SpanName {
+pub(in crate::cache::cache_stores::shared) struct SpanName {
     offset: u64,
     len: u64,
 }
 
 impl SpanName {
-    pub(in crate::cache) fn new(offset: u64, len: u64) -> Self {
+    pub(in crate::cache::cache_stores::shared) fn new(offset: u64, len: u64) -> Self {
         Self { offset, len }
     }
 
-    pub(in crate::cache) fn offset(self) -> u64 {
+    pub(in crate::cache::cache_stores::shared) fn offset(self) -> u64 {
         self.offset
     }
 
-    pub(in crate::cache) fn len(self) -> u64 {
+    pub(in crate::cache::cache_stores::shared) fn len(self) -> u64 {
         self.len
     }
 }
@@ -101,7 +101,7 @@ impl Drop for SharedMapping {
 /// A client's region: its shared memory, its mapping of it, and its spans
 /// not taken. Spans hold it, so it lives as long as the last of them, the
 /// caller's bytes of a read included.
-pub(in crate::cache) struct ClientRegion {
+pub(in crate::cache::cache_stores::shared) struct ClientRegion {
     memory: OwnedFd,
     mapping: SharedMapping,
     free: Mutex<FreeSpans>,
@@ -109,7 +109,7 @@ pub(in crate::cache) struct ClientRegion {
 
 impl ClientRegion {
     /// A region's bytes: pages take memory only once touched.
-    pub(super) const BYTES: u64 = 1 << 30;
+    pub(in crate::cache::cache_stores::shared) const BYTES: u64 = 1 << 30;
 
     /// A span this long or longer, given back, gives its memory back too.
     #[cfg(target_os = "linux")]
@@ -125,7 +125,7 @@ impl ClientRegion {
     /// # Errors
     ///
     /// If the memory can't be made, sized, sealed or mapped.
-    pub(in crate::cache) fn make() -> io::Result<Arc<Self>> {
+    pub(in crate::cache::cache_stores::shared) fn make() -> io::Result<Arc<Self>> {
         let memory = Self::shared_memory()?;
         let mapping = SharedMapping::map(memory.as_fd(), Self::BYTES as usize)?;
         Ok(Arc::new(Self {
@@ -177,13 +177,16 @@ impl ClientRegion {
     }
 
     /// The region's memory, to send its owner.
-    pub(in crate::cache) fn descriptor(&self) -> BorrowedFd<'_> {
+    pub(in crate::cache::cache_stores::shared) fn descriptor(&self) -> BorrowedFd<'_> {
         self.memory.as_fd()
     }
 
     /// A span of `len` bytes, whole pages, a page at least; `None` if no
     /// run of free pages is that long.
-    pub(in crate::cache) fn span(self: &Arc<Self>, len: u64) -> Option<RegionSpan> {
+    pub(in crate::cache::cache_stores::shared) fn span(
+        self: &Arc<Self>,
+        len: u64,
+    ) -> Option<RegionSpan> {
         let pages = len.div_ceil(PAGE_SIZE_U64).max(1);
         let first_page = self.free().take(pages)?;
         Some(RegionSpan {
@@ -213,13 +216,13 @@ impl ClientRegion {
 
     /// How many of the region's pages are free: for tests.
     #[cfg(all(test, not(feature = "shuttle")))]
-    pub(in crate::cache) fn free_pages(&self) -> u64 {
+    pub(in crate::cache::cache_stores::shared) fn free_pages(&self) -> u64 {
         self.free().runs.values().sum()
     }
 
     /// Whether `bytes` lie in the region: for tests.
     #[cfg(all(test, not(feature = "shuttle")))]
-    pub(in crate::cache) fn holds(&self, bytes: &[u8]) -> bool {
+    pub(in crate::cache::cache_stores::shared) fn holds(&self, bytes: &[u8]) -> bool {
         let start = self.mapping.ptr.as_ptr() as usize;
         let at = bytes.as_ptr() as usize;
         start <= at && at + bytes.len() <= start + self.mapping.len
@@ -233,7 +236,7 @@ impl ClientRegion {
 /// A span of a client's region, its pages its own until it drops, which
 /// gives them back. Lent to the owner, it is kept until the owner says it
 /// is done with it (decision 5).
-pub(in crate::cache) struct RegionSpan {
+pub(in crate::cache::cache_stores::shared) struct RegionSpan {
     region: Arc<ClientRegion>,
     first_page: u64,
     pages: u64,
@@ -241,7 +244,7 @@ pub(in crate::cache) struct RegionSpan {
 
 impl RegionSpan {
     /// The span, as a frame names it.
-    pub(in crate::cache) fn name(&self) -> SpanName {
+    pub(in crate::cache::cache_stores::shared) fn name(&self) -> SpanName {
         SpanName::new(self.first_page * PAGE_SIZE_U64, self.pages * PAGE_SIZE_U64)
     }
 
@@ -250,7 +253,7 @@ impl RegionSpan {
     /// # Panics
     ///
     /// If they run past the span.
-    pub(in crate::cache) fn copy_in(&mut self, at: usize, bytes: &[u8]) {
+    pub(in crate::cache::cache_stores::shared) fn copy_in(&mut self, at: usize, bytes: &[u8]) {
         let name = self.name();
         assert!(
             at + bytes.len() <= name.len() as usize,
@@ -280,7 +283,7 @@ impl RegionSpan {
     /// # Panics
     ///
     /// If `within` runs past the span.
-    pub(in crate::cache) fn into_bytes(self, within: Range<usize>) -> Bytes {
+    pub(in crate::cache::cache_stores::shared) fn into_bytes(self, within: Range<usize>) -> Bytes {
         assert!(
             within.end <= self.name().len() as usize,
             "{within:?} lie within the span"
@@ -320,7 +323,7 @@ impl AsRef<[u8]> for ServedSpan {
 /// too. The owner reads a span of it only where a frame names it, and
 /// only to copy its bytes: a client that changes them meanwhile garbles
 /// its own bytes, nothing of the owner's (decision 8).
-pub(in crate::cache) struct OwnerRegion {
+pub(in crate::cache::cache_stores::shared) struct OwnerRegion {
     mapping: SharedMapping,
 }
 
@@ -335,7 +338,7 @@ impl OwnerRegion {
     ///
     /// If it could shrink, is empty, not whole pages or too large, or can't
     /// be mapped.
-    pub(super) fn accept(memory: OwnedFd) -> Result<Self> {
+    pub(in crate::cache::cache_stores::shared) fn accept(memory: OwnedFd) -> Result<Self> {
         let bytes = u64::try_from(rustix::fs::fstat(&memory).map_err(io::Error::from)?.st_size)
             .map_err(|_| Self::refused("of a negative size"))?;
         if bytes == 0 || !bytes.is_multiple_of(PAGE_SIZE_U64) || bytes > Self::MOST_BYTES {
@@ -377,7 +380,7 @@ impl OwnerRegion {
     /// # Errors
     ///
     /// If the span runs past the region.
-    pub(super) fn staged(&self, span: SpanName) -> Result<&[u8]> {
+    pub(in crate::cache::cache_stores::shared) fn staged(&self, span: SpanName) -> Result<&[u8]> {
         let start = self
             .mapping
             .at(span)
@@ -400,7 +403,7 @@ impl OwnerRegion {
     /// If the span runs past the region, is too short for the output, or
     /// starts off a page boundary: the output lends its pages to reads from
     /// disk, which land past the page cache in page-aligned memory alone.
-    pub(super) fn output(
+    pub(in crate::cache::cache_stores::shared) fn output(
         self: &Arc<Self>,
         span: SpanName,
         asked: Range<u64>,

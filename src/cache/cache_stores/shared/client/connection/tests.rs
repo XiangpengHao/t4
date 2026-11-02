@@ -5,7 +5,7 @@ use super::*;
 /// one.
 #[test]
 fn an_answer_to_a_call_given_up_is_dropped() {
-    let table = CallTable::default();
+    let table = std::sync::Arc::new(CallTable::default());
     let given_up = table.wait().unwrap();
     let number = given_up.number;
     drop(given_up);

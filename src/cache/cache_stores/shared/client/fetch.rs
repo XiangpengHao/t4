@@ -13,7 +13,9 @@ use super::connection::OwnerConnection;
 use super::read::ReadNumber;
 use crate::cache::FileVersionId;
 use crate::cache::cache_stores::CacheStoreFetch;
-use crate::cache::sharing::{ClientFrame, FetchSpec, OwnerFrame, RegionSpan, SpanName};
+use crate::cache::cache_stores::shared::protocol::{
+    ClientFrame, FetchSpec, OwnerFrame, RegionSpan, SpanName,
+};
 use crate::io::error::{Error, Result};
 
 /// One of a client's read's fetches (`ClientRead`'s): the bytes of
@@ -23,8 +25,8 @@ use crate::io::error::{Error, Result};
 /// abandoned: the owner caches none of it, and the reads waiting on its
 /// blocks fetch for themselves. Dropped either way, its span is kept until
 /// the owner ends the read, which it holds open until then.
-pub(super) struct ClientFetch<'c> {
-    read: std::sync::Arc<ReadNumber<'c>>,
+pub(super) struct ClientFetch {
+    read: std::sync::Arc<ReadNumber>,
     /// Its place in the read's fetches.
     fetch: u32,
     spec: FetchSpec,
@@ -37,12 +39,12 @@ pub(super) struct ClientFetch<'c> {
     settled: bool,
 }
 
-impl<'c> ClientFetch<'c> {
+impl ClientFetch {
     /// The fetch `fetch` of the read `read`, of `spec`'s bytes of `file`:
     /// staged in a span of the client's region, if one is free; else its
     /// bytes go in the frames.
     pub(super) fn new(
-        read: std::sync::Arc<ReadNumber<'c>>,
+        read: std::sync::Arc<ReadNumber>,
         fetch: u32,
         spec: FetchSpec,
         file: FileVersionId,
@@ -61,7 +63,7 @@ impl<'c> ClientFetch<'c> {
     }
 }
 
-impl<'c> CacheStoreFetch<'c> for ClientFetch<'c> {
+impl<'c> CacheStoreFetch<'c> for ClientFetch {
     /// The file's bytes the fetch holds.
     fn range(&self) -> Range<u64> {
         self.spec.bytes()
@@ -141,7 +143,7 @@ impl<'c> CacheStoreFetch<'c> for ClientFetch<'c> {
     }
 }
 
-impl Drop for ClientFetch<'_> {
+impl Drop for ClientFetch {
     fn drop(&mut self) {
         if !self.settled {
             self.read.owner().tell(&[ClientFrame::Abandon {

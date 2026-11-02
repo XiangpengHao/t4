@@ -14,10 +14,10 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use super::region::SpanName;
-use crate::cache::FileVersionId;
 use crate::cache::policy::{BlockSource, IoPhase, PlannedGet, ReadIntent, ReadPlan};
 use crate::cache::storage::FileVersion;
 use crate::cache::storage::LocatedRun;
+use crate::cache::{BlockKey, FileVersionId};
 use crate::io::error::{Error, Result};
 
 /// The protocol's version: a client and an owner of different versions
@@ -25,14 +25,14 @@ use crate::io::error::{Error, Result};
 /// [`OwnerFrame::Welcome`], which are the same in every version, their
 /// tags and descriptors with them: a version that needs more of a
 /// handshake says it in frames after the welcome.
-pub(in crate::cache) const PROTOCOL_VERSION: u32 = 3;
+pub(in crate::cache::cache_stores::shared) const PROTOCOL_VERSION: u32 = 3;
 
 /// A frame a client sends its owner. A call, which the owner answers,
 /// carries the number the client gave it, `call`; the other frames take no
 /// answer. A read is named by the number the client gave it, `read`, from
 /// its start to its end.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::cache) enum ClientFrame {
+pub(in crate::cache::cache_stores::shared) enum ClientFrame {
     /// The first frame: the client's protocol version, sent with its
     /// descriptor of the first cache file, and of its region if `region`.
     Hello { version: u32, region: bool },
@@ -82,7 +82,7 @@ pub(in crate::cache) enum ClientFrame {
 /// A frame an owner sends its client: the answer to one of its calls, or
 /// news of a read from disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::cache) enum OwnerFrame {
+pub(in crate::cache::cache_stores::shared) enum OwnerFrame {
     /// The answer to [`ClientFrame::Hello`]: the owner's protocol version,
     /// and whether it mapped the client's region; if not, the client's
     /// reads' bytes go in the frames. A client of another version is told
@@ -148,7 +148,7 @@ pub(in crate::cache) enum OwnerFrame {
 /// What a read does next: plan the GETs of a run of its blocks, or make
 /// the GETs planned, each landed as fetch number its place in the list.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::cache) enum NextStep {
+pub(in crate::cache::cache_stores::shared) enum NextStep {
     Plan(LocatedRun),
     Fetch(Vec<FetchSpec>),
 }
@@ -156,26 +156,30 @@ pub(in crate::cache) enum NextStep {
 /// A GET a read makes: the file's bytes it fetches, how many requests race
 /// for them at once, and when one more races late.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::cache) struct FetchSpec {
+pub(in crate::cache::cache_stores::shared) struct FetchSpec {
     bytes: Range<u64>,
     race: NonZeroU8,
     late: Option<Duration>,
 }
 
 impl FetchSpec {
-    pub(super) fn new(bytes: Range<u64>, race: NonZeroU8, late: Option<Duration>) -> Self {
+    pub(in crate::cache::cache_stores::shared) fn new(
+        bytes: Range<u64>,
+        race: NonZeroU8,
+        late: Option<Duration>,
+    ) -> Self {
         Self { bytes, race, late }
     }
 
-    pub(in crate::cache) fn bytes(&self) -> Range<u64> {
+    pub(in crate::cache::cache_stores::shared) fn bytes(&self) -> Range<u64> {
         self.bytes.clone()
     }
 
-    pub(in crate::cache) fn race(&self) -> NonZeroU8 {
+    pub(in crate::cache::cache_stores::shared) fn race(&self) -> NonZeroU8 {
         self.race
     }
 
-    pub(in crate::cache) fn late_race(&self) -> Option<Duration> {
+    pub(in crate::cache::cache_stores::shared) fn late_race(&self) -> Option<Duration> {
         self.late
     }
 }
@@ -195,7 +199,7 @@ impl ClientFrame {
     const MAGIC: [u8; 4] = *b"t4sh";
 
     /// The frame, its length first.
-    pub(in crate::cache) fn encode(&self) -> Vec<u8> {
+    pub(in crate::cache::cache_stores::shared) fn encode(&self) -> Vec<u8> {
         match self {
             Self::Hello { version, region } => {
                 let mut frame = FrameWriter::new(Self::HELLO);
@@ -282,7 +286,7 @@ impl ClientFrame {
     /// # Errors
     ///
     /// If the body isn't a client frame's, whole.
-    pub(super) fn decode(body: Bytes) -> Result<Self> {
+    pub(in crate::cache::cache_stores::shared) fn decode(body: Bytes) -> Result<Self> {
         let mut frame = FrameReader::new(body);
         let decoded = match frame.u8()? {
             Self::HELLO => {
@@ -345,7 +349,7 @@ impl ClientFrame {
 
 impl OwnerFrame {
     /// The number of the call the frame answers; `None` if it answers none.
-    pub(in crate::cache) fn call(&self) -> Option<u64> {
+    pub(in crate::cache::cache_stores::shared) fn call(&self) -> Option<u64> {
         match *self {
             Self::Started { call, .. }
             | Self::Uncacheable { call }
@@ -372,7 +376,7 @@ impl OwnerFrame {
     const ENDED: u8 = 11;
 
     /// The frame, its length first.
-    pub(super) fn encode(&self) -> Vec<u8> {
+    pub(in crate::cache::cache_stores::shared) fn encode(&self) -> Vec<u8> {
         match self {
             Self::Welcome { version, region } => {
                 let mut frame = FrameWriter::new(Self::WELCOME);
@@ -445,7 +449,7 @@ impl OwnerFrame {
     /// # Errors
     ///
     /// If the body isn't an owner frame's, whole.
-    pub(in crate::cache) fn decode(body: Bytes) -> Result<Self> {
+    pub(in crate::cache::cache_stores::shared) fn decode(body: Bytes) -> Result<Self> {
         let mut frame = FrameReader::new(body);
         let decoded = match frame.u8()? {
             Self::WELCOME => Self::Welcome {
@@ -495,7 +499,7 @@ impl OwnerFrame {
 
 /// A frame being written: its length, filled in once it is whole, then its
 /// tag and fields, each appended in order.
-pub(in crate::cache) struct FrameWriter {
+pub(in crate::cache::cache_stores::shared) struct FrameWriter {
     frame: Vec<u8>,
 }
 
@@ -545,7 +549,7 @@ impl FrameWriter {
         }
     }
 
-    pub(in crate::cache) fn u32(&mut self, value: u32) {
+    pub(in crate::cache::cache_stores::shared) fn u32(&mut self, value: u32) {
         self.raw(&value.to_le_bytes());
     }
 
@@ -559,7 +563,7 @@ impl FrameWriter {
         self.raw(bytes);
     }
 
-    pub(in crate::cache) fn range(&mut self, range: &Range<u64>) {
+    pub(in crate::cache::cache_stores::shared) fn range(&mut self, range: &Range<u64>) {
         self.u64(range.start);
         self.u64(range.end);
     }
@@ -579,7 +583,7 @@ impl FrameWriter {
     }
 
     /// `sources`, their count first.
-    pub(in crate::cache) fn sources(&mut self, sources: &[BlockSource]) {
+    pub(in crate::cache::cache_stores::shared) fn sources(&mut self, sources: &[BlockSource]) {
         self.u32(u32::try_from(sources.len()).expect("a run's blocks fit a u32"));
         for source in sources {
             match *source {
@@ -617,11 +621,18 @@ impl FrameWriter {
         }
     }
 
+    /// Writes `run`, for a client to plan its GETs by.
+    fn located_run(&mut self, run: &LocatedRun) {
+        self.u32(run.first());
+        self.range(&run.asked());
+        self.sources(run.sources());
+    }
+
     fn next_step(&mut self, next: &NextStep) {
         match next {
             NextStep::Plan(run) => {
                 self.u8(0);
-                run.write_to(self);
+                self.located_run(run);
             }
             NextStep::Fetch(fetches) => {
                 self.u8(1);
@@ -672,7 +683,7 @@ impl FrameWriter {
 }
 
 /// A frame's body being read: each field taken in order, checked as it is.
-pub(in crate::cache) struct FrameReader {
+pub(in crate::cache::cache_stores::shared) struct FrameReader {
     body: Bytes,
     /// Where the next field starts.
     at: usize,
@@ -684,7 +695,7 @@ impl FrameReader {
     }
 
     /// The error of a frame whose `field` is wrong.
-    pub(in crate::cache) fn malformed(field: &str) -> Error {
+    pub(in crate::cache::cache_stores::shared) fn malformed(field: &str) -> Error {
         Error::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("a shared cache's frame holds a malformed {field}"),
@@ -735,7 +746,7 @@ impl FrameReader {
         })
     }
 
-    pub(in crate::cache) fn u32(&mut self) -> Result<u32> {
+    pub(in crate::cache::cache_stores::shared) fn u32(&mut self) -> Result<u32> {
         Ok(u32::from_le_bytes(self.array()?))
     }
 
@@ -749,7 +760,7 @@ impl FrameReader {
         self.take(len)
     }
 
-    pub(in crate::cache) fn range(&mut self) -> Result<Range<u64>> {
+    pub(in crate::cache::cache_stores::shared) fn range(&mut self) -> Result<Range<u64>> {
         let (start, end) = (self.u64()?, self.u64()?);
         if start > end {
             return Err(Self::malformed("range: it ends before it starts"));
@@ -781,7 +792,7 @@ impl FrameReader {
             .ok_or_else(|| Self::malformed("file size: past what a cache holds"))
     }
 
-    pub(in crate::cache) fn sources(&mut self) -> Result<Vec<BlockSource>> {
+    pub(in crate::cache::cache_stores::shared) fn sources(&mut self) -> Result<Vec<BlockSource>> {
         (0..self.u32()?)
             .map(|_| match self.u8()? {
                 0 => Ok(BlockSource::Memory),
@@ -821,9 +832,28 @@ impl FrameReader {
         }
     }
 
+    /// The run the frame holds next, as `FrameWriter::located_run` wrote
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// If the frame ends first, or the run holds no block or one past the
+    /// last a file has.
+    fn located_run(&mut self) -> Result<LocatedRun> {
+        let first = self.u32()?;
+        let asked = self.range()?;
+        let sources = self.sources()?;
+        let blocks = u32::try_from(sources.len()).ok();
+        let end = blocks.and_then(|blocks| first.checked_add(blocks));
+        if sources.is_empty() || end.is_none_or(|end| end > BlockKey::INDEX_LIMIT) {
+            return Err(Self::malformed("a located run's blocks"));
+        }
+        Ok(LocatedRun::new(first, asked, sources))
+    }
+
     fn next_step(&mut self) -> Result<NextStep> {
         match self.u8()? {
-            0 => Ok(NextStep::Plan(LocatedRun::read_from(self)?)),
+            0 => Ok(NextStep::Plan(self.located_run()?)),
             1 => {
                 let fetches = (0..self.u32()?)
                     .map(|_| {

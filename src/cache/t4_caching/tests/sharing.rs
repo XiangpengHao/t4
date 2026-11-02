@@ -476,7 +476,8 @@ fn a_fetch_dropped_after_its_read_gives_its_span_back() {
     std::thread::sleep(Duration::from_millis(100));
     drop(fetches);
     wait_until(|| region_free_pages(&client) == all, "every span is free");
-    assert!(!cache_store.owner_gone(), "the connection kept");
+    let owner = cache_store.owner_connection().expect("a client");
+    assert!(!owner.owner_gone(), "the connection kept");
 }
 
 /// The calls `cache`, a client, waits on its owner for, by number.

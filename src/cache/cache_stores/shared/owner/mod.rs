@@ -1,6 +1,10 @@
 //! [`OwnerListener`]: an owner serving its cache to its clients
 //! (`doc/11-shared-mode.md`, decisions 1 and 5): a thread that accepts
 //! their connections, and a thread for each connection, its session.
+//!
+//! - `client_reads`: a client's reads, as its owner serves them.
+//! - `session_waker`: what wakes a session's thread, waiting on its
+//!   client's socket and its reads at once.
 
 use std::os::unix::net::UnixListener;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,22 +12,25 @@ use std::sync::{Mutex, PoisonError};
 use std::task::{Context, Waker};
 use std::thread::{self, JoinHandle};
 
-use super::address::{FileIdentity, OwnerAddress};
-use super::client_reads::ClientReads;
-use super::frame_socket::{FrameReceiver, FrameSocket};
-use super::frames::{ClientFrame, OwnerFrame, PROTOCOL_VERSION};
-use super::handshake::Hello;
-use super::region::OwnerRegion;
-use super::session_waker::SessionWaker;
-use crate::cache::storage::ObjectCache;
+use super::protocol::{
+    ClientFrame, FrameReceiver, FrameSocket, Hello, OwnerAddress, OwnerFrame, OwnerRegion,
+    PROTOCOL_VERSION,
+};
+use crate::cache::storage::{FileIdentity, ObjectCache};
 use crate::io::error::Result;
 use crate::io::sync::Arc;
+
+mod client_reads;
+mod session_waker;
+
+use client_reads::ClientReads;
+use session_waker::SessionWaker;
 
 /// An owner listening for its clients, as long as it lives. Dropped, it
 /// stops: it takes no more connections, closes every session's, and waits
 /// for their threads, which hold the cache, to end; so the cache files'
 /// lock goes with the owner's last handle on its cache.
-pub(in crate::cache) struct OwnerListener {
+pub(super) struct OwnerListener {
     address: OwnerAddress,
     /// Set once the listener is dropped: the accept thread stops at the
     /// next connection, which the drop makes.
@@ -39,10 +46,7 @@ impl OwnerListener {
     /// # Errors
     ///
     /// If the address can't be bound, or the accept thread started.
-    pub(in crate::cache) fn listen(
-        cache: Arc<ObjectCache>,
-        first_file: FileIdentity,
-    ) -> Result<Self> {
+    pub(super) fn listen(cache: Arc<ObjectCache>, first_file: FileIdentity) -> Result<Self> {
         let address = OwnerAddress::of(first_file)?;
         let acceptor = Acceptor {
             listener: address.listen()?,
@@ -238,3 +242,6 @@ impl ClientSession {
         }
     }
 }
+
+#[cfg(all(test, not(feature = "shuttle")))]
+mod tests;

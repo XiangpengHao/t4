@@ -37,7 +37,7 @@
 use std::num::NonZeroU32;
 use std::ops::Range;
 
-use super::disk::CacheFiles;
+use super::disk::{CacheFiles, FileIdentity};
 use super::in_flight::InFlight;
 use super::index::{BlockTable, FileVersion, PathTable, PlannedBlock, UncacheableObject};
 use super::memory::MemoryPool;
@@ -90,6 +90,13 @@ impl ObjectCache {
             placement,
             in_flight: Arc::default(),
         })
+    }
+
+    /// The identity of its first cache file, which names its owner's
+    /// address (`doc/11-shared-mode.md`, decision 6); `None` for simulated
+    /// files.
+    pub(in crate::cache) fn first_file(&self) -> Option<FileIdentity> {
+        self.disk.first_file()
     }
 
     /// The file at `path`, the version of it with `e_tag` and `size`, as

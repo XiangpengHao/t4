@@ -14,9 +14,9 @@ use rustix::net::{
     SendAncillaryMessage,
 };
 
-use super::address::FileIdentity;
 use super::frame_socket::FrameSocket;
 use super::frames::{ClientFrame, FrameReader, PROTOCOL_VERSION};
+use crate::cache::storage::FileIdentity;
 use crate::io::error::{Error, Result};
 
 /// A client's hello: its protocol's version, its descriptor of the first
@@ -25,7 +25,7 @@ use crate::io::error::{Error, Result};
 /// file and is open for writing it: whoever may write the cache file may
 /// use the cache. Its region the owner maps if it can't shrink
 /// (`OwnerRegion::accept`).
-pub(in crate::cache) struct Hello {
+pub(in crate::cache::cache_stores::shared) struct Hello {
     version: u32,
     cache_file: File,
     region: Option<OwnedFd>,
@@ -34,7 +34,7 @@ pub(in crate::cache) struct Hello {
 impl Hello {
     /// How long each side of a handshake waits for the other's word: a peer
     /// that says nothing that long is gone.
-    pub(in crate::cache) const WAIT: Duration = Duration::from_secs(5);
+    pub(in crate::cache::cache_stores::shared) const WAIT: Duration = Duration::from_secs(5);
 
     /// The bytes of a hello's frame, its length with it: all an owner takes
     /// from a peer it hasn't admitted, so that a peer can't make it
@@ -52,7 +52,7 @@ impl Hello {
     #[cfg(not(target_os = "linux"))]
     const RECEIVE_FLAGS: RecvFlags = RecvFlags::empty();
 
-    pub(in crate::cache) fn new(version: u32, cache_file: File) -> Self {
+    pub(in crate::cache::cache_stores::shared) fn new(version: u32, cache_file: File) -> Self {
         Self {
             version,
             cache_file,
@@ -62,7 +62,7 @@ impl Hello {
 
     /// The hello, with `region`'s memory sent beside it.
     #[must_use]
-    pub(in crate::cache) fn with_region(self, region: OwnedFd) -> Self {
+    pub(in crate::cache::cache_stores::shared) fn with_region(self, region: OwnedFd) -> Self {
         Self {
             region: Some(region),
             ..self
@@ -70,12 +70,12 @@ impl Hello {
     }
 
     /// The client's protocol version.
-    pub(super) fn version(&self) -> u32 {
+    pub(in crate::cache::cache_stores::shared) fn version(&self) -> u32 {
         self.version
     }
 
     /// The client's region's memory, if it sent one: the owner's to check.
-    pub(super) fn into_region(self) -> Option<OwnedFd> {
+    pub(in crate::cache::cache_stores::shared) fn into_region(self) -> Option<OwnedFd> {
         self.region
     }
 
@@ -85,7 +85,10 @@ impl Hello {
     /// # Errors
     ///
     /// If the socket fails, or its peer has gone.
-    pub(in crate::cache) fn send(&self, socket: &FrameSocket) -> std::io::Result<()> {
+    pub(in crate::cache::cache_stores::shared) fn send(
+        &self,
+        socket: &FrameSocket,
+    ) -> std::io::Result<()> {
         let frame = ClientFrame::Hello {
             version: self.version,
             region: self.region.is_some(),
@@ -96,7 +99,11 @@ impl Hello {
     /// Sends `frame` on `socket`, the hello's descriptors beside its first
     /// bytes: the hello's own frame, or, in a test, one of a peer that
     /// breaks the protocol.
-    pub(super) fn send_as(&self, socket: &FrameSocket, frame: &[u8]) -> std::io::Result<()> {
+    pub(in crate::cache::cache_stores::shared) fn send_as(
+        &self,
+        socket: &FrameSocket,
+        frame: &[u8],
+    ) -> std::io::Result<()> {
         debug_assert_eq!(frame.len(), Self::FRAME_BYTES);
         let mut space =
             [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(Self::MOST_DESCRIPTORS))];
@@ -123,7 +130,7 @@ impl Hello {
     ///
     /// If the socket fails or closes, or the peer sent anything but a
     /// hello's frame with the descriptors it says beside it.
-    pub(super) fn receive(socket: &FrameSocket) -> Result<Self> {
+    pub(in crate::cache::cache_stores::shared) fn receive(socket: &FrameSocket) -> Result<Self> {
         let mut frame = [0; Self::FRAME_BYTES];
         let mut space =
             [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(Self::MOST_DESCRIPTORS))];
@@ -185,7 +192,10 @@ impl Hello {
     /// # Errors
     ///
     /// If it doesn't, saying why.
-    pub(super) fn admit(&self, first_file: FileIdentity) -> Result<()> {
+    pub(in crate::cache::cache_stores::shared) fn admit(
+        &self,
+        first_file: FileIdentity,
+    ) -> Result<()> {
         if self.version != PROTOCOL_VERSION {
             return Err(Self::refused("of another protocol version"));
         }

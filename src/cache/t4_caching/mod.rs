@@ -29,9 +29,9 @@ use object_store::{Extensions, GetRange, ObjectMeta, ObjectStore, ObjectStoreExt
 
 #[cfg(feature = "__fuzz")]
 use super::ChunkId;
-#[cfg(all(test, not(feature = "shuttle")))]
-use super::cache_stores::CacheStore;
-use super::cache_stores::{CacheStoreMaker, CurrentCacheStore, PlacementMaker};
+use super::cache_stores::{
+    CacheStore, InProcessCacheStore, PlacementMaker, SharedCacheStore, TierSettings,
+};
 use super::network::{Network, Sleep};
 #[cfg(feature = "__fuzz")]
 use super::policy::Tier;
@@ -50,7 +50,7 @@ pub struct T4Caching {
     inner: Arc<dyn ObjectStore>,
     /// The cache store: this process's own, or its owner's, until that
     /// owner goes (`doc/11-shared-mode.md`).
-    cache_store: Arc<CurrentCacheStore>,
+    cache_store: Arc<dyn CacheStore>,
     /// The network half: the GETs of what only the remote holds, and the
     /// read policy that plans them.
     network: Network,
@@ -237,16 +237,19 @@ impl T4CachingBuilder {
             .reads
             .take()
             .unwrap_or_else(|| Arc::new(RaceStragglers::default()));
-        let mut maker = CacheStoreMaker::new(
+        let mut tiers = TierSettings::new(
             memory_chunks,
             self.disk_files,
             queue_depth,
             self.direct_io,
             self.placement,
-            self.sharing,
-            Arc::clone(&reads),
         );
-        let cache_store = maker.make_within(Self::OWNER_WAIT)?;
+        let cache_store: Arc<dyn CacheStore> = if self.sharing {
+            let reads = Arc::clone(&reads);
+            Arc::new(SharedCacheStore::open(tiers, reads, Self::OWNER_WAIT)?)
+        } else {
+            Arc::new(InProcessCacheStore::open(&mut tiers)?)
+        };
         let network = Network::new(
             Arc::clone(&self.inner),
             reads,
@@ -256,7 +259,7 @@ impl T4CachingBuilder {
         );
         Ok(T4Caching {
             inner: self.inner,
-            cache_store: Arc::new(CurrentCacheStore::new(cache_store, maker)),
+            cache_store,
             network,
             known: Arc::new(KnownFiles::new()),
         })
@@ -370,8 +373,8 @@ impl T4Caching {
     ) -> object_store::Result<Option<Bytes>> {
         let intent = extensions.get::<ReadIntent>().copied();
         let path = location.as_ref().as_bytes();
-        let store = self.cache_store.get();
-        let started = store
+        let started = self
+            .cache_store
             .start_read(path, e_tag, size, range, intent, self.network.read_policy())
             .await;
         let Ok(Some(mut read)) = started else {
@@ -422,7 +425,7 @@ impl T4Caching {
     #[cfg(feature = "__fuzz")]
     #[doc(hidden)]
     pub fn check_at_rest(&self) -> Result<Vec<(Tier, ChunkId)>, String> {
-        match self.cache_store.current().owned() {
+        match self.cache_store.owned() {
             Some(cache) => cache.check_at_rest(),
             None => Err("a client holds no cache: its owner does".to_owned()),
         }
@@ -431,7 +434,7 @@ impl T4Caching {
     /// The cache store read through now: for tests.
     #[cfg(all(test, not(feature = "shuttle")))]
     pub(super) fn cache_store(&self) -> Arc<dyn CacheStore> {
-        self.cache_store.current()
+        Arc::clone(&self.cache_store)
     }
 }
 

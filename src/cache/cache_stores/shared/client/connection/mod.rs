@@ -16,11 +16,12 @@ use std::sync::{Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::thread::{self, JoinHandle};
 
-use crate::cache::policy::{Io, IoEvent, ReadPolicy};
-use crate::cache::sharing::{
-    ClientFrame, ClientRegion, FileIdentity, FrameReader, FrameReceiver, FrameSender, FrameSocket,
-    Hello, OwnerAddress, OwnerFrame, PROTOCOL_VERSION, RegionSpan,
+use crate::cache::cache_stores::shared::protocol::{
+    ClientFrame, ClientRegion, FrameReader, FrameReceiver, FrameSender, FrameSocket, Hello,
+    OwnerAddress, OwnerFrame, PROTOCOL_VERSION, RegionSpan,
 };
+use crate::cache::policy::{Io, IoEvent, ReadPolicy};
+use crate::cache::storage::FileIdentity;
 use crate::io::error::{Error, Result};
 use crate::io::io_task::TaskCompletion;
 use crate::io::sync::Arc;
@@ -65,7 +66,10 @@ impl OwnerConnection {
     /// If the cache file can't be opened for writing, or the socket fails
     /// otherwise; [`Error::Busy`] if the owner speaks another version of
     /// the protocol, so that the client gives up at once.
-    pub(super) fn connect(first_file: &Path, reads: Arc<dyn ReadPolicy>) -> Result<Option<Self>> {
+    pub(in crate::cache::cache_stores::shared) fn connect(
+        first_file: &Path,
+        reads: Arc<dyn ReadPolicy>,
+    ) -> Result<Option<Self>> {
         match Self::admitted(first_file) {
             Ok((socket, frames, region)) => Ok(Some(Self::start(socket, frames, region, reads)?)),
             Err(Error::Io(error)) if Self::owner_absent(&error) => Ok(None),
@@ -192,10 +196,7 @@ impl OwnerConnection {
     /// # Errors
     ///
     /// If the owner is gone.
-    pub(super) fn send_call(
-        &self,
-        call: impl FnOnce(u64) -> ClientFrame,
-    ) -> Result<WaitingCall<'_>> {
+    pub(super) fn send_call(&self, call: impl FnOnce(u64) -> ClientFrame) -> Result<WaitingCall> {
         let waiting = self.calls.wait()?;
         self.tell(&[call(waiting.number)]);
         Ok(waiting)
@@ -211,7 +212,7 @@ impl OwnerConnection {
         &self,
         first: impl FnOnce(u64) -> ClientFrame,
         then: impl FnOnce(u64) -> ClientFrame,
-    ) -> Result<(WaitingCall<'_>, WaitingCall<'_>)> {
+    ) -> Result<(WaitingCall, WaitingCall)> {
         let (one, other) = (self.calls.wait()?, self.calls.wait()?);
         self.tell(&[first(one.number), then(other.number)]);
         Ok((one, other))
@@ -253,7 +254,7 @@ impl OwnerConnection {
 
     /// Whether the owner mapped the client's region: for tests.
     #[cfg(all(test, not(feature = "shuttle")))]
-    pub(in crate::cache) fn has_region(&self) -> bool {
+    pub(in crate::cache::cache_stores::shared) fn has_region(&self) -> bool {
         self.region.is_some()
     }
 
@@ -266,14 +267,16 @@ impl OwnerConnection {
 
     /// The client's region, if its owner mapped it: for tests.
     #[cfg(all(test, not(feature = "shuttle")))]
-    pub(in crate::cache) fn region(&self) -> Option<&std::sync::Arc<ClientRegion>> {
+    pub(in crate::cache::cache_stores::shared) fn region(
+        &self,
+    ) -> Option<&std::sync::Arc<ClientRegion>> {
         self.region.as_ref()
     }
 
     /// The bytes the connection has sent and taken so far, its frames whole:
     /// for tests.
     #[cfg(all(test, not(feature = "shuttle")))]
-    pub(in crate::cache) fn socket_bytes(&self) -> (u64, u64) {
+    pub(in crate::cache::cache_stores::shared) fn socket_bytes(&self) -> (u64, u64) {
         let traffic = &self.traffic;
         (
             traffic.sent.load(Ordering::Relaxed),
@@ -339,7 +342,7 @@ impl CallTable {
     /// # Errors
     ///
     /// If the owner is gone.
-    fn wait(&self) -> Result<WaitingCall<'_>> {
+    fn wait(self: &std::sync::Arc<Self>) -> Result<WaitingCall> {
         let mut calls = self.calls();
         if calls.owner_gone {
             return Err(Self::gone_error());
@@ -349,7 +352,7 @@ impl CallTable {
         let answer = Arc::new(TaskCompletion::new());
         calls.waiting.insert(number, Arc::clone(&answer));
         Ok(WaitingCall {
-            table: self,
+            table: std::sync::Arc::clone(self),
             number,
             answer,
         })
@@ -418,13 +421,13 @@ impl CallTable {
 /// Dropped first, as with a read given up, the call is given up, and
 /// leaves the table: the owner may never answer it, as it doesn't a read's
 /// calls once the read ends.
-pub(super) struct WaitingCall<'t> {
-    table: &'t CallTable,
+pub(super) struct WaitingCall {
+    table: std::sync::Arc<CallTable>,
     number: u64,
     answer: Arc<TaskCompletion<OwnerFrame>>,
 }
 
-impl Future for WaitingCall<'_> {
+impl Future for WaitingCall {
     type Output = Result<OwnerFrame>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -432,7 +435,7 @@ impl Future for WaitingCall<'_> {
     }
 }
 
-impl Drop for WaitingCall<'_> {
+impl Drop for WaitingCall {
     fn drop(&mut self) {
         // Answered or failed, the call left the table already.
         self.table.give_up(self.number);

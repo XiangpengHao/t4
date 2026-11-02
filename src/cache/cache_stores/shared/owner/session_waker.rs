@@ -11,7 +11,7 @@ use std::thread::{self, ThreadId};
 
 use rustix::event::{PollFd, PollFlags};
 
-use super::frame_socket::FrameSocket;
+use crate::cache::cache_stores::shared::protocol::FrameSocket;
 
 /// Wakes a session's thread, waiting on its client's socket, when a read
 /// can go on or a frame waits to go: rings a bell, a byte on a socket of

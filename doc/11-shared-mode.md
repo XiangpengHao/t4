@@ -10,7 +10,7 @@ and reading through its owner, its reads going to the remote once its
 owner goes, those in flight too, until a read makes it the owner or a
 client of the next; tested in one process and in real ones; and step 4,
 the region: made, sent in the handshake and mapped by the owner
-(`sharing/region/`), a read's output a span of it, a fetch's bytes
+(`shared/protocol/region/`), a read's output a span of it, a fetch's bytes
 staged in one; only control crosses the socket. The user's call of 29
 Oct 2026, for Spiral (`10-spiral-integration.md`, decision 8).
 
@@ -168,7 +168,7 @@ decision 9).
 
 5. **Control over a Unix socket; value bytes in a shared region.**
    - **The socket** carries frames: a little-endian `u64` length, then
-     the body, as doc/02's (`sharing/frames/`). Calls carry a number,
+     the body, as doc/02's (`shared/protocol/frames/`). Calls carry a number,
      many are in flight on one connection, and answers come back in any
      order. A client's read, named by a number of its own, goes:
      - `StartRead` (path, e_tag, size, range, intent) is answered
@@ -196,7 +196,7 @@ decision 9).
        protocol error.
 
      The owner runs a client's reads as tasks on the connection's thread
-     (`sharing/client_reads.rs`), each taking its frames in order, and
+     (`shared/owner/client_reads.rs`), each taking its frames in order, and
      tells the client each read from disk it makes for one (`DiskRead`),
      for the client's read policy. A frame the protocol doesn't allow
      where it comes (GETs where none were due, a fetch or a read the
@@ -334,7 +334,7 @@ decision 9).
      no more than every 10 ms: the lock, then the owner, never the 10 s
      a build waits for one. The others read from the remote meanwhile,
      their calls on the dead connection failing at once
-     (`CurrentCacheStore`, `CacheStoreMaker`). A client whose next owner
+     (`SharedCacheStore::hand_off_from`). A client whose next owner
      speaks another version is refused at each try, and reads from the
      remote till that owner goes. A client builds the cache from its own
      builder's settings, its placement policy made then: a cache owns at
@@ -557,17 +557,20 @@ session ending the last read before it takes the next's frames, 1 µs.
       which `TierWork` reports the read's disk reads to;
    5. the one trait the fetch half reaches the storage half through.
       Built 29 Oct 2026, with step 3's connection, as an enum; a trait
-      since 2 Nov 2026: `CacheStore`, which the owner's
-      `InProcessCacheStore` (its `ObjectCache` and its listener) and a
-      client's `SharedCacheStore` (its `OwnerConnection`) implement. A
-      read through it is a `CacheStoreRead`, each of its fetches a
-      `CacheStoreFetch`: the owner's `InProcessRead` and
-      `FetchedBlocks`, or the client's `ClientRead` and `ClientFetch`.
-      The fetch half holds them as `dyn`, so `T4Caching::read_through`,
-      `fetch` and `turn` serve both with one copy of their logic. The
-      boxes cost no measured time: an owner's hot 4 KiB read took
-      429 ns, against 421 ns through the enum, within a run's spread
-      (`benches/shared_reads.rs`, 2 Nov 2026).
+      since 2 Nov 2026: `CacheStore`, picked as the cache is built, one
+      of two. `InProcessCacheStore`, a cache read by its process alone:
+      its `ObjectCache`, no socket. `SharedCacheStore`, shared mode, all
+      of it inside: this process's own `InProcessCacheStore` once it
+      takes the lock, served to clients by its `OwnerListener`; until
+      then its owner's, through an `OwnerConnection`; and the hand-off
+      once that owner goes. A read through either is a
+      `CacheStoreRead`, each of its fetches a `CacheStoreFetch`: an
+      `InProcessRead` and `FetchedBlocks`, or a client's `ClientRead`
+      and `ClientFetch`. The fetch half holds them as `dyn`, so
+      `T4Caching::read_through`, `fetch` and `turn` serve both with one
+      copy of their logic. The boxes cost no measured time: an owner's
+      hot 4 KiB read took 429 ns, against 421 ns through the enum,
+      within a run's spread (`benches/shared_reads.rs`, 2 Nov 2026).
 3. **The socket, bytes in its frames,** on Linux and macOS: the owner
    listens, a client connects on `Busy`, the handshake, failures to the
    remote, a client coming to own the cache. Tests in one process (a
@@ -575,7 +578,7 @@ session ending the last read before it takes the next's frames, 1 µs.
    lock conflicts within a process too), and in real processes for
    deaths: the owner killed mid-read, a client killed holding a claim,
    eight clients starting at once. Built so far (29 Oct 2026): the
-   frames (`sharing/frames/`); `with_multiprocess_sharing`; the owner
+   frames (`shared/protocol/frames/`); `with_multiprocess_sharing`; the owner
    listening, its sessions, the handshake, and a client connecting on
    `Busy`, trying the lock and the owner again until `OWNER_WAIT`
    (`a_cache_built_for_sharing_on_owned_files_is_their_owners_client`,
@@ -683,15 +686,14 @@ session ending the last read before it takes the next's frames, 1 µs.
 | `src/cache/storage/` | the storage half (decision 2): the object cache, the index, the blocks in flight, and the memory and disk tiers | yes |
 | `src/cache/network/` | the fetch half (decision 2): the GETs, their queue and races, and the read policy that plans them | yes |
 | `src/cache/t4_caching/` | the front end: a read through both halves (`read_through`), and `with_multiprocess_sharing` (decision 1) | yes |
-| `src/cache/cache_stores/` | the `CacheStore` trait the fetch half reads through, and its two stores: the owner's own (`in_process.rs`), and a client's, its owner's over the socket (`shared/`) (decision 2) | yes |
-| `src/cache/cache_stores/current.rs` | the store a cache reads through now, and what makes it: at build, and anew once a client's owner goes (decisions 1, 7) | yes |
-| `src/cache/sharing/frames/` | the frames, each checked as it arrives (decision 5) | yes |
-| `src/cache/sharing/frame_socket.rs` | a socket frames cross whole, raising no `SIGPIPE` (decision 5); the frames that came taken from one read (`FrameReceiver`), and many callers' frames sent with no thread between while the socket has room (`FrameSender`) (Cost) | yes |
-| `src/cache/sharing/session_waker.rs` | what wakes a session's thread, waiting on its client's socket and its reads at once (Cost) | yes |
-| `src/cache/sharing/address.rs` | the owner's address, by the first cache file's identity (decision 6) | yes |
-| `src/cache/sharing/handshake.rs` | a client's hello, its descriptor by `SCM_RIGHTS`, and the owner's check (decision 6) | yes |
-| `src/cache/sharing/owner.rs` | the owner's listener and a session for each client (decisions 1, 5) | yes |
-| `src/cache/sharing/client_reads.rs` | a client's reads, each a task of its session's (decision 5) | yes |
-| `src/cache/cache_stores/shared/` | the shared cache store: a client's connection to its owner and its calls (`connection/`), its reads through it (`read.rs`), and their fetches (`fetch.rs`) (decisions 5 to 7) | yes |
+| `src/cache/cache_stores/` | the `CacheStore` trait the fetch half reads through, one of two picked at build (decision 2) | yes |
+| `src/cache/cache_stores/in_process.rs` | a cache read by its process alone: the lock taken, the tiers made, no socket (decision 1) | yes |
+| `src/cache/cache_stores/shared/` | shared mode: this process the owner or a client, and the hand-off once the owner goes (decisions 1, 7) | yes |
+| `src/cache/cache_stores/shared/owner/` | the owner's listener and a session for each client (decisions 1, 5); a client's reads, each a task of its session's (`client_reads.rs`, decision 5); what wakes a session's thread, waiting on its client's socket and its reads at once (`session_waker.rs`, Cost) | yes |
+| `src/cache/cache_stores/shared/client/` | a client's connection to its owner and its calls (`connection/`), its reads through it (`read.rs`), and their fetches (`fetch.rs`) (decisions 5 to 7) | yes |
+| `src/cache/cache_stores/shared/protocol/frames/` | the frames, each checked as it arrives (decision 5) | yes |
+| `src/cache/cache_stores/shared/protocol/frame_socket.rs` | a socket frames cross whole, raising no `SIGPIPE` (decision 5); the frames that came taken from one read (`FrameReceiver`), and many callers' frames sent with no thread between while the socket has room (`FrameSender`) (Cost) | yes |
+| `src/cache/cache_stores/shared/protocol/address.rs` | the owner's address, by the first cache file's identity (decision 6) | yes |
+| `src/cache/cache_stores/shared/protocol/handshake.rs` | a client's hello, its descriptor by `SCM_RIGHTS`, and the owner's check (decision 6) | yes |
+| `src/cache/cache_stores/shared/protocol/region/` | the region, its spans, and the checks the owner makes of it (decision 5) | yes |
 | `src/cache/t4_caching/tests/sharing.rs`, `processes.rs` | an owner and its clients in one process, and in real ones (build step 3) | yes |
-| `src/cache/sharing/region/` | the region, its spans, and the checks the owner makes of it (decision 5) | yes |

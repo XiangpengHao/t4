@@ -5,16 +5,46 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::future::Future;
 use std::num::NonZeroU32;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use super::disk_chunks::{DiskChunkReader, DiskChunkWriter, DiskChunks};
 use crate::buffer::AlignedBuf;
 use crate::cache::BLOCK_SIZE_U64;
-use crate::cache::sharing::FileIdentity;
 use crate::io::error::{Error, Result};
 use crate::io::io_task::PageWrite;
 use crate::io::io_worker::IoWorker;
 use crate::io::sync::Arc;
+
+/// A file, by whatever path it is reached: its device and inode. The first
+/// cache file's names its owner's address (`doc/11-shared-mode.md`,
+/// decision 6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::cache) struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl FileIdentity {
+    /// The identity of the file `file` is open on.
+    pub(in crate::cache) fn of(file: &File) -> std::io::Result<Self> {
+        let meta = file.metadata()?;
+        Ok(Self {
+            device: meta.dev(),
+            inode: meta.ino(),
+        })
+    }
+
+    /// The device the file is on.
+    pub(in crate::cache) fn device(self) -> u64 {
+        self.device
+    }
+
+    /// The file's inode on its device.
+    pub(in crate::cache) fn inode(self) -> u64 {
+        self.inode
+    }
+}
 
 /// A cache file the user gives: where it is, and the bytes it may take.
 #[derive(Clone, Debug)]

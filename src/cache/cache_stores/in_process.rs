@@ -1,9 +1,10 @@
-//! [`InProcessCacheStore`]: the cache store of the process that holds the
-//! cache files' lock, its storage half run in this process; served to its
-//! clients too, if it was built for sharing and could listen.
+//! [`InProcessCacheStore`]: the cache store of a process that holds the
+//! cache files' lock and reads its cache alone, its storage half run in
+//! this process; and [`TierSettings`], what its tiers are made of.
 
-use std::num::NonZeroU8;
+use std::num::{NonZeroU8, NonZeroU32};
 use std::ops::Range;
+use std::path::Path;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -11,38 +12,117 @@ use futures_util::future::BoxFuture;
 
 use super::{CacheStore, CacheStoreFetch, CacheStoreRead};
 use crate::cache::FileVersionId;
-use crate::cache::policy::{ReadIntent, ReadPlan, ReadPolicy};
-use crate::cache::sharing::OwnerListener;
-use crate::cache::storage::{
-    CacheableFile, FetchedBlocks, LocatedRun, ObjectCache, PartialRead, TierWork,
+use crate::cache::policy::{
+    ClockPolicy, PlacementPolicy, ReadIntent, ReadPlan, ReadPolicy, TierSizes,
 };
-use crate::io::error::Result;
+use crate::cache::storage::{
+    CacheFiles, CacheableFile, DiskFile, FetchedBlocks, LocatedRun, ObjectCache, PartialRead,
+    TierWork,
+};
+use crate::io::error::{Error, Result};
 use crate::io::sync::Arc;
 
-/// This process's own cache store: the storage half, and the listener that
-/// serves it to clients, as long as it lives.
-pub(in crate::cache) struct InProcessCacheStore {
-    /// Goes first as the store drops, and with it its sessions' handles on
-    /// the cache.
-    _listener: Option<OwnerListener>,
-    cache: Arc<ObjectCache>,
+/// What makes a placement policy, once the tiers' chunk counts are known.
+pub(in crate::cache) type PlacementMaker =
+    Box<dyn FnOnce(TierSizes) -> Arc<dyn PlacementPolicy> + Send>;
+
+/// The placement policy the cache places blocks by, once it is made.
+enum PlacementSource {
+    /// A CLOCK for each tier, the default.
+    Clock,
+    /// The caller's, made once the tiers' chunk counts are known.
+    Given(PlacementMaker),
+    /// The caller's, made already for a cache that failed to open: no
+    /// other policy takes its place.
+    Spent,
 }
 
-impl InProcessCacheStore {
-    /// The store of `cache`, served to clients by `listener`, if any.
-    pub(super) fn new(cache: Arc<ObjectCache>, listener: Option<OwnerListener>) -> Self {
+/// What a cache's tiers are made of, as its builder said: the memory's
+/// chunks, the cache files and how they are read, and the placement policy.
+pub(in crate::cache) struct TierSettings {
+    memory_chunks: NonZeroU32,
+    disk_files: Vec<DiskFile>,
+    queue_depth: NonZeroU32,
+    direct_io: bool,
+    placement: PlacementSource,
+}
+
+impl TierSettings {
+    pub(in crate::cache) fn new(
+        memory_chunks: NonZeroU32,
+        disk_files: Vec<DiskFile>,
+        queue_depth: NonZeroU32,
+        direct_io: bool,
+        placement: Option<PlacementMaker>,
+    ) -> Self {
         Self {
-            _listener: listener,
-            cache,
+            memory_chunks,
+            disk_files,
+            queue_depth,
+            direct_io,
+            placement: placement.map_or(PlacementSource::Clock, PlacementSource::Given),
+        }
+    }
+
+    /// The first cache file's path, which names the cache.
+    pub(super) fn first_file(&self) -> &Path {
+        self.disk_files[0].path()
+    }
+
+    /// The placement policy for the memory's chunks and `disk_chunks`: a
+    /// CLOCK's, or the caller's, made once.
+    ///
+    /// # Errors
+    ///
+    /// If the caller's was spent on a cache that failed to open.
+    fn placement(&mut self, disk_chunks: NonZeroU32) -> Result<Arc<dyn PlacementPolicy>> {
+        let sizes = TierSizes::new(self.memory_chunks, disk_chunks);
+        match std::mem::replace(&mut self.placement, PlacementSource::Spent) {
+            PlacementSource::Clock => {
+                self.placement = PlacementSource::Clock;
+                Ok(Arc::new(ClockPolicy::new(self.memory_chunks, disk_chunks)))
+            }
+            PlacementSource::Given(make) => Ok(make(sizes)),
+            PlacementSource::Spent => Err(Error::InvalidArgument(
+                "the placement policy was spent on a cache that failed to open",
+            )),
         }
     }
 }
 
-impl CacheStore for InProcessCacheStore {
-    fn owner_gone(&self) -> bool {
-        false
+/// The cache store of a process that holds the cache files' lock: its
+/// storage half, read in this process.
+pub(in crate::cache) struct InProcessCacheStore {
+    cache: Arc<ObjectCache>,
+}
+
+impl InProcessCacheStore {
+    /// The cache of `tiers`, their files' lock taken and their memory
+    /// mapped.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Busy`] if another cache holds a cache file's lock. If a
+    /// cache file can't be made, sized and opened, or the memory mapped; or
+    /// if the caller's placement policy was spent on a cache that failed so.
+    pub(in crate::cache) fn open(tiers: &mut TierSettings) -> Result<Self> {
+        let disk = CacheFiles::open(&tiers.disk_files, tiers.queue_depth, tiers.direct_io)?;
+        let disk_chunks = NonZeroU32::new(disk.chunks().chunk_count())
+            .expect("a disk file holds a chunk at least");
+        let placement = tiers.placement(disk_chunks)?;
+        let cache = ObjectCache::new(tiers.memory_chunks, disk, placement)?;
+        Ok(Self {
+            cache: Arc::new(cache),
+        })
     }
 
+    /// The storage half.
+    pub(super) fn cache(&self) -> &Arc<ObjectCache> {
+        &self.cache
+    }
+}
+
+impl CacheStore for InProcessCacheStore {
     fn start_read<'s>(
         &'s self,
         path: &'s [u8],

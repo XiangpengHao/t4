@@ -2,40 +2,21 @@
 //! decision 6): an address named by the first cache file's identity, so
 //! that every path to the file names the same one.
 
-use std::fs::File;
 use std::io;
-use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(not(target_os = "linux"))]
 use std::path::PathBuf;
 
 use rustix::fs::Uid;
 
+use crate::cache::storage::FileIdentity;
 use crate::io::error::{Error, Result};
-
-/// A file, by whatever path it is reached: its device and inode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::cache) struct FileIdentity {
-    device: u64,
-    inode: u64,
-}
-
-impl FileIdentity {
-    /// The identity of the file `file` is open on.
-    pub(in crate::cache) fn of(file: &File) -> io::Result<Self> {
-        let meta = file.metadata()?;
-        Ok(Self {
-            device: meta.dev(),
-            inode: meta.ino(),
-        })
-    }
-}
 
 /// The address of the owner of the cache whose first cache file is one
 /// file: on Linux an abstract socket's name, which no file holds and which
 /// is gone with the owner's socket, however the owner exits; elsewhere a
 /// socket file's path, in the user's temporary directory.
-pub(in crate::cache) struct OwnerAddress {
+pub(in crate::cache::cache_stores::shared) struct OwnerAddress {
     #[cfg(target_os = "linux")]
     name: String,
     #[cfg(not(target_os = "linux"))]
@@ -49,8 +30,8 @@ impl OwnerAddress {
     /// # Errors
     ///
     /// If the system doesn't name the user's temporary directory.
-    pub(in crate::cache) fn of(file: FileIdentity) -> io::Result<Self> {
-        let FileIdentity { device, inode } = file;
+    pub(in crate::cache::cache_stores::shared) fn of(file: FileIdentity) -> io::Result<Self> {
+        let (device, inode) = (file.device(), file.inode());
         Ok(Self {
             #[cfg(target_os = "linux")]
             name: format!("t4/{device:x}/{inode:x}"),
@@ -98,7 +79,7 @@ impl OwnerAddress {
     /// Listens at the address, for the owner. It holds the cache files'
     /// lock, so no other process binds the address meanwhile: a socket file
     /// there is one an owner left as it died, and goes first.
-    pub(super) fn listen(&self) -> io::Result<UnixListener> {
+    pub(in crate::cache::cache_stores::shared) fn listen(&self) -> io::Result<UnixListener> {
         #[cfg(target_os = "linux")]
         {
             UnixListener::bind_addr(&self.socket_address()?)
@@ -122,7 +103,7 @@ impl OwnerAddress {
     ///
     /// If the socket fails; [`Error::Busy`] if the process listening runs
     /// as another user.
-    pub(in crate::cache) fn connect(&self, user: Uid) -> Result<UnixStream> {
+    pub(in crate::cache::cache_stores::shared) fn connect(&self, user: Uid) -> Result<UnixStream> {
         let stream = self.stream()?;
         if Self::peer_user(&stream)? != user {
             return Err(Error::Busy);
@@ -132,7 +113,7 @@ impl OwnerAddress {
 
     /// Connects to the address and goes: wakes the owner's thread that
     /// accepts its clients.
-    pub(super) fn wake(&self) {
+    pub(in crate::cache::cache_stores::shared) fn wake(&self) {
         let _ = self.stream();
     }
 
@@ -149,7 +130,7 @@ impl OwnerAddress {
 
     /// The owner's listener gone, its socket file goes too, while the owner
     /// still holds the lock; an abstract name went with its socket.
-    pub(super) fn remove(&self) {
+    pub(in crate::cache::cache_stores::shared) fn remove(&self) {
         #[cfg(not(target_os = "linux"))]
         let _ = std::fs::remove_file(&self.path);
     }

@@ -12,17 +12,14 @@
 //!   `Bytes` with no copy.
 //! - `t4_caching`: the front end over another `ObjectStore`: files opened,
 //!   a read run through both halves, and an `ObjectStore` itself.
-//! - `sharing`: one cache read by several processes, through the one that
-//!   owns it (`doc/11-shared-mode.md`).
-//! - `cache_stores`: the cache store a process reads through, one trait
-//!   over its own and its owner's.
+//! - `cache_stores`: the cache store a process reads through: in-process,
+//!   or shared by several processes (`doc/11-shared-mode.md`).
 
 mod cache_stores;
 mod io_report;
 mod network;
 pub mod policy;
 mod read_output;
-mod sharing;
 mod storage;
 mod t4_caching;
 

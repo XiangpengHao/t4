@@ -18,9 +18,10 @@ use futures_util::FutureExt;
 use futures_util::future::{AbortHandle, Abortable, LocalBoxFuture, join};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
-use super::frames::{ClientFrame, FetchSpec, FrameReader, NextStep, OwnerFrame};
-use super::region::{OwnerRegion, SpanName};
 use super::session_waker::SessionWaker;
+use crate::cache::cache_stores::shared::protocol::{
+    ClientFrame, FetchSpec, FrameReader, NextStep, OwnerFrame, OwnerRegion, SpanName,
+};
 use crate::cache::policy::{FetchRuns, Io, IoEvent, LocatedRead, ReadIntent, ReadPlan, ReadPolicy};
 use crate::cache::read_output::ReadOutput;
 use crate::cache::storage::FileVersion;
