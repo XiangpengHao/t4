@@ -23,7 +23,7 @@ mod read_output;
 mod storage;
 mod t4_caching;
 
-pub use t4_caching::{CachedFile, T4Caching, T4CachingBuilder};
+pub use t4_caching::{FileHandle, T4Caching, T4CachingBuilder};
 
 use std::fmt;
 

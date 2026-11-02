@@ -1,7 +1,7 @@
 # 09 — Vortex integration: t4's own API, and Vortex's reader over it
 
 Status: design (2026-10-27). Built: plan step 1, t4's `open`,
-`open_listed` and `CachedFile::read`, with the `ObjectStore` integration
+`open_listed` and `FileHandle::read`, with the `ObjectStore` integration
 rebuilt on them. Rewritten the same day: the first version kept t4 behind
 Vortex's object store reader (Rejected). Revised the same day: the thin
 adapter first, over what t4 does already; merging a batch's GETs, built as
@@ -151,7 +151,7 @@ the store from before the pivot; the cache isn't published.
      once (`03-cache.md`, decision 11). `T4Caching::open_listed` takes what
      a list already said and asks nothing, unless the cache already knows
      the path: it keeps to what it heard first.
-   - **The handle.** A `CachedFile` holds what the store said of the file,
+   - **The handle.** A `FileHandle` holds what the store said of the file,
      its size and e_tag, and reads with `read`: one range, as a bounded GET
      takes it, clamped to the file's end, an error if it starts past it.
      Reads of many ranges at once are many `read`s; a batch read that
@@ -166,7 +166,7 @@ the store from before the pivot; the cache isn't published.
      `If-Match` on the file's e_tag, if it has one. Their bytes are copied
      into an output too, so the alignment rule holds for every answer.
    - **Lifetimes.** `T4Caching` is a handle: a clone shares the cache. A
-     `CachedFile` holds one, so it is `'static` and cheap to clone, and a
+     `FileHandle` holds one, so it is `'static` and cheap to clone, and a
      reader makes `'static` futures by moving a clone in, as Vortex's trait
      needs.
    - **Errors** are the inner store's (`object_store::Error`), since t4's
@@ -177,7 +177,7 @@ the store from before the pivot; the cache isn't published.
    the intent from the request's extensions (`06-read-modes.md`, decision
    6). What the cache can't serve, it asks of the inner store as the
    request was, as before: so a file changed since reads as the store has
-   it now, unlike a `CachedFile`'s `read`. That is why it reads by a step
+   it now, unlike a `FileHandle`'s `read`. That is why it reads by a step
    of `read`'s that stays inside t4 (`read_cached`, nothing if the cache
    can't serve), not by `read` itself. Conditional and versioned reads
    still go to the inner store. So do lists, writes and deletes, and the
@@ -191,7 +191,7 @@ the store from before the pivot; the cache isn't published.
    vortex-io gains a `t4` feature beside its `object_store` one, unix only
    (Linux intended, `00-meta.md`). It holds two types.
 
-   `T4ReadAt` reads one `CachedFile`. It is a thin adapter: it does what
+   `T4ReadAt` reads one `FileHandle`. It is a thin adapter: it does what
    `ObjectStoreReadAt` does, but for where its bytes come from, so that
    the comparison with it measures t4 and nothing else:
 
@@ -202,7 +202,7 @@ the store from before the pivot; the cache isn't published.
    - **`concurrency`: `ObjectStoreReadAt`'s 192 per file,** or set at
      construction. t4's cap on bytes in flight already bounds the network
      across files (06, decision 11), the cap Vortex's TODO asks for.
-   - **`read_ranges`:** a `CachedFile::read` for each range, at most
+   - **`read_ranges`:** a `FileHandle::read` for each range, at most
      `concurrency` at once, driven by one task on Vortex's I/O runtime, as
      `ObjectStoreReadAt` drives its GETs; each answered as it lands.
    - **`size`:** the file's, known since it was opened.
@@ -214,7 +214,7 @@ the store from before the pivot; the cache isn't published.
 
    `T4FileSystem` is a `FileSystem` over a `T4Caching`. It lists, heads and
    deletes through t4's `ObjectStore`, so the cache remembers what lists
-   say. `open_read` opens a `CachedFile`.
+   say. `open_read` opens a `FileHandle`.
 
    Vortex depends on t4, and changes this reader whenever it changes its
    trait.
@@ -260,7 +260,7 @@ the store from before the pivot; the cache isn't published.
 
    That batch merging was built as the old step 2 and shelved the same
    day, on t4's branch `shelved-batch-gathering`:
-   `CachedFile::read_ranges`, and `GetQueue`'s `Gathering`. A batch's GETs
+   `FileHandle::read_ranges`, and `GetQueue`'s `Gathering`. A batch's GETs
    wait aside, room or not, then enter the queue together, so that
    adjacent ones merge, while other GETs go on. It came with unit and
    shuttle tests.
@@ -330,18 +330,18 @@ pub struct T4Caching { /* ... */ }
 impl T4Caching {
     /// The file at `location`, opened for reads: what the inner store says
     /// of it, asked once.
-    pub async fn open(&self, location: &Path) -> object_store::Result<CachedFile>;
+    pub async fn open(&self, location: &Path) -> object_store::Result<FileHandle>;
 
     /// The file a list named, opened for reads: nothing asked.
-    pub fn open_listed(&self, listed: ObjectMeta) -> CachedFile;
+    pub fn open_listed(&self, listed: ObjectMeta) -> FileHandle;
 }
 
 /// A file opened for reads through t4: what the store said of it, asked
 /// once. Every answer's address equals its file offset mod 4 KiB.
 #[derive(Clone)]
-pub struct CachedFile { /* a handle on the cache, what the store said */ }
+pub struct FileHandle { /* a handle on the cache, what the store said */ }
 
-impl CachedFile {
+impl FileHandle {
     pub fn meta(&self) -> &ObjectMeta;
 
     /// `range` of the file, of the version opened.
@@ -358,7 +358,7 @@ Vortex, `vortex-io/src/t4/` (decision 3):
 ```rust
 /// A Vortex file read through t4.
 pub struct T4ReadAt {
-    file: t4::CachedFile,
+    file: t4::FileHandle,
     uri: Arc<str>,
     handle: Handle,
     allocator: BufferAllocatorRef,
@@ -367,8 +367,8 @@ pub struct T4ReadAt {
 }
 
 impl T4ReadAt {
-    pub fn new(file: CachedFile, handle: Handle) -> Self;
-    pub fn new_with_allocator(file: CachedFile, handle: Handle, allocator: BufferAllocatorRef) -> Self;
+    pub fn new(file: FileHandle, handle: Handle) -> Self;
+    pub fn new_with_allocator(file: FileHandle, handle: Handle, allocator: BufferAllocatorRef) -> Self;
     pub fn with_concurrency(self, concurrency: usize) -> Self;
     pub fn with_coalesce_config(self, config: Option<CoalesceConfig>) -> Self;
 }
@@ -378,9 +378,9 @@ impl VortexReadAt for T4ReadAt {
     fn concurrency(&self) -> usize { self.concurrency }
     fn size(&self) -> BoxFuture<'static, VortexResult<u64>> { /* the file's */ }
     fn read_at(&self, offset: u64, length: usize, alignment: Alignment)
-        -> BoxFuture<'static, VortexResult<BufferHandle>> { /* `CachedFile::read` */ }
+        -> BoxFuture<'static, VortexResult<BufferHandle>> { /* `FileHandle::read` */ }
     fn read_ranges(&self, requests: Arc<[ReadAtRequest]>) -> ReadAtStream {
-        /* a `CachedFile::read` each, `concurrency` at once */
+        /* a `FileHandle::read` each, `concurrency` at once */
     }
 }
 
@@ -418,7 +418,7 @@ lists go through it too.
 
 ## The plan
 
-1. **t4's API:** `open`, `open_listed` and `CachedFile::read`, with the
+1. **t4's API:** `open`, `open_listed` and `FileHandle::read`, with the
    `ObjectStore` integration rebuilt on them. Its unit, shuttle and fuzz
    tests pass unchanged. Built 27 Oct 2026: the 136 unit tests and the 23
    shuttle tests passed unchanged, and six new ones cover the API (opening,
@@ -426,7 +426,7 @@ lists go through it too.
    changed since it was opened, the intent). The fuzz target compiles; it
    wasn't run.
 2. **The thin adapter, in the fork,** based on #10766: vortex-io's `t4`
-   feature and `T4ReadAt` over `CachedFile::read`, with its tests, a
+   feature and `T4ReadAt` over `FileHandle::read`, with its tests, a
    Vortex file read through it among them. Nothing new in t4; the fork
    takes t4 by path, then by git. Started 27 Oct 2026 on the fork's branch
    `t4-read-at`: the feature, `T4ReadAt`, and unit tests in vortex-io
@@ -434,7 +434,7 @@ lists go through it too.
    size): the six pass, and clippy is clean on vortex-io with every
    feature. And a Vortex file read through it: vortex-file gains a `t4`
    feature, vortex-io re-exports t4's `T4Caching`, `T4CachingBuilder` and
-   `CachedFile` so that the cache is built with the t4 Vortex is built
+   `FileHandle` so that the cache is built with the t4 Vortex is built
    against, and `vortex-file/tests/t4_read_at.rs` writes a file of over
    2 MiB to an in-memory store and scans it back through `T4ReadAt` twice,
    fetched then from t4's tiers, with Vortex's merging and without: both
@@ -1086,12 +1086,12 @@ What the reasoning expects; the runs check it:
 | Repository | Path | What | Built |
 |---|---|---|---|
 | t4 | `src/cache/t4_caching/` | `T4Caching`, a handle; `open`, `open_listed`; reads served and fetched | yes |
-| t4 | `src/cache/t4_caching/cached_file.rs` | `CachedFile`: `read` | yes |
+| t4 | `src/cache/t4_caching/file_handle.rs` | `FileHandle`: `read` | yes |
 | t4 | `src/cache/t4_caching/object_store_integration.rs` | `impl ObjectStore for T4Caching`, over `open` and `read_cached` | yes |
-| t4 | `src/cache/t4_caching/cached_file.rs`, `src/cache/network/get_queue/` | `CachedFile::read_ranges`; `Gathering`: a batch's GETs merged | shelved, branch `shelved-batch-gathering` |
+| t4 | `src/cache/t4_caching/file_handle.rs`, `src/cache/network/get_queue/` | `FileHandle::read_ranges`; `Gathering`: a batch's GETs merged | shelved, branch `shelved-batch-gathering` |
 | t4 | `src/cache/policy/fixed_placement.rs` | `FixedPlacementPolicy`, public, from `bench/src/fixed_placement_policy.rs` | yes |
 | Vortex | `vortex-io/src/t4/read_at.rs` | `T4ReadAt`, feature `t4` | yes, branch `t4-read-at` |
-| Vortex | `vortex-io/src/t4/mod.rs` | t4's `T4Caching`, `T4CachingBuilder`, `CachedFile` re-exported | yes, branch `t4-read-at` |
+| Vortex | `vortex-io/src/t4/mod.rs` | t4's `T4Caching`, `T4CachingBuilder`, `FileHandle` re-exported | yes, branch `t4-read-at` |
 | Vortex | `vortex-file/tests/t4_read_at.rs` | a Vortex file written to a store and scanned back through `T4ReadAt`; vortex-file's feature `t4` | yes, branch `t4-read-at` |
 | Vortex | `vortex-io/src/t4/filesystem.rs` | `T4FileSystem` | no |
 | Vortex | `vortex-datafusion/src/persistent/format.rs` | `VortexFormat`'s reader factory, used for schema and statistics too | yes, branch `t4-read-at` |

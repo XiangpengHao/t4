@@ -1,4 +1,4 @@
-//! [`CachedFile`]: a file opened for reads through t4
+//! [`FileHandle`]: a remote file opened for reads through t4
 //! (`doc/09-vortex-integration.md`, decision 1), what an integration reads
 //! by: t4's `ObjectStore`, or a reader of Vortex's.
 
@@ -14,17 +14,18 @@ use crate::cache::policy::ReadIntent;
 use crate::cache::read_output::ReadOutput;
 use crate::io::sync::Arc;
 
-/// A file opened for reads through a [`T4Caching`] ([`T4Caching::open`],
-/// [`T4Caching::open_listed`]): what the inner store said of it, asked
-/// once. Its reads are of that version: a read of a file changed since
-/// fails rather than mix two versions. A clone shares the cache.
+/// A remote file opened for reads through a [`T4Caching`]
+/// ([`T4Caching::open`], [`T4Caching::open_listed`]): what the inner store
+/// said of it, asked once. Its reads are of that version: a read of a file
+/// changed since fails rather than mix two versions. A clone shares the
+/// cache.
 #[derive(Clone, Debug)]
-pub struct CachedFile {
+pub struct FileHandle {
     store: T4Caching,
     meta: Arc<ObjectMeta>,
 }
 
-impl CachedFile {
+impl FileHandle {
     pub(super) fn new(store: T4Caching, meta: Arc<ObjectMeta>) -> Self {
         Self { store, meta }
     }

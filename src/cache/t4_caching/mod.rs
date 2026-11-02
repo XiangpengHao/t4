@@ -4,7 +4,7 @@
 //! one.
 //!
 //! Integrations read through its API (`doc/09-vortex-integration.md`,
-//! decision 1): a file opened once ([`T4Caching::open`]), a [`CachedFile`],
+//! decision 1): a file opened once ([`T4Caching::open`]), a [`FileHandle`],
 //! read a range at a time. One integration is t4's own: `T4Caching` is an
 //! [`ObjectStore`] too (`object_store_integration`).
 //!
@@ -317,18 +317,18 @@ impl T4Caching {
     /// # Errors
     ///
     /// The inner store's HEAD's: the file isn't there, say.
-    pub async fn open(&self, location: &Path) -> object_store::Result<CachedFile> {
+    pub async fn open(&self, location: &Path) -> object_store::Result<FileHandle> {
         let meta = self.meta_of(location).await?;
-        Ok(CachedFile::new(self.clone(), meta))
+        Ok(FileHandle::new(self.clone(), meta))
     }
 
     /// The file `listed` names, opened for reads as a list of the inner
     /// store's said it is, asking nothing; unless the cache knows the path
     /// already, as it keeps to what it heard first (decision 11).
-    pub fn open_listed(&self, listed: ObjectMeta) -> CachedFile {
+    pub fn open_listed(&self, listed: ObjectMeta) -> FileHandle {
         let listed = Arc::new(listed);
         let meta = self.known.remember(&listed.location, Arc::clone(&listed));
-        CachedFile::new(self.clone(), meta)
+        FileHandle::new(self.clone(), meta)
     }
 
     /// The bytes `range` asks of a file of `file_size`, as the inner store
@@ -509,10 +509,10 @@ impl fmt::Debug for KnownFiles {
     }
 }
 
-mod cached_file;
+mod file_handle;
 mod object_store_integration;
 
-pub use cached_file::CachedFile;
+pub use file_handle::FileHandle;
 
 #[cfg(all(test, not(feature = "shuttle")))]
 mod tests;

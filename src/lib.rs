@@ -19,7 +19,7 @@ use std::num::NonZeroU32;
 use vstd::prelude::*;
 
 #[cfg(unix)]
-pub use cache::{CachedFile, T4Caching, T4CachingBuilder, policy};
+pub use cache::{FileHandle, T4Caching, T4CachingBuilder, policy};
 pub use io::error::{Error, Result};
 
 #[cfg(feature = "__bench")]
