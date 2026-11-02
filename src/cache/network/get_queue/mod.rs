@@ -23,7 +23,7 @@ use std::task::{Poll, Waker};
 
 use bytes::Bytes;
 
-use crate::cache::FileVersionId;
+use crate::cache::cache_stores::FileVersionKey;
 use crate::io::sync::{Arc, Mutex, MutexGuard};
 
 /// The GETs in flight, at most `most` bytes of them, a GET's racers' each
@@ -64,7 +64,7 @@ impl GetQueue {
     /// came before it have gone.
     pub(super) async fn turn(
         self: &Arc<Self>,
-        file: FileVersionId,
+        file: FileVersionKey,
         bytes: Range<u64>,
         requests: NonZeroU8,
     ) -> GetTurn {
@@ -240,8 +240,8 @@ struct QueueState {
     waiting: HashMap<u64, WaitingGet>,
     /// The waiting GETs that may merge, by their file and first byte, and
     /// by their file and the byte past their last.
-    by_start: HashMap<(FileVersionId, u64), u64>,
-    by_end: HashMap<(FileVersionId, u64), u64>,
+    by_start: HashMap<(FileVersionKey, u64), u64>,
+    by_end: HashMap<(FileVersionKey, u64), u64>,
 }
 
 impl QueueState {
@@ -256,7 +256,7 @@ impl QueueState {
     fn wait(
         &mut self,
         cost: u64,
-        merges: Option<(FileVersionId, Range<u64>)>,
+        merges: Option<(FileVersionKey, Range<u64>)>,
         turn: Arc<TurnSlot>,
     ) -> u64 {
         let number = self.next;
@@ -295,7 +295,7 @@ struct WaitingGet {
     cost: u64,
     /// Its file and bytes, if it may merge: a GET of one request, in a
     /// queue that merges.
-    merges: Option<(FileVersionId, Range<u64>)>,
+    merges: Option<(FileVersionKey, Range<u64>)>,
     turn: Arc<TurnSlot>,
 }
 

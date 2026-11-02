@@ -73,6 +73,12 @@ impl Network {
         &*self.reads
     }
 
+    /// The GETs waiting for room now: for tests.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(super) fn gets_waiting(&self) -> usize {
+        self.gets.waiting()
+    }
+
     /// Plans `read`'s GETs, for `intent`, run by run as the cache locates
     /// its blocks: each run's by the read policy, which the cache takes,
     /// claiming the blocks its GETs widen to before it locates the next

@@ -335,6 +335,71 @@ fn two_clients_whose_owner_went_one_owns_and_the_other_reads_through_it() {
     assert_eq!(readers.take_asked(), [], "served by the new owner");
 }
 
+/// A client's GET waiting for room as its owner goes merges with no GET of
+/// the cache it reads through next, whose ids name other files: here the
+/// client's own, which names `c` with the id the owner gave `b`. Each read
+/// takes its own file's bytes.
+#[test]
+fn a_get_waiting_as_its_owner_goes_merges_with_none_of_the_next_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let (b, c) = (Path::from("b"), Path::from("c"));
+    let (b_data, c_data) = (file_bytes(3 * MIB, 13), file_bytes(3 * MIB, 14));
+    // Two blocks' GETs out at a time: room for two waiting to go as one.
+    let shared = |inner: &Arc<CountingStore>| {
+        builder(inner, &dir)
+            .with_network_rate(2 * MIB, Duration::from_secs(1))
+            .with_multiprocess_sharing()
+    };
+    let (owner, _, _) = process(&b, &b_data, shared);
+    let (client, clients, b_meta) = process(&b, &b_data, shared);
+    put(clients.as_ref(), &c, &c_data);
+    // A path too long to cache: a read of it hands the cache over, and
+    // names no version.
+    let long = Path::from("l".repeat(1025));
+    let long_data = file_bytes(10, 15);
+    put(clients.as_ref(), &long, &long_data);
+    let (c_meta, long_meta) = (listed(&clients, &c), listed(&clients, &long));
+
+    let open = clients.gate_next_get();
+    let first = read_on_thread(client.clone(), b_meta.clone(), 0..2 * MIB);
+    wait_until(|| clients.gets_out_now() == 1, "b's first blocks go out");
+    let third = read_on_thread(client.clone(), b_meta, 2 * MIB..3 * MIB);
+    wait_until(
+        || client.network.gets_waiting() == 1,
+        "b's third block waits",
+    );
+
+    drop(owner);
+    wait_until(
+        || {
+            assert_eq!(read_listed(&client, &long_meta, 0..10), long_data);
+            owns(&client)
+        },
+        "a read makes the client the owner",
+    );
+    // `c`'s second block, just before `b`'s third.
+    let second = read_on_thread(client.clone(), c_meta, MIB..2 * MIB);
+    wait_until(
+        || client.network.gets_waiting() == 2,
+        "c's second block waits",
+    );
+
+    drop(open);
+    let wait = Duration::from_secs(5);
+    assert_eq!(
+        second.recv_timeout(wait).unwrap(),
+        c_data.slice(MIB as usize..2 * MIB as usize)
+    );
+    assert_eq!(
+        third.recv_timeout(wait).unwrap(),
+        b_data.slice(2 * MIB as usize..)
+    );
+    assert_eq!(
+        first.recv_timeout(wait).unwrap(),
+        b_data.slice(..2 * MIB as usize)
+    );
+}
+
 /// A client whose files a cache not built for sharing took once its owner
 /// went: it can neither own them nor reach an owner, and reads from its
 /// store, no read waiting long for an owner.

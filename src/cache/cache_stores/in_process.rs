@@ -10,8 +10,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
 
-use super::{CacheStore, CacheStoreFetch, CacheStoreRead};
-use crate::cache::FileVersionId;
+use super::{CacheStore, CacheStoreFetch, CacheStoreRead, FileVersionKey, VersionIdSource};
 use crate::cache::policy::{
     ClockPolicy, PlacementPolicy, ReadIntent, ReadPlan, ReadPolicy, TierSizes,
 };
@@ -235,8 +234,8 @@ impl<'s> CacheStoreFetch<'s> for FetchedBlocks<'s> {
         FetchedBlocks::range(self)
     }
 
-    fn file(&self) -> FileVersionId {
-        FetchedBlocks::file(self)
+    fn file(&self) -> FileVersionKey {
+        FileVersionKey::new(VersionIdSource::OwnCache, FetchedBlocks::file(self))
     }
 
     fn race(&self) -> NonZeroU8 {

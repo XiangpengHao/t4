@@ -12,6 +12,7 @@ use shuttle::scheduler::PctScheduler;
 
 use super::{GetQueue, GetTurn};
 use crate::cache::FileVersionId;
+use crate::cache::cache_stores::{FileVersionKey, VersionIdSource};
 use crate::io::sync::{Arc, thread};
 
 /// A GET's bytes: its block's number throughout.
@@ -21,6 +22,11 @@ const MOST: u64 = 2 * BLOCK;
 
 fn explore(test: impl Fn() + Send + Sync + 'static) {
     shuttle::Runner::new(PctScheduler::new(3, 1000), shuttle::Config::new()).run(test);
+}
+
+/// The file every GET is of: a version of the process's own cache.
+fn file() -> FileVersionKey {
+    FileVersionKey::new(VersionIdSource::OwnCache, FileVersionId::new(1))
 }
 
 /// The bytes of blocks `from..to`, each its number throughout.
@@ -36,10 +42,7 @@ fn blocks(from: u64, to: u64) -> Bytes {
 async fn fetch(queue: &Arc<GetQueue>, block: u64) -> Bytes {
     let own = block * BLOCK..(block + 1) * BLOCK;
     loop {
-        match queue
-            .turn(FileVersionId::new(1), own.clone(), NonZeroU8::MIN)
-            .await
-        {
+        match queue.turn(file(), own.clone(), NonZeroU8::MIN).await {
             GetTurn::Send { place, mut joined } => {
                 assert!(queue.in_flight() <= MOST);
                 let from = joined.start().unwrap_or(own.start) / BLOCK;
@@ -75,9 +78,7 @@ fn shuttle_gets_take_turns_merge_and_hand_their_bytes_over() {
             let queue = Arc::clone(&queue);
             thread::spawn(move || {
                 let own = 9 * BLOCK..10 * BLOCK;
-                let turn = queue
-                    .turn(FileVersionId::new(1), own, NonZeroU8::MIN)
-                    .boxed();
+                let turn = queue.turn(file(), own, NonZeroU8::MIN).boxed();
                 if let Either::Left((turn, _)) = block_on(select(turn, ready(()))) {
                     drop(turn);
                 }

@@ -16,6 +16,7 @@ use std::sync::{Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::thread::{self, JoinHandle};
 
+use crate::cache::cache_stores::VersionIdSource;
 use crate::cache::cache_stores::shared::protocol::{
     ClientFrame, ClientRegion, FrameReader, FrameReceiver, FrameSender, FrameSocket, Hello,
     OwnerAddress, OwnerFrame, PROTOCOL_VERSION, RegionSpan,
@@ -43,6 +44,9 @@ pub(in crate::cache) struct OwnerConnection {
     calls: std::sync::Arc<CallTable>,
     /// The number the next read takes.
     next_read: AtomicU64,
+    /// The connection's number among this process's, each to an owner in
+    /// turn: which owner the version ids the connection is given come from.
+    number: u64,
     /// Sends the client's frames, in order.
     outgoing: FrameSender,
     /// Takes the owner's frames until the owner goes, or breaks the
@@ -57,9 +61,10 @@ impl OwnerConnection {
 
     /// A connection to the owner of the cache whose first cache file is at
     /// `first_file`, admitted, the reads from disk the owner makes for the
-    /// client's reads told to `reads`; `None` if no owner answered, or one
-    /// closed the connection first: it is starting, or leaving, or refused
-    /// the client.
+    /// client's reads told to `reads`, numbered `number` among this
+    /// process's connections; `None` if no owner answered, or one closed
+    /// the connection first: it is starting, or leaving, or refused the
+    /// client.
     ///
     /// # Errors
     ///
@@ -69,9 +74,12 @@ impl OwnerConnection {
     pub(in crate::cache::cache_stores::shared) fn connect(
         first_file: &Path,
         reads: Arc<dyn ReadPolicy>,
+        number: u64,
     ) -> Result<Option<Self>> {
         match Self::admitted(first_file) {
-            Ok((socket, frames, region)) => Ok(Some(Self::start(socket, frames, region, reads)?)),
+            Ok((socket, frames, region)) => {
+                Ok(Some(Self::start(socket, frames, region, reads, number)?))
+            }
             Err(Error::Io(error)) if Self::owner_absent(&error) => Ok(None),
             Err(error) => Err(error),
         }
@@ -140,16 +148,17 @@ impl OwnerConnection {
         )
     }
 
-    /// The connection over `socket`, the owner's frames taken by `frames`,
-    /// its owner having mapped `region` if any, its threads started: the
-    /// sender's writer sends the frames a caller couldn't, each batch in one
-    /// write; the reader answers each call, and tells `reads` of each read
-    /// from disk.
+    /// The connection numbered `number` over `socket`, the owner's frames
+    /// taken by `frames`, its owner having mapped `region` if any, its
+    /// threads started: the sender's writer sends the frames a caller
+    /// couldn't, each batch in one write; the reader answers each call, and
+    /// tells `reads` of each read from disk.
     fn start(
         socket: FrameSocket,
         frames: FrameReceiver,
         region: Option<std::sync::Arc<ClientRegion>>,
         reads: Arc<dyn ReadPolicy>,
+        number: u64,
     ) -> Result<Self> {
         let outgoing = FrameSender::start(socket.try_clone()?, FrameSender::SEND_WAIT)?;
         let calls = std::sync::Arc::new(CallTable::default());
@@ -175,6 +184,7 @@ impl OwnerConnection {
             traffic,
             calls,
             next_read: AtomicU64::new(0),
+            number,
             outgoing,
             reader: Some(reader),
         })
@@ -227,6 +237,15 @@ impl OwnerConnection {
             (self.traffic.sent).fetch_add(frame.len() as u64, Ordering::Relaxed);
         }
         self.outgoing.send(frames);
+    }
+
+    /// Where the version ids this connection is given come from: its
+    /// owner, told apart from those this process read through before, and
+    /// will after.
+    pub(super) fn version_ids(&self) -> VersionIdSource {
+        VersionIdSource::Owner {
+            connection: self.number,
+        }
     }
 
     /// The number the client's next read takes.

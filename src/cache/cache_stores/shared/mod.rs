@@ -65,6 +65,9 @@ struct HandOff {
     reads: Arc<dyn ReadPolicy>,
     /// When the next try is due.
     next_try: Instant,
+    /// The connections tried so far: the next one's number, which tells
+    /// the version ids its owner gives apart from the last owner's.
+    connections: u64,
 }
 
 /// What serves a read: this process's own store, or its owner, through
@@ -102,6 +105,7 @@ impl SharedCacheStore {
                 tiers,
                 reads,
                 next_try: Instant::now(),
+                connections: 0,
             }),
         };
         let deadline = Instant::now() + wait;
@@ -184,8 +188,10 @@ impl SharedCacheStore {
             Err(Error::Busy) => {}
             Err(error) => return Err(error),
         }
+        hand_off.connections += 1;
         let first_file = hand_off.tiers.first_file();
-        let Some(owner) = OwnerConnection::connect(first_file, Arc::clone(&hand_off.reads))? else {
+        let reads = Arc::clone(&hand_off.reads);
+        let Some(owner) = OwnerConnection::connect(first_file, reads, hand_off.connections)? else {
             return Ok(false);
         };
         *self.client.write().unwrap_or_else(PoisonError::into_inner) =

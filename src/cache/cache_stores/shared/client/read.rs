@@ -14,7 +14,7 @@ use crate::PAGE_SIZE_U64;
 use crate::cache::cache_stores::shared::protocol::{
     ClientFrame, NextStep, OwnerFrame, RegionSpan, SpanName,
 };
-use crate::cache::cache_stores::{CacheStoreFetch, CacheStoreRead};
+use crate::cache::cache_stores::{CacheStoreFetch, CacheStoreRead, FileVersionKey};
 use crate::cache::policy::{ReadIntent, ReadPlan};
 use crate::cache::read_output::ReadOutput;
 use crate::cache::storage::{CacheableFile, FileVersion, LocatedRun};
@@ -168,7 +168,7 @@ impl<'c> CacheStoreRead<'c> for ClientRead<'c> {
         let Some(NextStep::Fetch(specs)) = self.next.take() else {
             return Ok(Vec::new());
         };
-        let file = self.version.id();
+        let file = FileVersionKey::new(self.number.owner.version_ids(), self.version.id());
         Ok((0..)
             .zip(specs)
             .map(|(fetch, spec)| {

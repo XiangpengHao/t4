@@ -330,7 +330,15 @@ decision 9).
      The next read tries the lock: the client that wins
      owns the cache, cold until the snapshot exists
      (`10-spiral-integration.md`, decision 7) and from it after; the
-     others connect to it. One read of a client's tries at a time, once,
+     others connect to it. A version id names a version only in the
+     cache that gave it, and the next owner gives its ids again, to other
+     files: so a client's GETs still waiting under the last owner merge
+     with none of the next's, each keyed by its id and the cache it came
+     from, the client's own or the owner on a numbered connection
+     (`FileVersionKey`). Merged, a read of one file would take another's
+     bytes, and cache them (fixed 2 Nov 2026,
+     `a_get_waiting_as_its_owner_goes_merges_with_none_of_the_next_cache`).
+     One read of a client's tries at a time, once,
      no more than every 10 ms: the lock, then the owner, never the 10 s
      a build waits for one. The others read from the remote meanwhile,
      their calls on the dead connection failing at once
@@ -686,7 +694,7 @@ session ending the last read before it takes the next's frames, 1 µs.
 | `src/cache/storage/` | the storage half (decision 2): the object cache, the index, the blocks in flight, and the memory and disk tiers | yes |
 | `src/cache/network/` | the fetch half (decision 2): the GETs, their queue and races, and the read policy that plans them | yes |
 | `src/cache/t4_caching/` | the front end: a read through both halves (`read_through`), and `with_multiprocess_sharing` (decision 1) | yes |
-| `src/cache/cache_stores/` | the `CacheStore` trait the fetch half reads through, one of two picked at build (decision 2) | yes |
+| `src/cache/cache_stores/` | the `CacheStore` trait the fetch half reads through, one of two picked at build (decision 2); `FileVersionKey`, a version told apart across the caches a client reads through (decision 7) | yes |
 | `src/cache/cache_stores/in_process.rs` | a cache read by its process alone: the lock taken, the tiers made, no socket (decision 1) | yes |
 | `src/cache/cache_stores/shared/` | shared mode: this process the owner or a client, and the hand-off once the owner goes (decisions 1, 7) | yes |
 | `src/cache/cache_stores/shared/owner/` | the owner's listener and a session for each client (decisions 1, 5); a client's reads, each a task of its session's (`client_reads.rs`, decision 5); what wakes a session's thread, waiting on its client's socket and its reads at once (`session_waker.rs`, Cost) | yes |

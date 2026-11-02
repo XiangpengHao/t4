@@ -123,7 +123,7 @@ pub(super) trait CacheStoreFetch<'s>: Send {
     fn range(&self) -> Range<u64>;
 
     /// The version of the file they are of.
-    fn file(&self) -> FileVersionId;
+    fn file(&self) -> FileVersionKey;
 
     /// How many identical requests race for them.
     fn race(&self) -> NonZeroU8;
@@ -144,4 +144,33 @@ pub(super) trait CacheStoreFetch<'s>: Send {
     ///
     /// If the fetch brought fewer bytes than it holds: nothing is cached.
     fn finish(self: Box<Self>) -> BoxFuture<'s, Result<()>>;
+}
+
+/// A file version as a process's fetches tell it apart: its id, and the
+/// cache that gave the id. An id names one version in the cache that gave
+/// it only: a client whose owner went reads through the next owner, or its
+/// own cache, which give its ids to other files, while its GETs under the
+/// last owner may still wait to go (`doc/11-shared-mode.md`, decision 7).
+/// Those must never go as one with GETs of another file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) struct FileVersionKey {
+    source: VersionIdSource,
+    id: FileVersionId,
+}
+
+impl FileVersionKey {
+    pub(super) fn new(source: VersionIdSource, id: FileVersionId) -> Self {
+        Self { source, id }
+    }
+}
+
+/// The cache a file version's id came from, as this process tells it apart
+/// from the others it reads through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum VersionIdSource {
+    /// This process's own: it owns a cache once at most, and for good.
+    OwnCache,
+    /// The owner this process reached on its connection numbered so: each
+    /// connection a number of its own, one to each owner in turn.
+    Owner { connection: u64 },
 }

@@ -11,11 +11,10 @@ use futures_util::future::BoxFuture;
 
 use super::connection::OwnerConnection;
 use super::read::ReadNumber;
-use crate::cache::FileVersionId;
-use crate::cache::cache_stores::CacheStoreFetch;
 use crate::cache::cache_stores::shared::protocol::{
     ClientFrame, FetchSpec, OwnerFrame, RegionSpan, SpanName,
 };
+use crate::cache::cache_stores::{CacheStoreFetch, FileVersionKey};
 use crate::io::error::{Error, Result};
 
 /// One of a client's read's fetches (`ClientRead`'s): the bytes of
@@ -30,7 +29,7 @@ pub(super) struct ClientFetch {
     /// Its place in the read's fetches.
     fetch: u32,
     spec: FetchSpec,
-    file: FileVersionId,
+    file: FileVersionKey,
     /// Where its bytes are staged, if a span was free.
     staged: Option<RegionSpan>,
     /// How many of its bytes have landed.
@@ -47,7 +46,7 @@ impl ClientFetch {
         read: std::sync::Arc<ReadNumber>,
         fetch: u32,
         spec: FetchSpec,
-        file: FileVersionId,
+        file: FileVersionKey,
     ) -> Self {
         let bytes = spec.bytes();
         let staged = read.owner().span(bytes.end - bytes.start);
@@ -70,7 +69,7 @@ impl<'c> CacheStoreFetch<'c> for ClientFetch {
     }
 
     /// The version of the file they are of, as the owner named it.
-    fn file(&self) -> FileVersionId {
+    fn file(&self) -> FileVersionKey {
         self.file
     }
 

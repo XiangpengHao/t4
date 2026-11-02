@@ -5,6 +5,8 @@ use futures_util::future::BoxFuture;
 use futures_util::task::noop_waker_ref;
 
 use super::*;
+use crate::cache::FileVersionId;
+use crate::cache::cache_stores::VersionIdSource;
 
 const MIB: u64 = 1 << 20;
 const ONE: NonZeroU8 = NonZeroU8::MIN;
@@ -14,8 +16,9 @@ fn queue(most: u64, merged_up_to: u64) -> Arc<GetQueue> {
     Arc::new(GetQueue::new(NonZeroU64::new(most).unwrap(), merged_up_to))
 }
 
-fn file(number: u64) -> FileVersionId {
-    FileVersionId::new(number)
+/// Version `number` of the process's own cache.
+fn file(number: u64) -> FileVersionKey {
+    FileVersionKey::new(VersionIdSource::OwnCache, FileVersionId::new(number))
 }
 
 /// The turn of a GET waiting for it, polled once: `None` while it waits.
@@ -47,7 +50,7 @@ fn joined(turn: GetTurn) -> JoinedGet {
 /// A GET's turn with room free and none waiting: at once.
 fn at_once(
     queue: &Arc<GetQueue>,
-    file: FileVersionId,
+    file: FileVersionKey,
     bytes: Range<u64>,
 ) -> (GetPlace, JoinedParts) {
     sent(
