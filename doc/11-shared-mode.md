@@ -345,6 +345,18 @@ decision 9).
      its claims, drops its landings not committed, and unmaps its region
      once its I/O into it completes.
    - **A protocol error** closes the connection, as if the owner went.
+   - **A wakeup macOS loses:** a `shutdown` that comes just as another
+     thread starts to read the same Unix socket can leave that thread
+     asleep for good, if the socket's peer stays open (checked: 10 of
+     1,500 when they race 1 to 2 µs apart). It hung a client's drop,
+     joining its reader, once in about 20 runs of the tests, and kept a
+     test waiting 5 s for an owner's close: the owner's listener held a
+     copy of each session's socket, so a session that ended left its
+     connection open. Now the listener holds the socket weakly, so a
+     session that ends closes it, a second wakeup; and no thread waits on
+     a socket for good: the client's reader, a session, and a writer
+     waiting for room each look again every second
+     (`FrameSocket::RECHECK`).
 
 8. **One user's processes trust each other,** and no others'. A client
    may commit any bytes under any name, as any Spiral process of the

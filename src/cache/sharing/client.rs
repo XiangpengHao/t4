@@ -125,7 +125,8 @@ impl OwnerConnection {
             // An owner of another version admits no try of this client's.
             return Err(Error::Busy);
         }
-        socket.set_read_timeout(None)?;
+        // The reader's every read ends that often, to look again.
+        socket.set_read_timeout(Some(FrameSocket::RECHECK))?;
         Ok((socket, frames, region.filter(|_| mapped)))
     }
 
@@ -517,7 +518,15 @@ impl OwnerFrames {
     /// If the socket fails, or the owner sends a frame the protocol doesn't
     /// allow.
     fn take_frames(&mut self) -> Result<()> {
-        while let Some(body) = self.frames.receive(FrameSocket::MOST_BYTES)? {
+        loop {
+            let body = match self.frames.receive(FrameSocket::MOST_BYTES) {
+                Ok(Some(body)) => body,
+                Ok(None) => return Ok(()),
+                // Nothing for a while: look again, in case a shutdown's
+                // wakeup was lost (`FrameSocket::RECHECK`).
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(error) => return Err(error.into()),
+            };
             #[cfg(all(test, not(feature = "shuttle")))]
             (self.traffic.taken).fetch_add(8 + body.len() as u64, Ordering::Relaxed);
             match OwnerFrame::decode(body)? {
@@ -533,7 +542,6 @@ impl OwnerFrames {
                 answer => self.calls.answer(answer)?,
             }
         }
-        Ok(())
     }
 }
 

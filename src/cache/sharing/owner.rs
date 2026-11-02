@@ -78,7 +78,9 @@ impl Drop for OwnerListener {
         let sessions =
             std::mem::take(&mut *self.sessions.lock().unwrap_or_else(PoisonError::into_inner));
         for session in &sessions {
-            session.socket.shut_down();
+            if let Some(socket) = session.socket.upgrade() {
+                socket.shut_down();
+            }
         }
         for session in sessions {
             let _ = session.thread.join();
@@ -88,9 +90,12 @@ impl Drop for OwnerListener {
 }
 
 /// A client's session, as its listener holds it: its socket, which the
-/// listener shuts as it stops, and the thread serving it.
+/// listener shuts as it stops, if the session still has it; and the thread
+/// serving it. The listener's hold on the socket doesn't keep it open: a
+/// session that ends closes its connection, whatever its shutdown did
+/// (`FrameSocket::RECHECK`).
 struct Session {
-    socket: FrameSocket,
+    socket: std::sync::Weak<FrameSocket>,
     thread: JoinHandle<()>,
 }
 
@@ -115,9 +120,8 @@ impl Acceptor {
             let Ok(socket) = stream.and_then(FrameSocket::new) else {
                 continue;
             };
-            let Ok(shut) = socket.try_clone() else {
-                continue;
-            };
+            let socket = std::sync::Arc::new(socket);
+            let shut = std::sync::Arc::downgrade(&socket);
             let session = ClientSession {
                 socket,
                 cache: Arc::clone(&self.cache),
@@ -144,7 +148,7 @@ impl Acceptor {
 /// session's takes the client's frames as they come; the session's own
 /// runs the reads, each a task ([`ClientReads`]), and sends their answers.
 struct ClientSession {
-    socket: FrameSocket,
+    socket: std::sync::Arc<FrameSocket>,
     cache: Arc<ObjectCache>,
     first_file: FileIdentity,
 }

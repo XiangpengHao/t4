@@ -47,8 +47,9 @@ impl SessionWaker {
     }
 
     /// Waits until `socket` has bytes to take, or its peer has closed it,
-    /// or the session is woken, whichever comes first; returns at once if
-    /// it was woken since the last wait. Whether the socket is ready.
+    /// or the session is woken, or [`FrameSocket::RECHECK`] is up, whichever
+    /// comes first; returns at once if it was woken since the last wait.
+    /// Whether the socket is ready.
     ///
     /// # Errors
     ///
@@ -58,8 +59,9 @@ impl SessionWaker {
             PollFd::new(socket, PollFlags::IN),
             PollFd::new(&self.bell, PollFlags::IN),
         ];
+        let recheck = FrameSocket::recheck();
         loop {
-            match rustix::event::poll(&mut ready, None) {
+            match rustix::event::poll(&mut ready, Some(&recheck)) {
                 Err(rustix::io::Errno::INTR) => {}
                 waited => break waited.map(drop).map_err(io::Error::from)?,
             }

@@ -13,7 +13,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use bytes::{Buf, Bytes, BytesMut};
-use rustix::event::{PollFd, PollFlags};
+use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::net::{SendAncillaryBuffer, SendFlags};
 
 /// A connected Unix socket, frames sent and received whole. A write to a
@@ -44,6 +44,14 @@ impl FrameSocket {
     const SEND_SOME_FLAGS: SendFlags = Self::SEND_FLAGS.union(SendFlags::DONTWAIT);
     #[cfg(target_vendor = "apple")]
     const SEND_SOME_FLAGS: SendFlags = Self::SEND_FLAGS;
+
+    /// How often a thread waiting on a socket looks again, though nothing
+    /// woke it: macOS can lose the wakeup of a shutdown that comes just as
+    /// a thread starts to read the socket, which, its peer open, would
+    /// leave the thread asleep for good (checked: about 1 in 300 when they
+    /// race, `doc/11-shared-mode.md`, Cost). Every wait on a socket that
+    /// could last ends this often, to look again.
+    pub(super) const RECHECK: Duration = Duration::from_secs(1);
 
     /// The most slices a `sendmsg` takes: `IOV_MAX`, on Linux and macOS.
     const MOST_SLICES: usize = 1024;
@@ -136,14 +144,24 @@ impl FrameSocket {
         self.stream.set_write_timeout(timeout)
     }
 
-    /// Waits until the socket is ready for `ready`, or its peer has gone.
+    /// Waits until the socket is ready for `ready`, or its peer has gone,
+    /// or [`Self::RECHECK`] is up.
     fn wait(&self, ready: PollFlags) -> io::Result<()> {
         let mut socket = [PollFd::new(&self.stream, ready)];
+        let recheck = Self::recheck();
         loop {
-            match rustix::event::poll(&mut socket, None) {
+            match rustix::event::poll(&mut socket, Some(&recheck)) {
                 Err(rustix::io::Errno::INTR) => {}
                 waited => return waited.map(drop).map_err(io::Error::from),
             }
+        }
+    }
+
+    /// [`Self::RECHECK`], as `poll` takes it.
+    pub(super) fn recheck() -> Timespec {
+        Timespec {
+            tv_sec: Self::RECHECK.as_secs().try_into().expect("a second fits"),
+            tv_nsec: Self::RECHECK.subsec_nanos().into(),
         }
     }
 
