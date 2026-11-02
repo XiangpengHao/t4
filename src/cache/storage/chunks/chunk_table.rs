@@ -22,7 +22,7 @@ use crate::io::sync::{Arc, Mutex, MutexGuard};
 /// by whichever drop leaves it so. A lease dropped unpublished frees its
 /// chunk once the I/O it started is done. The owner changes only while the
 /// chunk is free or leased, so it holds still under a pin.
-pub(super) struct ChunkTable {
+pub(in crate::cache::storage) struct ChunkTable {
     free: Mutex<FreeChunks>,
     slots: Box<[ChunkSlot]>,
 }
@@ -34,20 +34,20 @@ impl ChunkTable {
     const READERS: u32 = Self::PUBLISHED - 1;
 
     /// `chunk_count` chunks, all free.
-    pub(super) fn new(chunk_count: u32) -> Self {
+    pub(in crate::cache::storage) fn new(chunk_count: u32) -> Self {
         Self {
             free: Mutex::new(FreeChunks::new(chunk_count)),
             slots: (0..chunk_count).map(|_| ChunkSlot::new()).collect(),
         }
     }
 
-    pub(super) fn chunk_count(&self) -> u32 {
+    pub(in crate::cache::storage) fn chunk_count(&self) -> u32 {
         // `new` made one slot per chunk of a `u32` count.
         self.slots.len() as u32
     }
 
     #[cfg(test)]
-    pub(super) fn free_count(&self) -> u32 {
+    pub(in crate::cache::storage) fn free_count(&self) -> u32 {
         self.free_chunks().free_count()
     }
 
@@ -55,7 +55,9 @@ impl ChunkTable {
     /// are once nothing holds any: no writer, reader or I/O. `Err` names a
     /// chunk held still, or one the free bitmap has wrong.
     #[cfg(any(test, feature = "__fuzz"))]
-    pub(super) fn blocks_at_rest(&self) -> Result<Vec<Option<BlockKey>>, String> {
+    pub(in crate::cache::storage) fn blocks_at_rest(
+        &self,
+    ) -> Result<Vec<Option<BlockKey>>, String> {
         let free = self.free_chunks();
         (0..self.chunk_count())
             .map(ChunkId::new)
@@ -79,7 +81,7 @@ impl ChunkTable {
     }
 
     /// A free chunk, leased to one writer; `None` when every chunk is taken.
-    pub(super) fn allocate(&self) -> Option<ChunkLease<'_>> {
+    pub(in crate::cache::storage) fn allocate(&self) -> Option<ChunkLease<'_>> {
         let chunk = self.free_chunks().allocate()?;
         // The lease is the chunk's one holder, and it is unpublished: no pin
         // gets in. The free bitmap's lock orders this after the last holder
@@ -91,13 +93,17 @@ impl ChunkTable {
     /// Pins `chunk` to read `block` from it. `None` if the chunk doesn't
     /// hold `block`: the index entry that named it is stale, and the caller
     /// looks again.
-    pub(super) fn pin_block(&self, chunk: ChunkId, block: BlockKey) -> Option<ChunkPin<'_>> {
+    pub(in crate::cache::storage) fn pin_block(
+        &self,
+        chunk: ChunkId,
+        block: BlockKey,
+    ) -> Option<ChunkPin<'_>> {
         self.pin(chunk).filter(|pin| pin.block() == block)
     }
 
     /// Pins `chunk` with whatever block it holds, as eviction does. `None`
     /// if no block is published in it.
-    pub(super) fn pin(&self, chunk: ChunkId) -> Option<ChunkPin<'_>> {
+    pub(in crate::cache::storage) fn pin(&self, chunk: ChunkId) -> Option<ChunkPin<'_>> {
         let slot = self.slot(chunk);
         let mut state = slot.state.load(Ordering::Relaxed);
         loop {
@@ -222,26 +228,29 @@ impl ChunkSlot {
 /// A chunk leased to its one writer, until [`Self::publish`] hands it to
 /// readers. Dropped unpublished, it frees the chunk, once the holds it took
 /// for I/O are gone too.
-pub(super) struct ChunkLease<'table> {
+pub(in crate::cache::storage) struct ChunkLease<'table> {
     table: &'table ChunkTable,
     chunk: ChunkId,
 }
 
 impl<'table> ChunkLease<'table> {
-    pub(super) fn chunk(&self) -> ChunkId {
+    pub(in crate::cache::storage) fn chunk(&self) -> ChunkId {
         self.chunk
     }
 
     /// A hold on the chunk for a direct I/O that writes it: until the hold
     /// drops, the chunk isn't freed, whatever becomes of the lease.
-    pub(super) fn hold_owned<T: ChunkTier>(&self, tier: &Arc<T>) -> OwnedChunkHold<T> {
+    pub(in crate::cache::storage) fn hold_owned<T: ChunkTier>(
+        &self,
+        tier: &Arc<T>,
+    ) -> OwnedChunkHold<T> {
         OwnedChunkHold::new(self.table, self.chunk, tier)
     }
 
     /// Publishes the chunk as holding `block`, which the writer has written:
     /// readers may pin it from now on, and the writer goes on as one of
     /// them.
-    pub(super) fn publish(self, block: BlockKey) -> ChunkPin<'table> {
+    pub(in crate::cache::storage) fn publish(self, block: BlockKey) -> ChunkPin<'table> {
         let (table, chunk) = (self.table, self.chunk);
         // The lease's count goes on as the pin's.
         std::mem::forget(self);
@@ -262,31 +271,34 @@ impl Drop for ChunkLease<'_> {
 
 /// A reader's hold on a chunk: until it drops, the chunk is not freed, so
 /// it holds `block`.
-pub(super) struct ChunkPin<'table> {
+pub(in crate::cache::storage) struct ChunkPin<'table> {
     table: &'table ChunkTable,
     chunk: ChunkId,
     block: BlockKey,
 }
 
 impl ChunkPin<'_> {
-    pub(super) fn chunk(&self) -> ChunkId {
+    pub(in crate::cache::storage) fn chunk(&self) -> ChunkId {
         self.chunk
     }
 
-    pub(super) fn block(&self) -> BlockKey {
+    pub(in crate::cache::storage) fn block(&self) -> BlockKey {
         self.block
     }
 
     /// A hold on the chunk for a direct I/O that reads it: until the hold
     /// drops, the chunk isn't freed, whatever becomes of the pin.
-    pub(super) fn hold_owned<T: ChunkTier>(&self, tier: &Arc<T>) -> OwnedChunkHold<T> {
+    pub(in crate::cache::storage) fn hold_owned<T: ChunkTier>(
+        &self,
+        tier: &Arc<T>,
+    ) -> OwnedChunkHold<T> {
         OwnedChunkHold::new(self.table, self.chunk, tier)
     }
 
     /// Unpublishes the chunk, for eviction: no new reader pins it, and it is
     /// freed when its last pin drops, this one included. Whether this call
     /// did it: of two evictions of one chunk, one goes on.
-    pub(super) fn unpublish(&self) -> bool {
+    pub(in crate::cache::storage) fn unpublish(&self) -> bool {
         self.table.unpublish(self.chunk)
     }
 }
@@ -299,7 +311,9 @@ impl Drop for ChunkPin<'_> {
 
 /// A tier: what owns a chunk table, and hands it to the holds that keep the
 /// tier alive.
-pub(super) trait ChunkTier: Send + Sync + 'static {
+pub(in crate::cache::storage) trait ChunkTier:
+    Send + Sync + 'static
+{
     fn chunk_table(&self) -> &ChunkTable;
 }
 
@@ -307,7 +321,7 @@ pub(super) trait ChunkTier: Send + Sync + 'static {
 /// its buffer, handed to the I/O worker, outlives any borrow of the tier,
 /// and the future that started it may be dropped before it is done. Until
 /// the hold drops, the chunk isn't freed.
-pub(super) struct OwnedChunkHold<T: ChunkTier> {
+pub(in crate::cache::storage) struct OwnedChunkHold<T: ChunkTier> {
     tier: Arc<T>,
     chunk: ChunkId,
 }

@@ -261,8 +261,8 @@ chunk table the frame table.
 | `src/cache/storage/object_cache.rs` | reads, fills, promotions and evictions over the index and the tiers | 3, 7, 8 |
 | `src/cache/policy/` | the `PlacementPolicy` trait, and `ClockPolicy`, the default | 7 |
 | `src/cache/storage/index/` | `paths` and `blocks` on bbtree, and planning a read's blocks | 1, 4, 5, 6 |
-| `src/cache/chunk_pool/` | each tier's chunks: the free bitmap, the chunk table, the memory pool, the disk chunks | 2, 8 |
-| `src/cache/cache_files.rs` | the cache files and the I/O worker that reads and writes them | 2, 9 |
+| `src/cache/storage/{chunks,memory,disk}/` | each tier's chunks: the free bitmap, the chunk table, the memory pool, the disk chunks | 2, 8 |
+| `src/cache/storage/disk/cache_files.rs` | the cache files and the I/O worker that reads and writes them | 2, 9 |
 | `src/io/` | the I/O worker: io_uring on Linux, a thread pool elsewhere, and a simulated drive for shuttle tests | 2 |
 | `src/buffer.rs` | page-aligned buffers for direct I/O, and alignment arithmetic | |
 | `src/range.rs` | byte ranges, and the whole pages around one | 1 |

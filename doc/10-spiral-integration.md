@@ -578,8 +578,8 @@ Phase 2, t4 in the read path:
 
 | Repository | Path | What | Built |
 |---|---|---|---|
-| t4 | `src/cache/cache_files.rs` | the lock (decision 8) | yes |
-| t4 | `src/cache/cache_files.rs` | sparse cache files (decision 9) | no |
+| t4 | `src/cache/storage/disk/cache_files.rs` | the lock (decision 8) | yes |
+| t4 | `src/cache/storage/disk/cache_files.rs` | sparse cache files (decision 9) | no |
 | t4 | `11-shared-mode.md`'s code map | shared mode (decision 8) | no |
 | t4 | `src/cache/snapshot.rs` | the disk tier's snapshot (decision 7) | no |
 | t4 | `src/cache/t4_caching.rs` | `known_size` | no |

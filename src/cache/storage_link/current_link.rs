@@ -9,10 +9,10 @@ use std::sync::{Mutex, PoisonError, RwLock, TryLockError};
 use std::time::{Duration, Instant};
 
 use super::StorageLink;
-use crate::cache::cache_files::{CacheFiles, DiskFile};
 use crate::cache::policy::{ClockPolicy, PlacementPolicy, ReadPolicy, TierSizes};
 use crate::cache::sharing::{OwnerConnection, OwnerListener};
 use crate::cache::storage::ObjectCache;
+use crate::cache::storage::{CacheFiles, DiskFile};
 use crate::io::error::{Error, Result};
 use crate::io::sync::Arc;
 

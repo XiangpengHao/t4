@@ -2,12 +2,8 @@
 //! held in memory chunks and disk chunks, found through an index on bbtree.
 //!
 //! - `storage`: the storage half (`doc/11-shared-mode.md`, decision 2): the
-//!   index of which blocks are cached where, the blocks being fetched, and
-//!   reads, fills and evictions over the tiers.
-//! - `chunk_pool`: each tier's chunks, which of them are free, and what
-//!   each holds (build step 1).
-//! - `cache_files`: the disk tier, its chunks striped over its cache files,
-//!   read and written by direct I/O (`doc/04-multi-device.md`).
+//!   memory and disk tiers, the index of which blocks are cached where, the
+//!   blocks being fetched, and reads, fills and evictions over them all.
 //! - `policy`: what the cache asks of its policy, and the default one.
 //! - `read_output`: the buffer a read's bytes land in, the caller's as
 //!   `Bytes` with no copy.
@@ -18,8 +14,6 @@
 //! - `storage_link`: how the front end reaches the cache: its own, or its
 //!   owner's.
 
-mod cache_files;
-mod chunk_pool;
 mod get_queue;
 mod io_report;
 pub mod policy;

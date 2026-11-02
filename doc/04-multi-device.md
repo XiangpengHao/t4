@@ -309,6 +309,6 @@ reading nothing off the drives differ by up to a third between runs (7,
 | Path | What it is | Decisions |
 |---|---|---|
 | `src/io/` | the worker and its drivers over several files, an I/O naming its file (`FilePosition`) | 4 |
-| `src/cache/cache_files.rs` | `CacheFiles`: the tier's files, each sized to the smallest, and the worker | 2, 3 |
-| `src/cache/chunk_pool/disk_chunks.rs` | a chunk's position: file `c mod n`, offset `(c / n) MiB` | 2 |
+| `src/cache/storage/disk/cache_files.rs` | `CacheFiles`: the tier's files, each sized to the smallest, and the worker | 2, 3 |
+| `src/cache/storage/disk/disk_chunks.rs` | a chunk's position: file `c mod n`, offset `(c / n) MiB` | 2 |
 | `src/cache/t4_caching.rs` | `with_disk_file` | 1 |

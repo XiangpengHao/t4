@@ -31,15 +31,13 @@ use bytes::Bytes;
 use futures_util::FutureExt;
 use futures_util::future::{BoxFuture, join, join_all};
 
+use super::disk::CacheFiles;
+use super::disk::{DiskChunkReader, DiskChunkWriter};
 use super::in_flight::{BlockFetch, FetchClaim, FetchEnd, InFlight};
 use super::index::{BlockTable, FileVersion, Location, PathTable, PlannedBlock, UncacheableObject};
+use super::memory::{LentMemoryChunk, MemoryChunkReader, MemoryChunkWriter, MemoryPool};
 use crate::PAGE_SIZE_U32;
 use crate::buffer::AlignedBuf;
-use crate::cache::cache_files::CacheFiles;
-use crate::cache::chunk_pool::disk_chunks::{DiskChunkReader, DiskChunkWriter};
-use crate::cache::chunk_pool::memory_pool::{
-    LentMemoryChunk, MemoryChunkReader, MemoryChunkWriter, MemoryPool,
-};
 use crate::cache::io_report::IoReport;
 use crate::cache::policy::{
     Admit, BlockRead, BlockSource, DiskHit, FetchRuns, Io, LocatedRead, MemoryVictim,

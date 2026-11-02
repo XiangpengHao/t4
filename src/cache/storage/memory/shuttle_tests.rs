@@ -3,7 +3,7 @@
 
 use std::num::NonZeroU32;
 
-use super::memory_pool::MemoryPool;
+use super::MemoryPool;
 use crate::cache::{BlockKey, ChunkId, FileVersionId};
 use crate::io::sync::{Arc, thread};
 

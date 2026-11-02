@@ -18,8 +18,8 @@ use shuttle::scheduler::PctScheduler;
 
 use super::test_policy::TestPolicy;
 use super::{CacheableFile, MoveToDisk, ObjectCache};
-use crate::cache::cache_files::CacheFiles;
 use crate::cache::policy::{Admit, DiskHit, FetchRuns, PlacementPolicy};
+use crate::cache::storage::CacheFiles;
 use crate::cache::storage::index::Location;
 use crate::cache::{BlockKey, ChunkId};
 use crate::io::io_worker::IoWorker;

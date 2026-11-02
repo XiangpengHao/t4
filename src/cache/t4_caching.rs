@@ -34,7 +34,6 @@ use object_store::{
 
 #[cfg(feature = "__fuzz")]
 use super::ChunkId;
-use super::cache_files::DiskFile;
 use super::get_queue::{GetPlace, GetQueue, GetTurn, JoinedParts};
 use super::io_report::IoReport;
 #[cfg(feature = "__fuzz")]
@@ -42,6 +41,7 @@ use super::policy::Tier;
 use super::policy::{
     FetchRuns, Io, PlacementPolicy, RaceStragglers, ReadIntent, ReadPolicy, TierSizes,
 };
+use super::storage::DiskFile;
 #[cfg(all(test, not(feature = "shuttle")))]
 use super::storage_link::StorageLink;
 use super::storage_link::{CurrentLink, LinkMaker, LinkedFetch, LinkedRead, PlacementMaker};

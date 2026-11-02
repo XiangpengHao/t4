@@ -7,10 +7,10 @@ use std::future::Future;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
-use super::BLOCK_SIZE_U64;
-use super::chunk_pool::disk_chunks::{DiskChunkReader, DiskChunkWriter, DiskChunks};
-use super::sharing::FileIdentity;
+use super::disk_chunks::{DiskChunkReader, DiskChunkWriter, DiskChunks};
 use crate::buffer::AlignedBuf;
+use crate::cache::BLOCK_SIZE_U64;
+use crate::cache::sharing::FileIdentity;
 use crate::io::error::{Error, Result};
 use crate::io::io_task::PageWrite;
 use crate::io::io_worker::IoWorker;
@@ -18,24 +18,24 @@ use crate::io::sync::Arc;
 
 /// A cache file the user gives: where it is, and the bytes it may take.
 #[derive(Clone, Debug)]
-pub(super) struct DiskFile {
+pub(in crate::cache) struct DiskFile {
     path: PathBuf,
     capacity: u64,
 }
 
 impl DiskFile {
-    pub(super) fn new(path: PathBuf, capacity: u64) -> Self {
+    pub(in crate::cache) fn new(path: PathBuf, capacity: u64) -> Self {
         Self { path, capacity }
     }
 
-    pub(super) fn path(&self) -> &Path {
+    pub(in crate::cache) fn path(&self) -> &Path {
         &self.path
     }
 }
 
 /// The disk tier: its chunks, striped over its files by number, and the
 /// one I/O worker that reads and writes them all.
-pub(super) struct CacheFiles {
+pub(in crate::cache) struct CacheFiles {
     io: IoWorker,
     chunks: Arc<DiskChunks>,
     /// The first file's identity, which names its owner's address
@@ -51,7 +51,7 @@ impl CacheFiles {
     /// index isn't kept across restarts (decision 9), so every chunk starts
     /// free. Direct I/O unless `direct_io` is off, and no `O_DSYNC`: nothing
     /// on disk has to outlast a crash.
-    pub(super) fn open(
+    pub(in crate::cache) fn open(
         files: &[DiskFile],
         queue_depth: NonZeroU32,
         direct_io: bool,
@@ -85,7 +85,11 @@ impl CacheFiles {
 
     /// The disk tier on the `files` files `io` reads and writes, of
     /// `chunks_per_file` chunks each.
-    pub(super) fn on(io: IoWorker, files: NonZeroU32, chunks_per_file: u32) -> Result<Self> {
+    pub(in crate::cache) fn on(
+        io: IoWorker,
+        files: NonZeroU32,
+        chunks_per_file: u32,
+    ) -> Result<Self> {
         Ok(Self {
             io,
             chunks: Arc::new(DiskChunks::new(files, chunks_per_file)?),
@@ -93,18 +97,18 @@ impl CacheFiles {
         })
     }
 
-    pub(super) fn chunks(&self) -> &Arc<DiskChunks> {
+    pub(in crate::cache) fn chunks(&self) -> &Arc<DiskChunks> {
         &self.chunks
     }
 
     /// The identity of the first cache file; `None` if the files are
     /// simulated.
-    pub(super) fn first_file(&self) -> Option<FileIdentity> {
+    pub(in crate::cache) fn first_file(&self) -> Option<FileIdentity> {
         self.first_file
     }
 
     /// Writes `pages` at the start of the chunk `writer` holds.
-    pub(super) async fn write(
+    pub(in crate::cache) async fn write(
         &self,
         writer: &DiskChunkWriter<'_>,
         pages: AlignedBuf,
@@ -118,7 +122,7 @@ impl CacheFiles {
 
     /// Reads the first pages of the chunk `reader` holds into `into`, as
     /// many as it has room for, and gives it back once read.
-    pub(super) async fn read_chunk_start(
+    pub(in crate::cache) async fn read_chunk_start(
         &self,
         reader: &DiskChunkReader<'_>,
         into: AlignedBuf,
@@ -130,7 +134,7 @@ impl CacheFiles {
     /// it, into `into`, as many as it has room for. The read is submitted
     /// now, so reads started together run at once, and the future is done
     /// when it lands.
-    pub(super) fn read_into(
+    pub(in crate::cache) fn read_into(
         &self,
         reader: &DiskChunkReader<'_>,
         from: u32,

@@ -97,7 +97,8 @@ disk whose I/O completes in any order, is tested under
 [shuttle](https://github.com/awslabs/shuttle), which runs each test's
 threads through a thousand schedules. Shuttle runs threads one at a time,
 so it finds interleavings, not memory orderings too weak: those rest on the
-`Acquire` and `Release` pairs `src/cache/chunk_pool/chunk_table.rs` explains.
+`Acquire` and `Release` pairs `src/cache/storage/chunks/chunk_table.rs`
+explains.
 
 ```bash
 cargo test --features shuttle shuttle    # the shuttle tests, as CI runs them

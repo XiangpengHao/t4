@@ -7,10 +7,20 @@
 //! - `index`: which blocks of which objects are cached, and where.
 //! - `in_flight`: the blocks being fetched, which a read that needs one
 //!   waits for rather than fetching again.
+//! - `memory`: the memory tier: chunks in one mapping, written and read as
+//!   bytes.
+//! - `disk`: the disk tier: chunks in the cache files, written and read by
+//!   direct I/O.
+//! - `chunks`: the rules both tiers share for their chunks.
 
+mod chunks;
+mod disk;
 mod in_flight;
 mod index;
+mod memory;
 mod object_cache;
+
+pub(in crate::cache) use disk::{CacheFiles, DiskFile};
 
 pub(in crate::cache) use index::FileVersion;
 pub(in crate::cache) use object_cache::{

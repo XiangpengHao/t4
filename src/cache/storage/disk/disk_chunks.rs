@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::num::NonZeroU32;
 
-use super::chunk_table::{ChunkLease, ChunkPin, ChunkTable, ChunkTier};
+use crate::cache::storage::chunks::{ChunkLease, ChunkPin, ChunkTable, ChunkTier};
 use crate::cache::{BLOCK_SIZE_U64, BlockKey, ChunkId};
 use crate::io::error::{Error, Result};
 use crate::io::io_task::FilePosition;

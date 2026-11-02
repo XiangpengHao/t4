@@ -265,4 +265,4 @@ no hyper.
 | `bench/src/host_counters.rs` | the process's and the machine's CPU time, with the bytes moved; ENA's allowance counters and each receive queue's bytes, from `ethtool -S` |
 | `bench/src/table_store.rs` | `s3://` tables; `--http reqwest\|ktls`, `--io-threads` (the HTTP on threads of its own), `--requests-in-flight` (object_store's `LimitStore`) |
 | `src/cache/storage/object_cache.rs` | `FetchedBlocks`: a fetch's bytes into the output and the cache as they come |
-| `src/cache/chunk_pool/memory_pool.rs` | the memory tier on transparent huge pages |
+| `src/cache/storage/memory/mod.rs` | the memory tier on transparent huge pages |

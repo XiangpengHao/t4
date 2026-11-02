@@ -4,7 +4,7 @@ use std::ptr::NonNull;
 
 use rustix::mm::{MapFlags, ProtFlags};
 
-use super::chunk_table::{ChunkLease, ChunkPin, ChunkTable, ChunkTier};
+use super::chunks::{ChunkLease, ChunkPin, ChunkTable, ChunkTier};
 use crate::PAGE_SIZE;
 use crate::buffer::AlignedBuf;
 use crate::cache::{BLOCK_SIZE, BlockKey, ChunkId};
@@ -357,6 +357,9 @@ impl Drop for PoolMemory {
         let _ = unsafe { rustix::mm::munmap(self.mapping.as_ptr().cast(), len) };
     }
 }
+
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_tests;
 
 #[cfg(all(test, not(feature = "shuttle")))]
 mod tests {

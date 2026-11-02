@@ -5,8 +5,8 @@ use tempfile::TempDir;
 
 use super::test_policy::{Heard, TestPolicy};
 use super::*;
-use crate::cache::cache_files::DiskFile;
 use crate::cache::policy::{IoEvent, ReadPlan};
+use crate::cache::storage::DiskFile;
 
 const MIB: u64 = BLOCK_SIZE_U64;
 
