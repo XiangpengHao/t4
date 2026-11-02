@@ -20,14 +20,14 @@ use rustix::net::{SendAncillaryBuffer, SendFlags};
 /// socket whose peer has gone fails, as any other, rather than raise
 /// `SIGPIPE` in the process, which the process may not ignore: it is a
 /// user's app.
-pub(super) struct FrameSocket {
+pub(in crate::cache) struct FrameSocket {
     stream: UnixStream,
 }
 
 impl FrameSocket {
     /// The most bytes a frame's body holds once the handshake is done: 2 GiB,
     /// more than a read or a piece of a GET's body holds.
-    pub(super) const MOST_BYTES: u64 = 1 << 31;
+    pub(in crate::cache) const MOST_BYTES: u64 = 1 << 31;
 
     /// How a send asks for no `SIGPIPE`: per send on Linux, per socket on
     /// macOS (`Self::new`).
@@ -51,19 +51,19 @@ impl FrameSocket {
     /// leave the thread asleep for good (checked: about 1 in 300 when they
     /// race, `doc/11-shared-mode.md`, Cost). Every wait on a socket that
     /// could last ends this often, to look again.
-    pub(super) const RECHECK: Duration = Duration::from_secs(1);
+    pub(in crate::cache) const RECHECK: Duration = Duration::from_secs(1);
 
     /// The most slices a `sendmsg` takes: `IOV_MAX`, on Linux and macOS.
     const MOST_SLICES: usize = 1024;
 
-    pub(super) fn new(stream: UnixStream) -> io::Result<Self> {
+    pub(in crate::cache) fn new(stream: UnixStream) -> io::Result<Self> {
         #[cfg(target_vendor = "apple")]
         rustix::net::sockopt::set_socket_nosigpipe(&stream, true)?;
         Ok(Self { stream })
     }
 
     /// The same socket, for another thread to read or write.
-    pub(super) fn try_clone(&self) -> io::Result<Self> {
+    pub(in crate::cache) fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             stream: self.stream.try_clone()?,
         })
@@ -167,13 +167,13 @@ impl FrameSocket {
 
     /// How long a receive waits for bytes before it fails; forever if
     /// `None`.
-    pub(super) fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+    pub(in crate::cache) fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.stream.set_read_timeout(timeout)
     }
 
     /// Shuts the socket both ways: its peer sees it closed, and so does
     /// every thread of this side's, a receive waiting at once.
-    pub(super) fn shut_down(&self) {
+    pub(in crate::cache) fn shut_down(&self) {
         // Fails only if the peer shut it first: shut either way.
         let _ = self.stream.shutdown(Shutdown::Both);
     }
@@ -197,7 +197,7 @@ impl Read for &FrameSocket {
 /// more, so that a batch of frames costs one syscall
 /// (`FrameSocket::send_all`). A frame goes out as the read's own bytes, not
 /// a copy of them.
-pub(super) struct FrameReceiver {
+pub(in crate::cache) struct FrameReceiver {
     socket: FrameSocket,
     /// The bytes read and not yet handed out.
     read: BytesMut,
@@ -211,7 +211,7 @@ impl FrameReceiver {
     /// The bytes of a frame's length, which comes first.
     const LENGTH: usize = size_of::<u64>();
 
-    pub(super) fn new(socket: FrameSocket) -> Self {
+    pub(in crate::cache) fn new(socket: FrameSocket) -> Self {
         Self {
             socket,
             read: BytesMut::with_capacity(Self::READ_AHEAD),
@@ -225,7 +225,7 @@ impl FrameReceiver {
     ///
     /// If the socket fails, its peer closes it within a frame, or the frame
     /// is longer than `most`.
-    pub(super) fn receive(&mut self, most: u64) -> io::Result<Option<Bytes>> {
+    pub(in crate::cache) fn receive(&mut self, most: u64) -> io::Result<Option<Bytes>> {
         loop {
             if let Some(body) = self.next_frame(most)? {
                 return Ok(Some(body));
@@ -294,7 +294,7 @@ impl FrameReceiver {
     }
 
     /// Shuts the socket both ways, as [`FrameSocket::shut_down`] does.
-    pub(super) fn shut_down(&self) {
+    pub(in crate::cache) fn shut_down(&self) {
         self.socket.shut_down();
     }
 }
@@ -306,7 +306,7 @@ impl FrameReceiver {
 /// they have gone, waits for the sender's writer thread, so that frames go
 /// in the order sent. Dropped, it shuts the socket down and stops its
 /// writer: frames still waiting go nowhere.
-pub(super) struct FrameSender {
+pub(in crate::cache) struct FrameSender {
     queue: std::sync::Arc<SenderQueue>,
     writer: Option<JoinHandle<()>>,
 }
@@ -315,7 +315,7 @@ impl FrameSender {
     /// On macOS, the most a caller's send waits for room on the socket
     /// before it leaves its frames to the writer: a frame takes a few µs to
     /// send; an owner that doesn't read for this long is busy, or stuck.
-    pub(super) const SEND_WAIT: Duration = Duration::from_micros(200);
+    pub(in crate::cache) const SEND_WAIT: Duration = Duration::from_micros(200);
 
     /// A sender on `socket`, its writer thread started. On macOS, a send on
     /// any clone of the socket waits `wait` at most for room after; on
@@ -325,7 +325,7 @@ impl FrameSender {
     /// # Errors
     ///
     /// If the socket fails, or the thread can't be started.
-    pub(super) fn start(socket: FrameSocket, wait: Duration) -> io::Result<Self> {
+    pub(in crate::cache) fn start(socket: FrameSocket, wait: Duration) -> io::Result<Self> {
         #[cfg(target_vendor = "apple")]
         socket.set_write_timeout(Some(wait))?;
         #[cfg(not(target_vendor = "apple"))]
@@ -348,7 +348,7 @@ impl FrameSender {
     /// Sends `frames`, in order, after every frame sent before them, in one
     /// write if the socket has room and no other caller or the writer is
     /// writing; drops them once the peer has gone.
-    pub(super) fn send(&self, frames: Vec<Vec<u8>>) {
+    pub(in crate::cache) fn send(&self, frames: Vec<Vec<u8>>) {
         let mut frames = VecDeque::from(frames);
         {
             let mut state = self.queue.state();

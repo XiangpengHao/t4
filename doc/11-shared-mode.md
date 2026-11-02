@@ -683,7 +683,7 @@ session ending the last read before it takes the next's frames, 1 µs.
 | `src/cache/storage/` | the storage half (decision 2): the object cache, the index, the blocks in flight, and the memory and disk tiers | yes |
 | `src/cache/network/` | the fetch half (decision 2): the GETs, their queue and races, and the read policy that plans them | yes |
 | `src/cache/t4_caching/` | the front end: a read through both halves (`read_through`), and `with_multiprocess_sharing` (decision 1) | yes |
-| `src/cache/cache_stores/` | the `CacheStore` trait the fetch half reads through, and its two stores: the owner's own (`in_process.rs`), and a client's, its owner's over the socket (`shared.rs`) (decision 2) | yes |
+| `src/cache/cache_stores/` | the `CacheStore` trait the fetch half reads through, and its two stores: the owner's own (`in_process.rs`), and a client's, its owner's over the socket (`shared/`) (decision 2) | yes |
 | `src/cache/cache_stores/current.rs` | the store a cache reads through now, and what makes it: at build, and anew once a client's owner goes (decisions 1, 7) | yes |
 | `src/cache/sharing/frames/` | the frames, each checked as it arrives (decision 5) | yes |
 | `src/cache/sharing/frame_socket.rs` | a socket frames cross whole, raising no `SIGPIPE` (decision 5); the frames that came taken from one read (`FrameReceiver`), and many callers' frames sent with no thread between while the socket has room (`FrameSender`) (Cost) | yes |
@@ -692,6 +692,6 @@ session ending the last read before it takes the next's frames, 1 µs.
 | `src/cache/sharing/handshake.rs` | a client's hello, its descriptor by `SCM_RIGHTS`, and the owner's check (decision 6) | yes |
 | `src/cache/sharing/owner.rs` | the owner's listener and a session for each client (decisions 1, 5) | yes |
 | `src/cache/sharing/client_reads.rs` | a client's reads, each a task of its session's (decision 5) | yes |
-| `src/cache/sharing/client/` | a client's connection to its owner, its calls, and its reads through it (decisions 5 to 7) | yes |
+| `src/cache/cache_stores/shared/` | the shared cache store: a client's connection to its owner and its calls (`connection/`), its reads through it (`read.rs`), and their fetches (`fetch.rs`) (decisions 5 to 7) | yes |
 | `src/cache/t4_caching/tests/sharing.rs`, `processes.rs` | an owner and its clients in one process, and in real ones (build step 3) | yes |
 | `src/cache/sharing/region/` | the region, its spans, and the checks the owner makes of it (decision 5) | yes |

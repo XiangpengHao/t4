@@ -35,7 +35,7 @@ impl FileIdentity {
 /// file: on Linux an abstract socket's name, which no file holds and which
 /// is gone with the owner's socket, however the owner exits; elsewhere a
 /// socket file's path, in the user's temporary directory.
-pub(super) struct OwnerAddress {
+pub(in crate::cache) struct OwnerAddress {
     #[cfg(target_os = "linux")]
     name: String,
     #[cfg(not(target_os = "linux"))]
@@ -49,7 +49,7 @@ impl OwnerAddress {
     /// # Errors
     ///
     /// If the system doesn't name the user's temporary directory.
-    pub(super) fn of(file: FileIdentity) -> io::Result<Self> {
+    pub(in crate::cache) fn of(file: FileIdentity) -> io::Result<Self> {
         let FileIdentity { device, inode } = file;
         Ok(Self {
             #[cfg(target_os = "linux")]
@@ -122,7 +122,7 @@ impl OwnerAddress {
     ///
     /// If the socket fails; [`Error::Busy`] if the process listening runs
     /// as another user.
-    pub(super) fn connect(&self, user: Uid) -> Result<UnixStream> {
+    pub(in crate::cache) fn connect(&self, user: Uid) -> Result<UnixStream> {
         let stream = self.stream()?;
         if Self::peer_user(&stream)? != user {
             return Err(Error::Busy);

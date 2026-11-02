@@ -18,8 +18,6 @@ use futures_util::future::BoxFuture;
 
 use super::FileVersionId;
 use super::policy::{ReadIntent, ReadPlan, ReadPolicy};
-#[cfg(all(test, not(feature = "shuttle")))]
-use super::sharing::OwnerConnection;
 #[cfg(any(all(test, not(feature = "shuttle")), feature = "__fuzz"))]
 use super::storage::ObjectCache;
 use super::storage::{CacheableFile, LocatedRun};
@@ -30,8 +28,10 @@ mod in_process;
 mod shared;
 
 pub(super) use current::{CacheStoreMaker, CurrentCacheStore, PlacementMaker};
-pub(super) use in_process::InProcessCacheStore;
-pub(super) use shared::SharedCacheStore;
+use in_process::InProcessCacheStore;
+#[cfg(all(test, not(feature = "shuttle")))]
+use shared::OwnerConnection;
+use shared::SharedCacheStore;
 
 /// A cache store a process reads through: the storage half, run in this
 /// process or in its owner's.

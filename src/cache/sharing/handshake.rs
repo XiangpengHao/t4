@@ -25,7 +25,7 @@ use crate::io::error::{Error, Result};
 /// file and is open for writing it: whoever may write the cache file may
 /// use the cache. Its region the owner maps if it can't shrink
 /// (`OwnerRegion::accept`).
-pub(super) struct Hello {
+pub(in crate::cache) struct Hello {
     version: u32,
     cache_file: File,
     region: Option<OwnedFd>,
@@ -34,7 +34,7 @@ pub(super) struct Hello {
 impl Hello {
     /// How long each side of a handshake waits for the other's word: a peer
     /// that says nothing that long is gone.
-    pub(super) const WAIT: Duration = Duration::from_secs(5);
+    pub(in crate::cache) const WAIT: Duration = Duration::from_secs(5);
 
     /// The bytes of a hello's frame, its length with it: all an owner takes
     /// from a peer it hasn't admitted, so that a peer can't make it
@@ -52,7 +52,7 @@ impl Hello {
     #[cfg(not(target_os = "linux"))]
     const RECEIVE_FLAGS: RecvFlags = RecvFlags::empty();
 
-    pub(super) fn new(version: u32, cache_file: File) -> Self {
+    pub(in crate::cache) fn new(version: u32, cache_file: File) -> Self {
         Self {
             version,
             cache_file,
@@ -62,7 +62,7 @@ impl Hello {
 
     /// The hello, with `region`'s memory sent beside it.
     #[must_use]
-    pub(super) fn with_region(self, region: OwnedFd) -> Self {
+    pub(in crate::cache) fn with_region(self, region: OwnedFd) -> Self {
         Self {
             region: Some(region),
             ..self
@@ -85,7 +85,7 @@ impl Hello {
     /// # Errors
     ///
     /// If the socket fails, or its peer has gone.
-    pub(super) fn send(&self, socket: &FrameSocket) -> std::io::Result<()> {
+    pub(in crate::cache) fn send(&self, socket: &FrameSocket) -> std::io::Result<()> {
         let frame = ClientFrame::Hello {
             version: self.version,
             region: self.region.is_some(),

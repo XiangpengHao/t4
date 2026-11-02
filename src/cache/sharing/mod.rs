@@ -11,10 +11,11 @@
 //!   out in spans.
 //! - `owner`: an owner's listener, and a session for each client.
 //! - `client_reads`: a client's reads, as its owner serves them.
-//! - `client`: a client's connection to its owner.
+//!
+//! A client's side, its connection to its owner and its reads through it,
+//! is the shared cache store's (`cache_stores::shared`).
 
 mod address;
-mod client;
 mod client_reads;
 mod frame_socket;
 mod frames;
@@ -23,10 +24,14 @@ mod owner;
 mod region;
 mod session_waker;
 
-pub(super) use address::FileIdentity;
-pub(super) use client::{ClientFetch, ClientRead, OwnerConnection};
-pub(super) use frames::{FrameReader, FrameWriter};
+pub(super) use address::{FileIdentity, OwnerAddress};
+pub(super) use frame_socket::{FrameReceiver, FrameSender, FrameSocket};
+pub(super) use frames::{
+    ClientFrame, FetchSpec, FrameReader, FrameWriter, NextStep, OwnerFrame, PROTOCOL_VERSION,
+};
+pub(super) use handshake::Hello;
 pub(super) use owner::OwnerListener;
+pub(super) use region::{ClientRegion, RegionSpan, SpanName};
 
 #[cfg(all(test, not(feature = "shuttle")))]
 mod tests;

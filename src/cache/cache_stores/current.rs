@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use super::{CacheStore, InProcessCacheStore, SharedCacheStore};
 use crate::cache::policy::{ClockPolicy, PlacementPolicy, ReadPolicy, TierSizes};
-use crate::cache::sharing::{OwnerConnection, OwnerListener};
+use crate::cache::sharing::OwnerListener;
 use crate::cache::storage::ObjectCache;
 use crate::cache::storage::{CacheFiles, DiskFile};
 use crate::io::error::{Error, Result};
@@ -170,8 +170,8 @@ impl CacheStoreMaker {
             Err(error) => return Err(error),
         }
         let first_file = self.disk_files[0].path();
-        let owner = OwnerConnection::connect(first_file, Arc::clone(&self.reads))?;
-        Ok(owner.map(|owner| Arc::new(SharedCacheStore::new(owner)) as Arc<dyn CacheStore>))
+        let owner = SharedCacheStore::connect(first_file, Arc::clone(&self.reads))?;
+        Ok(owner.map(|owner| Arc::new(owner) as Arc<dyn CacheStore>))
     }
 
     /// The cache of the memory's chunks and the chunks of `disk`, its

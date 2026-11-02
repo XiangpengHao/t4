@@ -25,14 +25,14 @@ use crate::io::error::{Error, Result};
 /// [`OwnerFrame::Welcome`], which are the same in every version, their
 /// tags and descriptors with them: a version that needs more of a
 /// handshake says it in frames after the welcome.
-pub(super) const PROTOCOL_VERSION: u32 = 3;
+pub(in crate::cache) const PROTOCOL_VERSION: u32 = 3;
 
 /// A frame a client sends its owner. A call, which the owner answers,
 /// carries the number the client gave it, `call`; the other frames take no
 /// answer. A read is named by the number the client gave it, `read`, from
 /// its start to its end.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum ClientFrame {
+pub(in crate::cache) enum ClientFrame {
     /// The first frame: the client's protocol version, sent with its
     /// descriptor of the first cache file, and of its region if `region`.
     Hello { version: u32, region: bool },
@@ -82,7 +82,7 @@ pub(super) enum ClientFrame {
 /// A frame an owner sends its client: the answer to one of its calls, or
 /// news of a read from disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum OwnerFrame {
+pub(in crate::cache) enum OwnerFrame {
     /// The answer to [`ClientFrame::Hello`]: the owner's protocol version,
     /// and whether it mapped the client's region; if not, the client's
     /// reads' bytes go in the frames. A client of another version is told
@@ -148,7 +148,7 @@ pub(super) enum OwnerFrame {
 /// What a read does next: plan the GETs of a run of its blocks, or make
 /// the GETs planned, each landed as fetch number its place in the list.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum NextStep {
+pub(in crate::cache) enum NextStep {
     Plan(LocatedRun),
     Fetch(Vec<FetchSpec>),
 }
@@ -156,7 +156,7 @@ pub(super) enum NextStep {
 /// A GET a read makes: the file's bytes it fetches, how many requests race
 /// for them at once, and when one more races late.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct FetchSpec {
+pub(in crate::cache) struct FetchSpec {
     bytes: Range<u64>,
     race: NonZeroU8,
     late: Option<Duration>,
@@ -167,15 +167,15 @@ impl FetchSpec {
         Self { bytes, race, late }
     }
 
-    pub(super) fn bytes(&self) -> Range<u64> {
+    pub(in crate::cache) fn bytes(&self) -> Range<u64> {
         self.bytes.clone()
     }
 
-    pub(super) fn race(&self) -> NonZeroU8 {
+    pub(in crate::cache) fn race(&self) -> NonZeroU8 {
         self.race
     }
 
-    pub(super) fn late_race(&self) -> Option<Duration> {
+    pub(in crate::cache) fn late_race(&self) -> Option<Duration> {
         self.late
     }
 }
@@ -195,7 +195,7 @@ impl ClientFrame {
     const MAGIC: [u8; 4] = *b"t4sh";
 
     /// The frame, its length first.
-    pub(super) fn encode(&self) -> Vec<u8> {
+    pub(in crate::cache) fn encode(&self) -> Vec<u8> {
         match self {
             Self::Hello { version, region } => {
                 let mut frame = FrameWriter::new(Self::HELLO);
@@ -345,7 +345,7 @@ impl ClientFrame {
 
 impl OwnerFrame {
     /// The number of the call the frame answers; `None` if it answers none.
-    pub(super) fn call(&self) -> Option<u64> {
+    pub(in crate::cache) fn call(&self) -> Option<u64> {
         match *self {
             Self::Started { call, .. }
             | Self::Uncacheable { call }
@@ -445,7 +445,7 @@ impl OwnerFrame {
     /// # Errors
     ///
     /// If the body isn't an owner frame's, whole.
-    pub(super) fn decode(body: Bytes) -> Result<Self> {
+    pub(in crate::cache) fn decode(body: Bytes) -> Result<Self> {
         let mut frame = FrameReader::new(body);
         let decoded = match frame.u8()? {
             Self::WELCOME => Self::Welcome {

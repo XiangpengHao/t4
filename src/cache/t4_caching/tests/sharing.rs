@@ -459,22 +459,16 @@ fn a_fetch_dropped_after_its_read_gives_its_span_back() {
     let (client, _, meta) = process(&path, &data, shared);
     let all = region_free_pages(&client);
     let cache_store = client.cache_store();
-    let owner = cache_store.owner_connection().expect("a client");
     let e_tag = meta.e_tag.clone().unwrap();
-    let started = crate::cache::sharing::ClientRead::start(
-        owner,
-        path.as_ref().as_bytes(),
-        &e_tag,
-        meta.size,
-        0..MIB,
-        None,
-    );
+    let reads = FetchRuns::default();
+    let path = path.as_ref().as_bytes();
+    let started = cache_store.start_read(path, &e_tag, meta.size, 0..MIB, None, &reads);
     let mut read = block_on(started).unwrap().expect("a cacheable file");
-    while let Some(run) = read.locate_next_run() {
-        let gets = run.planned_by(&FetchRuns::default(), &read.file(), None);
+    while let Some(run) = read.locate_next_run().unwrap() {
+        let gets = run.planned_by(&reads, &read.file(), None);
         block_on(read.take_gets(&gets)).unwrap();
     }
-    let fetches = read.fetches();
+    let fetches = read.fetches().unwrap();
     assert!(!fetches.is_empty(), "the read fetches its block");
 
     drop(read);
@@ -482,7 +476,7 @@ fn a_fetch_dropped_after_its_read_gives_its_span_back() {
     std::thread::sleep(Duration::from_millis(100));
     drop(fetches);
     wait_until(|| region_free_pages(&client) == all, "every span is free");
-    assert!(!owner.owner_gone(), "the connection kept");
+    assert!(!cache_store.owner_gone(), "the connection kept");
 }
 
 /// The calls `cache`, a client, waits on its owner for, by number.
