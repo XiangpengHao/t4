@@ -144,7 +144,10 @@ impl SharedProcess {
         let store = Arc::new(CountingStore::default());
         let path = Path::from("shared");
         put(store.as_ref(), &path, &Self::data());
-        let cache = builder(&store, dir).with_sharing().build().unwrap();
+        let cache = builder(&store, dir)
+            .with_multiprocess_sharing()
+            .build()
+            .unwrap();
         let meta = block_on(store.head(&path)).unwrap();
         store.take_asked();
         Self { cache, store, meta }

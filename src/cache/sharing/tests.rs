@@ -42,7 +42,7 @@ fn shared(inner: &Arc<InMemory>, dir: &TempDir) -> T4CachingBuilder {
     T4Caching::builder(Arc::clone(inner) as Arc<dyn ObjectStore>)
         .with_memory_capacity(4 * MIB)
         .with_disk_file(dir.path().join("cache"), 8 * MIB)
-        .with_sharing()
+        .with_multiprocess_sharing()
 }
 
 /// What `work` returns, run on a thread of its own: `None` if it takes

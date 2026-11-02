@@ -1,19 +1,18 @@
 # 11 — Shared mode: one cache, several processes
 
 Status: design (2026-10-29). Built: build step 1, the lock
-(`CacheFiles::open_file`, `Error::Busy`); step 2.1, the read policy
-in the fetch half; step 2.2, no `Location` held by the fetch half;
-step 2.4, no read policy held by the storage half; step 2.5,
-`StorageLink`; and step 3, the socket: the frames, the owner listening
-and serving a client's reads, and a client connecting (`with_sharing`)
+(`CacheFiles::open_file`, `Error::Busy`); step 2.1, the read policy in
+the fetch half; step 2.2, no `Location` held by the fetch half; step
+2.4, no read policy held by the storage half; step 2.5, `StorageLink`;
+and step 3, the socket: the frames, the owner listening and serving a
+client's reads, and a client connecting (`with_multiprocess_sharing`)
 and reading through its owner, its reads going to the remote once its
 owner goes, those in flight too, until a read makes it the owner or a
-client of the next; tested in one process and in real ones; and step
-4, the region: made, sent in the handshake and mapped by the owner
+client of the next; tested in one process and in real ones; and step 4,
+the region: made, sent in the handshake and mapped by the owner
 (`sharing/region.rs`), a read's output a span of it, a fetch's bytes
-staged in one; only control crosses the socket.
-The user's call of 29 Oct 2026, for Spiral
-(`10-spiral-integration.md`, decision 8).
+staged in one; only control crosses the socket. The user's call of 29
+Oct 2026, for Spiral (`10-spiral-integration.md`, decision 8).
 
 Several processes on one machine read through one cache: Spiral's
 desktop Studio host and `spiral connect`, which Kismet lets share one
@@ -62,13 +61,13 @@ decision 9).
 1. **The process that takes the lock owns the cache, and serves it.**
    Building a cache takes an exclusive `flock` on each cache file, held
    for the cache's life (built). A cache built for sharing
-   (`T4CachingBuilder::with_sharing`) that finds a file locked connects
-   to its owner instead of failing with `Error::Busy`, and the owner of a
-   cache built for sharing listens on a thread of its own. Without
-   sharing, a second cache is `Busy`, as built now. The owner keeps the
-   cache in-process: its own reads cross no socket. No server binary, no
-   fork, no idle timeout. Sharing is per cache: two Spiral hosts both
-   set it.
+   (`T4CachingBuilder::with_multiprocess_sharing`) that finds a file
+   locked connects to its owner instead of failing with `Error::Busy`,
+   and the owner of a cache built for sharing listens on a thread of its
+   own. Without sharing, a second cache is `Busy`, as built now. The
+   owner keeps the cache in-process: its own reads cross no socket. No
+   server binary, no fork, no idle timeout. Sharing is per cache: two
+   Spiral hosts both set it.
 
 2. **The cache splits in two: a storage half and a fetch half.** The
    owner runs both; a client runs the fetch half alone. The fetch half
@@ -365,9 +364,9 @@ decision 9).
    `Busy` otherwise: on Linux any process may listen at an abstract name,
    first, and would be sent the client's descriptor of the cache file,
    and serve its reads any bytes
-   (`a_client_connects_only_to_an_owner_of_its_user`). The owner checks only what keeps the cache
-   whole: that a commit's length is its block's, and that it names a
-   claim the client holds.
+   (`a_client_connects_only_to_an_owner_of_its_user`). The owner checks
+   only what keeps the cache whole: that a commit's length is its
+   block's, and that it names a claim the client holds.
 
 ## Cost
 
@@ -570,9 +569,9 @@ session ending the last read before it takes the next's frames, 1 µs.
    lock conflicts within a process too), and in real processes for
    deaths: the owner killed mid-read, a client killed holding a claim,
    eight clients starting at once. Built so far (29 Oct 2026): the
-   frames (`sharing/frames.rs`); `with_sharing`; the owner listening,
-   its sessions, the handshake, and a client connecting on `Busy`,
-   trying the lock and the owner again until `OWNER_WAIT`
+   frames (`sharing/frames.rs`); `with_multiprocess_sharing`; the owner
+   listening, its sessions, the handshake, and a client connecting on
+   `Busy`, trying the lock and the owner again until `OWNER_WAIT`
    (`a_cache_built_for_sharing_on_owned_files_is_their_owners_client`,
    `an_owner_dropped_hands_its_files_to_the_next_cache`,
    `the_owner_admits_only_a_writer_of_its_first_cache_file`); the
@@ -676,7 +675,7 @@ session ending the last read before it takes the next's frames, 1 µs.
 |---|---|---|
 | `src/cache/cache_files.rs` | the lock (decision 1) | yes |
 | `src/cache/object_cache.rs` | the storage half (decision 2) | yes |
-| `src/cache/t4_caching.rs` | the fetch half (decision 2), and `with_sharing` (decision 1) | yes |
+| `src/cache/t4_caching.rs` | the fetch half (decision 2), and `with_multiprocess_sharing` (decision 1) | yes |
 | `src/cache/storage_link.rs` | how the fetch half reaches the storage half: its own, or its owner's (decision 2) | yes |
 | `src/cache/storage_link/current_link.rs` | the link a cache reads through now, and what makes it: at build, and anew once a client's owner goes (decisions 1, 7) | yes |
 | `src/cache/sharing/frames.rs` | the frames, each checked as it arrives (decision 5) | yes |

@@ -70,7 +70,7 @@ impl SharedHotFile {
         T4Caching::builder(Arc::clone(store) as Arc<dyn ObjectStore>)
             .with_memory_capacity(64 << 20)
             .with_disk_file(dir.join("t4.cache"), 64 << 20)
-            .with_sharing()
+            .with_multiprocess_sharing()
             .build()
             .unwrap()
     }

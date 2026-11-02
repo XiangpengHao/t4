@@ -147,7 +147,7 @@ impl T4CachingBuilder {
     /// a normal read, 4 MiB, so that merging never undoes its split.
     pub const DEFAULT_MERGED_UP_TO: u64 = FetchRuns::NORMAL_GET_MOST;
     /// How long a cache built for sharing tries to reach the owner of its
-    /// files (`Self::with_sharing`) before it fails with `Error::Busy`: an
+    /// files (`Self::with_multiprocess_sharing`) before it fails with `Error::Busy`: an
     /// owner starting or leaving refuses connections a while. An owner of
     /// another protocol version says so, and the cache fails at once.
     pub const OWNER_WAIT: Duration = Duration::from_secs(10);
@@ -188,7 +188,7 @@ impl T4CachingBuilder {
     /// ([`ClockPolicy`](super::policy::ClockPolicy)) unless set. A cache
     /// built for sharing makes it once it owns the cache files, which may
     /// be later, on another thread: as a client whose owner went
-    /// (`Self::with_sharing`).
+    /// (`Self::with_multiprocess_sharing`).
     pub fn with_placement_policy<P: PlacementPolicy + 'static>(
         mut self,
         build: impl FnOnce(TierSizes) -> P + Send + 'static,
@@ -252,9 +252,7 @@ impl T4CachingBuilder {
     /// placement policy count only once it owns the cache; its read policy
     /// and its credentials, the inner store's, stay its own. Off unless
     /// set: a second cache on owned files is `Busy`.
-    ///
-    /// Being built: for now a client's reads go to the inner store alone.
-    pub fn with_sharing(mut self) -> Self {
+    pub fn with_multiprocess_sharing(mut self) -> Self {
         self.sharing = true;
         self
     }

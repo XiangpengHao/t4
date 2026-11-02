@@ -44,7 +44,7 @@ fn a_clients_cold_read_is_cached_for_its_owner() {
     let dir = tempfile::tempdir().unwrap();
     let path = Path::from("a");
     let data = file_bytes(2 * MIB, 1);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
     let (owner, owners, owners_meta) = process(&path, &data, shared);
     let (client, clients, clients_meta) = process(&path, &data, shared);
     assert_eq!(
@@ -72,7 +72,7 @@ fn a_block_the_owner_holds_is_served_to_its_client() {
     let dir = tempfile::tempdir().unwrap();
     let path = Path::from("a");
     let data = file_bytes(2 * MIB, 2);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
     let (owner, owners, owners_meta) = process(&path, &data, shared);
     let (client, clients, clients_meta) = process(&path, &data, shared);
     assert_eq!(read_listed(&owner, &owners_meta, 0..2 * MIB), data);
@@ -92,7 +92,7 @@ fn reads_of_one_block_across_owner_and_client_fetch_it_once() {
     let dir = tempfile::tempdir().unwrap();
     let path = Path::from("a");
     let data = file_bytes(MIB, 3);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
     let (owner, owners, owners_meta) = process(&path, &data, shared);
     let (client, clients, clients_meta) = process(&path, &data, shared);
     let open = clients.gate_next_get();
@@ -131,7 +131,7 @@ fn a_clients_read_policy_hears_its_gets_and_its_owners_disk_reads() {
     let data = file_bytes(MIB, 4);
     let on_disk = |inner: &Arc<CountingStore>| {
         builder(inner, &dir)
-            .with_sharing()
+            .with_multiprocess_sharing()
             .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
     };
     let (owner, _, owners_meta) = process(&path, &data, on_disk);
@@ -171,7 +171,7 @@ fn a_client_whose_owner_went_reads_from_its_store() {
     let dir = tempfile::tempdir().unwrap();
     let path = Path::from("a");
     let data = file_bytes(MIB, 6);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
     let (owner, _, owners_meta) = process(&path, &data, shared);
     let (client, clients, clients_meta) = process(&path, &data, shared);
     assert_eq!(read_listed(&owner, &owners_meta, 0..MIB), data);
@@ -201,7 +201,7 @@ fn a_clients_read_whose_owner_goes_mid_get_reads_from_its_store() {
     let dir = tempfile::tempdir().unwrap();
     let path = Path::from("a");
     let data = file_bytes(MIB, 7);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
     let (owner, _, _) = process(&path, &data, shared);
     let (client, clients, clients_meta) = process(&path, &data, shared);
     let open = clients.gate_next_get();
@@ -226,7 +226,7 @@ fn a_clients_read_waiting_on_another_when_the_owner_goes_reads_from_its_store() 
     let dir = tempfile::tempdir().unwrap();
     let path = Path::from("a");
     let data = file_bytes(MIB, 8);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
     let (owner, _, _) = process(&path, &data, shared);
     let (fetching, fetchings, fetchings_meta) = process(&path, &data, shared);
     let (waiting, waitings, waitings_meta) = process(&path, &data, shared);
@@ -266,7 +266,7 @@ fn a_client_whose_owner_went_comes_to_own_the_cache() {
     let dir = tempfile::tempdir().unwrap();
     let path = Path::from("a");
     let data = file_bytes(MIB, 9);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
     let (owner, _, _) = process(&path, &data, shared);
     let (client, clients, clients_meta) = process(&path, &data, shared);
 
@@ -299,7 +299,7 @@ fn two_clients_whose_owner_went_one_owns_and_the_other_reads_through_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = Path::from("a");
     let data = file_bytes(MIB, 10);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
     let (owner, _, _) = process(&path, &data, shared);
     let (first, firsts, firsts_meta) = process(&path, &data, shared);
     let (second, seconds, seconds_meta) = process(&path, &data, shared);
@@ -343,7 +343,7 @@ fn a_client_that_finds_no_owner_reads_from_its_store_without_waiting() {
     let dir = tempfile::tempdir().unwrap();
     let path = Path::from("a");
     let data = file_bytes(MIB, 12);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
     let (owner, _, _) = process(&path, &data, shared);
     let (client, clients, clients_meta) = process(&path, &data, shared);
     drop(owner);
@@ -395,7 +395,7 @@ fn a_clients_reads_are_served_in_its_region() {
     let dir = tempfile::tempdir().unwrap();
     let path = Path::from("a");
     let data = file_bytes(3 * MIB, 21);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
     let (_owner, _, _) = process(&path, &data, shared);
     let (client, _, clients_meta) = process(&path, &data, shared);
     let all = region_free_pages(&client);
@@ -427,7 +427,7 @@ fn a_clients_spans_come_back_once_its_owner_goes() {
     let dir = tempfile::tempdir().unwrap();
     let path = Path::from("a");
     let data = file_bytes(MIB, 22);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
     let (owner, _, _) = process(&path, &data, shared);
     let (client, clients, clients_meta) = process(&path, &data, shared);
     let all = region_free_pages(&client);
@@ -451,7 +451,7 @@ fn a_fetch_dropped_after_its_read_gives_its_span_back() {
     let dir = tempfile::tempdir().unwrap();
     let path = Path::from("a");
     let data = file_bytes(MIB, 23);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
     let (_owner, _, _) = process(&path, &data, shared);
     let (client, _, meta) = process(&path, &data, shared);
     let all = region_free_pages(&client);
@@ -500,7 +500,7 @@ fn a_clients_read_whose_wait_ends_uncached_fetches_in_a_second_round() {
     let dir = tempfile::tempdir().unwrap();
     let path = Path::from("a");
     let data = file_bytes(MIB, 17);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
     let (owner, owners, owners_meta) = process(&path, &data, shared);
     let (client, clients, clients_meta) = process(&path, &data, shared);
     let open = owners.gate_next_get();
@@ -543,7 +543,7 @@ fn a_clients_read_given_up_leaves_no_call_waiting() {
     let dir = tempfile::tempdir().unwrap();
     let path = Path::from("a");
     let data = file_bytes(MIB, 13);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
     let (owner, owners, owners_meta) = process(&path, &data, shared);
     let (client, clients, clients_meta) = process(&path, &data, shared);
     let open = owners.gate_next_get();
@@ -585,7 +585,7 @@ fn a_clients_read_given_up_mid_get_abandons_its_claim() {
     let dir = tempfile::tempdir().unwrap();
     let path = Path::from("a");
     let data = file_bytes(MIB, 14);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
     let (owner, owners, owners_meta) = process(&path, &data, shared);
     let (client, clients, clients_meta) = process(&path, &data, shared);
     clients.stall_next_body(MIB as usize / 2);
@@ -624,7 +624,7 @@ fn a_clients_failed_get_abandons_its_fetch() {
     let dir = tempfile::tempdir().unwrap();
     let path = Path::from("a");
     let data = file_bytes(MIB, 15);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_sharing();
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
     let (_owner, _, _) = process(&path, &data, shared);
     let (client, clients, clients_meta) = process(&path, &data, shared);
     put(clients.as_ref(), &path, &file_bytes(MIB, 16));
