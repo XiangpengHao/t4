@@ -1,7 +1,7 @@
 //! The storage half of the cache (`doc/11-shared-mode.md`, decision 2):
 //! what is cached where, the bytes themselves, and the blocks being
 //! fetched. The process that owns the cache runs it; its clients reach it
-//! through their owner (`storage_link`).
+//! through their owner (`cache_stores`).
 //!
 //! - `cache_store`: the one way into the tiers: every read of memory
 //!   and disk, fills, promotions and evictions, over the index and the

@@ -15,21 +15,21 @@ use object_store::{Extensions, GetOptions, GetRange, GetResult};
 
 use super::Network;
 use super::get_queue::{GetPlace, GetTurn, JoinedParts};
+use crate::cache::cache_stores::CacheStoreFetch;
 use crate::cache::io_report::IoReport;
 use crate::cache::policy::Io;
-use crate::cache::storage_link::LinkedFetch;
 
 /// Where a GET's body goes: first the bytes of the waiting GETs joined to
 /// it, then the read's own blocks.
 struct BodyLanding<'c> {
     joined: JoinedParts,
-    blocks: LinkedFetch<'c>,
+    blocks: Box<dyn CacheStoreFetch<'c> + 'c>,
     /// The body's bytes landed so far.
     received: u64,
 }
 
 impl<'c> BodyLanding<'c> {
-    fn new(joined: JoinedParts, blocks: LinkedFetch<'c>) -> Self {
+    fn new(joined: JoinedParts, blocks: Box<dyn CacheStoreFetch<'c> + 'c>) -> Self {
         Self {
             joined,
             blocks,
@@ -62,15 +62,15 @@ impl Network {
     /// in yet: the first to have them all is taken, and the other dropped.
     /// The read policy hears the GET finished once its body is in, and
     /// landed once its blocks are cached.
-    pub(in crate::cache) async fn fetch(
+    pub(in crate::cache) async fn fetch<'c>(
         &self,
         location: &Path,
         e_tag: &str,
-        mut blocks: LinkedFetch<'_>,
+        mut blocks: Box<dyn CacheStoreFetch<'c> + 'c>,
         extensions: &Extensions,
     ) -> object_store::Result<()> {
         let waiting = Instant::now();
-        let Some((place, joined)) = self.turn(&mut blocks).await? else {
+        let Some((place, joined)) = self.turn(&mut *blocks).await? else {
             // Its bytes came with another GET's.
             return blocks.finish().await.map_err(Self::cache_error);
         };
@@ -163,7 +163,7 @@ impl Network {
     /// that GET failed or was given up on, it waits again.
     async fn turn(
         &self,
-        blocks: &mut LinkedFetch<'_>,
+        blocks: &mut dyn CacheStoreFetch<'_>,
     ) -> object_store::Result<Option<(GetPlace, JoinedParts)>> {
         loop {
             match self

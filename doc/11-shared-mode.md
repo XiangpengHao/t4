@@ -3,7 +3,7 @@
 Status: design (2026-10-29). Built: build step 1, the lock
 (`CacheFiles::open_file`, `Error::Busy`); step 2.1, the read policy in
 the fetch half; step 2.2, no `Location` held by the fetch half; step
-2.4, no read policy held by the storage half; step 2.5, `StorageLink`;
+2.4, no read policy held by the storage half; step 2.5, `CacheStore`;
 and step 3, the socket: the frames, the owner listening and serving a
 client's reads, and a client connecting (`with_multiprocess_sharing`)
 and reading through its owner, its reads going to the remote once its
@@ -71,8 +71,9 @@ decision 9).
 
 2. **The cache splits in two: a storage half and a fetch half.** The
    owner runs both; a client runs the fetch half alone. The fetch half
-   reaches the storage half through one type, which in the owner calls
-   it directly and in a client calls it over the socket:
+   reaches the storage half through one trait, `CacheStore`, which the
+   owner's store implements by calling it directly and a client's by
+   calling it over the socket:
 
    - **Open** a file version: name, e_tag and size in, its file version
      id out (`ObjectCache::resolve` now). The id is the owner's, minted
@@ -333,9 +334,9 @@ decision 9).
      no more than every 10 ms: the lock, then the owner, never the 10 s
      a build waits for one. The others read from the remote meanwhile,
      their calls on the dead connection failing at once
-     (`CurrentLink`, `LinkMaker`). A client whose next owner speaks
-     another version is refused at each try, and reads from the remote
-     till that owner goes. A client builds the cache from its own
+     (`CurrentCacheStore`, `CacheStoreMaker`). A client whose next owner
+     speaks another version is refused at each try, and reads from the
+     remote till that owner goes. A client builds the cache from its own
      builder's settings, its placement policy made then: a cache owns at
      most once, as an owner never goes back to being a client, so the
      policy's maker is called once (it is `Send` now, for a read on
@@ -554,14 +555,19 @@ session ending the last read before it takes the next's frames, 1 µs.
    4. disk reads reported to the read's caller. Built 29 Oct 2026:
       `ObjectCache::start_read` and `retry` take the caller's read policy,
       which `TierWork` reports the read's disk reads to;
-   5. the one type the fetch half reaches the storage half through.
-      Built 29 Oct 2026, with step 3's connection: `StorageLink`, the
-      owner's `ObjectCache` and its listener, or a client's
-      `OwnerConnection`. A read through it is a `LinkedRead`, each of
-      its fetches a `LinkedFetch`, each an enum of the owner's
-      (`PartialRead` and `TierWork`, `FetchedBlocks`) and the client's
-      (`ClientRead`, `ClientFetch`): `T4Caching::read_through`, `fetch`
-      and `turn` serve both with one copy of their logic.
+   5. the one trait the fetch half reaches the storage half through.
+      Built 29 Oct 2026, with step 3's connection, as an enum; a trait
+      since 2 Nov 2026: `CacheStore`, which the owner's
+      `InProcessCacheStore` (its `ObjectCache` and its listener) and a
+      client's `SharedCacheStore` (its `OwnerConnection`) implement. A
+      read through it is a `CacheStoreRead`, each of its fetches a
+      `CacheStoreFetch`: the owner's `InProcessRead` and
+      `FetchedBlocks`, or the client's `ClientRead` and `ClientFetch`.
+      The fetch half holds them as `dyn`, so `T4Caching::read_through`,
+      `fetch` and `turn` serve both with one copy of their logic. The
+      boxes cost no measured time: an owner's hot 4 KiB read took
+      429 ns, against 421 ns through the enum, within a run's spread
+      (`benches/shared_reads.rs`, 2 Nov 2026).
 3. **The socket, bytes in its frames,** on Linux and macOS: the owner
    listens, a client connects on `Busy`, the handshake, failures to the
    remote, a client coming to own the cache. Tests in one process (a
@@ -677,8 +683,8 @@ session ending the last read before it takes the next's frames, 1 µs.
 | `src/cache/storage/` | the storage half (decision 2): the object cache, the index, the blocks in flight, and the memory and disk tiers | yes |
 | `src/cache/network/` | the fetch half (decision 2): the GETs, their queue and races, and the read policy that plans them | yes |
 | `src/cache/t4_caching/` | the front end: a read through both halves (`read_through`), and `with_multiprocess_sharing` (decision 1) | yes |
-| `src/cache/storage_link/` | how the fetch half reaches the storage half: its own, or its owner's (decision 2) | yes |
-| `src/cache/storage_link/current_link.rs` | the link a cache reads through now, and what makes it: at build, and anew once a client's owner goes (decisions 1, 7) | yes |
+| `src/cache/cache_stores/` | the `CacheStore` trait the fetch half reads through, and its two stores: the owner's own (`in_process.rs`), and a client's, its owner's over the socket (`shared.rs`) (decision 2) | yes |
+| `src/cache/cache_stores/current.rs` | the store a cache reads through now, and what makes it: at build, and anew once a client's owner goes (decisions 1, 7) | yes |
 | `src/cache/sharing/frames/` | the frames, each checked as it arrives (decision 5) | yes |
 | `src/cache/sharing/frame_socket.rs` | a socket frames cross whole, raising no `SIGPIPE` (decision 5); the frames that came taken from one read (`FrameReceiver`), and many callers' frames sent with no thread between while the socket has room (`FrameSender`) (Cost) | yes |
 | `src/cache/sharing/session_waker.rs` | what wakes a session's thread, waiting on its client's socket and its reads at once (Cost) | yes |

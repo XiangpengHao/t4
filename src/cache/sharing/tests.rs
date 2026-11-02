@@ -30,7 +30,6 @@ use crate::cache::policy::{
 use crate::cache::read_output::ReadOutput;
 use crate::cache::storage::FileVersion;
 use crate::cache::storage::LocatedRun;
-use crate::cache::storage_link::StorageLink;
 use crate::cache::{FileVersionId, T4Caching, T4CachingBuilder};
 use crate::io::sync::Arc;
 
@@ -69,10 +68,11 @@ fn eventually(done: impl Fn() -> bool) -> bool {
 
 /// Whether the owner of `store`, a client, has gone.
 fn owner_gone(store: &T4Caching) -> bool {
-    match &*store.link() {
-        StorageLink::Client(connection) => connection.owner_gone(),
-        StorageLink::Owner { .. } => panic!("a client"),
-    }
+    store
+        .cache_store()
+        .owner_connection()
+        .expect("a client")
+        .owner_gone()
 }
 
 /// Frames go whole, in the order sent, those sent in one write too, a
@@ -399,13 +399,16 @@ fn a_cache_built_for_sharing_on_owned_files_is_their_owners_client() {
     block_on(inner.put(&path, data.clone().into())).unwrap();
 
     let owner = shared(&inner, &dir).build().unwrap();
-    assert!(matches!(*owner.link(), StorageLink::Owner { .. }));
+    assert!(owner.cache_store().owned().is_some());
     let client = shared(&inner, &dir).build().unwrap();
     assert!(!owner_gone(&client));
-    match &*client.link() {
-        StorageLink::Client(connection) => assert!(connection.has_region()),
-        StorageLink::Owner { .. } => panic!("a client"),
-    }
+    let clients_store = client.cache_store();
+    assert!(
+        clients_store
+            .owner_connection()
+            .expect("a client")
+            .has_region()
+    );
     for store in [&owner, &client] {
         let read = block_on(store.get_range(&path, 10..2 * MIB - 10)).unwrap();
         assert_eq!(read, data.slice(10..2 * MIB as usize - 10));
@@ -438,7 +441,7 @@ fn an_owner_dropped_hands_its_files_to_the_next_cache() {
         (next_owner, next_client)
     })
     .expect("the next owner and its client are built");
-    assert!(matches!(*next_owner.link(), StorageLink::Owner { .. }));
+    assert!(next_owner.cache_store().owned().is_some());
     assert!(!owner_gone(&next_client));
     drop((next_client, next_owner, kept));
 }
@@ -556,7 +559,7 @@ fn an_owner_whose_address_is_held_still_owns_its_cache() {
     let _holder = address.listen().unwrap();
 
     let owner = shared(&inner, &dir).build().unwrap();
-    assert!(matches!(*owner.link(), StorageLink::Owner { .. }));
+    assert!(owner.cache_store().owned().is_some());
     let read = block_on(owner.get_range(&meta.location, 0..MIB)).unwrap();
     assert_eq!(read, data.slice(..MIB as usize));
 }
@@ -1067,10 +1070,11 @@ fn the_owner_lands_a_fetch_staged_in_its_clients_region() {
 /// The bytes `cache`'s connection to its owner has sent and taken so far,
 /// `cache` a client.
 fn socket_bytes(cache: &T4Caching) -> (u64, u64) {
-    match &*cache.link() {
-        StorageLink::Client(connection) => connection.socket_bytes(),
-        StorageLink::Owner { .. } => panic!("a client"),
-    }
+    cache
+        .cache_store()
+        .owner_connection()
+        .expect("a client")
+        .socket_bytes()
 }
 
 /// A client's cold read moves only control over its socket: its GET's
@@ -1096,10 +1100,8 @@ fn a_clients_cold_read_moves_only_control_over_its_socket() {
     assert_eq!(read_listed(&owner, &meta, 0..2 * MIB).unwrap(), data);
 
     let (data, meta) = put_file(&inner, &Path::from("b"), 2 * MIB);
-    let link = client.link();
-    let StorageLink::Client(connection) = &*link else {
-        panic!("a client");
-    };
+    let cache_store = client.cache_store();
+    let connection = cache_store.owner_connection().expect("a client");
     let region = connection.region().unwrap();
     let held: Vec<_> = std::iter::from_fn(|| region.span(1)).collect();
     let (sent, taken) = socket_bytes(&client);

@@ -51,7 +51,7 @@ fn a_clients_cold_read_is_cached_for_its_owner() {
         owners_meta.e_tag, clients_meta.e_tag,
         "one file, one version"
     );
-    assert!(matches!(*client.link(), StorageLink::Client(_)));
+    assert!(client.cache_store().owner_connection().is_some());
 
     let read = read_listed(&client, &clients_meta, 10..2 * MIB);
     assert_eq!(read, data.slice(10..));
@@ -250,12 +250,12 @@ fn a_clients_read_waiting_on_another_when_the_owner_goes_reads_from_its_store() 
 
 /// Whether `cache` owns its files now.
 fn owns(cache: &T4Caching) -> bool {
-    matches!(*cache.link(), StorageLink::Owner { .. })
+    cache.cache_store().owned().is_some()
 }
 
 /// Whether `cache` reads through an owner that is still there.
 fn reads_through_an_owner(cache: &T4Caching) -> bool {
-    matches!(&*cache.link(), StorageLink::Client(owner) if !owner.owner_gone())
+    (cache.cache_store().owner_connection()).is_some_and(|owner| !owner.owner_gone())
 }
 
 /// A client whose owner went comes to own the cache at a read: from then
@@ -372,18 +372,21 @@ fn a_client_that_finds_no_owner_reads_from_its_store_without_waiting() {
 /// The pages of `cache`'s region free, `cache` a client whose owner mapped
 /// its region.
 fn region_free_pages(cache: &T4Caching) -> u64 {
-    match &*cache.link() {
-        StorageLink::Client(owner) => owner.region_free_pages().expect("a region mapped"),
-        StorageLink::Owner { .. } => panic!("a client"),
-    }
+    cache
+        .cache_store()
+        .owner_connection()
+        .expect("a client")
+        .region_free_pages()
+        .expect("a region mapped")
 }
 
 /// Whether `bytes` lie in `cache`'s region, `cache` a client.
 fn in_region(cache: &T4Caching, bytes: &Bytes) -> bool {
-    match &*cache.link() {
-        StorageLink::Client(owner) => owner.region_holds(bytes),
-        StorageLink::Owner { .. } => panic!("a client"),
-    }
+    cache
+        .cache_store()
+        .owner_connection()
+        .expect("a client")
+        .region_holds(bytes)
 }
 
 /// A client's reads are served in its region: their bytes are in spans of
@@ -455,10 +458,8 @@ fn a_fetch_dropped_after_its_read_gives_its_span_back() {
     let (_owner, _, _) = process(&path, &data, shared);
     let (client, _, meta) = process(&path, &data, shared);
     let all = region_free_pages(&client);
-    let link = client.link();
-    let StorageLink::Client(owner) = &*link else {
-        panic!("a client");
-    };
+    let cache_store = client.cache_store();
+    let owner = cache_store.owner_connection().expect("a client");
     let e_tag = meta.e_tag.clone().unwrap();
     let started = crate::cache::sharing::ClientRead::start(
         owner,
@@ -486,10 +487,11 @@ fn a_fetch_dropped_after_its_read_gives_its_span_back() {
 
 /// The calls `cache`, a client, waits on its owner for, by number.
 fn calls_waiting(cache: &T4Caching) -> Vec<u64> {
-    match &*cache.link() {
-        StorageLink::Client(owner) => owner.calls_waiting(),
-        StorageLink::Owner { .. } => panic!("a client"),
-    }
+    cache
+        .cache_store()
+        .owner_connection()
+        .expect("a client")
+        .calls_waiting()
 }
 
 /// A client's read that waited for the owner's fetch of a block, which

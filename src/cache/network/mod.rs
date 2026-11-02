@@ -16,8 +16,8 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use object_store::ObjectStore;
 
+use super::cache_stores::CacheStoreRead;
 use super::policy::{ReadIntent, ReadPolicy};
-use super::storage_link::LinkedRead;
 use crate::io::sync::Arc;
 
 mod get;
@@ -84,7 +84,7 @@ impl Network {
     /// the read or went.
     pub(super) async fn plan_gets(
         &self,
-        read: &mut LinkedRead<'_>,
+        read: &mut dyn CacheStoreRead<'_>,
         intent: Option<ReadIntent>,
     ) -> crate::Result<()> {
         while let Some(run) = read.locate_next_run()? {

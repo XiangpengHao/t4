@@ -1,14 +1,14 @@
-//! [`CurrentLink`]: the link a cache reads through now, and [`LinkMaker`],
-//! what makes it: the cache files' lock taken, or the owner's connection
-//! made (`doc/11-shared-mode.md`, decisions 1 and 7). A client whose owner
-//! went makes a new link at a read: owning the cache if it takes the lock,
-//! else a client of whoever took it.
+//! [`CurrentCacheStore`]: the cache store a process reads through now, and
+//! [`CacheStoreMaker`], what makes it: the cache files' lock taken, or the
+//! owner's connection made (`doc/11-shared-mode.md`, decisions 1 and 7). A
+//! client whose owner went makes a new store at a read: its own if it takes
+//! the lock, else that of whoever took it.
 
 use std::num::NonZeroU32;
 use std::sync::{Mutex, PoisonError, RwLock, TryLockError};
 use std::time::{Duration, Instant};
 
-use super::StorageLink;
+use super::{CacheStore, InProcessCacheStore, SharedCacheStore};
 use crate::cache::policy::{ClockPolicy, PlacementPolicy, ReadPolicy, TierSizes};
 use crate::cache::sharing::{OwnerConnection, OwnerListener};
 use crate::cache::storage::ObjectCache;
@@ -20,55 +20,54 @@ use crate::io::sync::Arc;
 pub(in crate::cache) type PlacementMaker =
     Box<dyn FnOnce(TierSizes) -> Arc<dyn PlacementPolicy> + Send>;
 
-/// The link a cache reads through now, which all its clones share; and,
-/// once a client's owner is gone, what makes the next.
-pub(in crate::cache) struct CurrentLink {
-    link: RwLock<Arc<StorageLink>>,
-    /// Taken by one read at a time, the one that makes a new link; the
-    /// others go on with the link they have.
-    maker: Mutex<LinkMaker>,
+/// The cache store a cache reads through now, which all its clones share;
+/// and, once a client's owner is gone, what makes the next.
+pub(in crate::cache) struct CurrentCacheStore {
+    store: RwLock<Arc<dyn CacheStore>>,
+    /// Taken by one read at a time, the one that makes a new store; the
+    /// others go on with the store they have.
+    maker: Mutex<CacheStoreMaker>,
 }
 
-impl CurrentLink {
-    pub(in crate::cache) fn new(link: StorageLink, maker: LinkMaker) -> Self {
+impl CurrentCacheStore {
+    pub(in crate::cache) fn new(store: Arc<dyn CacheStore>, maker: CacheStoreMaker) -> Self {
         Self {
-            link: RwLock::new(Arc::new(link)),
+            store: RwLock::new(store),
             maker: Mutex::new(maker),
         }
     }
 
-    /// The link to read through: the current one; or, if it is a client's
-    /// whose owner is gone, a new one, if a try of it is due and no other
-    /// read is trying (`LinkMaker::relink`). A read that finds no new link
-    /// goes on with the dead one, whose calls fail at once: it reads from
-    /// the remote.
-    pub(in crate::cache) fn get(&self) -> Arc<StorageLink> {
-        let link = self.current();
-        if !link.owner_gone() {
-            return link;
+    /// The store to read through: the current one; or, if its owner is
+    /// gone, a new one, if a try of it is due and no other read is trying
+    /// (`CacheStoreMaker::remake`). A read that finds no new store goes on
+    /// with the dead one, whose calls fail at once: it reads from the
+    /// remote.
+    pub(in crate::cache) fn get(&self) -> Arc<dyn CacheStore> {
+        let store = self.current();
+        if !store.owner_gone() {
+            return store;
         }
         let mut maker = match self.maker.try_lock() {
             Ok(maker) => maker,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return link,
+            Err(TryLockError::WouldBlock) => return store,
         };
         // Another read may have made one since.
         let current = self.current();
-        if !Arc::ptr_eq(&current, &link) {
+        if !Arc::ptr_eq(&current, &store) {
             return current;
         }
-        let Some(relinked) = maker.relink() else {
-            return link;
+        let Some(remade) = maker.remake() else {
+            return store;
         };
-        let relinked = Arc::new(relinked);
-        *self.link.write().unwrap_or_else(PoisonError::into_inner) = Arc::clone(&relinked);
-        relinked
+        *self.store.write().unwrap_or_else(PoisonError::into_inner) = Arc::clone(&remade);
+        remade
     }
 
-    /// The current link, as it is.
-    pub(in crate::cache) fn current(&self) -> Arc<StorageLink> {
-        let link = self.link.read().unwrap_or_else(PoisonError::into_inner);
-        Arc::clone(&link)
+    /// The current store, as it is.
+    pub(in crate::cache) fn current(&self) -> Arc<dyn CacheStore> {
+        let store = self.store.read().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(&store)
     }
 }
 
@@ -83,10 +82,10 @@ enum PlacementSource {
     Spent,
 }
 
-/// What makes a cache's link, as its builder said: its tiers, how its
+/// What makes a cache's store, as its builder said: its tiers, how its
 /// files are read, its placement policy, whether it shares them, and the
 /// read policy that hears its owner's reads from disk for it as a client.
-pub(in crate::cache) struct LinkMaker {
+pub(in crate::cache) struct CacheStoreMaker {
     memory_chunks: NonZeroU32,
     disk_files: Vec<DiskFile>,
     queue_depth: NonZeroU32,
@@ -94,11 +93,11 @@ pub(in crate::cache) struct LinkMaker {
     placement: PlacementSource,
     sharing: bool,
     reads: Arc<dyn ReadPolicy>,
-    /// When the next try of a new link is due.
+    /// When the next try of a new store is due.
     next_try: Instant,
 }
 
-impl LinkMaker {
+impl CacheStoreMaker {
     /// How long a client waits between tries of the lock and its owner.
     const RETRY: Duration = Duration::from_millis(10);
 
@@ -123,8 +122,8 @@ impl LinkMaker {
         }
     }
 
-    /// The link: the cache files' lock taken; else, built for sharing, a
-    /// connection to their owner. An owner starting or leaving refuses
+    /// The store: its own, the cache files' lock taken; else, built for
+    /// sharing, its owner's, connected to. An owner starting or leaving refuses
     /// connections a while: the lock is tried again, and the owner again,
     /// until `wait` is up.
     ///
@@ -134,11 +133,11 @@ impl LinkMaker {
     /// mapped. `Error::Busy` if another cache owns a cache file, and either
     /// this one isn't built for sharing or that one's owner didn't admit it
     /// within `wait`.
-    pub(in crate::cache) fn link_within(&mut self, wait: Duration) -> Result<StorageLink> {
+    pub(in crate::cache) fn make_within(&mut self, wait: Duration) -> Result<Arc<dyn CacheStore>> {
         let deadline = Instant::now() + wait;
         loop {
-            if let Some(link) = self.try_once()? {
-                return Ok(link);
+            if let Some(store) = self.try_once()? {
+                return Ok(store);
             }
             if Instant::now() >= deadline {
                 return Err(Error::Busy);
@@ -147,10 +146,10 @@ impl LinkMaker {
         }
     }
 
-    /// A new link, for a client whose owner went (decision 7): one try of
+    /// A new store, for a client whose owner went (decision 7): one try of
     /// the lock, then one of its owner, if a try is due; `None` if neither
     /// came, or a try isn't due. A read waits for no owner.
-    fn relink(&mut self) -> Option<StorageLink> {
+    fn remake(&mut self) -> Option<Arc<dyn CacheStore>> {
         let now = Instant::now();
         if now < self.next_try {
             return None;
@@ -159,12 +158,12 @@ impl LinkMaker {
         self.try_once().ok().flatten()
     }
 
-    /// The link, if the lock or the owner came at the first try.
+    /// The store, if the lock or the owner came at the first try.
     ///
     /// # Errors
     ///
-    /// As [`Self::link_within`]'s, but for an owner that didn't answer.
-    fn try_once(&mut self) -> Result<Option<StorageLink>> {
+    /// As [`Self::make_within`]'s, but for an owner that didn't answer.
+    fn try_once(&mut self) -> Result<Option<Arc<dyn CacheStore>>> {
         match CacheFiles::open(&self.disk_files, self.queue_depth, self.direct_io) {
             Ok(disk) => return self.own(disk).map(Some),
             Err(Error::Busy) if self.sharing => {}
@@ -172,7 +171,7 @@ impl LinkMaker {
         }
         let first_file = self.disk_files[0].path();
         let owner = OwnerConnection::connect(first_file, Arc::clone(&self.reads))?;
-        Ok(owner.map(StorageLink::Client))
+        Ok(owner.map(|owner| Arc::new(SharedCacheStore::new(owner)) as Arc<dyn CacheStore>))
     }
 
     /// The cache of the memory's chunks and the chunks of `disk`, its
@@ -183,7 +182,7 @@ impl LinkMaker {
     ///
     /// If the memory can't be mapped; or if the caller's placement policy
     /// was spent on a cache that failed so.
-    fn own(&mut self, disk: CacheFiles) -> Result<StorageLink> {
+    fn own(&mut self, disk: CacheFiles) -> Result<Arc<dyn CacheStore>> {
         let disk_chunks = NonZeroU32::new(disk.chunks().chunk_count())
             .expect("a disk file holds a chunk at least");
         let sizes = TierSizes::new(self.memory_chunks, disk_chunks);
@@ -211,9 +210,6 @@ impl LinkMaker {
             }
             _ => None,
         };
-        Ok(StorageLink::Owner {
-            _listener: listener,
-            cache,
-        })
+        Ok(Arc::new(InProcessCacheStore::new(cache, listener)))
     }
 }

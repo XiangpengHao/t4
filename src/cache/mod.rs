@@ -14,16 +14,16 @@
 //!   a read run through both halves, and an `ObjectStore` itself.
 //! - `sharing`: one cache read by several processes, through the one that
 //!   owns it (`doc/11-shared-mode.md`).
-//! - `storage_link`: how the front end reaches the cache: its own, or its
-//!   owner's.
+//! - `cache_stores`: the cache store a process reads through, one trait
+//!   over its own and its owner's.
 
+mod cache_stores;
 mod io_report;
 mod network;
 pub mod policy;
 mod read_output;
 mod sharing;
 mod storage;
-mod storage_link;
 mod t4_caching;
 
 pub use t4_caching::{CachedFile, T4Caching, T4CachingBuilder};

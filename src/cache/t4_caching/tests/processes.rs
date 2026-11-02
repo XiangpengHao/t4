@@ -170,7 +170,7 @@ impl SharedProcess {
     }
 
     fn owns(&self) -> bool {
-        matches!(*self.cache.link(), StorageLink::Owner { .. })
+        self.cache.cache_store().owned().is_some()
     }
 
     /// The bytes the process's store sent since last asked.
