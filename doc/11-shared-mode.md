@@ -10,7 +10,7 @@ and reading through its owner, its reads going to the remote once its
 owner goes, those in flight too, until a read makes it the owner or a
 client of the next; tested in one process and in real ones; and step 4,
 the region: made, sent in the handshake and mapped by the owner
-(`sharing/region.rs`), a read's output a span of it, a fetch's bytes
+(`sharing/region/`), a read's output a span of it, a fetch's bytes
 staged in one; only control crosses the socket. The user's call of 29
 Oct 2026, for Spiral (`10-spiral-integration.md`, decision 8).
 
@@ -76,7 +76,7 @@ decision 9).
 
    - **Open** a file version: name, e_tag and size in, its file version
      id out (`ObjectCache::resolve` now). The id is the owner's, minted
-     once, so the GET queue's merge keys (`get_queue.rs`) mean the same
+     once, so the GET queue's merge keys (`get_queue/`) mean the same
      in every process.
    - **Read** a range into an output: for each block, served (the
      storage half copies it from memory into the output, or reads it
@@ -120,7 +120,7 @@ decision 9).
      a fetch's bytes only through `FetchedBlocks`'s `range`, `file`,
      `race`, `late_race`, `land` and `finish`, the commit; where a block
      lands, the eviction it makes and its claim are private to
-     `object_cache.rs`. The owner runs a client's fetch's
+     `storage/cache_store/`. The owner runs a client's fetch's
      `FetchedBlocks`, fed over the socket (step 3) or from the region
      (step 4).
    - **The fetch half held where blocks were.** A fetch ends with
@@ -167,7 +167,7 @@ decision 9).
 
 5. **Control over a Unix socket; value bytes in a shared region.**
    - **The socket** carries frames: a little-endian `u64` length, then
-     the body, as doc/02's (`sharing/frames.rs`). Calls carry a number,
+     the body, as doc/02's (`sharing/frames/`). Calls carry a number,
      many are in flight on one connection, and answers come back in any
      order. A client's read, named by a number of its own, goes:
      - `StartRead` (path, e_tag, size, range, intent) is answered
@@ -569,7 +569,7 @@ session ending the last read before it takes the next's frames, 1 µs.
    lock conflicts within a process too), and in real processes for
    deaths: the owner killed mid-read, a client killed holding a claim,
    eight clients starting at once. Built so far (29 Oct 2026): the
-   frames (`sharing/frames.rs`); `with_multiprocess_sharing`; the owner
+   frames (`sharing/frames/`); `with_multiprocess_sharing`; the owner
    listening, its sessions, the handshake, and a client connecting on
    `Busy`, trying the lock and the owner again until `OWNER_WAIT`
    (`a_cache_built_for_sharing_on_owned_files_is_their_owners_client`,
@@ -675,16 +675,16 @@ session ending the last read before it takes the next's frames, 1 µs.
 |---|---|---|
 | `src/cache/storage/disk/cache_files.rs` | the lock (decision 1) | yes |
 | `src/cache/storage/` | the storage half (decision 2): the object cache, the index, the blocks in flight, and the memory and disk tiers | yes |
-| `src/cache/t4_caching.rs` | the fetch half (decision 2), and `with_multiprocess_sharing` (decision 1) | yes |
-| `src/cache/storage_link.rs` | how the fetch half reaches the storage half: its own, or its owner's (decision 2) | yes |
+| `src/cache/t4_caching/` | the fetch half (decision 2), and `with_multiprocess_sharing` (decision 1) | yes |
+| `src/cache/storage_link/` | how the fetch half reaches the storage half: its own, or its owner's (decision 2) | yes |
 | `src/cache/storage_link/current_link.rs` | the link a cache reads through now, and what makes it: at build, and anew once a client's owner goes (decisions 1, 7) | yes |
-| `src/cache/sharing/frames.rs` | the frames, each checked as it arrives (decision 5) | yes |
+| `src/cache/sharing/frames/` | the frames, each checked as it arrives (decision 5) | yes |
 | `src/cache/sharing/frame_socket.rs` | a socket frames cross whole, raising no `SIGPIPE` (decision 5); the frames that came taken from one read (`FrameReceiver`), and many callers' frames sent with no thread between while the socket has room (`FrameSender`) (Cost) | yes |
 | `src/cache/sharing/session_waker.rs` | what wakes a session's thread, waiting on its client's socket and its reads at once (Cost) | yes |
 | `src/cache/sharing/address.rs` | the owner's address, by the first cache file's identity (decision 6) | yes |
 | `src/cache/sharing/handshake.rs` | a client's hello, its descriptor by `SCM_RIGHTS`, and the owner's check (decision 6) | yes |
 | `src/cache/sharing/owner.rs` | the owner's listener and a session for each client (decisions 1, 5) | yes |
 | `src/cache/sharing/client_reads.rs` | a client's reads, each a task of its session's (decision 5) | yes |
-| `src/cache/sharing/client.rs` | a client's connection to its owner, its calls, and its reads through it (decisions 5 to 7) | yes |
+| `src/cache/sharing/client/` | a client's connection to its owner, its calls, and its reads through it (decisions 5 to 7) | yes |
 | `src/cache/t4_caching/tests/sharing.rs`, `processes.rs` | an owner and its clients in one process, and in real ones (build step 3) | yes |
-| `src/cache/sharing/region.rs` | the region, its spans, and the checks the owner makes of it (decision 5) | yes |
+| `src/cache/sharing/region/` | the region, its spans, and the checks the owner makes of it (decision 5) | yes |

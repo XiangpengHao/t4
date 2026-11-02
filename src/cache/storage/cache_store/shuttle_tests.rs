@@ -16,8 +16,9 @@ use futures_util::FutureExt;
 use shuttle::future::block_on;
 use shuttle::scheduler::PctScheduler;
 
+use super::eviction::MoveToDisk;
 use super::test_policy::TestPolicy;
-use super::{CacheableFile, MoveToDisk, ObjectCache};
+use super::{CacheableFile, ObjectCache};
 use crate::cache::policy::{Admit, DiskHit, FetchRuns, PlacementPolicy};
 use crate::cache::storage::CacheFiles;
 use crate::cache::storage::index::Location;

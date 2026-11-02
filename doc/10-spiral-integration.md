@@ -582,7 +582,7 @@ Phase 2, t4 in the read path:
 | t4 | `src/cache/storage/disk/cache_files.rs` | sparse cache files (decision 9) | no |
 | t4 | `11-shared-mode.md`'s code map | shared mode (decision 8) | no |
 | t4 | `src/cache/snapshot.rs` | the disk tier's snapshot (decision 7) | no |
-| t4 | `src/cache/t4_caching.rs` | `known_size` | no |
+| t4 | `src/cache/t4_caching/` | `known_size` | no |
 | spiraldb | `spiraldb/spiral-io/src/cache/t4_cache.rs` | `T4Cache`: the names, `SpiralFetch`, `SpiralFetchRouter`, the profiles, the metrics wrappers; its tests | yes, branch `xiangpeng/t4-cache` |
 | spiraldb | `spiraldb/spiral-io/src/cache.rs`, `cache/settings.rs` | `SharedCache` over `SharedCacheEngine`; `CacheEngine`, `T4Profile` | yes, branch `xiangpeng/t4-cache` |
 | spiraldb | `spiraldb/spiral-io/src/store.rs` | `t4_cached_get`, `stream_pinned_get` | yes, branch `xiangpeng/t4-cache` |

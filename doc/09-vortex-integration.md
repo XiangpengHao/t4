@@ -1085,10 +1085,10 @@ What the reasoning expects; the runs check it:
 
 | Repository | Path | What | Built |
 |---|---|---|---|
-| t4 | `src/cache/t4_caching.rs` | `T4Caching`, a handle; `open`, `open_listed`; reads served and fetched | yes |
+| t4 | `src/cache/t4_caching/` | `T4Caching`, a handle; `open`, `open_listed`; reads served and fetched | yes |
 | t4 | `src/cache/t4_caching/cached_file.rs` | `CachedFile`: `read` | yes |
 | t4 | `src/cache/t4_caching/object_store_integration.rs` | `impl ObjectStore for T4Caching`, over `open` and `read_cached` | yes |
-| t4 | `src/cache/t4_caching/cached_file.rs`, `src/cache/get_queue.rs` | `CachedFile::read_ranges`; `Gathering`: a batch's GETs merged | shelved, branch `shelved-batch-gathering` |
+| t4 | `src/cache/t4_caching/cached_file.rs`, `src/cache/get_queue/` | `CachedFile::read_ranges`; `Gathering`: a batch's GETs merged | shelved, branch `shelved-batch-gathering` |
 | t4 | `src/cache/policy/fixed_placement.rs` | `FixedPlacementPolicy`, public, from `bench/src/fixed_placement_policy.rs` | yes |
 | Vortex | `vortex-io/src/t4/read_at.rs` | `T4ReadAt`, feature `t4` | yes, branch `t4-read-at` |
 | Vortex | `vortex-io/src/t4/mod.rs` | t4's `T4Caching`, `T4CachingBuilder`, `CachedFile` re-exported | yes, branch `t4-read-at` |

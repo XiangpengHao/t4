@@ -183,7 +183,7 @@ impl PathTable {
 }
 
 // Std threads, which shuttle's atomics refuse: shuttle tests are in
-// `object_cache`.
+// `cache_store`.
 #[cfg(all(test, not(feature = "shuttle")))]
 mod tests {
     use std::collections::HashSet;

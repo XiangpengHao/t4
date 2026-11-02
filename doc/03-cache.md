@@ -153,7 +153,7 @@ chunk table the frame table.
 ### Front end
 
 10. **t4 fetches from the object store itself.** `T4Caching`
-    (`src/cache/t4_caching.rs`) is an `object_store::ObjectStore` (0.13, as
+    (`src/cache/t4_caching/`) is an `object_store::ObjectStore` (0.13, as
     DataFusion 55 uses) over another, made by a builder: the memory capacity
     and a cache file or more, each a path and a size, are required; the
     queue depth, direct I/O and the policy, built for the tiers' chunk
@@ -257,8 +257,8 @@ chunk table the frame table.
 
 | Module | What it is | Decisions |
 |---|---|---|
-| `src/cache/t4_caching.rs` | `T4Caching` and its builder: the `ObjectStore` front end | 10, 11 |
-| `src/cache/storage/object_cache.rs` | reads, fills, promotions and evictions over the index and the tiers | 3, 7, 8 |
+| `src/cache/t4_caching/` | `T4Caching` and its builder: the `ObjectStore` front end | 10, 11 |
+| `src/cache/storage/cache_store/` | reads, fills, promotions and evictions over the index and the tiers | 3, 7, 8 |
 | `src/cache/policy/` | the `PlacementPolicy` trait, and `ClockPolicy`, the default | 7 |
 | `src/cache/storage/index/` | `paths` and `blocks` on bbtree, and planning a read's blocks | 1, 4, 5, 6 |
 | `src/cache/storage/{chunks,memory,disk}/` | each tier's chunks: the free bitmap, the chunk table, the memory pool, the disk chunks | 2, 8 |

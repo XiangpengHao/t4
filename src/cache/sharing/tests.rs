@@ -1441,7 +1441,7 @@ fn a_clients_misuse_closes_its_connection() {
         ),
         (
             "a read ended twice",
-            vec![ClientFrame::EndRead { read: 1 }],
+            vec![start_read(1, &meta, 0..1), ClientFrame::EndRead { read: 1 }],
             ClientFrame::EndRead { read: 1 },
         ),
     ];
