@@ -505,7 +505,7 @@ fn a_hit_asks_the_store_nothing() {
     assert_eq!(inner.take_asked(), [Asked::Head, bounded(0..2 * MIB)]);
     let bytes = get_range(&store, &path, 5..2 * MIB - 5);
     assert_eq!(bytes, data.slice(5..2 * MIB as usize - 5));
-    assert_eq!(inner.take_asked(), []);
+    assert_eq!(inner.take_asked(), Vec::<Asked>::new());
 }
 
 #[test]
@@ -539,7 +539,7 @@ fn ranges_read_through_the_cache() {
     }
     inner.take_asked();
     block_on(store.get_ranges(&path, &ranges)).unwrap();
-    assert_eq!(inner.take_asked(), []);
+    assert_eq!(inner.take_asked(), Vec::<Asked>::new());
 }
 
 #[test]
@@ -574,7 +574,7 @@ fn a_file_changed_behind_the_cache_is_caught_by_a_remote_read() {
     assert_eq!(get_range(&store, &path, 0..10), new.slice(0..10));
     inner.take_asked();
     assert_eq!(get_range(&store, &path, 0..10), new.slice(0..10));
-    assert_eq!(inner.take_asked(), []);
+    assert_eq!(inner.take_asked(), Vec::<Asked>::new());
 }
 
 /// Two reads of one block at once, the first's GET still out when the
@@ -747,7 +747,7 @@ fn conditional_reads_go_to_the_store() {
     };
     let bytes = block_on(async { store.get_opts(&path, matching).await?.bytes().await }).unwrap();
     assert_eq!(bytes, data.slice(0..10));
-    assert_eq!(inner.take_asked(), []);
+    assert_eq!(inner.take_asked(), Vec::<Asked>::new());
 }
 
 /// A list through the cache tells it what each file it names is, as a
@@ -973,7 +973,7 @@ fn a_get_merged_over_a_hit_drops_its_bytes() {
         "the hit asked about nothing"
     );
     assert_eq!(get_range(&store, &path, 0..3 * MIB), data);
-    assert_eq!(inner.take_asked(), []);
+    assert_eq!(inner.take_asked(), Vec::<Asked>::new());
     store.link().owned().unwrap().check_at_rest().unwrap();
 }
 
@@ -1423,7 +1423,7 @@ fn an_opened_file_reads_through_the_cache() {
     let bytes = block_on(file.read(5..2 * MIB, None)).unwrap();
     assert_eq!(bytes, data.slice(5..));
     assert_eq!(get_range(&store, &path, 5..15), data.slice(5..15));
-    assert_eq!(inner.take_asked(), []);
+    assert_eq!(inner.take_asked(), Vec::<Asked>::new());
     // As a bounded GET: clamped to the file's end, an error past it.
     let bytes = block_on(file.read(MIB..10 * MIB, None)).unwrap();
     assert_eq!(bytes, data.slice(MIB as usize..));

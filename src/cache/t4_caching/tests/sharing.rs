@@ -59,7 +59,7 @@ fn a_clients_cold_read_is_cached_for_its_owner() {
     assert_eq!(read_listed(&owner, &owners_meta, 0..2 * MIB), data);
     assert_eq!(
         owners.take_asked(),
-        [],
+        Vec::<Asked>::new(),
         "the owner holds the client's fetch"
     );
 }
@@ -81,7 +81,7 @@ fn a_block_the_owner_holds_is_served_to_its_client() {
     let read = read_listed(&client, &clients_meta, 4097..MIB + 3);
     assert_eq!(read, data.slice(4097..MIB as usize + 3));
     assert_eq!(read.as_ptr() as u64 % 4096, 4097 % 4096);
-    assert_eq!(clients.take_asked(), []);
+    assert_eq!(clients.take_asked(), Vec::<Asked>::new());
 }
 
 /// Reads of one block in the owner and its client, at once, fetch it once:
@@ -287,7 +287,7 @@ fn a_client_whose_owner_went_comes_to_own_the_cache() {
     assert_eq!(read_listed(&next, &nexts_meta, 0..MIB), data);
     assert_eq!(
         nexts.take_asked(),
-        [],
+        Vec::<Asked>::new(),
         "served by the client that took over"
     );
 }
@@ -565,7 +565,7 @@ fn a_clients_read_given_up_leaves_no_call_waiting() {
     drop(read);
     assert_eq!(
         calls_waiting(&client),
-        [],
+        Vec::<u64>::new(),
         "the call given up with its read"
     );
 
@@ -601,7 +601,7 @@ fn a_clients_read_given_up_mid_get_abandons_its_claim() {
         "the client's GET stalls halfway",
     );
     drop(read);
-    assert_eq!(calls_waiting(&client), []);
+    assert_eq!(calls_waiting(&client), Vec::<u64>::new());
 
     let owned = read_on_thread(owner.clone(), owners_meta, 0..MIB);
     assert_eq!(owned.recv_timeout(Duration::from_secs(5)).unwrap(), data);
