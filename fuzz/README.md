@@ -9,7 +9,11 @@ an in-memory `object_store`:
 - heads, and reads of every shape: whole, `GetRange::Bounded`, `Offset` and
   `Suffix`, some joined so they interleave at each I/O, and some given up
   on after a few polls, their futures dropped midway through a fetch, a
-  fill, an eviction or a promotion.
+  fill, an eviction or a promotion;
+- restarts: the cache dropped, keeping its disk tier in a snapshot, and
+  built again on its files, taking it back. Where the cache files' file
+  system reports no creation time, the cache keeps none, and a restart
+  starts cold.
 
 Its tiers are 1 to 4 blocks of memory and 1 to 6 on disk, and its files up
 to four blocks, so eviction, moves to disk and promotions start within a few

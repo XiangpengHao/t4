@@ -1,9 +1,9 @@
 #![no_main]
 
 //! `T4Caching` against the store under it: random writes through the cache
-//! and behind its back, and reads of every shape, some at once, some given
-//! up on midway, with tiers of a few blocks, under the default policy or one
-//! the input scripts.
+//! and behind its back, reads of every shape, some at once, some given up
+//! on midway, and restarts, with tiers of a few blocks, under the default
+//! policy or one the input scripts.
 //!
 //! Every answer must be one the cache may give: the file as the store holds
 //! it, or, after a write behind its back, a version the cache may still
@@ -49,6 +49,13 @@ fuzz_target!(|scenario: Scenario| {
 /// A cache, its policy, and what is done to it.
 #[derive(Debug)]
 struct Scenario {
+    settings: CacheSettings,
+    operations: Vec<Operation>,
+}
+
+/// How the cache is built, each time.
+#[derive(Clone, Debug)]
+struct CacheSettings {
     memory_blocks: u64,
     /// The blocks the smallest cache file holds: the first; the others are
     /// a block larger each, room the tier leaves unused.
@@ -57,7 +64,6 @@ struct Scenario {
     disk_files: u64,
     queue_depth: u32,
     policy: PolicyChoice,
-    operations: Vec<Operation>,
 }
 
 impl Scenario {
@@ -81,17 +87,19 @@ impl<'a> Arbitrary<'a> for Scenario {
             operations.push(u.arbitrary()?);
         }
         Ok(Self {
-            memory_blocks,
-            disk_blocks,
-            disk_files,
-            queue_depth,
-            policy,
+            settings: CacheSettings {
+                memory_blocks,
+                disk_blocks,
+                disk_files,
+                queue_depth,
+                policy,
+            },
             operations,
         })
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum PolicyChoice {
     /// The default, a CLOCK for each tier.
     Clock,
@@ -142,13 +150,16 @@ enum Operation {
         read: Read,
         polls: u8,
     },
+    /// The cache dropped, keeping its disk tier, and built again on its
+    /// files, taking it back.
+    Restart,
 }
 
 impl<'a> Arbitrary<'a> for Operation {
     /// An operation in a byte or so: reads two times in five, as they
     /// fill, evict and promote.
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        Ok(match u.choose_index(17)? {
+        Ok(match u.choose_index(18)? {
             0 | 1 => Self::Put {
                 file: u.arbitrary()?,
                 size: u.arbitrary()?,
@@ -180,6 +191,7 @@ impl<'a> Arbitrary<'a> for Operation {
             },
             10..=12 => Self::Get(u.arbitrary()?),
             13 | 14 => Self::GetAtOnce(u.arbitrary()?),
+            17 => Self::Restart,
             _ => Self::GiveUp {
                 read: u.arbitrary()?,
                 polls: u.int_in_range(1..=4)?,
@@ -391,6 +403,14 @@ impl Model {
         file.stale.clear();
     }
 
+    /// The cache built again: it knows no path, and asks the store what
+    /// each is when it is next read, so it trusts no version written over.
+    fn restart(&mut self) {
+        for file in &mut self.files {
+            file.stale.clear();
+        }
+    }
+
     /// A write behind the cache's back: it may still trust what was there.
     fn write_behind(&mut self, file: FileName, content: Option<Content>) {
         let file = &mut self.files[file.0];
@@ -401,10 +421,12 @@ impl Model {
 
 /// A cache over an in-memory store, and the model of both.
 struct Harness {
-    /// The cache files' directory, which lives as long as the cache.
-    _dir: TempDir,
+    /// The cache files' directory, which outlives each cache built on them.
+    dir: TempDir,
+    settings: CacheSettings,
     store: Arc<InMemory>,
-    cache: T4Caching,
+    /// `None` only while it is built again.
+    cache: Option<T4Caching>,
     model: Model,
     /// What a scripted policy can still pick; `None` under CLOCK.
     pickable: Option<Arc<PickableChunks>>,
@@ -413,21 +435,42 @@ struct Harness {
 impl Harness {
     /// `None` where io_uring isn't allowed.
     fn new(scenario: &Scenario) -> Option<Self> {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(InMemory::new());
-        let builder = (0..scenario.disk_files)
+        let mut harness = Self {
+            dir: tempfile::tempdir().unwrap(),
+            settings: scenario.settings.clone(),
+            store: Arc::new(InMemory::new()),
+            cache: None,
+            model: Model::default(),
+            pickable: None,
+        };
+        match harness.build() {
+            Ok(()) => Some(harness),
+            Err(t4::Error::Io(error))
+                if matches!(error.raw_os_error(), Some(libc::EPERM | libc::ENOSYS)) =>
+            {
+                None
+            }
+            Err(error) => panic!("building the cache failed: {error}"),
+        }
+    }
+
+    /// Builds the cache on the cache files, as the settings say, and a
+    /// scripted policy anew, which hears of each chunk the cache takes back.
+    fn build(&mut self) -> t4::Result<()> {
+        let settings = &self.settings;
+        let builder = (0..settings.disk_files)
             .fold(
-                T4Caching::builder(Arc::clone(&store) as Arc<dyn ObjectStore>),
+                T4Caching::builder(Arc::clone(&self.store) as Arc<dyn ObjectStore>),
                 |builder, file| {
-                    let path = dir.path().join(format!("cache{file}"));
-                    builder.with_disk_file(path, (scenario.disk_blocks + file) * BLOCK)
+                    let path = self.dir.path().join(format!("cache{file}"));
+                    builder.with_disk_file(path, (settings.disk_blocks + file) * BLOCK)
                 },
             )
-            .with_memory_capacity(scenario.memory_blocks * BLOCK)
-            .with_queue_depth(scenario.queue_depth)
+            .with_memory_capacity(settings.memory_blocks * BLOCK)
+            .with_queue_depth(settings.queue_depth)
             // So the cache files can be on tmpfs (`fuzz/README.md`).
             .with_direct_io(false);
-        let (builder, pickable) = match &scenario.policy {
+        let (builder, pickable) = match &settings.policy {
             PolicyChoice::Clock => (builder, None),
             PolicyChoice::Scripted(script) => {
                 let script = script.clone();
@@ -438,22 +481,15 @@ impl Harness {
                 (builder, Some(pickable))
             }
         };
-        let cache = match builder.build() {
-            Ok(cache) => cache,
-            Err(t4::Error::Io(error))
-                if matches!(error.raw_os_error(), Some(libc::EPERM | libc::ENOSYS)) =>
-            {
-                return None;
-            }
-            Err(error) => panic!("building the cache failed: {error}"),
-        };
-        Some(Self {
-            _dir: dir,
-            store,
-            cache,
-            model: Model::default(),
-            pickable,
-        })
+        self.cache = Some(builder.build()?);
+        self.pickable = pickable;
+        Ok(())
+    }
+
+    fn cache(&self) -> &T4Caching {
+        self.cache
+            .as_ref()
+            .expect("a cache, but while it is built again")
     }
 
     async fn run(&mut self, operations: &[Operation]) {
@@ -472,7 +508,7 @@ impl Harness {
     fn at_rest(&self, after: &Operation) -> Vec<(Tier, ChunkId)> {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            match self.cache.check_at_rest() {
+            match self.cache().check_at_rest() {
                 Ok(in_use) => return in_use,
                 Err(error) if Instant::now() > deadline => {
                     panic!("after {after:?}, the cache is out of step: {error}")
@@ -500,7 +536,7 @@ impl Harness {
         match *operation {
             Operation::Put { file, size } => {
                 let content = self.model.new_content(size);
-                self.cache
+                self.cache()
                     .put(&file.path(), content.payload())
                     .await
                     .unwrap();
@@ -510,7 +546,7 @@ impl Harness {
                 let content = self.model.new_content(size);
                 let bytes = content.bytes(0..content.size);
                 let half = bytes.len() / 2;
-                let mut upload = self.cache.put_multipart(&file.path()).await.unwrap();
+                let mut upload = self.cache().put_multipart(&file.path()).await.unwrap();
                 upload.put_part(bytes.slice(..half).into()).await.unwrap();
                 upload.put_part(bytes.slice(half..).into()).await.unwrap();
                 upload.complete().await.unwrap();
@@ -525,7 +561,7 @@ impl Harness {
                 self.model.write_behind(file, Some(content));
             }
             Operation::Delete { file } => {
-                self.cache.delete(&file.path()).await.unwrap();
+                self.cache().delete(&file.path()).await.unwrap();
                 self.model.write_through(file, None);
             }
             Operation::DeleteBehind { file } => {
@@ -533,7 +569,7 @@ impl Harness {
                 self.model.write_behind(file, None);
             }
             Operation::Copy { from, to } => {
-                let copied = self.cache.copy(&from.path(), &to.path()).await;
+                let copied = self.cache().copy(&from.path(), &to.path()).await;
                 let source = self.model.file(from).current;
                 assert_eq!(copied.is_ok(), source.is_some(), "{copied:?}");
                 // The cache forgets the target, copied or not.
@@ -541,7 +577,7 @@ impl Harness {
                 self.model.write_through(to, target);
             }
             Operation::Rename { from, to } => {
-                let renamed = self.cache.rename(&from.path(), &to.path()).await;
+                let renamed = self.cache().rename(&from.path(), &to.path()).await;
                 let source = self.model.file(from).current;
                 assert_eq!(renamed.is_ok(), source.is_some(), "{renamed:?}");
                 // A copy, then a delete of the source, which may be the
@@ -557,7 +593,7 @@ impl Harness {
             }
             Operation::Head { file } => {
                 let size = self
-                    .cache
+                    .cache()
                     .head(&file.path())
                     .await
                     .ok()
@@ -572,11 +608,11 @@ impl Harness {
                 );
             }
             Operation::Get(ref read) => {
-                let answer = read.answer(&self.cache).await;
+                let answer = read.answer(self.cache()).await;
                 self.check_answer(read, &answer);
             }
             Operation::GiveUp { ref read, polls } => {
-                let mut answer = pin!(read.answer(&self.cache));
+                let mut answer = pin!(read.answer(self.cache()));
                 let mut cx = Context::from_waker(Waker::noop());
                 for _ in 0..polls {
                     if let Poll::Ready(answer) = answer.as_mut().poll(&mut cx) {
@@ -585,8 +621,15 @@ impl Harness {
                     }
                 }
             }
+            Operation::Restart => {
+                // Dropped first: it keeps its disk tier, and its files'
+                // lock goes with it.
+                self.cache = None;
+                self.build().unwrap();
+                self.model.restart();
+            }
             Operation::GetAtOnce(ref reads) => {
-                let answers = join_all(reads.iter().map(|read| read.answer(&self.cache))).await;
+                let answers = join_all(reads.iter().map(|read| read.answer(self.cache()))).await;
                 for (read, answer) in reads.iter().zip(&answers) {
                     self.check_answer(read, answer);
                 }

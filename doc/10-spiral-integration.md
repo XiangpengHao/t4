@@ -7,7 +7,8 @@ key and version (Later); t4's existing API does the job, with Spiral
 naming each file as a path (decision 2). macOS runs t4 for real, untuned
 (decision 12). Revised 29 Oct 2026: Spiral's processes share one cache
 through its owner, `11-shared-mode.md` (decision 8); the lock is built
-(plan step 3).
+(plan step 3), and shared mode with it. Revised 2 Nov 2026: the disk tier
+survives a clean restart, built (decision 7, stage 1); a crash, Later.
 
 The goal: t4 replaces spiraldb's local I/O cache, Kismet, and then
 takes over the rest of the work `spiral-io` does to read fast. The rest
@@ -143,8 +144,8 @@ nothing; Kismet's non-unix fallbacks have no user.
 | no HEAD for a file Spiral already knows | `open_listed` takes the file's size and e_tag from the caller and asks nothing |
 | fetches through Spiral's own GET | t4 GETs from its inner store, carrying each read's `GetOptions::extensions` |
 | fetch-once | yes, within a process |
-| survives a restart | no: a restart loses everything (`03-cache.md`, decision 9); a snapshot is in 03's Later |
-| several processes, one cache | a lock: a second cache on a cache file fails to build, `Error::Busy` (built 29 Oct 2026). Shared mode, one process owning the cache and the others reading through it, is `11-shared-mode.md`. The key-value store had both, and lost them with it (`doc/02-multi-process.md`, removed in 45a0009 on 21 Oct 2026) |
+| survives a restart | a clean one: the disk tier, kept in a snapshot as the cache drops (decision 7, built 2 Nov 2026); a crash loses everything |
+| several processes, one cache | shared mode: one process owns the cache and the others read through it (`11-shared-mode.md`, built); a cache not built for sharing on owned files fails to build, `Error::Busy` |
 | a laptop's footprint | the cache files are allocated in full at build (`fallocate`); a memory capacity is required |
 | a disk error served from the remote | yes: a failed cache-file read goes to the inner store |
 | macOS | built and tested there, for development only until this doc (decision 12): a thread pool, `F_NOCACHE` |
@@ -262,37 +263,65 @@ hosts is one.
    else. One cache for both is Later.
 
 7. **The disk tier survives a restart.** 03's Later, needed now: a
-   desktop app restarts, and Kismet's cache doesn't start cold.
+   desktop app restarts, and Kismet's cache doesn't start cold. In two
+   stages: a clean restart (built 2 Nov 2026), then a crash, once the
+   first is measured in Studio.
 
-   - **At a clean shutdown,** once the writes in flight are done and the
-     cache file is flushed (`fdatasync`, which direct I/O off needs), the
-     cache writes a snapshot: each file version with blocks on disk
-     (name, e_tag, size, id), and each such block's chunk; and the next
-     file version id, so that no id is handed out twice across restarts
-     (`03-cache.md`, decision 5). A temporary file, then a rename. At
-     20 GiB that is 20,480 block entries, about 240 KiB.
-   - **At startup** the cache loads the snapshot, then deletes it before
-     it writes any chunk, so that a crash can't leave it naming chunks
-     reused since. A snapshot from another layout, another block size or
-     another chunk count is ignored, and the cache starts cold.
-   - **Every minute or so** the cache writes a snapshot too, and keeps
-     each freed disk chunk unused until the next snapshot is durable. A
-     desktop app is force-quit, a laptop's battery runs out: a clean
-     shutdown can't be counted on. A crash then loses the blocks written
-     since the last snapshot.
+   - **As the cache drops,** once nothing reads through it (in a shared
+     cache, once its owner's listener and sessions are gone), and before
+     its files close and their lock goes with them, it flushes its cache
+     files (`fdatasync`; `F_FULLFSYNC` on macOS) and writes a snapshot
+     beside the first, `<first cache file>.snapshot`: each file version
+     with blocks on disk (path, e_tag, size, id), each of those blocks'
+     chunk, and the next file version id, so that no id is given twice
+     across restarts (`03-cache.md`, decision 5). A temporary file,
+     flushed, renamed into place, the directory flushed. About 8 bytes a
+     block and each version's path: some 160 KiB at 20 GiB. A cache never
+     dropped, in a process that exits around it, keeps nothing: Studio
+     and `spiral connect` have to drop their caches as they shut down
+     (to be checked in the adapter, plan step 6).
+   - **As the next cache on the files builds,** its lock taken, it reads
+     the snapshot and removes it, durably, before it writes a chunk: a
+     running cache reuses a chunk as soon as it frees it, so a crash must
+     not find a snapshot naming one. It takes the snapshot back only if it
+     matches: its format and block size, the chunks per file, and each
+     cache file, in order, by device, inode and creation time, so that a
+     cache file made again at the same path, or the files listed in
+     another order, start cold. Each field is checked as it is read: every
+     id below the next, no path, id or chunk twice, each block within its
+     file and its chunk within the tier. A snapshot that fails is removed
+     all the same, and the cache starts cold; a file system that reports
+     no creation time keeps none.
+   - **Taken back:** the path table and its next id, the block table, each
+     chunk marked as holding its block, and the placement policy told of
+     each as admitted (`on_admit`), as a fill tells it.
+   - **A shared cache's next owner** builds the same way: a hand-off after
+     its owner dropped is warm (`11-shared-mode.md`, decision 7).
    - **Sizes across a restart:** `T4Caching::known_size(name)` answers
-     the size of the version t4 holds under a name, from the snapshot.
-     So a restarted Studio sends no HEAD for a file it cached before, and
-     a Hugging Face file cached at a commit still reads offline, as with
-     Kismet's size records. The one addition to t4's API.
+     the size of the version the cache holds under a name, resolved by a
+     read since it built, or taken back. So a restarted Studio sends no
+     HEAD for a file it cached before, and a Hugging Face file cached at
+     a commit still reads offline, as with Kismet's size records. Async: a
+     client asks its owner (`KnownSize`, protocol version 4). The one
+     addition to t4's API. A name whose file changed answers the old
+     version's size, so it is for callers who name each version apart, as
+     Spiral does.
    - **Memory's blocks aren't written to disk at shutdown.** On a user's
      machine memory holds one chunk; a server's memory tier starts cold,
      which the tiering accepts.
-   - **No checksums.** A snapshot names only chunks flushed before it,
-     and none of them is written again until the next snapshot is
-     durable, so a crash can't leave it naming a torn chunk. Kismet's
-     CRC32 covers what t4 doesn't do: writing without a sync. A failed
-     read of the cache file goes to the remote, as now.
+   - **No checksums.** A snapshot names only chunks the index named, each
+     published once its write was done, all flushed before the snapshot
+     is written; and the cache that takes it back removes it before it
+     writes a chunk. So a crash can't leave one naming a torn chunk.
+     Kismet's CRC32 covers what t4 doesn't do: writing without a sync. A
+     failed read of the cache file goes to the remote, as now.
+   - **A crash loses the whole cache,** in stage 1: the snapshot is gone
+     once taken back. Stage 2 (Later): a snapshot every minute or so, each
+     freed disk chunk held back until the next is durable, and the loaded
+     snapshot kept, as it stays true. That needs the disk tier to keep a
+     reserve of free chunks: a full tier evicts only when an allocation
+     finds none, so with freed chunks held back it would evict for nothing.
+     The reserve costs capacity, to be measured.
 
    Spiral's names are stable across processes, a SHA-256 of canonical
    bytes, so a restarted process opens the files it cached before under
@@ -307,12 +336,13 @@ hosts is one.
 
    Kismet lets Studio and `spiral connect` share one cache, and t4 does
    too, through its owner (`11-shared-mode.md`, the user's call of
-   29 Oct 2026): whichever host takes the lock owns the cache and serves
-   it from a thread of its own; the other reads through it, fetching what
-   the cache doesn't hold with its own Spiral connection. Until that is
-   built, the host that starts second gets `Error::Busy`, and spiral-io
-   runs it uncached, saying so once, rather than failing the session as a
-   cache that can't be made does now.
+   29 Oct 2026, built): whichever host takes the lock owns the cache and
+   serves it from a thread of its own; the other reads through it,
+   fetching what the cache doesn't hold with its own Spiral connection.
+   Both hosts build their caches with `with_multiprocess_sharing`. A
+   cache not built for sharing on owned files still gets `Error::Busy`,
+   and spiral-io runs it uncached, saying so once, rather than failing
+   the session as a cache that can't be made does now.
 
 9. **A user's machine gets a cache file that grows.** t4 allocates its
    cache files in full at build: 20 GiB the first time Studio starts, and
@@ -371,14 +401,15 @@ hosts is one.
 ## The interfaces
 
 t4: nothing new for phase 1. `T4Caching::builder`, `open_listed` and
-`get_opts` as they are; `known_size` comes with the snapshot (decision
-7):
+`get_opts` as they are; `known_size` came with the snapshot (decision
+7), async, as a client asks its owner:
 
 ```rust
 impl T4Caching {
     /// The size of the version the cache holds under `location`, if it
-    /// holds one: known since it was opened, or from the last snapshot.
-    pub fn known_size(&self, location: &Path) -> Option<u64>;
+    /// holds one: read through it since it was built, or taken back from
+    /// the snapshot.
+    pub async fn known_size(&self, location: &Path) -> Option<u64>;
 }
 ```
 
@@ -489,10 +520,19 @@ Phase 1, t4 in Kismet's place:
    (`CacheFiles::open_file`; `a_cache_file_has_one_owner`, which reaches
    the file through a symlink too). Shared mode follows it, by
    `11-shared-mode.md`'s build order.
-4. **Restarts in t4** (decision 7): the snapshot at a clean shutdown,
-   then every minute; `known_size`. Tests: a restart keeps the disk tier
-   and its sizes; a process killed keeps the last snapshot's blocks and no
-   others; the fuzz target restarts the cache between operations.
+4. **Restarts in t4** (decision 7). Stage 1, built 2 Nov 2026: the
+   snapshot as the cache drops, taken back and removed as the next
+   builds; `known_size`, and its frame. Tests: the snapshot's checks, each
+   field and layout (`storage/snapshot/tests.rs`); a cache built again
+   serves its disk tier with no GET and knows the sizes, memory's blocks
+   are gone, another capacity starts cold, a file written over between
+   two caches is fetched again (`t4_caching/tests/restarts.rs`); a client
+   that comes to own the cache takes its owner's disk tier, and asks its
+   owner the sizes it knows (`sharing.rs`); the fuzz target restarts the
+   cache between operations. Stage 2, a crash: a snapshot every minute,
+   freed chunks held back, a reserve of free disk chunks; tests that a
+   process killed keeps the last snapshot's blocks and no others. Later,
+   once stage 1 is measured in Studio.
 5. **The sparse cache file in t4** (decision 9), with a test of the free
    space rule on a small file system.
 6. **Studio and the CLI on t4:** checked on a Mac against Kismet as in
@@ -580,9 +620,10 @@ Phase 2, t4 in the read path:
 |---|---|---|---|
 | t4 | `src/cache/storage/disk/cache_files.rs` | the lock (decision 8) | yes |
 | t4 | `src/cache/storage/disk/cache_files.rs` | sparse cache files (decision 9) | no |
-| t4 | `11-shared-mode.md`'s code map | shared mode (decision 8) | no |
-| t4 | `src/cache/snapshot.rs` | the disk tier's snapshot (decision 7) | no |
-| t4 | `src/cache/t4_caching/` | `known_size` | no |
+| t4 | `11-shared-mode.md`'s code map | shared mode (decision 8) | yes |
+| t4 | `src/cache/storage/snapshot/` | the disk tier's snapshot: its bytes and checks, and its file (decision 7) | stage 1 |
+| t4 | `src/cache/storage/cache_store/restart.rs` | the disk tier captured as the cache drops, restored as the next builds (decision 7) | stage 1 |
+| t4 | `src/cache/t4_caching/`, `cache_stores/` | `known_size`, and a client's `KnownSize` call (decision 7) | yes |
 | spiraldb | `spiraldb/spiral-io/src/cache/t4_cache.rs` | `T4Cache`: the names, `SpiralFetch`, `SpiralFetchRouter`, the profiles, the metrics wrappers; its tests | yes, branch `xiangpeng/t4-cache` |
 | spiraldb | `spiraldb/spiral-io/src/cache.rs`, `cache/settings.rs` | `SharedCache` over `SharedCacheEngine`; `CacheEngine`, `T4Profile` | yes, branch `xiangpeng/t4-cache` |
 | spiraldb | `spiraldb/spiral-io/src/store.rs` | `t4_cached_get`, `stream_pinned_get` | yes, branch `xiangpeng/t4-cache` |

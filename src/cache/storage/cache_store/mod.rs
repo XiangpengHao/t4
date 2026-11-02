@@ -32,6 +32,8 @@
 //! - `fill`: a fetch's bytes landing, in the output and the cache
 //!   ([`FetchedBlocks`]).
 //! - `eviction`: room made in a full tier, and blocks moved between tiers.
+//! - `restart`: the disk tier kept as the cache drops, and restored as the
+//!   next cache on its files opens.
 //! - `at_rest`: whether the index and the tiers agree, for tests.
 
 use std::num::NonZeroU32;
@@ -53,6 +55,7 @@ mod fill;
 mod locate;
 mod located_run;
 mod partial_read;
+mod restart;
 mod tier_work;
 
 pub(in crate::cache) use fill::FetchedBlocks;
@@ -75,21 +78,36 @@ pub(in crate::cache) struct ObjectCache {
 
 impl ObjectCache {
     /// A cache of `memory_chunks` chunks of memory and the chunks of
-    /// `disk`, all free, holding nothing: its blocks placed by `placement`,
-    /// which is built for both counts.
+    /// `disk`: its blocks placed by `placement`, which is built for both
+    /// counts. Memory holds nothing; the disk holds what the snapshot the
+    /// last cache on its files kept says, if it matches them, and nothing
+    /// otherwise (`restart`).
+    ///
+    /// # Errors
+    ///
+    /// If the memory can't be mapped, or a snapshot is there and can't be
+    /// removed.
     pub(in crate::cache) fn new(
         memory_chunks: NonZeroU32,
         disk: CacheFiles,
         placement: Arc<dyn PlacementPolicy>,
     ) -> Result<Self> {
-        Ok(Self {
+        let kept = match disk.snapshot() {
+            Some(snapshot) => snapshot.take()?,
+            None => None,
+        };
+        let cache = Self {
             paths: PathTable::new(),
             blocks: BlockTable::new(),
             memory: Arc::new(MemoryPool::new(memory_chunks)?),
             disk,
             placement,
             in_flight: Arc::default(),
-        })
+        };
+        if let Some(kept) = kept {
+            cache.restore(&kept);
+        }
+        Ok(cache)
     }
 
     /// The identity of its first cache file, which names its owner's

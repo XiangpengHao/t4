@@ -149,6 +149,10 @@ impl CacheStore for InProcessCacheStore {
         })
     }
 
+    fn known_size<'s>(&'s self, path: &'s [u8]) -> BoxFuture<'s, Option<u64>> {
+        Box::pin(std::future::ready(self.cache.known_size(path)))
+    }
+
     #[cfg(any(all(test, not(feature = "shuttle")), feature = "__fuzz"))]
     fn owned(&self) -> Option<&ObjectCache> {
         Some(&self.cache)

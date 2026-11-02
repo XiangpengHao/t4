@@ -55,6 +55,11 @@ pub(super) trait CacheStore: Send + Sync {
         reads: &'s dyn ReadPolicy,
     ) -> BoxFuture<'s, Result<Option<Box<dyn CacheStoreRead<'s> + 's>>>>;
 
+    /// The size of the version the cache holds of the file at `path`, if it
+    /// holds one: resolved by a read since the cache opened, or kept across
+    /// a restart. `None` too if the owner is gone.
+    fn known_size<'s>(&'s self, path: &'s [u8]) -> BoxFuture<'s, Option<u64>>;
+
     /// The storage half, if this process runs it.
     #[cfg(any(all(test, not(feature = "shuttle")), feature = "__fuzz"))]
     fn owned(&self) -> Option<&ObjectCache> {

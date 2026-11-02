@@ -248,6 +248,15 @@ impl CacheStore for SharedCacheStore {
         }
     }
 
+    /// This process's own store's answer, once it owns the cache; else its
+    /// owner's.
+    fn known_size<'s>(&'s self, path: &'s [u8]) -> BoxFuture<'s, Option<u64>> {
+        match self.server() {
+            Server::Owned(store) => store.known_size(path),
+            Server::Owner(owner) => Box::pin(async move { owner.known_size(path).await.ok()? }),
+        }
+    }
+
     #[cfg(any(all(test, not(feature = "shuttle")), feature = "__fuzz"))]
     fn owned(&self) -> Option<&ObjectCache> {
         self.owned.get().map(|owned| &**owned.store.cache())

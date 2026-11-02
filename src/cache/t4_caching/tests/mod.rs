@@ -1534,4 +1534,5 @@ fn an_opened_files_intent_reaches_both_policies() {
 }
 
 mod processes;
+mod restarts;
 mod sharing;

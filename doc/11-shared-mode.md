@@ -187,6 +187,10 @@ decision 9).
        client is done with it: the owner keeps the read's number until
        then, and drops the frames sent to a read it ended first, served
        or failed, as the client may send them before it knows.
+     - `KnownSize` (a path) is answered `KnownSize`: the size of the
+       version the owner's cache holds under it, if any
+       (`T4Caching::known_size`, `10-spiral-integration.md`, decision
+       7).
      - `Failed` answers any call the cache failed: the read goes to the
        remote.
      - A call the client gives up, its read dropped before the answer,
@@ -313,7 +317,7 @@ decision 9).
      (`a_cache_whose_owner_speaks_another_version_is_busy_at_once`;
      `the_hello_and_the_welcome_are_every_versions` pins their bytes). A
      version that needs more of a handshake says it after the welcome.
-     Protocol version 3. The owner's settings rule: its tiers,
+     Protocol version 4. The owner's settings rule: its tiers,
      its placement policy, its direct I/O. A client's own tier settings
      matter only if it comes to own the cache.
 
@@ -328,8 +332,8 @@ decision 9).
      from its own GETs would take an output in the client, a copy more
      for every read, for a read the owner's going costs one GET more.
      The next read tries the lock: the client that wins
-     owns the cache, cold until the snapshot exists
-     (`10-spiral-integration.md`, decision 7) and from it after; the
+     owns the cache, with the disk tier its last owner kept as it dropped
+     (`10-spiral-integration.md`, decision 7), or cold after a crash; the
      others connect to it. A version id names a version only in the
      cache that gave it, and the next owner gives its ids again, to other
      files: so a client's GETs still waiting under the last owner merge

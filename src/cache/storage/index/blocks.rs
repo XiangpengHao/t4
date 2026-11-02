@@ -8,7 +8,7 @@ use bbtree::BBTreeMap;
 use super::paths::FileVersion;
 use super::read_plan::{ReadPlan, ReadPlanner};
 use crate::cache::InsertOrAbort;
-use crate::cache::{BlockKey, ChunkId};
+use crate::cache::{BLOCK_SIZE_U64, BlockKey, ChunkId};
 
 /// Where a cached block is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,6 +96,24 @@ impl BlockTable {
         self.blocks
             .remove_if(&key.packed(), |_, location| *location == expected)
             .is_some()
+    }
+
+    /// The blocks of `version` on disk, in order: each by its number, with
+    /// the chunk that holds it.
+    pub(in crate::cache) fn on_disk(&self, version: FileVersion) -> Vec<(u32, ChunkId)> {
+        // The block one past the file's last is a block number too
+        // (`FileVersion::MAX_SIZE`).
+        let blocks = version.size().div_ceil(BLOCK_SIZE_U64) as u32;
+        let keys =
+            BlockKey::new(version.id(), 0).packed()..BlockKey::new(version.id(), blocks).packed();
+        let mut on_disk = Vec::new();
+        self.blocks.scan(keys, |key, location| {
+            if let Location::Disk(chunk) = *location {
+                on_disk.push((BlockKey::from_packed(*key).index(), chunk));
+            }
+            ControlFlow::<()>::Continue(())
+        });
+        on_disk
     }
 
     /// How to read `range` of `version`: the blocks it covers, in order, each

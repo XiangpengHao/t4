@@ -331,6 +331,18 @@ impl T4Caching {
         FileHandle::new(self.clone(), meta)
     }
 
+    /// The size of the version of the file at `location` the cache holds,
+    /// if it holds one: read through the cache since it was built, or kept
+    /// on disk across a restart (`doc/10-spiral-integration.md`, decision
+    /// 7). Asks the inner store nothing, so a caller that names each version
+    /// apart, as Spiral does, can open a file it cached before with
+    /// [`Self::open_listed`] and no HEAD. A path whose file changed since
+    /// the cache last read it answers the old version's size.
+    pub async fn known_size(&self, location: &Path) -> Option<u64> {
+        let path = location.as_ref().as_bytes();
+        self.cache_store.known_size(path).await
+    }
+
     /// The bytes `range` asks of a file of `file_size`, as the inner store
     /// takes them: a bounded range clamped to the file's end, an error if
     /// it starts past it.

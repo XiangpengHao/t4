@@ -124,6 +124,11 @@ impl<'c> ClientReads<'c> {
                 self.reads.insert(read, inbox);
                 Ok(())
             }
+            ClientFrame::KnownSize { call, path } => {
+                let size = self.cache.known_size(&path);
+                self.outbox.send(OwnerFrame::KnownSize { call, size });
+                Ok(())
+            }
             ClientFrame::EndRead { read } => {
                 // The read's end goes with the last of its inbox, its task
                 // and the buffers over its spans.

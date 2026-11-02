@@ -400,6 +400,69 @@ fn a_get_waiting_as_its_owner_goes_merges_with_none_of_the_next_cache() {
     );
 }
 
+/// A client that comes to own the cache once its owner went takes the disk
+/// tier the owner kept as it dropped (`doc/10-spiral-integration.md`,
+/// decision 7): its reads of what the owner held on disk ask its store
+/// nothing.
+#[test]
+fn a_client_that_comes_to_own_the_cache_takes_its_owners_disk_tier() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(2 * MIB, 16);
+    let on_disk = |inner: &Arc<CountingStore>| {
+        builder(inner, &dir)
+            .with_multiprocess_sharing()
+            .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
+    };
+    let (owner, _, owners_meta) = process(&path, &data, on_disk);
+    let (client, clients, clients_meta) = process(&path, &data, on_disk);
+    // A path too long to cache: a read of it hands the cache over, and
+    // caches nothing.
+    let long = Path::from("l".repeat(1025));
+    let long_data = file_bytes(10, 17);
+    put(clients.as_ref(), &long, &long_data);
+    let long_meta = listed(&clients, &long);
+    assert_eq!(read_listed(&owner, &owners_meta, 0..2 * MIB), data);
+
+    drop(owner);
+    wait_until(
+        || {
+            assert_eq!(read_listed(&client, &long_meta, 0..10), long_data);
+            owns(&client)
+        },
+        "a read makes the client the owner",
+    );
+    clients.take_asked();
+    assert_eq!(block_on(client.known_size(&path)), Some(2 * MIB));
+    assert_eq!(read_listed(&client, &clients_meta, 0..2 * MIB), data);
+    assert_eq!(
+        clients.take_asked(),
+        [],
+        "the owner's disk tier, taken over"
+    );
+}
+
+/// A client asks its owner the size it knows of a file: none before a read
+/// through either names the file, and its size after.
+#[test]
+fn a_client_asks_its_owner_the_size_it_knows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::from("a");
+    let data = file_bytes(MIB + 3, 18);
+    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
+    let (owner, _, owners_meta) = process(&path, &data, shared);
+    let (client, clients, _) = process(&path, &data, shared);
+    assert!(reads_through_an_owner(&client));
+    assert_eq!(block_on(client.known_size(&path)), None);
+
+    assert_eq!(
+        read_listed(&owner, &owners_meta, 0..MIB),
+        data.slice(..MIB as usize)
+    );
+    assert_eq!(block_on(client.known_size(&path)), Some(MIB + 3));
+    assert_eq!(clients.take_asked(), [], "asked of the owner alone");
+}
+
 /// A client whose files a cache not built for sharing took once its owner
 /// went: it can neither own them nor reach an owner, and reads from its
 /// store, no read waiting long for an owner.

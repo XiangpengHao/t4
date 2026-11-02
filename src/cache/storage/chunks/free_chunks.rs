@@ -52,6 +52,15 @@ impl FreeChunks {
         Some(ChunkId::new((word_index * Self::WORD_BITS) as u32 + bit))
     }
 
+    /// Takes free `chunk` itself: one a snapshot says holds a block, as the
+    /// cache opens.
+    pub(super) fn take(&mut self, chunk: ChunkId) {
+        let (word_index, mask) = self.bit_of(chunk);
+        assert_eq!(self.taken[word_index] & mask, 0, "{chunk:?} taken twice");
+        self.taken[word_index] |= mask;
+        self.free_count -= 1;
+    }
+
     /// Gives `chunk` back. A chunk freed twice could go to two blocks at
     /// once, so that panics. The next allocation starts at it: in a full
     /// cache, frees and allocations take turns.

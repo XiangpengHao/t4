@@ -84,6 +84,10 @@ fn client_frames() -> Vec<ClientFrame> {
         ClientFrame::Abandon { read: 2, fetch: 0 },
         ClientFrame::Finish { call: 8, read: 2 },
         ClientFrame::EndRead { read: u64::MAX },
+        ClientFrame::KnownSize {
+            call: 9,
+            path: Bytes::from_static(b"digest/a.vortex"),
+        },
     ]
 }
 
@@ -169,6 +173,14 @@ fn owner_frames() -> Vec<OwnerFrame> {
             asked: 4096 + 7..3 << 20,
         },
         OwnerFrame::Ended { read: 11 },
+        OwnerFrame::KnownSize {
+            call: 12,
+            size: Some(5 << 20),
+        },
+        OwnerFrame::KnownSize {
+            call: 13,
+            size: None,
+        },
     ];
     frames.extend(phases.map(|phase| OwnerFrame::DiskRead {
         drive: 2,

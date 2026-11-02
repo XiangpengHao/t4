@@ -8,7 +8,7 @@ behind the pivot in `00-meta.md`, worked out from the notes in
 t4 caches the bytes of files from an object store in two tiers, memory and
 disk, each of a fixed size it never exceeds. The object store holds the true
 data, so the cache may lose anything, but never returns wrong bytes. A
-restart loses all of it.
+clean restart keeps the disk tier; a crash loses all of it (decision 9).
 
 ```text
  T4Caching::get_range(path, range)                 an object_store::ObjectStore
@@ -141,14 +141,17 @@ chunk table the frame table.
 
 ### Persistence
 
-9. **A restart loses the whole cache,** after a crash or a clean
-   shutdown alike. The index lives only in memory, so the cache starts
-   cold, every chunk free, and refills from the object store: that costs
-   time and egress, never correctness. So nothing is logged while the
-   cache runs: no WAL, no tombstones, no `O_DSYNC`. A block reaches disk
-   only when memory evicts it, as a plain `O_DIRECT` write, and a freed
-   disk chunk can be reused at once. Keeping the disk tier across restarts
-   comes later ("Later").
+9. **A clean restart keeps the disk tier; a crash loses the whole
+   cache.** The index lives in memory. As the cache drops, its files
+   flushed, it writes a snapshot of the index's disk half beside its first
+   cache file, and the next cache on those files takes it back and
+   removes it before it writes a chunk (`10-spiral-integration.md`,
+   decision 7, built 2 Nov 2026). After a crash there is none: the cache
+   starts cold, every chunk free, and refills from the object store, which
+   costs time and egress, never correctness. So nothing is logged while
+   the cache runs: no WAL, no tombstones, no `O_DSYNC`. A block reaches
+   disk only when memory evicts it or the policy admits it there, as a
+   plain write, and a freed disk chunk can be reused at once.
 
 ### Front end
 
@@ -235,30 +238,21 @@ chunk table the frame table.
 - **The drive's own garbage collection:** a file kept full leaves the SSD
   no spare room. Leave part of the drive unwritten, or discard freed
   chunks.
-- **Keeping the disk tier across a clean restart:** a snapshot of the
-  index's disk half, written at shutdown once the writes in flight are
-  done and the drive flushed: a file record (file version id, path, e_tag,
-  size) for each path with blocks on disk, and a block entry (block key,
-  chunk), 12 bytes, for each of those blocks. About 50 MB of block entries
-  at 4 TB. Best in a file of its own next to the cache file, written as a
-  temporary file and renamed: the rename is atomic, so the file being
-  there says the snapshot is whole. Startup loads it, then deletes it
-  before it writes any chunk, so that a later crash can't leave it naming
-  chunks reused since. Open then: whether blocks in memory are written to
-  disk first, so that the snapshot keeps them.
-- **Then across a crash, if a refill proves too costly:** write the
-  snapshot every minute or so, and keep each freed disk chunk unused until
-  the next snapshot is durable. After a crash the last snapshot is still
-  true, as no chunk it lists was reused since: a crash loses only the
-  blocks written since, for about 150 MB written a minute at 4 TB and a
-  reserve of the chunks freed meanwhile.
+- **The disk tier across a crash, if a refill proves too costly:**
+  write the snapshot every minute or so, and keep each freed disk chunk
+  unused until the next snapshot is durable. After a crash the last
+  snapshot is still true, as no chunk it lists was reused since: a crash
+  loses only the blocks written since. The disk tier then keeps a reserve
+  of free chunks, so that an admission finds one while freed chunks wait
+  (`10-spiral-integration.md`, decision 7, stage 2).
 
 ## Code map
 
 | Module | What it is | Decisions |
 |---|---|---|
 | `src/cache/t4_caching/` | `T4Caching` and its builder: the `ObjectStore` front end | 10, 11 |
-| `src/cache/storage/cache_store/` | reads, fills, promotions and evictions over the index and the tiers | 3, 7, 8 |
+| `src/cache/storage/cache_store/` | reads, fills, promotions and evictions over the index and the tiers; the disk tier captured as the cache drops, and restored (`restart.rs`) | 3, 7, 8, 9 |
+| `src/cache/storage/snapshot/` | the snapshot of the disk tier: its bytes and checks, and its file beside the cache files | 9 |
 | `src/cache/policy/` | the `PlacementPolicy` trait, and `ClockPolicy`, the default | 7 |
 | `src/cache/storage/index/` | `paths` and `blocks` on bbtree, and planning a read's blocks | 1, 4, 5, 6 |
 | `src/cache/storage/{chunks,memory,disk}/` | each tier's chunks: the free bitmap, the chunk table, the memory pool, the disk chunks | 2, 8 |

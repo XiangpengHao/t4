@@ -60,6 +60,12 @@ impl DiskChunks {
         self.table.blocks_at_rest()
     }
 
+    /// Takes free `chunk` as holding `block`, as a snapshot says it does
+    /// ([`ChunkTable::restore`]).
+    pub(in crate::cache) fn restore(&self, chunk: ChunkId, block: BlockKey) {
+        self.table.restore(chunk, block);
+    }
+
     /// A free chunk for one writer to fill; `None` when every chunk is taken.
     pub(in crate::cache) fn allocate(&self) -> Option<DiskChunkWriter<'_>> {
         let lease = self.table.allocate()?;

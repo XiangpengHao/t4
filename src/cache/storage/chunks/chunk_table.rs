@@ -80,6 +80,17 @@ impl ChunkTable {
             .collect()
     }
 
+    /// Takes free `chunk` as holding `block`, published, with no holder: a
+    /// block a snapshot says the chunk holds, as the cache opens, before
+    /// anything else holds a chunk.
+    pub(in crate::cache::storage) fn restore(&self, chunk: ChunkId, block: BlockKey) {
+        self.free_chunks().take(chunk);
+        let slot = self.slot(chunk);
+        slot.set_owner(block);
+        // Release: the owner comes before any pin that sees `PUBLISHED`.
+        slot.state.store(Self::PUBLISHED, Ordering::Release);
+    }
+
     /// A free chunk, leased to one writer; `None` when every chunk is taken.
     pub(in crate::cache::storage) fn allocate(&self) -> Option<ChunkLease<'_>> {
         let chunk = self.free_chunks().allocate()?;

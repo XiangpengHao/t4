@@ -16,6 +16,8 @@ use std::sync::{Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::thread::{self, JoinHandle};
 
+use bytes::Bytes;
+
 use crate::cache::cache_stores::VersionIdSource;
 use crate::cache::cache_stores::shared::protocol::{
     ClientFrame, ClientRegion, FrameReader, FrameReceiver, FrameSender, FrameSocket, Hello,
@@ -245,6 +247,26 @@ impl OwnerConnection {
     pub(super) fn version_ids(&self) -> VersionIdSource {
         VersionIdSource::Owner {
             connection: self.number,
+        }
+    }
+
+    /// The size of the version the owner's cache holds of the file at
+    /// `path`, if it holds one.
+    ///
+    /// # Errors
+    ///
+    /// If the owner is gone, or goes before it answers.
+    pub(in crate::cache::cache_stores::shared) async fn known_size(
+        &self,
+        path: &[u8],
+    ) -> Result<Option<u64>> {
+        let path = Bytes::copy_from_slice(path);
+        match self
+            .call(|call| ClientFrame::KnownSize { call, path })
+            .await?
+        {
+            OwnerFrame::KnownSize { size, .. } => Ok(size),
+            answer => Err(Self::unexpected(&answer)),
         }
     }
 

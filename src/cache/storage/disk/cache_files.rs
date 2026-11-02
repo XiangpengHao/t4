@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use super::disk_chunks::{DiskChunkReader, DiskChunkWriter, DiskChunks};
 use crate::buffer::AlignedBuf;
 use crate::cache::BLOCK_SIZE_U64;
+use crate::cache::storage::snapshot::SnapshotFile;
 use crate::io::error::{Error, Result};
 use crate::io::io_task::PageWrite;
 use crate::io::io_worker::IoWorker;
@@ -26,6 +27,11 @@ pub(in crate::cache) struct FileIdentity {
 }
 
 impl FileIdentity {
+    /// The file `inode` on `device`.
+    pub(in crate::cache) fn new(device: u64, inode: u64) -> Self {
+        Self { device, inode }
+    }
+
     /// The identity of the file `file` is open on.
     pub(in crate::cache) fn of(file: &File) -> std::io::Result<Self> {
         let meta = file.metadata()?;
@@ -71,16 +77,20 @@ pub(in crate::cache) struct CacheFiles {
     /// The first file's identity, which names its owner's address
     /// (`doc/11-shared-mode.md`, decision 6); `None` for simulated files.
     first_file: Option<FileIdentity>,
+    /// Where the disk tier is kept across a restart; `None` for simulated
+    /// files, and files that don't say when they were made.
+    snapshot: Option<SnapshotFile>,
 }
 
 impl CacheFiles {
     /// Opens `files`, each made if missing, with `queue_depth` I/Os in
     /// flight across them. Each holds as many chunks as the smallest has
     /// room for (`doc/04-multi-device.md`, decision 3), one at least, and
-    /// takes only those. Whatever a file held is nothing to the cache: the
-    /// index isn't kept across restarts (decision 9), so every chunk starts
-    /// free. Direct I/O unless `direct_io` is off, and no `O_DSYNC`: nothing
-    /// on disk has to outlast a crash.
+    /// takes only those. Every chunk starts free, but those a snapshot the
+    /// cache takes back names (`SnapshotFile`). Direct I/O unless
+    /// `direct_io` is off, and no `O_DSYNC`: a snapshot flushes the files
+    /// before it is kept, and nothing else on disk has to outlast a
+    /// crash.
     pub(in crate::cache) fn open(
         files: &[DiskFile],
         queue_depth: NonZeroU32,
@@ -108,8 +118,10 @@ impl CacheFiles {
             })
             .collect::<Result<Vec<_>>>()?;
         let first_file = FileIdentity::of(&opened[0])?;
+        let snapshot = SnapshotFile::beside(&files[0].path, &opened, chunks_per_file);
         let mut files = Self::on(IoWorker::new(queue_depth, opened)?, count, chunks_per_file)?;
         files.first_file = Some(first_file);
+        files.snapshot = snapshot;
         Ok(files)
     }
 
@@ -124,6 +136,7 @@ impl CacheFiles {
             io,
             chunks: Arc::new(DiskChunks::new(files, chunks_per_file)?),
             first_file: None,
+            snapshot: None,
         })
     }
 
@@ -135,6 +148,11 @@ impl CacheFiles {
     /// simulated.
     pub(in crate::cache) fn first_file(&self) -> Option<FileIdentity> {
         self.first_file
+    }
+
+    /// Where the disk tier is kept across a restart; `None` if it isn't.
+    pub(in crate::cache) fn snapshot(&self) -> Option<&SnapshotFile> {
+        self.snapshot.as_ref()
     }
 
     /// Writes `pages` at the start of the chunk `writer` holds.
@@ -186,11 +204,12 @@ impl CacheFiles {
 
     /// Opens the cache file at `path` and takes it for this cache: an
     /// exclusive `flock`, held as long as the file is open, so until the
-    /// I/O worker that owns it is dropped. A file another cache holds, in
-    /// this process or another, by whatever path, is [`Error::Busy`]. The
-    /// kernel drops the lock when its holder exits, however it exits. A
-    /// `flock`, not an `fcntl` record lock: record locks don't conflict
-    /// within a process, and closing any descriptor of the file drops them.
+    /// I/O worker that owns it is dropped, and the snapshot's copy of it. A
+    /// file another cache holds, in this process or another, by whatever
+    /// path, is [`Error::Busy`]. The kernel drops the lock when its holder
+    /// exits, however it exits. A `flock`, not an `fcntl` record lock:
+    /// record locks don't conflict within a process, and closing any
+    /// descriptor of the file drops them.
     fn open_file(path: &Path, direct_io: bool) -> Result<File> {
         let mut open = OpenOptions::new();
         open.read(true).write(true).create(true).truncate(false);

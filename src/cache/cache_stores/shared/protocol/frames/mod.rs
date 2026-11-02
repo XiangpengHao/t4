@@ -25,7 +25,7 @@ use crate::io::error::{Error, Result};
 /// [`OwnerFrame::Welcome`], which are the same in every version, their
 /// tags and descriptors with them: a version that needs more of a
 /// handshake says it in frames after the welcome.
-pub(in crate::cache::cache_stores::shared) const PROTOCOL_VERSION: u32 = 3;
+pub(in crate::cache::cache_stores::shared) const PROTOCOL_VERSION: u32 = 4;
 
 /// A frame a client sends its owner. A call, which the owner answers,
 /// carries the number the client gave it, `call`; the other frames take no
@@ -77,6 +77,8 @@ pub(in crate::cache::cache_stores::shared) enum ClientFrame {
     /// The client is done with the read, or gave it up; the owner answers
     /// [`OwnerFrame::Ended`] once it is done with the read's spans.
     EndRead { read: u64 },
+    /// The size of the version the cache holds of the file at `path`.
+    KnownSize { call: u64, path: Bytes },
 }
 
 /// A frame an owner sends its client: the answer to one of its calls, or
@@ -143,6 +145,12 @@ pub(in crate::cache::cache_stores::shared) enum OwnerFrame {
         bytes: u32,
         phase: IoPhase,
     },
+    /// The size of the version the cache holds of the file asked of, if it
+    /// holds one.
+    KnownSize {
+        call: u64,
+        size: Option<u64>,
+    },
 }
 
 /// What a read does next: plan the GETs of a run of its blocks, or make
@@ -194,6 +202,7 @@ impl ClientFrame {
     const FINISH: u8 = 7;
     const END_READ: u8 = 8;
     const LAND_STAGED: u8 = 9;
+    const KNOWN_SIZE: u8 = 10;
 
     /// What a client's first frame starts with.
     const MAGIC: [u8; 4] = *b"t4sh";
@@ -278,6 +287,12 @@ impl ClientFrame {
                 frame.u64(*read);
                 frame.finish()
             }
+            Self::KnownSize { call, path } => {
+                let mut frame = FrameWriter::new(Self::KNOWN_SIZE);
+                frame.u64(*call);
+                frame.bytes(path);
+                frame.finish()
+            }
         }
     }
 
@@ -340,6 +355,10 @@ impl ClientFrame {
                 read: frame.u64()?,
             },
             Self::END_READ => Self::EndRead { read: frame.u64()? },
+            Self::KNOWN_SIZE => Self::KnownSize {
+                call: frame.u64()?,
+                path: frame.bytes()?,
+            },
             _ => return Err(FrameReader::malformed("a client frame's tag")),
         };
         frame.finish()?;
@@ -358,7 +377,8 @@ impl OwnerFrame {
             | Self::Retry { call, .. }
             | Self::Served { call, .. }
             | Self::Failed { call }
-            | Self::ServedInSpan { call, .. } => Some(call),
+            | Self::ServedInSpan { call, .. }
+            | Self::KnownSize { call, .. } => Some(call),
             Self::Welcome { .. } | Self::DiskRead { .. } | Self::Ended { .. } => None,
         }
     }
@@ -374,6 +394,7 @@ impl OwnerFrame {
     const DISK_READ: u8 = 9;
     const SERVED_IN_SPAN: u8 = 10;
     const ENDED: u8 = 11;
+    const KNOWN_SIZE: u8 = 12;
 
     /// The frame, its length first.
     pub(in crate::cache::cache_stores::shared) fn encode(&self) -> Vec<u8> {
@@ -441,6 +462,15 @@ impl OwnerFrame {
                 frame.phase(phase);
                 frame.finish()
             }
+            Self::KnownSize { call, size } => {
+                let mut frame = FrameWriter::new(Self::KNOWN_SIZE);
+                frame.u64(*call);
+                frame.flag(size.is_some());
+                if let Some(size) = size {
+                    frame.u64(*size);
+                }
+                frame.finish()
+            }
         }
     }
 
@@ -489,6 +519,13 @@ impl OwnerFrame {
                 drive: frame.u32()?,
                 bytes: frame.u32()?,
                 phase: frame.phase()?,
+            },
+            Self::KNOWN_SIZE => Self::KnownSize {
+                call: frame.u64()?,
+                size: match frame.flag()? {
+                    true => Some(frame.u64()?),
+                    false => None,
+                },
             },
             _ => return Err(FrameReader::malformed("an owner frame's tag")),
         };

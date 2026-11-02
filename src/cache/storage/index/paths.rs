@@ -1,7 +1,7 @@
 //! `paths`: each object's path, to the version of it the cache holds blocks
 //! of (`doc/03-cache.md`, decisions 4 and 5).
 
-use std::ops::Range;
+use std::ops::{ControlFlow, Range};
 
 use bbtree::BBTreeMap;
 
@@ -144,6 +144,49 @@ impl PathTable {
             .or_abort()
             .unwrap_or(fresh_id);
         Ok(FileVersion { id, size })
+    }
+
+    /// The size of the version the path's entry names, if it has one.
+    pub(in crate::cache) fn known_size(&self, path: &[u8]) -> Option<u64> {
+        self.paths.read(path, |_, entry| entry.size)
+    }
+
+    /// Each path's entry, in path order: its path, e_tag and version.
+    pub(in crate::cache) fn scan(&self, mut found: impl FnMut(&[u8], &str, FileVersion)) {
+        self.paths.scan::<[u8], ()>(.., |path, entry| {
+            let version = FileVersion {
+                id: entry.id,
+                size: entry.size,
+            };
+            found(path, &entry.e_tag, version);
+            ControlFlow::Continue(())
+        });
+    }
+
+    /// The id the next new file version gets.
+    pub(in crate::cache) fn next_id(&self) -> u64 {
+        self.next_id.load(Ordering::Relaxed)
+    }
+
+    /// Puts back the entry a snapshot kept of `path`, its `version` with
+    /// `e_tag`, as the cache opens, before any read resolves a path. A
+    /// snapshot names each path once.
+    pub(in crate::cache) fn restore(&self, path: &[u8], e_tag: &str, version: FileVersion) {
+        let entry = FileEntry {
+            id: version.id,
+            e_tag: e_tag.into(),
+            size: version.size,
+        };
+        let held = self.paths.insert(path.into(), entry).or_abort();
+        assert!(held.is_none(), "a snapshot names a path once");
+    }
+
+    /// Gives new versions ids from `next_id` on, as the snapshot the cache
+    /// opened from said: above every id it named, and every id the cache
+    /// that kept it gave (decision 5).
+    pub(in crate::cache) fn resume_ids_at(&self, next_id: u64) {
+        assert!(self.next_id() <= next_id, "ids only grow");
+        self.next_id.store(next_id, Ordering::Relaxed);
     }
 
     /// An id no file version had. Every change to `next_id` is a read-modify-write,

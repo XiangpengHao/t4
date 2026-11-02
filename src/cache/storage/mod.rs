@@ -14,6 +14,7 @@
 //! - `disk`: the disk tier: chunks in the cache files, written and read by
 //!   direct I/O.
 //! - `chunks`: the rules both tiers share for their chunks.
+//! - `snapshot`: the disk tier kept across a restart.
 
 mod cache_store;
 mod chunks;
@@ -21,6 +22,7 @@ mod disk;
 mod in_flight;
 mod index;
 mod memory;
+mod snapshot;
 
 pub(in crate::cache) use disk::{CacheFiles, DiskFile, FileIdentity};
 
