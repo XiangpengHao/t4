@@ -297,8 +297,12 @@ hosts is one.
      until it exits, killed or not. A drop after keeps the snapshot again.
      A client of a shared cache keeps nothing, as its owner holds the
      tier, and takes over no cache once its owner goes. Studio calls it
-     from `RunEvent::Exit` through its host's `IoSession` (the adapter, to
-     do).
+     from `RunEvent::Exit`, beside `flush_usage`: `DesktopScandal`, its
+     host's `EmbeddedScandal`, the `StorageTransports` whose caches every
+     binding reads through, each `SharedCache` (nothing for Kismet, which
+     writes each entry as it goes), `T4Cache`. `spiral connect` calls it
+     too once Ctrl-C ends its serve, whatever still holds its scandal
+     (adapter, 2 Nov 2026).
    - **As the next cache on the files builds,** its lock taken, it reads
      the snapshot and removes it, durably, before it writes a chunk: a
      running cache reuses a chunk as soon as it frees it, so a crash must
@@ -554,7 +558,22 @@ Phase 1, t4 in Kismet's place:
    configured for the exact operation session". t4 takes `bbtree` 0.2.0
    (bumped 2 Nov 2026), the same `vstd` pin as 0.1.x: Spiral had resolved
    t4's `bbtree = "0.1.4"` to 0.1.7, untested by t4's own lockfile, which
-   held 0.1.4. The adapter takes the version with t4's next commit.
+   held 0.1.4.
+
+   Then, the same day, t4 by git at abb641e (bbtree 0.2.0 with it), and
+   the shutdown wired (decision 7): `T4Cache::shut_down`,
+   `SharedCache::shut_down`, `StorageTransports::shut_down_disk_caches`,
+   `EmbeddedScandal::shut_down_disk_cache`, `DesktopScandal`'s, called from
+   Studio's `RunEvent::Exit`, and `spiral connect`'s after its serve. Tests:
+   a cache shut down keeps its snapshot at once, serves what it holds, and
+   caches nothing more on disk
+   (`a_cache_shut_down_keeps_its_disk_at_once_and_still_serves`); the
+   ScanDAL disk-cache cases shut down after their scans, t4's leaving its
+   snapshot, and scan right after. Passing: spiral-io's 123, the I/O
+   plugin's 103, Hugging Face's 20, the ScanDAL runtime's lib tests but
+   one that needs FFmpeg's runtime, which this Mac lacks; clippy
+   (`-D warnings`) on the six crates the adapter touches, `spiral-cli-connect`
+   and `spiral-studio`, which CI's clippy leaves out.
 2. **Measured on Linux: Kismet and t4 in the same seat,** a user's
    machine's profile, the same drive, OS defaults. A ClickBench subset
    from S3 through Spiral's engine: engine-bench, if it reads through
