@@ -244,16 +244,20 @@ hosts is one.
    to t4 with the cache (decision 1). Hosts without a cache keep Spiral's
    hedging and coalescing: t4 on them is Later.
 
-5. **Each host takes a profile: Kismet's behaviour on a user's machine,
-   t4's defaults on a server.** No new mechanism in either.
+5. **Each host takes a profile, a user's machine's or a server's, both
+   with direct I/O.** No new mechanism in either. The aim is to beat
+   Kismet, not to behave as it does.
 
    - **A user's machine** (Studio, `spiral connect`, the SQL CLI):
      `FixedPlacementPolicy` admitting every fetched block to disk, a disk
-     hit staying there; direct I/O off, so the OS's page cache serves
-     repeated reads as it serves Kismet's files; a memory tier of one
-     chunk, the least t4 takes; a cache file that grows (decision 9). The
-     disk tier is what survives a restart (decision 7), so admitting
-     straight to it loses nothing at exit.
+     hit staying there; direct I/O, so repeated reads come from the disk
+     tier, not the OS's page cache; a memory tier of one chunk, the least
+     t4 takes; a cache file that grows (decision 9). The disk tier is what
+     survives a restart (decision 7), so admitting straight to it loses
+     nothing at exit. Buffered, as this profile first ran, t4 took 1.45
+     times Kismet's time from disk on Linux: a buffered read's page-cache
+     work runs on the thread that submits it, there t4's one io_uring
+     thread (plan step 2).
    - **A server**, if one opts in (Open questions): t4's defaults: the
      CLOCK, fetched blocks to memory and memory's victims to disk, direct
      I/O, a cache file on each drive.
@@ -430,8 +434,8 @@ hosts is one.
     so now: t4 must be correct on macOS and tested there, and no worse
     for Studio than Kismet, but nothing is designed, tuned or benchmarked
     for macOS's speed, and no Linux design bends for it. On macOS t4 runs
-    its thread-pool backend; a user's machine's profile turns direct I/O
-    off (decision 5), so `F_NOCACHE` isn't used there.
+    its thread-pool backend, past the page cache by `F_NOCACHE` (decision
+    5).
 
 ## The interfaces
 
@@ -583,6 +587,63 @@ Phase 1, t4 in Kismet's place:
    same with the page cache left warm, as a user's machine runs. The
    slowest run first, then the median, and the slowest GET and GETs over
    1 s; bytes fetched, and CPU.
+
+   engine-bench reads only local files, never installs the cache, and a
+   local file's reads skip it, unpinned: so a harness in it, its native
+   lane reading from S3 through spiral-io (`--data-uri`, `--io-cache
+   none|kismet|t4`, each file listed, pinned to its e_tag and opened with
+   `vortex_read_at`), its GETs timed below either cache, a process a pass
+   (`bench/spiral_cache/`). Run 2 Nov 2026 on an i7i.24xlarge Spot, its 6
+   SSDs as one RAID0, OS defaults; ClickBench's 2 MiB-dictionary Vortex
+   files, the 23 queries engine-bench plans natively but those on
+   EventDate (36-41: its plans want vortex-bench's date extension type);
+   Kismet and t4 taking turns each pass; results in
+   `bench/spiral_cache/results/2026-11-02`. The same rows from every pass
+   of both (counts compared, not values).
+
+   - **Cold, from S3** (one pass): level, 19.2 s Kismet and 19.7 s t4, the
+     same 11.69 GB fetched, t4 in 10% more GETs; slowest GET 0.63 s and
+     0.30 s, none over 1 s. One sample.
+   - **From disk**, the page cache dropped before each query (5 passes):
+     t4 17.4 s a pass against Kismet's 12.0 s, each within 3% from pass to
+     pass, with a quarter less CPU (200 s against 266 s). The wide scans
+     make the gap: q23 4.8 s against 1.7 s, q20 and q21 twice Kismet's,
+     q19, q24, q26 near twice; most other queries level.
+   - **Warm**, the page cache as the queries leave it (5 passes after one
+     that fills it): t4 13.2 s, Kismet 11.5 s, t4 again with a quarter less
+     CPU; q23 1.7 times Kismet's.
+
+   Why, measured 3 Nov 2026 on the same kind of box (drive counters before
+   each query, iostat, and perf a thread; `results/2026-11-03` and
+   `-perf`): t4's one io_uring thread. A buffered read's page-cache work
+   runs on the thread that submits it, readahead's pages added to the page
+   cache and their bytes copied out; in t4 that is the one I/O thread, at a
+   whole CPU through q23 (`__filemap_add_folio`, `rep_movs_alternative`,
+   `folio_mark_accessed`), and the reads queue behind it: q23's drive reads
+   took 7.7 ms each, from the block layer's start to their end, against
+   Kismet's 0.3 ms, where Kismet reads on its many `spiral-io` threads.
+   Warm, nothing read from the drives, the same thread copies at 98% of a
+   CPU. Not readahead: t4 reads a third fewer bytes from its drives than
+   Kismet (27 GB a pass against 41 GB), for the pages each read asks for,
+   where Kismet's drive bytes match the blocks its reads touch (the hit
+   counters of both count blocks touched, 41.5 GB).
+
+   With direct I/O on (`t4-direct`, engine-bench built with the profile
+   flipped; the profile since, decision 5), the thread is at half a
+   CPU at most, pinning pages: from disk 11.3 s a pass against Kismet's
+   12.1 s and buffered t4's 17.7 s (2 passes each, within 1%), the slowest
+   run 1.94 s against 2.23 s and 4.83 s; warm, still from its drives,
+   10.8-11.2 s, level with Kismet's 11.0-11.6 s from the page cache (the
+   slowest run 2.07 s against 2.04 s; buffered t4 13.0 s, 2.69 s). Its CPU
+   in between: 238 s a pass against Kismet's 265 s and buffered t4's 200 s.
+   The same rows everywhere.
+
+   So a user's machine's profile takes direct I/O, on Linux and macOS
+   alike (decision 5): t4 then beats Kismet from disk and matches it warm,
+   on this box's 6 SSDs. Not measured: warm reads on a laptop's one SSD,
+   which t4 reads from the drive where Kismet reads the page cache; nor
+   macOS, where t4 reads through its thread pool, a thread a core, by
+   `F_NOCACHE`.
 3. **The lock in t4** (decision 8): `flock` on each cache file,
    `Error::Busy`, with a test that a second cache on one file fails to
    build and builds once the first is dropped. Built 29 Oct 2026
@@ -678,7 +739,7 @@ Phase 2, t4 in the read path:
 - **A real memory tier on a user's machine.** Its blocks would be lost at
   exit unless written to disk then, which makes exit wait on the drive;
   keeping them on disk as well is inclusive tiering (`03-cache.md`,
-  Rejected). The page cache serves repeated reads there instead (decision
+  Rejected). The disk tier serves repeated reads there instead (decision
   5).
 - **Checksums per chunk:** decision 7.
 

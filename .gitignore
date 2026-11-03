@@ -7,3 +7,5 @@ fuzz/coverage
 .DS_STORE
 
 bench/cold_reads
+
+bench/spiral_cache/results
