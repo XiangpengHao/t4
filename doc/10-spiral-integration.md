@@ -644,6 +644,52 @@ Phase 1, t4 in Kismet's place:
    which t4 reads from the drive where Kismet reads the page cache; nor
    macOS, where t4 reads through its thread pool, a thread a core, by
    `F_NOCACHE`.
+
+   On Spiral's own tables, 3 Nov 2026 (`results/2026-11-03-project` and
+   `-8g`): no local cache reached them at first. A project's storage
+   comes to the client as a `gs://` or `s3://` root, whose keys may be
+   rewritten, and Arbor pinned only an object's size, so every read
+   skipped Kismet and t4 alike; SPFS mounts alone, whose keys never
+   change, were cached. Arbor writes each object once under a name never
+   reused, so its reads now say so: spiral-io's `pin_immutable_object`
+   and `pin_immutable_objects` key such a read by the object's name on
+   any store, scandal pins a table root's store that way, and Arbor's own
+   reads pin each object.
+
+   Then, the project `xiangpeng-t4-testing-378145` on Spiral-managed GCS
+   in us-east4, TPC-H at SF100 and ClickBench written through the SDK,
+   read as desktop Studio reads a project (engine-bench
+   `--spiral-project`: DataFusion over the project's catalog, through an
+   embedded scandal and its disk cache, a desktop's settings and 20 GiB
+   budget), from a GCP `c3-standard-88-lssd` Spot box beside the storage,
+   its 16 SSDs as one RAID0 (`bench/spiral_cache/project.sh`,
+   `drive_gcp.sh`); a process a pass, the same rows from every pass of
+   both:
+
+   - **TPC-H SF100**, 17.3 GB read, all of it held: level. Disk and warm
+     passes: Kismet 393.2 s a pass on average, t4 394.6 s, within either's
+     spread from pass to pass (391-397 s), t4 the faster in 54 of 105
+     paired runs; the slowest run q18 at 78-81 s in both; cold 398.5 s
+     and 400.4 s. The queries compute: 4,600 CPU-seconds a pass, 11.7 of
+     88 cores busy, the drives read at 0.24 GB/s. With no cache, 426 s a
+     pass, 99 GB fetched again each: the cache is worth 8%.
+   - **ClickBench**, 12.1 GB read: from disk t4 3.4% the faster (117.8
+     and 118.4 s against 121.9 and 122.6 s), in 72 of 86 paired runs,
+     with a tenth less CPU (844-898 s against 960-986 s); warm level
+     (115.5-117.7 s against 116.6-117.3 s, Kismet from the page cache,
+     t4 from its drives), t4 still with a tenth less CPU. No cache, 133 s.
+   - **TPC-H at an 8 GiB budget**: the time level (t4 413-420 s, Kismet
+     416-417 s), but t4 fetches 44% more again each pass (52.6-57.4 GB
+     against 36.4-38.2 GB): it holds less in the same budget. Each block
+     takes a 1 MiB chunk of it, where Kismet's average 914 KiB, a tenth
+     more; and Kismet's batched eviction holds past its target (9.7 GB at
+     8 GiB in the cold pass). In the same region the refetch costs no
+     time; over a slower link it would.
+
+   So beside its storage the cache is worth 8-12% of these queries, which
+   compute; t4 wins where reads weigh more and spends less CPU, and under
+   a tight budget its chunk accounting refetches more. Not measured: a
+   slow link, a laptop's one SSD.
 3. **The lock in t4** (decision 8): `flock` on each cache file,
    `Error::Busy`, with a test that a second cache on one file fails to
    build and builds once the first is dropped. Built 29 Oct 2026

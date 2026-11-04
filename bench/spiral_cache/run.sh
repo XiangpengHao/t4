@@ -55,7 +55,7 @@ OUT=$(cd "$OUT" && pwd)
 # spiraldb's build: a C toolchain and protoc; Rust through rustup, which takes
 # the toolchain spiraldb's rust-toolchain.toml pins. sysstat for iostat; perf
 # for the kernel running.
-packages=(build-essential pkg-config protobuf-compiler clang cmake libssl-dev sysstat)
+packages=(build-essential pkg-config protobuf-compiler libprotobuf-dev clang cmake libssl-dev sysstat)
 [ "$PERF" = 1 ] && packages+=(linux-tools-common "linux-tools-$(uname -r)")
 sudo apt-get update -q && sudo apt-get install -y -q "${packages[@]}" > /dev/null
 command -v rustup >/dev/null || curl -sSf https://sh.rustup.rs | sh -s -- -y -q --default-toolchain none
