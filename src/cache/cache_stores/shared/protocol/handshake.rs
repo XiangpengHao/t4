@@ -1,6 +1,3 @@
-//! [`Hello`]: a client's first frame to its owner, and the owner's check of
-//! it (`doc/11-shared-mode.md`, decision 6).
-
 use std::fs::File;
 use std::io::{IoSlice, IoSliceMut, Read};
 use std::mem::MaybeUninit;
@@ -19,12 +16,7 @@ use super::frames::{ClientFrame, FrameReader, PROTOCOL_VERSION};
 use crate::cache::storage::FileIdentity;
 use crate::io::error::{Error, Result};
 
-/// A client's hello: its protocol's version, its descriptor of the first
-/// cache file, and of its region if it made one, sent beside the frame by
-/// `SCM_RIGHTS`. The owner admits a client whose descriptor names that
-/// file and is open for writing it: whoever may write the cache file may
-/// use the cache. Its region the owner maps if it can't shrink
-/// (`OwnerRegion::accept`).
+/// Admission is by write access to the first cache file: whoever may write it may use the cache.
 pub(in crate::cache::cache_stores::shared) struct Hello {
     version: u32,
     cache_file: File,
@@ -32,21 +24,13 @@ pub(in crate::cache::cache_stores::shared) struct Hello {
 }
 
 impl Hello {
-    /// How long each side of a handshake waits for the other's word: a peer
-    /// that says nothing that long is gone.
     pub(in crate::cache::cache_stores::shared) const WAIT: Duration = Duration::from_secs(5);
 
-    /// The bytes of a hello's frame, its length with it: all an owner takes
-    /// from a peer it hasn't admitted, so that a peer can't make it
-    /// allocate.
+    /// All an owner reads from a peer it hasn't admitted, so that a peer can't make it allocate.
     const FRAME_BYTES: usize = 8 + 1 + 4 + 4 + 1;
 
-    /// The most descriptors a hello comes with: the cache file's and the
-    /// region's.
     const MOST_DESCRIPTORS: usize = 2;
 
-    /// How a receive takes the descriptors: closed on `exec` from the first,
-    /// where the kernel can; elsewhere `Self::receive` sets it after.
     #[cfg(target_os = "linux")]
     const RECEIVE_FLAGS: RecvFlags = RecvFlags::CMSG_CLOEXEC;
     #[cfg(not(target_os = "linux"))]
@@ -60,7 +44,6 @@ impl Hello {
         }
     }
 
-    /// The hello, with `region`'s memory sent beside it.
     #[must_use]
     pub(in crate::cache::cache_stores::shared) fn with_region(self, region: OwnedFd) -> Self {
         Self {
@@ -69,22 +52,14 @@ impl Hello {
         }
     }
 
-    /// The client's protocol version.
     pub(in crate::cache::cache_stores::shared) fn version(&self) -> u32 {
         self.version
     }
 
-    /// The client's region's memory, if it sent one: the owner's to check.
     pub(in crate::cache::cache_stores::shared) fn into_region(self) -> Option<OwnedFd> {
         self.region
     }
 
-    /// Sends the hello on `socket`, the descriptors beside its frame's
-    /// first bytes.
-    ///
-    /// # Errors
-    ///
-    /// If the socket fails, or its peer has gone.
     pub(in crate::cache::cache_stores::shared) fn send(
         &self,
         socket: &FrameSocket,
@@ -96,9 +71,7 @@ impl Hello {
         self.send_as(socket, &frame.encode())
     }
 
-    /// Sends `frame` on `socket`, the hello's descriptors beside its first
-    /// bytes: the hello's own frame, or, in a test, one of a peer that
-    /// breaks the protocol.
+    /// `frame` is the hello's own, or in a test, a protocol-breaking peer's.
     pub(in crate::cache::cache_stores::shared) fn send_as(
         &self,
         socket: &FrameSocket,
@@ -124,12 +97,6 @@ impl Hello {
         socket.send(&frame[sent..])
     }
 
-    /// The hello the peer of `socket` sent first, and its descriptors.
-    ///
-    /// # Errors
-    ///
-    /// If the socket fails or closes, or the peer sent anything but a
-    /// hello's frame with the descriptors it says beside it.
     pub(in crate::cache::cache_stores::shared) fn receive(socket: &FrameSocket) -> Result<Self> {
         let mut frame = [0; Self::FRAME_BYTES];
         let mut space =
@@ -154,8 +121,7 @@ impl Hello {
                 descriptors.extend(sent);
             }
         }
-        // Where the receive can't close them on `exec`, at once after: a
-        // process this one starts meanwhile still could inherit them.
+        // Set at once after the receive, but a process started meanwhile could still inherit them.
         #[cfg(not(target_os = "linux"))]
         for descriptor in &descriptors {
             rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC)
@@ -186,12 +152,6 @@ impl Hello {
         })
     }
 
-    /// Whether the owner of the cache whose first cache file is
-    /// `first_file` admits the client.
-    ///
-    /// # Errors
-    ///
-    /// If it doesn't, saying why.
     pub(in crate::cache::cache_stores::shared) fn admit(
         &self,
         first_file: FileIdentity,
@@ -209,7 +169,6 @@ impl Hello {
         Ok(())
     }
 
-    /// The error of a hello refused for `why`.
     fn refused(why: &str) -> Error {
         Error::Io(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,

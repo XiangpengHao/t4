@@ -5,18 +5,15 @@ use crate::io::error::{Error, Result};
 
 verus! {
 
-/// Rounds `value` down to the nearest multiple of `alignment`.
-/// `alignment` must be a power of two.
 fn align_down_u64(value: u64, alignment: u64) -> (result: u64)
     requires
         alignment > 0,
-        alignment & sub(alignment, 1) == 0,  // power of two
+        alignment & sub(alignment, 1) == 0,
 
     ensures
         result <= value,
         result & sub(alignment, 1) == 0,
         value - result < alignment,
-        // idempotent on aligned values
         value & sub(alignment, 1) == 0 ==> result == value,
 {
     let mask = alignment - 1;
@@ -53,9 +50,6 @@ fn align_down_u64(value: u64, alignment: u64) -> (result: u64)
     result
 }
 
-/// Rounds `value` up to the nearest multiple of `alignment`.
-/// Returns `None` on overflow.
-/// `alignment` must be a power of two.
 fn align_up_u64(value: u64, alignment: u64) -> (result: Option<u64>)
     requires
         alignment > 0,
@@ -108,7 +102,6 @@ fn align_up_u64(value: u64, alignment: u64) -> (result: Option<u64>)
     Some(result)
 }
 
-/// A byte range, `start` and `len`, whose `end` fits a `u32`.
 #[derive(Clone, Copy)]
 pub(super) struct RangeRequestU32 {
     pub(super) start: u32,
@@ -182,22 +175,15 @@ impl CheckedRangeU32 {
 
 } // verus!
 
-/// The pages one read covers. The bytes asked for, a range of a page-aligned
-/// extent (a chunk), lie inside a page-aligned window of it, read whole into
-/// a buffer of exactly the window's size, as direct I/O needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PageWindow {
-    /// Where the window starts in the extent: a page boundary.
     first_byte: u32,
-    /// The window's size, in whole pages; 0 when nothing is asked for.
     buffer_len: u32,
-    /// Where the bytes asked for start in the window.
     start: u32,
     len: u32,
 }
 
 impl PageWindow {
-    /// The window for `range` of an extent.
     pub(super) fn of(range: CheckedRangeU32) -> Result<Self> {
         if range.is_empty() {
             return Ok(Self {
@@ -222,7 +208,6 @@ impl PageWindow {
         })
     }
 
-    /// Where the window starts in the extent: a page boundary.
     pub(super) fn first_byte(&self) -> u32 {
         self.first_byte
     }
@@ -231,8 +216,6 @@ impl PageWindow {
         self.buffer_len
     }
 
-    /// Where the bytes asked for start in the window: for the read plan's
-    /// tests, which `shuttle` builds leave out.
     #[cfg(all(test, not(feature = "shuttle")))]
     pub(super) fn start(&self) -> u32 {
         self.start

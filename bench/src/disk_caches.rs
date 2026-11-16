@@ -1,20 +1,3 @@
-//! The disk caches `cold_reads` compares, each holding the same 1 MiB blocks
-//! of one synthetic object on the same drives: t4 with every block on disk,
-//! foyer's hybrid cache as shipped and tuned, and Kismet as spiraldb runs it.
-//!
-//! Each cache keeps what a deployment would key it by. t4 caches the object
-//! itself, so a read is a byte range of it. foyer and Kismet cache values by
-//! key, so each block is a value under its index: the layer an app would
-//! build to cache files in them (`doc/08-spiral-presentation`, the foyer
-//! slides). Kismet goes through the same key and envelope as spiraldb's
-//! `shared/spiral-kismet-cache`: a SHA-256 name, a header, the payload, and
-//! a CRC32 checked on every read.
-//!
-//! Beside them, a reference that reads no drive: the blocks as a plain file
-//! whose every page is in the page cache, read with pread. That is reading
-//! from memory, as Vortex reads a file the OS has cached, and it prices what
-//! a byte from memory costs the CPU.
-
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::ops::Range;
@@ -36,28 +19,20 @@ use t4::policy::{Admit, FixedPlacementPolicy};
 use crate::Error;
 use crate::synthetic_objects::SyntheticObjects;
 
-/// Which cache holds the blocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum DiskCacheKind {
-    /// t4, every block on disk ([`FixedPlacementPolicy`]), as shipped:
-    /// direct I/O through io_uring.
+    /// t4, every block on disk: direct I/O through io_uring.
     T4,
-    /// foyer as shipped: its directory device through the page cache, read
-    /// with pread on tokio's blocking pool.
+    /// foyer as shipped: through the page cache, pread on tokio's blocking pool.
     Foyer,
-    /// foyer tuned: the same device opened with `O_DIRECT`, read through its
-    /// io_uring engine. Linux only.
+    /// foyer with `O_DIRECT` and its io_uring engine. Linux only.
     FoyerTuned,
     /// Kismet as spiraldb runs it: a file per block in 64 shard folders.
     Kismet,
-    /// The reference: a plain file of the blocks, every page already in the
-    /// page cache, read with pread into a fresh buffer. Reads memory, not the
-    /// drives.
+    /// Reference: a plain file in the page cache, read with pread. Reads no drive.
     PageCache,
 }
 
-/// The blocks every cache holds: `count` 1 MiB blocks of one synthetic
-/// object, whose bytes [`SyntheticObjects`] computes and can check.
 pub struct Blocks {
     objects: Arc<SyntheticObjects>,
     path: Path,
@@ -65,8 +40,7 @@ pub struct Blocks {
 }
 
 impl Blocks {
-    /// A block's bytes: 1 MiB, the block size of t4, of spiraldb's Kismet,
-    /// and of every value here.
+    /// t4's block size, and spiraldb's Kismet's.
     pub const SIZE: u64 = 1 << 20;
 
     pub fn new(count: u64) -> Self {
@@ -83,12 +57,10 @@ impl Blocks {
         self.count
     }
 
-    /// The store t4 fetches the object from as it fills.
     pub fn store(&self) -> Arc<dyn ObjectStore> {
         Arc::clone(&self.objects) as Arc<dyn ObjectStore>
     }
 
-    /// Block `index`'s bytes, as every cache must return them.
     pub fn bytes(&self, index: u64) -> Bytes {
         self.objects.bytes(&self.path, Self::range(index))
     }
@@ -98,7 +70,6 @@ impl Blocks {
     }
 }
 
-/// A cache holding [`Blocks`], filled once and then read.
 pub enum DiskCache {
     T4(T4Blocks),
     Foyer(FoyerBlocks),
@@ -107,10 +78,6 @@ pub enum DiskCache {
 }
 
 impl DiskCache {
-    /// A cache of `kind` with its files in `dir`, room for `blocks` and some
-    /// spare, reading `source` for what it doesn't hold (t4 alone does).
-    /// `io_depth`, if given, is the I/Os its io_uring engine keeps in flight:
-    /// t4's queue depth, tuned foyer's; each's default (64) otherwise.
     pub async fn build(
         kind: DiskCacheKind,
         dir: &FsPath,
@@ -125,9 +92,7 @@ impl DiskCache {
                 let tuned = kind == DiskCacheKind::FoyerTuned;
                 Self::Foyer(FoyerBlocks::open(dir.join("foyer"), capacity, tuned, io_depth).await?)
             }
-            // Kismet splits its capacity evenly over its shards, and random
-            // keys fill some shards past their share, which then evict: twice
-            // the room keeps every block, so a pass measures reads alone.
+            // Random keys overfill some of Kismet's even shards: twice the room keeps every block.
             DiskCacheKind::Kismet => {
                 Self::Kismet(KismetBlocks::new(dir.join("kismet"), 2 * capacity)?)
             }
@@ -135,13 +100,10 @@ impl DiskCache {
         })
     }
 
-    /// Whether its reads come from memory, so the page cache must stay
-    /// filled between passes: the reference alone.
     pub fn reads_memory(&self) -> bool {
         matches!(self, Self::PageCache(_))
     }
 
-    /// Puts block `index` on disk.
     pub async fn fill(self: &Arc<Self>, index: u64, blocks: &Blocks) -> Result<(), Error> {
         match &**self {
             // A read fetches the block and lands it on disk, as the policy says.
@@ -160,10 +122,7 @@ impl DiskCache {
         }
     }
 
-    /// Done filling: whatever is still in memory goes. foyer flushes, then
-    /// reopens on its files with an empty memory tier, its disk index
-    /// rebuilt from them; t4 and Kismet hold nothing in memory to drop. The
-    /// reference writes its pages back, so that they stay cached clean.
+    /// foyer reopens to empty its memory tier; the reference syncs so its pages stay cached clean.
     pub async fn settled(self) -> Result<Self, Error> {
         match self {
             Self::Foyer(cache) => Ok(Self::Foyer(cache.reopened().await?)),
@@ -175,7 +134,6 @@ impl DiskCache {
         }
     }
 
-    /// Block `index`, from disk, or `None` if the cache doesn't hold it.
     pub async fn read(self: &Arc<Self>, index: u64) -> Result<Option<Bytes>, Error> {
         match &**self {
             Self::T4(cache) => cache.read(index).await.map(Some),
@@ -193,16 +151,13 @@ impl DiskCache {
     }
 }
 
-/// t4 over the synthetic object, admitting every fetched block to disk and
-/// keeping it there, its cache file in the benchmark's directory.
 pub struct T4Blocks {
     store: T4Caching,
     path: Path,
 }
 
 impl T4Blocks {
-    /// Memory for cached bytes: a few blocks, as t4 needs some; the policy
-    /// puts none there.
+    /// t4 needs some memory; the policy puts nothing there.
     const MEMORY: u64 = 64 << 20;
 
     fn new(
@@ -234,9 +189,6 @@ impl T4Blocks {
     }
 }
 
-/// foyer's hybrid cache, each block a value under its index. Its memory tier
-/// is small, so reads go to disk; its disk tier is the block engine on a
-/// directory device, foyer's default.
 pub struct FoyerBlocks {
     cache: HybridCache<u64, Bytes>,
     dir: PathBuf,
@@ -246,10 +198,8 @@ pub struct FoyerBlocks {
 }
 
 impl FoyerBlocks {
-    /// The memory tier's bytes: a few blocks.
     const MEMORY: usize = 64 << 20;
-    /// Blocks inserted between waits for the flushers: under foyer's 16 MiB
-    /// flush buffer, so none is dropped for want of room.
+    /// Under foyer's 16 MiB flush buffer, so no insert is dropped for want of room.
     const FILL_BATCH: u64 = 12;
 
     async fn open(
@@ -326,8 +276,6 @@ impl FoyerBlocks {
         Ok(storage)
     }
 
-    /// Writes block `index` to disk, past the memory tier and the admission
-    /// filter, waiting for the flushers once a batch is in.
     async fn fill(&self, index: u64, value: Bytes) -> Result<(), Error> {
         self.cache.storage_writer(index).force().insert(value);
         if (index + 1).is_multiple_of(Self::FILL_BATCH) {
@@ -349,18 +297,14 @@ impl FoyerBlocks {
     }
 }
 
-/// Kismet as spiraldb runs it (`shared/spiral-kismet-cache`): a file per
-/// block in 64 shard folders, unsynced writes, each entry an envelope whose
-/// CRC32 a read checks.
 pub struct KismetBlocks {
     cache: kismet_cache::Cache,
 }
 
 impl KismetBlocks {
-    /// spiraldb's shard folders (`doc/10-spiral-integration.md`).
+    /// spiraldb's shard count.
     const SHARDS: usize = 64;
-    /// spiraldb's envelope: magic, the key's digest, the payload's CRC32,
-    /// the payload's length.
+    /// spiraldb's envelope: magic, key digest, payload CRC32, payload length.
     const MAGIC: &'static [u8] = b"SPFSKISMET3\0";
     const HEADER_LEN: usize = Self::MAGIC.len() + 32 + 4 + 8;
 
@@ -376,8 +320,7 @@ impl KismetBlocks {
         })
     }
 
-    /// Block `index`'s key, as spiraldb derives one from canonical bytes:
-    /// its SHA-256 names the file and gives the two hashes.
+    /// As spiraldb derives a key from canonical bytes.
     fn key(index: u64) -> ([u8; 32], String, u64, u64) {
         let digest: [u8; 32] = Sha256::digest(format!("cold_reads/blocks/{index}")).into();
         let hash = u64::from_le_bytes(digest[0..8].try_into().expect("8 bytes"));
@@ -408,8 +351,7 @@ impl KismetBlocks {
         file.write_all(payload)
     }
 
-    /// The block, read as spiraldb's `read_envelope` does: the file's
-    /// length, the header, the payload, and its CRC32 checked.
+    /// Read as spiraldb's `read_envelope` reads it.
     fn get(&self, index: u64) -> Result<Option<Bytes>, Error> {
         let (digest, name, hash, secondary) = Self::key(index);
         let Some(mut file) = self
@@ -451,9 +393,6 @@ impl KismetBlocks {
     }
 }
 
-/// The reference: the blocks as one plain file on the same drives, whose
-/// pages the fill leaves in the page cache, read as a file the OS has cached
-/// is read: pread into a fresh buffer.
 pub struct PageCacheBlocks {
     file: File,
 }
@@ -483,13 +422,10 @@ impl PageCacheBlocks {
     }
 }
 
-/// A read into a fresh buffer that nothing zeroes first: pread straight into
-/// a vector's spare capacity, as spiraldb's Kismet reads its payloads
-/// (`read_exact_uninit`), and as a cached file's read costs at its least.
+/// Into unzeroed memory, as spiraldb's Kismet reads payloads (`read_exact_uninit`).
 struct FreshRead;
 
 impl FreshRead {
-    /// `len` bytes of `file` from `offset`, or `None` if it ends first.
     fn exact_at(file: &File, len: usize, offset: u64) -> std::io::Result<Option<Vec<u8>>> {
         let mut buffer = Vec::with_capacity(len);
         while buffer.len() < len {
@@ -497,8 +433,7 @@ impl FreshRead {
             let at =
                 libc::off_t::try_from(offset + filled as u64).map_err(std::io::Error::other)?;
             let spare = &mut buffer.spare_capacity_mut()[..len - filled];
-            // SAFETY: pread writes at most `spare.len()` bytes into `spare`,
-            // memory the vector owns and nothing else reads meanwhile.
+            // SAFETY: pread writes at most `spare.len()` bytes into memory the vector owns.
             let read = unsafe {
                 libc::pread(file.as_raw_fd(), spare.as_mut_ptr().cast(), spare.len(), at)
             };
@@ -512,8 +447,7 @@ impl FreshRead {
                 }
                 read => {
                     let read = usize::try_from(read).expect("a positive count fits a usize");
-                    // SAFETY: pread initialized those `read` bytes, just past
-                    // the vector's length, within its capacity.
+                    // SAFETY: pread initialized these `read` bytes, within the vector's capacity.
                     unsafe { buffer.set_len(buffer.len() + read) };
                 }
             }

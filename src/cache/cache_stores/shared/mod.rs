@@ -1,16 +1,3 @@
-//! [`SharedCacheStore`]: shared mode, one cache read by several processes
-//! (`doc/11-shared-mode.md`). The process that holds the cache files' lock
-//! owns the cache: it reads through its own in-process store, and serves
-//! the others, its clients, over a Unix socket. A client reads through its
-//! owner; once that owner goes, a client's read tries the lock, then the
-//! next owner (decision 7). All of it is the store's own: a read through it
-//! is a read, whichever this process is.
-//!
-//! - `owner`: an owner serving its clients.
-//! - `client`: a client's connection to its owner, and its reads through it.
-//! - `protocol`: what the two speak: the frames, the socket they cross, the
-//!   owner's address, the handshake, and the client's region.
-
 use std::ops::Range;
 use std::sync::{Mutex, OnceLock, PoisonError, RwLock, TryLockError};
 use std::time::{Duration, Instant};
@@ -32,70 +19,36 @@ use client::ClientRead;
 pub(super) use client::OwnerConnection;
 use owner::OwnerListener;
 
-/// Shared mode's cache store: this process's own once it holds the cache
-/// files' lock, served to its clients; until then its owner's, through a
-/// connection to it, or to the next owner once that one goes.
 pub(in crate::cache) struct SharedCacheStore {
-    /// Set once this process takes the lock: it owns the cache from then
-    /// on, for good, as an owner never goes back to being a client.
     owned: OnceLock<OwnedCache>,
-    /// Until then, the connection to the owner: replaced by one to the next
-    /// once it goes, and dropped once this process owns the cache. Reads
-    /// in flight hold their own.
     client: RwLock<Option<std::sync::Arc<OwnerConnection>>>,
-    /// Taken by one read at a time, the one that tries the lock and the
-    /// next owner; the others go on with the connection they have.
     hand_off: Mutex<HandOff>,
 }
 
-/// The cache this process owns: its in-process store, and the listener
-/// that serves it to clients, if it could listen.
 struct OwnedCache {
-    /// Goes first as it drops, and with it its sessions' handles on the
-    /// cache.
+    /// Drops first, and with it its sessions' handles on the cache.
     _listener: Option<OwnerListener>,
     store: InProcessCacheStore,
 }
 
-/// What a client tries once its owner goes: the lock, its tiers made of
-/// `tiers`; then the next owner, which tells `reads` of the reads from disk
-/// it makes for this process.
 struct HandOff {
     tiers: TierSettings,
     reads: Arc<dyn ReadPolicy>,
-    /// When the next try is due.
     next_try: Instant,
-    /// The connections tried so far: the next one's number, which tells
-    /// the version ids its owner gives apart from the last owner's.
     connections: u64,
-    /// Set once this process shut its cache down: it takes over none once
-    /// its owner goes, as it is exiting.
     shut_down: bool,
 }
 
-/// What serves a read: this process's own store, or its owner, through
-/// the connection to it.
 enum Server<'s> {
     Owned(&'s InProcessCacheStore),
     Owner(std::sync::Arc<OwnerConnection>),
 }
 
 impl SharedCacheStore {
-    /// How long a client waits between tries of the lock and its owner.
     const RETRY: Duration = Duration::from_millis(10);
 
-    /// Shared mode's store of the cache `tiers` are made of: this
-    /// process's own if it takes their files' lock; else that of the
-    /// process that holds it, which admits this one, and tells `reads` of
-    /// the reads from disk it makes for it. An owner starting or leaving
-    /// refuses connections a while: the lock is tried again, and the owner
-    /// again, until `wait` is up.
-    ///
-    /// # Errors
-    ///
-    /// If a cache file can't be made, sized and opened, or the memory
-    /// mapped. [`Error::Busy`] if the owner didn't admit this process
-    /// within `wait`, or speaks another version of the protocol.
+    /// An owner starting or leaving refuses connections a while: both are tried until `wait`
+    /// is up.
     pub(in crate::cache) fn open(
         tiers: TierSettings,
         reads: Arc<dyn ReadPolicy>,
@@ -124,9 +77,6 @@ impl SharedCacheStore {
         Ok(store)
     }
 
-    /// What serves a read now: this process's own store, once it owns the
-    /// cache; else its owner; or, that owner gone, whatever the hand-off
-    /// came to (`Self::hand_off_from`).
     fn server(&self) -> Server<'_> {
         match self.current() {
             Server::Owner(owner) if owner.owner_gone() => self.hand_off_from(owner),
@@ -134,14 +84,12 @@ impl SharedCacheStore {
         }
     }
 
-    /// What serves a read now, as it is.
     fn current(&self) -> Server<'_> {
         if let Some(owned) = self.owned.get() {
             return Server::Owned(&owned.store);
         }
         let client = self.client.read().unwrap_or_else(PoisonError::into_inner);
-        // The cache is owned before the connection drops: a read that finds
-        // none finds the cache owned.
+        // The cache is owned before the connection drops: a read that finds none finds it owned.
         if let Some(owned) = self.owned.get() {
             return Server::Owned(&owned.store);
         }
@@ -151,11 +99,7 @@ impl SharedCacheStore {
         Server::Owner(std::sync::Arc::clone(owner))
     }
 
-    /// What serves a read once `gone`, the owner it read through, went: a
-    /// try of the lock, then of the next owner, if one is due and no other
-    /// read is trying. A read waits for no owner: one that didn't come
-    /// leaves the dead connection, whose calls fail at once, and the read
-    /// goes to the remote.
+    /// A read waits for no owner: the dead connection's calls fail at once, sending it remote.
     fn hand_off_from(&self, gone: std::sync::Arc<OwnerConnection>) -> Server<'_> {
         let mut hand_off = match self.hand_off.try_lock() {
             Ok(hand_off) => hand_off,
@@ -178,11 +122,6 @@ impl SharedCacheStore {
         self.current()
     }
 
-    /// One try of the lock, then of its owner: whether either came.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::open`]'s, but for an owner that didn't answer.
     fn try_once(&self, hand_off: &mut HandOff) -> Result<bool> {
         if !hand_off.shut_down {
             match InProcessCacheStore::open(&mut hand_off.tiers) {
@@ -205,14 +144,10 @@ impl SharedCacheStore {
         Ok(true)
     }
 
-    /// Owns the cache through `store`: served to clients if this process
-    /// can listen, and the connection to the last owner, if any, dropped.
     fn own(&self, store: InProcessCacheStore) {
         let cache = store.cache();
-        // An owner that can't listen owns its cache unshared, its address
-        // held by another process: one of another user, as any may hold an
-        // abstract name on Linux, or an owner of a deleted cache file whose
-        // inode this one's took (decision 6).
+        // Can't listen: another process holds the address, so own the cache unshared
+        // (`doc/11-shared-mode.md`, decision 6).
         let listener = cache
             .first_file()
             .and_then(|first_file| OwnerListener::listen(Arc::clone(cache), first_file).ok());
@@ -232,10 +167,7 @@ impl SharedCacheStore {
 }
 
 impl CacheStore for SharedCacheStore {
-    /// A read through this process's own store, once it owns the cache;
-    /// else through its owner, which hears its reads from disk itself, and
-    /// tells the read policy the connection holds of them: `reads` goes
-    /// unused then.
+    /// Through an owner, `reads` goes unused: the owner tells the connection's read policy.
     fn start_read<'s>(
         &'s self,
         path: &'s [u8],
@@ -254,10 +186,8 @@ impl CacheStore for SharedCacheStore {
         }
     }
 
-    /// This process's own store shut down, if it owns the cache; nothing of
-    /// its owner's otherwise. Either way, it takes over no cache from now
-    /// on: the flag is set under the hand-off's lock, which a process takes
-    /// the cache under, so a hand-off is done before it or never comes.
+    /// Set under the hand-off's lock, which a process takes the cache under: a hand-off is done
+    /// before it or never comes.
     fn shut_down(&self) -> Result<()> {
         self.hand_off().shut_down = true;
         match self.owned.get() {
@@ -266,8 +196,6 @@ impl CacheStore for SharedCacheStore {
         }
     }
 
-    /// This process's own store's answer, once it owns the cache; else its
-    /// owner's.
     fn known_size<'s>(&'s self, path: &'s [u8]) -> BoxFuture<'s, Option<u64>> {
         match self.server() {
             Server::Owned(store) => store.known_size(path),

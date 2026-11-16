@@ -11,17 +11,14 @@ use crate::cache::cache_stores::VersionIdSource;
 const MIB: u64 = 1 << 20;
 const ONE: NonZeroU8 = NonZeroU8::MIN;
 
-/// A queue letting `most` bytes be in flight, merging into `merged_up_to`.
 fn queue(most: u64, merged_up_to: u64) -> Arc<GetQueue> {
     Arc::new(GetQueue::new(NonZeroU64::new(most).unwrap(), merged_up_to))
 }
 
-/// Version `number` of the process's own cache.
 fn file(number: u64) -> FileVersionKey {
     FileVersionKey::new(VersionIdSource::OwnCache, FileVersionId::new(number))
 }
 
-/// The turn of a GET waiting for it, polled once: `None` while it waits.
 fn polled<T>(waiting: &mut BoxFuture<'_, T>) -> Option<T> {
     match waiting
         .as_mut()
@@ -32,7 +29,6 @@ fn polled<T>(waiting: &mut BoxFuture<'_, T>) -> Option<T> {
     }
 }
 
-/// A turn that sends its GET: its place, and the GETs joined to it.
 fn sent(turn: GetTurn) -> (GetPlace, JoinedParts) {
     match turn {
         GetTurn::Send { place, joined } => (place, joined),
@@ -47,7 +43,6 @@ fn joined(turn: GetTurn) -> JoinedGet {
     }
 }
 
-/// A GET's turn with room free and none waiting: at once.
 fn at_once(
     queue: &Arc<GetQueue>,
     file: FileVersionKey,
@@ -61,7 +56,6 @@ fn at_once(
     )
 }
 
-/// A file's bytes, each a function of its offset.
 fn body(len: u64) -> Bytes {
     (0..len)
         .map(|at| (at % 251) as u8)
@@ -94,8 +88,7 @@ fn gets_past_the_cap_wait_their_turn_first_come_first_served() {
     assert_eq!(queue.in_flight(), 0);
 }
 
-/// A GET's bytes count once for each racer; a GET bigger than the cap goes
-/// once nothing is in flight.
+/// Also: a GET bigger than the cap goes once nothing is in flight.
 #[test]
 fn a_gets_bytes_count_once_for_each_racer() {
     let two = NonZeroU8::new(2).unwrap();
@@ -122,21 +115,15 @@ fn a_get_given_up_on_leaves_the_queue_or_gives_its_place_back() {
     assert!(polled(&mut second).is_none());
     assert!(polled(&mut third).is_none());
 
-    // Before its turn: it leaves the queue.
     drop(second);
     assert_eq!(queue.waiting(), 1);
-    // Once its turn came, before it took it: its place goes to none, and
-    // back.
+    // third gets its turn but never takes it.
     drop(first);
     assert_eq!((queue.in_flight(), queue.waiting()), (MIB, 0));
     drop(third);
     assert_eq!(queue.in_flight(), 0);
 }
 
-/// When a waiting GET's turn comes, those of the file's bytes just before
-/// and after it join it: the one with the last bytes sends the GET, in the
-/// place of them all, and the others are handed theirs as the body brings
-/// them all.
 #[test]
 fn waiting_gets_of_adjacent_bytes_go_as_one() {
     let queue = queue(4 * MIB, 4 * MIB);
@@ -179,8 +166,6 @@ fn waiting_gets_of_adjacent_bytes_go_as_one() {
     drop(other_file);
 }
 
-/// GETs merge up to the size, as long as their bytes fit in flight, and
-/// only GETs of one request.
 #[test]
 fn waiting_gets_merge_up_to_a_size_and_the_room_left() {
     for (most, merged_up_to) in [(4 * MIB, 2 * MIB), (2 * MIB, 4 * MIB)] {
@@ -221,8 +206,6 @@ fn waiting_gets_merge_up_to_a_size_and_the_room_left() {
     let _racing = sent(polled(&mut racing).unwrap());
 }
 
-/// A merged GET given up on before its body is in, or before its sender
-/// took its turn, hands its joined GETs nothing: they wait again.
 #[test]
 fn a_merged_get_given_up_on_leaves_its_joined_gets_to_wait_again() {
     for taken in [true, false] {
@@ -248,8 +231,6 @@ fn a_merged_get_given_up_on_leaves_its_joined_gets_to_wait_again() {
     }
 }
 
-/// The first waiting GET waits for room for the GETs that join it too:
-/// room for itself alone doesn't send it.
 #[test]
 fn a_merged_get_waits_for_room_for_all_its_bytes() {
     let queue = queue(4 * MIB, 4 * MIB);

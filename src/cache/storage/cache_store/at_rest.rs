@@ -1,19 +1,9 @@
-//! The cache store at rest: whether its index and both tiers agree, for
-//! the tests and the fuzzer to check once every read, fill and eviction is
-//! done.
-
 use super::ObjectCache;
 use crate::cache::ChunkId;
 use crate::cache::policy::Tier;
 use crate::cache::storage::index::Location;
 
 impl ObjectCache {
-    /// Whether the index and both tiers agree, as they do once every read,
-    /// fill and eviction is done, and the I/O each started: no block in
-    /// flight, each entry names
-    /// a chunk that holds its block, each chunk that holds a block has an
-    /// entry naming it, and every other chunk is free. If so, the chunks
-    /// that hold a block, each with its tier; `Err` says where they don't.
     pub(in crate::cache) fn check_at_rest(
         &self,
     ) -> std::result::Result<Vec<(Tier, ChunkId)>, String> {

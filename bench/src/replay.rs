@@ -1,15 +1,5 @@
-//! [`ReplayPlan`]: the calls a traced workload made of its store, grouped as
-//! it made them, and [`Replayer`], which makes them again of another store
-//! with nothing between them: the reads alone, at the workload's own sizes,
-//! order and concurrency.
-//!
-//! A trace holds a setup (the table registered) and one pass or more over
-//! the queries, which make the same calls; the plan takes the first pass.
-//! Within a query, the calls no task made (planning: a HEAD) come first, in
-//! order; then each task's calls, in its order, every task at once, as
-//! DataFusion's partitions made them. A task's `get_ranges` call is replayed
-//! as one: the store under test merges its ranges as it would under
-//! DataFusion.
+//! Only the first pass is planned: every pass over the queries makes the same calls.
+//! A `get_ranges` replays as one call, so the store under test merges ranges as under DataFusion.
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -27,7 +17,6 @@ use crate::Error;
 use crate::request_trace::{RecordedRequest, RequestKind};
 use crate::table_store::TableLocation;
 
-/// One call a workload made of its store.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReplayCall {
     GetRanges {
@@ -47,11 +36,6 @@ pub enum ReplayCall {
 }
 
 impl ReplayCall {
-    /// Makes the call of `store`, and returns the bytes it read.
-    ///
-    /// # Errors
-    ///
-    /// If the store fails, or returns other than the bytes asked for.
     async fn make(&self, store: &dyn ObjectStore) -> Result<u64, Error> {
         match self {
             Self::GetRanges { object, ranges } => {
@@ -85,8 +69,6 @@ impl ReplayCall {
     }
 }
 
-/// One query's calls: those made outside any task, in order, then each
-/// task's, in order.
 #[derive(Debug)]
 pub struct QueryPlan {
     query: usize,
@@ -95,12 +77,10 @@ pub struct QueryPlan {
 }
 
 impl QueryPlan {
-    /// The query's number in its workload.
     pub fn query(&self) -> usize {
         self.query
     }
 
-    /// Calls in all.
     pub fn len(&self) -> usize {
         self.planning.len() + self.tasks.iter().map(|task| task.len()).sum::<usize>()
     }
@@ -110,15 +90,12 @@ impl QueryPlan {
     }
 }
 
-/// A traced workload's calls, ready to make again of a table at another
-/// location.
 #[derive(Debug)]
 pub struct ReplayPlan {
     setup: Vec<ReplayCall>,
     queries: Vec<QueryPlan>,
 }
 
-/// A call as the trace recorded it: when, by which task, what.
 struct TimedCall {
     issued: Duration,
     task: Option<u64>,
@@ -126,11 +103,6 @@ struct TimedCall {
 }
 
 impl ReplayPlan {
-    /// The calls in `trace`, the objects in it put at `table`'s.
-    ///
-    /// # Errors
-    ///
-    /// If a traced object has no counterpart at `table`.
     pub fn new(trace: &[RecordedRequest], table: &TableLocation) -> Result<Self, Error> {
         let pass = trace
             .iter()
@@ -178,15 +150,11 @@ impl ReplayPlan {
         Ok(Self { setup, queries })
     }
 
-    /// `p{pass}q{query}` as numbers.
     fn pass_and_query(label: &str) -> Option<(usize, usize)> {
         let (pass, query) = label.strip_prefix('p')?.split_once('q')?;
         Some((pass.parse().ok()?, query.parse().ok()?))
     }
 
-    /// The calls `requests` record, in the order issued: a `get_ranges` call
-    /// from its batch's ranges (its GETs are the store's own doing), a GET
-    /// outside a batch, a HEAD, a list.
     fn timed_calls(
         requests: &[&RecordedRequest],
         table: &TableLocation,
@@ -222,8 +190,7 @@ impl ReplayPlan {
                 (RequestKind::List, _) => calls.push(timed(ReplayCall::List {
                     prefix: table.path()?,
                 })),
-                // A batch's GETs, and a range outside a batch, which no
-                // trace holds.
+                // A batch's GETs are the store's own doing; no trace holds a range outside one.
                 _ => {}
             }
         }
@@ -232,18 +199,15 @@ impl ReplayPlan {
         Ok(calls)
     }
 
-    /// The calls made registering the table, in order.
     pub fn setup(&self) -> &[ReplayCall] {
         &self.setup
     }
 
-    /// The queries, in order.
     pub fn queries(&self) -> &[QueryPlan] {
         &self.queries
     }
 }
 
-/// One call made again: the bytes it read, and how long it took.
 #[derive(Clone, Copy, Debug)]
 pub struct CallTime {
     bytes: u64,
@@ -260,7 +224,6 @@ impl CallTime {
     }
 }
 
-/// A query made again: how long it took, and each call's time.
 #[derive(Debug)]
 pub struct QueryReplay {
     elapsed: Duration,
@@ -281,23 +244,16 @@ impl QueryReplay {
     }
 }
 
-/// Makes a plan's calls of a store, each task's calls back to back.
 pub struct Replayer {
     store: Arc<dyn ObjectStore>,
     copies: NonZeroUsize,
 }
 
 impl Replayer {
-    /// Replays of `store`, each query's tasks run `copies` times at once.
     pub fn new(store: Arc<dyn ObjectStore>, copies: NonZeroUsize) -> Self {
         Self { store, copies }
     }
 
-    /// Makes `calls` one after another.
-    ///
-    /// # Errors
-    ///
-    /// If a call fails.
     pub async fn sequence(&self, calls: &[ReplayCall]) -> Result<QueryReplay, Error> {
         let start = Instant::now();
         let calls = Self::in_order(self.store.as_ref(), calls).await?;
@@ -307,13 +263,6 @@ impl Replayer {
         })
     }
 
-    /// Makes `query`'s calls: those outside a task in order, then every
-    /// task's, `copies` times over, all at once, each task on a tokio task
-    /// of its own.
-    ///
-    /// # Errors
-    ///
-    /// If a call fails, or a task panics.
     pub async fn query(&self, query: &QueryPlan) -> Result<QueryReplay, Error> {
         let start = Instant::now();
         let mut calls = Self::in_order(self.store.as_ref(), &query.planning).await?;
@@ -351,7 +300,6 @@ impl Replayer {
     }
 }
 
-/// Latencies summed up: p50, p99 and the largest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LatencySummary {
     p50: Duration,
@@ -360,14 +308,10 @@ pub struct LatencySummary {
 }
 
 impl LatencySummary {
-    /// A summary read off elsewhere, as from a histogram.
     pub(crate) fn new(p50: Duration, p99: Duration, max: Duration) -> Self {
         Self { p50, p99, max }
     }
 
-    /// `latencies` summed up, or `None` if there are none. A percentile is
-    /// the nearest rank's latency: the smallest that `p`% of the calls take
-    /// at most.
     pub fn of(latencies: impl IntoIterator<Item = Duration>) -> Option<Self> {
         let mut sorted: Vec<_> = latencies.into_iter().collect();
         sorted.sort_unstable();
@@ -406,8 +350,6 @@ impl fmt::Display for LatencySummary {
     }
 }
 
-/// How many bytes a call read, in the groups the workload's GETs split
-/// into: small ones that cost latency, large ones that cost bandwidth.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CallSize {
     Under64KiB,
@@ -450,9 +392,6 @@ mod tests {
     use super::*;
     use crate::request_trace::{RequestTrace, TracedStore};
 
-    /// A workload traced through a [`TracedStore`] replays as the same
-    /// calls: setup and planning in order, each task's calls in its order,
-    /// the objects moved to the replay's table.
     #[tokio::test]
     async fn a_traced_workload_replays_as_traced() {
         let inner = Arc::new(InMemory::new());
@@ -508,7 +447,6 @@ mod tests {
         let mut tasks: Vec<Vec<ReplayCall>> =
             query.tasks.iter().map(|task| task.to_vec()).collect();
         tasks.sort_by_key(|calls| format!("{calls:?}"));
-        // A call that asks for one range.
         let one = |range: Range<u64>| vec![range];
         assert_eq!(
             tasks,

@@ -1,7 +1,3 @@
-//! The store a benchmark reads a table through: the table's location, a
-//! file or a directory of files on the local file system, in GCS or in S3,
-//! moving its HTTP as asked, and t4 in front of it if asked.
-
 use std::num::{NonZeroU8, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,20 +20,13 @@ use crate::Error;
 use crate::io_latency::{IoLatencies, TimedReads};
 use crate::ktls_transport::KtlsConnector;
 
-/// Where a table's files are, as a URL: one file, or a directory of them,
-/// whose URL ends in `/`, as DataFusion reads a table's URL.
+/// A directory's URL ends in `/`, as DataFusion reads a table's URL.
 #[derive(Clone, Debug)]
 pub struct TableLocation {
     url: Url,
 }
 
 impl TableLocation {
-    /// A `gs://bucket/path` or `s3://bucket/path` URL as given, or a local
-    /// path: a directory's URL gets its `/`.
-    ///
-    /// # Errors
-    ///
-    /// If `location` isn't a URL, or a local path that exists.
     pub fn parse(location: &str) -> Result<Self, String> {
         let url = if location.starts_with("gs://") || location.starts_with("s3://") {
             Url::parse(location).map_err(|error| format!("{location}: {error}"))?
@@ -58,23 +47,12 @@ impl TableLocation {
         &self.url
     }
 
-    /// The URL of the store that serves the table: its scheme and bucket.
     pub fn store_url(&self) -> Url {
         Url::parse(&self.url[..url::Position::BeforePath])
             .expect("a URL's scheme and host are a URL")
     }
 
-    /// The store that holds the table's files, a cloud one moving its HTTP
-    /// as `http` says, configured from the environment (GCS's `GOOGLE_*`,
-    /// S3's `AWS_*` variables). A GCS store takes `GCS_ACCESS_TOKEN` as its
-    /// credential if set: a box outside Google Cloud, with no credentials of
-    /// Google's, given the hour's token `gcloud auth print-access-token`
-    /// prints.
-    ///
-    /// # Errors
-    ///
-    /// If the URL names no store this harness knows, or the store can't be
-    /// made.
+    /// `GCS_ACCESS_TOKEN` serves a box outside Google Cloud: `gcloud auth print-access-token`'s.
     pub fn origin(&self, http: &StoreHttp) -> object_store::Result<Arc<dyn ObjectStore>> {
         let bucket = self.url.host_str().unwrap_or_default();
         match self.url.scheme() {
@@ -103,22 +81,10 @@ impl TableLocation {
         }
     }
 
-    /// The table's file, or its directory, in its store.
-    ///
-    /// # Errors
-    ///
-    /// If the URL's path isn't a valid object path.
     pub fn path(&self) -> object_store::Result<Path> {
         Ok(Path::from_url_path(self.url.path())?)
     }
 
-    /// The object in this table that stands for `object`, a file of the
-    /// same table at another location: the table's file itself, or the file
-    /// of `object`'s name in the table's directory.
-    ///
-    /// # Errors
-    ///
-    /// If the table's path isn't valid, or `object` has no file name.
     pub fn counterpart(&self, object: &Path) -> object_store::Result<Path> {
         let path = self.path()?;
         if !self.url.path().ends_with('/') {
@@ -134,33 +100,21 @@ impl TableLocation {
     }
 }
 
-/// How a cloud store moves its HTTP: its transport, the threads it runs on,
-/// and the requests it has in flight at most.
+/// How a cloud store moves its HTTP.
 #[derive(clap::Args, Debug)]
 pub struct HttpOptions {
     /// The transport.
     #[arg(long = "http", value_enum, default_value_t)]
     transport: HttpTransport,
-    /// Run a cloud store's HTTP, its bodies read and decrypted included, on
-    /// a runtime of this many threads of its own, apart from the work it
-    /// serves; on the threads of that work unless given.
+    /// Run a cloud store's HTTP on a runtime of this many threads of its own.
     #[arg(long = "io-threads")]
     io_threads: Option<NonZeroUsize>,
-    /// A cloud store's requests in flight at most, a GET's until its body
-    /// is all in (object_store's `LimitStore`); no limit unless given. What
-    /// fills the NIC and queues no more: its bytes a second times a GET's
-    /// time unloaded, over a GET's bytes; about 190 for 50 Gbit/s and t4's
-    /// 1 MiB GETs at 32 ms.
+    /// A cloud store's requests in flight at most; about 190 fills 50 Gbit/s with 1 MiB GETs.
     #[arg(long = "requests-in-flight")]
     requests_in_flight: Option<NonZeroUsize>,
 }
 
 impl HttpOptions {
-    /// The HTTP these options ask for, its threads started if asked.
-    ///
-    /// # Errors
-    ///
-    /// If the threads can't be started.
     pub fn start(&self) -> std::io::Result<StoreHttp> {
         Ok(StoreHttp {
             transport: self.transport,
@@ -170,8 +124,6 @@ impl HttpOptions {
     }
 }
 
-/// A cloud store's HTTP as [`HttpOptions`] asked for it, its threads
-/// running while it lives.
 pub struct StoreHttp {
     transport: HttpTransport,
     io_threads: Option<IoThreads>,
@@ -179,8 +131,6 @@ pub struct StoreHttp {
 }
 
 impl StoreHttp {
-    /// A cloud store's connector: the transport, on the threads of its own
-    /// if there are any.
     fn connector(&self) -> StoreConnector {
         StoreConnector {
             transport: self.transport,
@@ -188,7 +138,6 @@ impl StoreHttp {
         }
     }
 
-    /// `store`, its requests in flight capped if asked.
     fn limited(&self, store: impl ObjectStore) -> Arc<dyn ObjectStore> {
         match self.requests_in_flight {
             Some(most) => Arc::new(LimitStore::new(store, most.get())),
@@ -197,9 +146,7 @@ impl StoreHttp {
     }
 }
 
-/// The threads of a cloud store's HTTP: a tokio runtime of their own. It
-/// shuts down without waiting when dropped, as a runtime dropped on
-/// another runtime's thread would panic.
+/// Shuts down without waiting on drop: a runtime dropped on another runtime's thread panics.
 struct IoThreads {
     runtime: Option<Runtime>,
 }
@@ -233,19 +180,15 @@ impl Drop for IoThreads {
     }
 }
 
-/// How a cloud store moves its HTTP.
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 enum HttpTransport {
     /// object_store's own: reqwest over hyper and rustls.
     #[default]
     Reqwest,
-    /// [`KtlsConnector`]: the kernel decrypts, into the body's own buffer
-    /// (Linux only).
+    /// The kernel decrypts, into the body's own buffer (Linux only).
     Ktls,
 }
 
-/// A cloud store's HTTP connector: its transport, run on `io`'s threads if
-/// given, else on the threads that call it.
 #[derive(Debug)]
 struct StoreConnector {
     transport: HttpTransport,
@@ -279,39 +222,26 @@ pub struct CacheOptions {
     /// Each cache file's size, in GiB.
     #[arg(long = "cache-disk-gib")]
     disk_gib: Option<u64>,
-    /// The I/Os to the cache files in flight at most, all of them together;
-    /// t4's default unless given.
+    /// The cache files' I/Os in flight at most, all together; t4's default unless given.
     #[arg(long = "cache-queue-depth")]
     queue_depth: Option<u32>,
-    /// Race each GET of t4's once more if its body isn't all in by this
-    /// quantile of the GET times t4 heard lately ([`RaceStragglers`]), or
-    /// never: t4's default, the p90, unless given.
+    /// Race a GET not done by this quantile of recent GET times; t4's default, p90.
     #[arg(long = "race-at", value_enum, default_value_t)]
     race_at: RaceAt,
-    /// How many requests race for a Parquet or Vortex file's footer, its
-    /// last 2 MiB (`FetchRuns::racing_footers`); given more than once,
-    /// sessions take them in turn, the first session the first. t4's
-    /// default unless given.
+    /// Requests racing for a file's 2 MiB footer; given more than once, sessions take turns.
     #[arg(long = "footer-race")]
     footer_races: Vec<NonZeroU8>,
-    /// The NIC's rate, in Gbit/s: t4 caps its GETs' bytes in flight at
-    /// what fills it, this rate times `--cache-unloaded-get-ms`, and GETs
-    /// past it wait their turn in t4. t4's default, 50 Gbit/s and 32 ms,
-    /// unless given.
+    /// The NIC's rate in Gbit/s, for t4's cap on GET bytes in flight; t4's default, 50.
     #[arg(long = "cache-network-gbit")]
     network_gbit: Option<f64>,
-    /// What a GET of a block takes with little else in flight, in ms: the
-    /// other half of t4's cap.
+    /// A block GET's time with little else in flight, in ms: the other half of t4's cap.
     #[arg(long = "cache-unloaded-get-ms", default_value_t = 32.0)]
     unloaded_get_ms: f64,
-    /// While t4's GETs wait their turn, those of adjacent bytes of a file
-    /// go as one GET of this many MiB at most, each apart if 0; t4's
-    /// default, 4 MiB, unless given.
+    /// Merge waiting GETs of adjacent bytes up to this many MiB, 0 for none; t4's default, 4.
     #[arg(long = "cache-merge-waiting-mib")]
     merge_waiting_mib: Option<u64>,
 }
 
-/// The quantile of the GET times heard that t4 races a GET past, if any.
 #[derive(Clone, Copy, Default, ValueEnum)]
 enum RaceAt {
     #[default]
@@ -331,41 +261,28 @@ impl RaceAt {
     }
 }
 
-/// Which policy t4 runs.
 #[derive(Clone, Copy, ValueEnum)]
 enum CachePolicyChoice {
-    /// t4's default, a CLOCK for each tier: fetched blocks go to memory,
-    /// memory's victims to disk.
+    /// t4's default: a CLOCK per tier, memory's victims to disk.
     Clock,
-    /// Every block in memory ([`FixedPlacementPolicy`]): memory hits alone.
+    /// Every block in memory: memory hits alone.
     Memory,
-    /// Every block on disk ([`FixedPlacementPolicy`]): disk hits alone.
+    /// Every block on disk: disk hits alone.
     Disk,
-    /// No block kept ([`FixedPlacementPolicy`]): every read from the
-    /// remote through t4, what it costs to go through t4 at all.
+    /// No block kept: what going through t4 at all costs.
     None,
 }
 
 impl CacheOptions {
-    /// Whether t4 is asked for.
     pub fn is_set(&self) -> bool {
         self.policy.is_some()
     }
 
-    /// How many requests race for a footer in session `session`, from 0,
-    /// if `--footer-race` says.
     pub fn footer_race(&self, session: usize) -> Option<NonZeroU8> {
         (!self.footer_races.is_empty())
             .then(|| self.footer_races[session % self.footer_races.len()])
     }
 
-    /// `origin` read through t4, if asked, for session `session`, from 0,
-    /// every I/O t4 makes timed in `latencies`; else `origin` itself.
-    ///
-    /// # Errors
-    ///
-    /// If a policy is given without the capacities and path, or t4 can't be
-    /// built.
     pub fn in_front_of(
         &self,
         origin: Arc<dyn ObjectStore>,
@@ -448,9 +365,7 @@ mod tests {
         .unwrap()
     }
 
-    /// The HTTP's own threads run what the connector hands them, and stop
-    /// when dropped on another runtime's thread, which would otherwise
-    /// panic.
+    /// The drop is on a runtime's thread, where an IoThreads that waited would panic.
     #[tokio::test]
     async fn http_threads_run_apart_and_stop_when_dropped() {
         let http = http(Some(2), None);
@@ -463,7 +378,6 @@ mod tests {
         drop(http);
     }
 
-    /// A capped store holds a GET's place until its body is dropped.
     #[tokio::test]
     async fn a_capped_store_holds_a_get_until_its_body_is_done() {
         let object = Path::from("a");
@@ -490,8 +404,6 @@ mod tests {
         );
     }
 
-    /// A file location stands for every file of the table; a directory
-    /// for the file of the same name in it.
     #[test]
     fn counterparts_of_traced_objects() {
         let traced = Path::from("clickbench/partitioned/hits_7.parquet");

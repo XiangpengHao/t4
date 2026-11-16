@@ -1,19 +1,3 @@
-//! [`T4Caching`]: the cache's front end (`doc/03-cache.md`, decision 10),
-//! over an [`ObjectStore`], whose files' reads the cache serves, and which
-//! fetches what only the remote holds itself. [`T4CachingBuilder`] makes
-//! one.
-//!
-//! Integrations read through its API (`doc/09-vortex-integration.md`,
-//! decision 1): a file opened once ([`T4Caching::open`]), a [`FileHandle`],
-//! read a range at a time. One integration is t4's own: `T4Caching` is an
-//! [`ObjectStore`] too (`object_store_integration`).
-//!
-//! - **What a file is,** the inner store says once: its first answer for the
-//!   path, a list through the cache that named it or else a HEAD, which the
-//!   cache trusts (decision 11). A hit asks the store nothing. A remote read
-//!   fetches with `If-Match` on that answer's e_tag, so a file changed since
-//!   is caught there, and the cache forgets the path.
-
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::ops::Range;
@@ -42,24 +26,17 @@ use super::storage::{DiskFile, FileAllocation};
 use super::{BLOCK_SIZE_U64, InsertOrAbort};
 use crate::io::sync::Arc;
 
-/// A cache of the reads of an [`ObjectStore`], in memory and on disk, and
-/// an [`ObjectStore`] itself. [`Self::builder`] makes one. A clone shares
-/// the cache: its tiers, its GETs and the files it knows.
+/// A cache of an [`ObjectStore`]'s reads, in memory and on disk, and an [`ObjectStore`] itself.
+/// A clone shares the cache.
 #[derive(Clone)]
 pub struct T4Caching {
     inner: Arc<dyn ObjectStore>,
-    /// The cache store: this process's own, or its owner's, until that
-    /// owner goes (`doc/11-shared-mode.md`).
     cache_store: Arc<dyn CacheStore>,
-    /// The network half: the GETs of what only the remote holds, and the
-    /// read policy that plans them.
     network: Network,
-    /// Shared with the uploads and deletes in flight, which forget their
-    /// paths once done.
     known: Arc<KnownFiles>,
 }
 
-/// Makes a [`T4Caching`]: where it caches, how much, and by what policies.
+/// Makes a [`T4Caching`].
 ///
 /// ```no_run
 /// # fn example(s3: std::sync::Arc<dyn object_store::ObjectStore>) -> t4::Result<()> {
@@ -87,71 +64,49 @@ pub struct T4CachingBuilder {
 }
 
 impl T4CachingBuilder {
-    /// The NIC's rate, in bytes a second, that t4 sizes its cap on bytes in
-    /// flight for unless told (`Self::with_network_rate`): 50 Gbit/s.
+    /// The NIC's rate t4 assumes unless told, in bytes a second: 50 Gbit/s.
     pub const DEFAULT_NETWORK_RATE: u64 = 50_000_000_000 / 8;
-    /// What a GET of a block takes with little else in flight, unless told:
-    /// the other half of the cap.
     pub const DEFAULT_UNLOADED_GET_TIME: Duration = Duration::from_millis(32);
-    /// The most bytes waiting GETs go as, merged, unless told
-    /// (`Self::with_waiting_gets_merged`): the default read policy's GET of
-    /// a normal read, 4 MiB, so that merging never undoes its split.
+    /// The default read policy's normal GET, so that merging never undoes its split.
     pub const DEFAULT_MERGED_UP_TO: u64 = FetchRuns::NORMAL_GET_MOST;
-    /// How long a cache built for sharing tries to reach the owner of its
-    /// files (`Self::with_multiprocess_sharing`) before it fails with `Error::Busy`: an
-    /// owner starting or leaving refuses connections a while. An owner of
-    /// another protocol version says so, and the cache fails at once.
+    /// How long a cache built for sharing tries to reach its owner before `Error::Busy`: an
+    /// owner starting or leaving refuses connections a while.
     pub const OWNER_WAIT: Duration = Duration::from_secs(10);
 
-    /// Memory for cached bytes, in whole 1 MiB blocks, one at least.
-    /// Required.
+    /// Memory for cached bytes, in whole 1 MiB blocks, one at least. Required.
     pub fn with_memory_capacity(mut self, bytes: u64) -> Self {
         self.memory_capacity = Some(bytes);
         self
     }
 
-    /// A cache file at `path`, made if missing, of `capacity` bytes: one a
-    /// drive, one at least. t4 stripes its disk tier over them by 1 MiB
-    /// chunk, each file holding as many chunks as the smallest has room for
-    /// (`doc/04-multi-device.md`). Whatever a file held is nothing to the
-    /// cache, which starts cold every time (decision 9).
+    /// A cache file of `capacity` bytes, one a drive, one at least. Each file holds as many
+    /// chunks as the smallest has room for.
     pub fn with_disk_file(mut self, path: impl Into<PathBuf>, capacity: u64) -> Self {
         self.disk_files.push(DiskFile::new(path.into(), capacity));
         self
     }
 
-    /// The I/Os to the cache files in flight at most, all of them together;
-    /// 64 unless set.
+    /// The most I/Os in flight to all cache files together; 64 unless set.
     pub fn with_queue_depth(mut self, queue_depth: u32) -> Self {
         self.queue_depth = queue_depth;
         self
     }
 
-    /// Whether the cache files are read and written past the page cache; so
-    /// unless set.
+    /// Whether the cache files bypass the page cache; true unless set.
     pub fn with_direct_io(mut self, direct_io: bool) -> Self {
         self.direct_io = direct_io;
         self
     }
 
-    /// The cache files are allocated on demand: each takes room on its
-    /// drive as blocks are written to it; and a block is cached on disk
-    /// only while every drive keeps 64 MiB and two blocks free, as
-    /// Kismet's rule is. For a user's machine, whose drive the cache shares
-    /// (`doc/10-spiral-integration.md`, decision 9). Unless set, they are
-    /// allocated eagerly: each file takes its whole capacity as the cache
-    /// is built, and no write finds its drive full.
+    /// For a drive the cache shares: files grow as blocks are written, and a block goes to disk
+    /// only while every drive keeps 64 MiB and two blocks free. Eager (whole capacity) unless set.
     pub fn with_on_demand_disk_allocation(mut self) -> Self {
         self.disk_allocation = FileAllocation::on_demand();
         self
     }
 
-    /// The placement policy, where blocks live, which `build` makes for the
-    /// tiers' chunk counts, once it knows them; a CLOCK for each tier
-    /// ([`ClockPolicy`](super::policy::ClockPolicy)) unless set. A cache
-    /// built for sharing makes it once it owns the cache files, which may
-    /// be later, on another thread: as a client whose owner went
-    /// (`Self::with_multiprocess_sharing`).
+    /// A CLOCK per tier unless set. A cache built for sharing may build it later, on another
+    /// thread, when it takes over from an owner that went.
     pub fn with_placement_policy<P: PlacementPolicy + 'static>(
         mut self,
         build: impl FnOnce(TierSizes) -> P + Send + 'static,
@@ -160,20 +115,14 @@ impl T4CachingBuilder {
         self
     }
 
-    /// The read policy, how reads are served: which GETs fetch what they
-    /// only the remote holds, how many race. Unless set, [`RaceStragglers`]
-    /// at the p90: it plans as `FetchRuns` does, a Parquet or Vortex file's
-    /// footer raced, and races a GET late once it runs past the p90 of the
-    /// GET times heard, given a timer (`Self::with_sleep`).
+    /// [`RaceStragglers`] at the p90 unless set.
     pub fn with_read_policy(mut self, policy: impl ReadPolicy + 'static) -> Self {
         self.reads = Some(Arc::new(policy));
         self
     }
 
-    /// The timer a GET's late racer waits on (`PlannedGet::with_late_race`):
-    /// the caller's runtime's, `tokio::time::sleep` boxed, say, as t4 runs
-    /// on none of its own. Without it no GET is raced late, by the default
-    /// read policy either.
+    /// The timer a GET's late racer waits on, `tokio::time::sleep` boxed, say: t4 has no
+    /// runtime of its own. Without it no GET is raced late.
     pub fn with_sleep(
         mut self,
         sleep: impl Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync + 'static,
@@ -182,57 +131,27 @@ impl T4CachingBuilder {
         self
     }
 
-    /// The network t4's GETs to the inner store share: `bytes_per_second`,
-    /// the NIC's rate, and `unloaded_get_time`, what a GET of a block takes
-    /// when little else is in flight. t4 caps the bytes its GETs have in
-    /// flight, all their racers', at what fills the NIC, the two multiplied
-    /// (`doc/06-read-modes.md`, decision 11): 200 MB for 50 Gbit/s and
-    /// 32 ms. GETs past it wait their turn, first come, first served, each
-    /// until another's body is in; a GET bigger than the cap goes once
-    /// nothing else is in flight, and a late racer goes at once, beside
-    /// it. Unless set, [`Self::DEFAULT_NETWORK_RATE`] and
-    /// [`Self::DEFAULT_UNLOADED_GET_TIME`], 200 MB: a NIC faster than
-    /// 50 Gbit/s wants its own.
+    /// Caps the bytes t4's GETs have in flight at `bytes_per_second * unloaded_get_time`, what
+    /// fills the NIC; GETs past it wait. 50 Gbit/s and 32 ms, 200 MB, unless set.
     pub fn with_network_rate(mut self, bytes_per_second: u64, unloaded_get_time: Duration) -> Self {
         self.network_rate = (bytes_per_second, unloaded_get_time);
         self
     }
 
-    /// While GETs wait their turn (`Self::with_network_rate`), those of one
-    /// request for adjacent bytes of a file go as one GET, of `up_to` bytes
-    /// at most, when the first of them is due; each apart if 0. Unless set,
-    /// [`Self::DEFAULT_MERGED_UP_TO`], 4 MiB.
+    /// Waiting GETs of one request for adjacent bytes go as one GET of `up_to` bytes at most;
+    /// each apart if 0.
     pub fn with_waiting_gets_merged(mut self, up_to: u64) -> Self {
         self.merged_up_to = up_to;
         self
     }
 
-    /// Shares the cache with the other processes on the machine that build
-    /// one for sharing on the same cache files (`doc/11-shared-mode.md`).
-    /// The first to build owns the cache and serves it to the others, its
-    /// clients, from a thread of its own; another, rather than fail with
-    /// `Error::Busy`, becomes a client. A client's tier settings and
-    /// placement policy count only once it owns the cache; its read policy
-    /// and its credentials, the inner store's, stay its own. Off unless
-    /// set: a second cache on owned files is `Busy`.
+    /// Shares the cache with other processes built for sharing on the same files: the first owns
+    /// it, the rest are its clients, whose tier settings count only once one takes over.
     pub fn with_multiprocess_sharing(mut self) -> Self {
         self.sharing = true;
         self
     }
 
-    /// The store: its cache files made and sized, its memory mapped, its
-    /// policy built; or, built for sharing on files another cache owns, a
-    /// client of that cache's.
-    ///
-    /// # Errors
-    ///
-    /// If the memory capacity or a disk file wasn't given, the queue depth
-    /// or the network's bytes in flight are 0, or a cache file can't be
-    /// made, sized and opened, or the memory mapped. `Error::Busy` if
-    /// another cache owns a cache file, and either this one isn't built for
-    /// sharing or that one's owner didn't admit it within
-    /// [`Self::OWNER_WAIT`], or speaks another version of the protocol
-    /// between them.
     pub fn build(mut self) -> crate::Result<T4Caching> {
         let memory_chunks =
             Self::chunks(self.memory_capacity, "T4Caching needs a memory capacity")?;
@@ -279,8 +198,6 @@ impl T4CachingBuilder {
         })
     }
 
-    /// The whole blocks `capacity` holds, one at least; `missing` if it
-    /// wasn't given.
     fn chunks(capacity: Option<u64>, missing: &'static str) -> crate::Result<NonZeroU32> {
         let capacity = capacity.ok_or(crate::Error::InvalidArgument(missing))?;
         let chunks = (capacity / BLOCK_SIZE_U64).clamp(1, u64::from(u32::MAX));
@@ -305,7 +222,6 @@ impl fmt::Debug for T4CachingBuilder {
 }
 
 impl T4Caching {
-    /// A builder of a cache over `inner`.
     pub fn builder(inner: Arc<dyn ObjectStore>) -> T4CachingBuilder {
         T4CachingBuilder {
             inner,
@@ -326,59 +242,33 @@ impl T4Caching {
         }
     }
 
-    /// The file at `location`, opened for reads: what the inner store says
-    /// of it, asked once, unless a list or a read through the cache asked
-    /// already (decision 11).
-    ///
-    /// # Errors
-    ///
-    /// The inner store's HEAD's: the file isn't there, say.
+    /// Opens the file at `location`, with a HEAD only if no list or read through the cache saw it.
     pub async fn open(&self, location: &Path) -> object_store::Result<FileHandle> {
         let meta = self.meta_of(location).await?;
         Ok(FileHandle::new(self.clone(), meta))
     }
 
-    /// The file `listed` names, opened for reads as a list of the inner
-    /// store's said it is, asking nothing; unless the cache knows the path
-    /// already, as it keeps to what it heard first (decision 11).
+    /// Opens the file `listed` names with no HEAD; a path the cache knows keeps what it heard
+    /// first.
     pub fn open_listed(&self, listed: ObjectMeta) -> FileHandle {
         let listed = Arc::new(listed);
         let meta = self.known.remember(&listed.location, Arc::clone(&listed));
         FileHandle::new(self.clone(), meta)
     }
 
-    /// The size of the version of the file at `location` the cache holds,
-    /// if it holds one: read through the cache since it was built, or kept
-    /// on disk across a restart (`doc/10-spiral-integration.md`, decision
-    /// 7). Asks the inner store nothing, so a caller that names each version
-    /// apart, as Spiral does, can open a file it cached before with
-    /// [`Self::open_listed`] and no HEAD. A path whose file changed since
-    /// the cache last read it answers the old version's size.
+    /// The size of the version of `location` the cache holds, asking the inner store nothing: a
+    /// file changed since the cache read it answers the old version's size.
     pub async fn known_size(&self, location: &Path) -> Option<u64> {
         let path = location.as_ref().as_bytes();
         self.cache_store.known_size(path).await
     }
 
-    /// Writes no more to disk, and keeps the disk tier for the next cache on
-    /// these files, as dropping the cache does (`doc/10-spiral-integration.md`,
-    /// decision 7): for a process that exits without dropping its cache, as
-    /// an app's exit hook runs before the process ends around it. Reads go
-    /// on, from memory, disk and the inner store, but no block is written to
-    /// disk again. A client of a shared cache keeps nothing, as its owner
-    /// holds the disk tier, and takes over no cache once its owner goes.
-    /// Blocks while it flushes the cache files.
-    ///
-    /// # Errors
-    ///
-    /// If the snapshot can't be kept: the next cache on these files starts
-    /// cold.
+    /// Keeps the disk tier for the next cache on these files, as dropping does, for a process
+    /// that exits without dropping its cache. Reads go on; nothing more is written to disk.
     pub fn shut_down(&self) -> crate::Result<()> {
         self.cache_store.shut_down()
     }
 
-    /// The bytes `range` asks of a file of `file_size`, as the inner store
-    /// takes them: a bounded range clamped to the file's end, an error if
-    /// it starts past it.
     fn bytes_of(range: &GetRange, file_size: u64) -> object_store::Result<Range<u64>> {
         range
             .as_range(file_size)
@@ -388,8 +278,6 @@ impl T4Caching {
             })
     }
 
-    /// What the inner store says of the file at `location`: what it said
-    /// first, unless the cache forgot it since.
     async fn meta_of(&self, location: &Path) -> object_store::Result<Arc<ObjectMeta>> {
         if let Some(meta) = self.known.get(location) {
             return Ok(meta);
@@ -398,16 +286,6 @@ impl T4Caching {
         Ok(self.known.remember(location, meta))
     }
 
-    /// `range` of the version of the file at `location` with `e_tag` and
-    /// `size`, within it, from memory, disk and fetches of what only the
-    /// remote holds, each fetch's bytes put into the read's output and cached
-    /// as the policy says as they come in; and the blocks other reads are
-    /// fetching, taken from where those fetches cache them, or fetched again
-    /// if they don't. The cache store is this process's own, or its owner's,
-    /// whose storage half does the same for it (`doc/11-shared-mode.md`).
-    /// `None` if the cache can't serve it: it can't hold the file, a read of
-    /// the cache file failed, a fetch found the file changed, which the cache
-    /// forgets then, or the owner failed the read or went.
     async fn read_through(
         &self,
         location: &Path,
@@ -432,11 +310,7 @@ impl T4Caching {
             let Ok(receivers) = read.fetches() else {
                 return Ok(None);
             };
-            // Every fetch is in flight at once, a read's remote blocks keeping
-            // the NIC busy, and beside the read's work on the tiers: its disk
-            // reads, and its waits for the blocks other reads fetch. The GETs
-            // are polled first, so they are sent before any of it is waited
-            // on.
+            // The GETs are polled first, so they are sent before the tier work is waited on.
             let fetches = join_all(
                 receivers
                     .into_iter()
@@ -454,9 +328,6 @@ impl T4Caching {
                 }
             }
             match worked {
-                // Blocks the read waited for that no fetch cached: it
-                // fetches them itself, or waits again for a read that
-                // fetches them now.
                 Ok(true) => {}
                 Ok(false) => return Ok(read.into_bytes()),
                 Err(_) => return Ok(None),
@@ -464,9 +335,7 @@ impl T4Caching {
         }
     }
 
-    /// Whether the cache's index and tiers agree, as they must once nothing
-    /// is in flight; if so, the chunks that hold a block, each with its tier.
-    /// For the fuzz target (`fuzz/`), not part of the API.
+    /// For the fuzz target, not part of the API.
     #[cfg(feature = "__fuzz")]
     #[doc(hidden)]
     pub fn check_at_rest(&self) -> Result<Vec<(Tier, ChunkId)>, String> {
@@ -476,7 +345,6 @@ impl T4Caching {
         }
     }
 
-    /// The cache store read through now: for tests.
     #[cfg(all(test, not(feature = "shuttle")))]
     pub(super) fn cache_store(&self) -> Arc<dyn CacheStore> {
         Arc::clone(&self.cache_store)
@@ -497,7 +365,6 @@ impl fmt::Debug for T4Caching {
     }
 }
 
-/// What the inner store said of each file the cache has read, by path.
 struct KnownFiles {
     metas: BBTreeMap<Box<[u8]>, Arc<ObjectMeta>>,
 }
@@ -514,8 +381,6 @@ impl KnownFiles {
             .read(Self::key(location), |_, meta| Arc::clone(meta))
     }
 
-    /// Keeps `meta` for `location`, unless another read kept an answer
-    /// first; returns the one kept.
     fn remember(&self, location: &Path, meta: Arc<ObjectMeta>) -> Arc<ObjectMeta> {
         self.metas
             .get_or_insert(Self::key(location).into(), meta, |_, kept| Arc::clone(kept))
@@ -526,9 +391,6 @@ impl KnownFiles {
         self.metas.remove(Self::key(location));
     }
 
-    /// `listed`, a list of the inner store's, each file it names kept as the
-    /// store's answer for that path, unless one was kept first: a read of a
-    /// listed file asks for no HEAD.
     fn remembering(
         self: &Arc<Self>,
         listed: BoxStream<'static, object_store::Result<ObjectMeta>>,

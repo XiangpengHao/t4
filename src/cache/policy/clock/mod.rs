@@ -1,23 +1,17 @@
-//! [`ClockPolicy`]: the default policy, a lock-free CLOCK for each tier.
-
 use std::num::NonZeroU32;
 
 use super::{Admit, BlockRead, DiskHit, MemoryVictim, PlacementPolicy, Tier, VictimAction};
 use crate::cache::{BlockKey, ChunkId};
 use crate::io::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-/// The default policy: a CLOCK for each tier.
-///
-/// A fetched block goes to memory, and memory's victims to disk. A block
-/// read from disk moves to memory on its second hit since the disk's hand
-/// last passed it: one read of a cold block pushes nothing out of memory.
+/// A CLOCK for each tier. A disk block moves to memory on its second hit since the hand last
+/// passed it, so one read of a cold block pushes nothing out of memory.
 pub struct ClockPolicy {
     memory: Clock,
     disk: Clock,
 }
 
 impl ClockPolicy {
-    /// A CLOCK for each tier, of `memory_chunks` and `disk_chunks` chunks.
     pub fn new(memory_chunks: NonZeroU32, disk_chunks: NonZeroU32) -> Self {
         Self {
             memory: Clock::new(memory_chunks),
@@ -67,26 +61,11 @@ impl PlacementPolicy for ClockPolicy {
     }
 }
 
-/// One tier's CLOCK, over its chunk numbers: for each chunk, whether it
-/// holds a block the hand may take, and whether a hit gave it a second
-/// chance since the hand last passed. The hand sweeps a word of 64 chunks
-/// at a time.
-///
-/// Every atomic here is relaxed. The cache checks each victim against its
-/// chunk table, so the policy hands no memory over through these words: it
-/// only keeps its own bits whole. And that takes atomicity, not ordering:
-/// the read-modify-writes of one word are in one order, each seeing the one
-/// before. So a claim takes an admit's bit at most once, and no bit set is
-/// lost to another change of its word. A hit racing a sweep lands on either
-/// side of it: a chunk gets a second chance more or less, nothing worse.
+/// Every atomic is relaxed: the cache checks each victim against its chunk table, so these
+/// words hand no memory over, and per-word RMW order keeps their bits whole.
 struct Clock {
-    /// Chunk `i`'s bits are bit `i % 64` of word `i / 64`. The bits past
-    /// the last chunk are never set: every chunk is checked against
-    /// `chunk_count` first.
     words: Box<[ClockWord]>,
-    /// The words swept so far: the next is `hand % words.len()`. Concurrent
-    /// picks take different words, unless they sweep more than a rotation
-    /// between them.
+    /// Concurrent picks take different words, unless they sweep more than a rotation between them.
     hand: AtomicUsize,
     chunk_count: u32,
 }
@@ -94,7 +73,6 @@ struct Clock {
 impl Clock {
     const WORD_BITS: u32 = u64::BITS;
 
-    /// `chunk_count` chunks, none holding a block.
     fn new(chunk_count: NonZeroU32) -> Self {
         let word_count = chunk_count.get().div_ceil(Self::WORD_BITS);
         Self {
@@ -104,23 +82,17 @@ impl Clock {
         }
     }
 
-    /// Marks `chunk` referenced, and returns whether it was already: hit
-    /// since the hand last passed.
     fn mark_referenced(&self, chunk: ChunkId) -> bool {
         let (word, bit) = self.bit_of(chunk);
-        // A hot chunk is marked already: the load spares its cache line a
-        // write per hit.
+        // A load first spares a hot chunk's cache line a write per hit.
         if word.referenced.load(Ordering::Relaxed) & bit != 0 {
             return true;
         }
-        // A hit since the load may have marked it: then this one is the
-        // second.
+        // A hit since the load may have marked it: then this one is the second.
         word.referenced.fetch_or(bit, Ordering::Relaxed) & bit != 0
     }
 
-    /// `chunk` took a block: the hand takes it on its next pass, unless a
-    /// hit comes first. So a block read once goes soon, and a scan leaves
-    /// the blocks read again.
+    /// Admitted unreferenced, so a scan's blocks go before those read again.
     fn admit(&self, chunk: ChunkId) {
         let (word, bit) = self.bit_of(chunk);
         // A hit on the chunk's last block gives the new one no second chance.
@@ -128,10 +100,7 @@ impl Clock {
         word.occupied.fetch_or(bit, Ordering::Relaxed);
     }
 
-    /// Up to `count` chunks the hand takes, each this call's alone until it
-    /// is admitted again. Fewer if the hand finds no more in two rotations:
-    /// the first clears every second chance, so the second takes every
-    /// chunk not hit again meanwhile.
+    /// Two rotations: the first clears second chances, the second takes chunks not hit again.
     fn pick(&self, count: usize) -> Vec<ChunkId> {
         let mut victims = Vec::new();
         for _ in 0..2 * self.words.len() {
@@ -144,9 +113,6 @@ impl Clock {
         victims
     }
 
-    /// Passes the hand over word `word_index`: clears its chunks' second
-    /// chances, and claims those that had none and hold a block, until
-    /// `victims` holds `count`.
     fn sweep(&self, word_index: usize, count: usize, victims: &mut Vec<ChunkId>) {
         let word = &self.words[word_index];
         let referenced = word.referenced.swap(0, Ordering::Relaxed);
@@ -155,18 +121,15 @@ impl Clock {
             let offset = candidates.trailing_zeros();
             candidates &= candidates - 1;
             let bit = 1 << offset;
-            // Another pick may have claimed it since the load: it is this
-            // one's only if this call cleared the bit.
+            // Another pick may have claimed it: it's ours only if this call cleared the bit.
             if word.occupied.fetch_and(!bit, Ordering::Relaxed) & bit != 0 {
-                // Below `chunk_count`, a `u32`: the bits past it are never
-                // set.
+                // The bits past `chunk_count` are never set, so this fits a `u32`.
                 let first_chunk = word_index as u32 * Self::WORD_BITS;
                 victims.push(ChunkId::new(first_chunk + offset));
             }
         }
     }
 
-    /// The word holding `chunk`'s bits, and its bit in them.
     fn bit_of(&self, chunk: ChunkId) -> (&ClockWord, u64) {
         assert!(
             chunk.index() < self.chunk_count,
@@ -179,15 +142,11 @@ impl Clock {
     }
 }
 
-/// 64 chunks' bits in a [`Clock`]. The two side by side: an admit and a
-/// sweep change both, in one cache line, as the alignment to the pair's
-/// size keeps it from straddling two.
+/// Aligned to its size so an admit or sweep touches both words in one cache line.
 #[derive(Default)]
 #[repr(align(16))]
 struct ClockWord {
-    /// Set by a hit; cleared by the hand's pass, and by an admit.
     referenced: AtomicU64,
-    /// Set by an admit; cleared by the pick that claims the chunk.
     occupied: AtomicU64,
 }
 
@@ -200,7 +159,6 @@ mod tests {
     use crate::cache::FileVersionId;
     use crate::io::sync::atomic::{AtomicBool, fence};
 
-    /// A policy whose tiers have `chunk_count` chunks each.
     fn policy(chunk_count: u32) -> ClockPolicy {
         let chunk_count = NonZeroU32::new(chunk_count).unwrap();
         ClockPolicy::new(chunk_count, chunk_count)
@@ -228,8 +186,6 @@ mod tests {
         policy.on_disk_hit(ChunkId::new(chunk), &read())
     }
 
-    /// Up to `count` memory victims, each moved to disk: their chunk
-    /// numbers, sorted.
     fn pick(policy: &ClockPolicy, count: usize) -> Vec<u32> {
         let mut chunks: Vec<_> = policy
             .pick_memory_victims(count)
@@ -284,14 +240,12 @@ mod tests {
         admit(&policy, Tier::Memory, 0..4);
         hit(&policy, 0);
         assert_eq!(pick(&policy, 3), [1, 2, 3]);
-        // The sweep took its second chance, and no hit gave it another.
         assert_eq!(pick(&policy, 1), [0]);
     }
 
     #[test]
     fn a_chunk_hit_before_every_pick_goes_last() {
-        // Two words: a pick sweeps the other between its two passes of
-        // chunk 0's word.
+        // Two words: a pick sweeps the other between its two passes of chunk 0's word.
         let policy = policy(100);
         admit(&policy, Tier::Memory, 0..100);
         let mut others = Vec::new();
@@ -328,17 +282,12 @@ mod tests {
         // The hand's pass clears the hits: the next is a first again.
         assert_eq!(policy.pick_disk_victims(1), [ChunkId::new(1)]);
         assert_eq!(disk_hit(&policy, 0), DiskHit::Stay);
-        // As does an admit: a new block starts unreferenced.
         admit(&policy, Tier::Disk, [0]);
         assert_eq!(disk_hit(&policy, 0), DiskHit::Stay);
         assert_eq!(disk_hit(&policy, 0), DiskHit::Promote);
         assert!(pick(&policy, 2).is_empty(), "memory holds none");
     }
 
-    /// Four pickers on one word, each giving its victims back as the cache
-    /// does when it reuses a chunk, against a hitter and an admitter of fresh
-    /// chunks: no two pickers hold one chunk at once, and no admission is
-    /// lost.
     #[test]
     fn concurrent_pickers_never_hold_one_chunk_at_once() {
         const CHUNKS: u32 = 64;
@@ -356,10 +305,8 @@ mod tests {
                 scope.spawn(|| {
                     for _ in 0..20_000 {
                         let victims = pick(&policy, 2);
-                        // The policy's atomics are relaxed: these fences,
-                        // paired through a give-back's admit and the next
-                        // claim, which reads it, order one picker's flags
-                        // before the next one's.
+                        // Relaxed policy atomics: these fences, paired via the admit and the
+                        // next claim, order one picker's flags before the next one's.
                         fence(Ordering::Acquire);
                         for &chunk in &victims {
                             let taken = held[chunk as usize].swap(true, Ordering::Relaxed);

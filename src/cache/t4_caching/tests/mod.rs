@@ -22,36 +22,25 @@ use crate::cache::policy::{
 
 const MIB: u64 = BLOCK_SIZE_U64;
 
-/// A request the cache made of the store under it.
 #[derive(Clone, Debug, PartialEq)]
 enum Asked {
     Head,
     Get(Option<GetRange>),
 }
 
-/// An in-memory store that records every get the cache makes of it, and
-/// can acknowledge its writes late.
 #[derive(Debug, Default)]
 struct CountingStore {
     store: InMemory,
     asked: Mutex<Vec<Asked>>,
     acks: Acks,
-    /// Whether a get is answered a poll after it is asked, as across a
-    /// network: a read planned meanwhile finds its blocks in flight.
+    /// Answers gets a poll late, so a read planned meanwhile finds its blocks in flight.
     answers: Acks,
-    /// The bytes the next get's body stops after, a HEAD's aside, never
-    /// sending the rest, as a straggler's does; and whether such a body was
-    /// waited on past them.
     stall: Mutex<Option<usize>>,
     stalled: Arc<AtomicBool>,
-    /// The GETs out: asked, their bodies not yet dropped.
     gets_out: Arc<GetsOut>,
-    /// What the next get, a HEAD's aside, waits for before it is answered,
-    /// blocking its thread: a message, or its sender dropped.
     gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
 }
 
-/// The GETs a store has out now, and the most it had at once.
 #[derive(Debug, Default)]
 struct GetsOut {
     now: AtomicUsize,
@@ -59,7 +48,6 @@ struct GetsOut {
 }
 
 impl GetsOut {
-    /// One more out, until the guard is dropped.
     fn sent(self: &Arc<Self>) -> GetOut {
         let now = self.now.fetch_add(1, Ordering::Relaxed) + 1;
         self.most.fetch_max(now, Ordering::Relaxed);
@@ -67,7 +55,6 @@ impl GetsOut {
     }
 }
 
-/// A GET out, until its answer's body is dropped.
 struct GetOut(Arc<GetsOut>);
 
 impl Drop for GetOut {
@@ -77,17 +64,14 @@ impl Drop for GetOut {
 }
 
 impl CountingStore {
-    /// The most GETs the store had out at once.
     fn most_gets_out(&self) -> usize {
         self.gets_out.most.load(Ordering::Relaxed)
     }
 
-    /// The GETs the store has out now, asked and not answered whole.
     fn gets_out_now(&self) -> usize {
         self.gets_out.now.load(Ordering::Relaxed)
     }
 
-    /// `answer` with `out` held until its body is dropped.
     fn held_out(answer: GetResult, out: GetOut) -> GetResult {
         let (meta, range, attributes) = (
             answer.meta.clone(),
@@ -106,7 +90,6 @@ impl CountingStore {
         }
     }
 
-    /// What the cache asked since the last call.
     fn take_asked(&self) -> Vec<Asked> {
         std::mem::take(&mut self.asked.lock().unwrap())
     }
@@ -119,21 +102,17 @@ impl CountingStore {
         self.answers.0.store(late, Ordering::Relaxed);
     }
 
-    /// Holds the next get, a HEAD's aside, until the sender returned sends
-    /// or is dropped: the thread that asked it is blocked till then.
+    /// Blocks the next non-HEAD get's thread until the sender sends or drops.
     fn gate_next_get(&self) -> std::sync::mpsc::Sender<()> {
         let (open, gate) = std::sync::mpsc::channel();
         *self.gate.lock().unwrap() = Some(gate);
         open
     }
 
-    /// Stops the next get's body after `after` bytes.
     fn stall_next_body(&self, after: usize) {
         *self.stall.lock().unwrap() = Some(after);
     }
 
-    /// `answer` with its body stopped after `after` bytes: `stalled` set
-    /// once the rest is waited on.
     async fn stalled(&self, answer: GetResult, after: usize) -> object_store::Result<GetResult> {
         let (meta, range, attributes) = (
             answer.meta.clone(),
@@ -158,14 +137,11 @@ impl CountingStore {
     }
 }
 
-/// Whether a store acknowledges a write a poll after doing it, as a store
-/// across a network does: a caller that gives up then has written anyway.
-/// Shared by the store, its uploads and its deletes.
+/// Acks a write a poll after doing it, so a caller that gives up then has written anyway.
 #[derive(Clone, Debug, Default)]
 struct Acks(Arc<AtomicBool>);
 
 impl Acks {
-    /// The acknowledgement of a write that is done: a poll later, if late.
     async fn arrive(&self) {
         let mut on_its_way = self.0.load(Ordering::Relaxed);
         poll_fn(|cx| {
@@ -180,7 +156,6 @@ impl Acks {
     }
 }
 
-/// An upload whose completion its store acknowledges as it does writes.
 #[derive(Debug)]
 struct AckedUpload {
     upload: Box<dyn MultipartUpload>,
@@ -304,23 +279,19 @@ impl ObjectStore for CountingStore {
     }
 }
 
-/// A builder of a cache of 4 MiB of memory and 8 on disk over `inner`, in
-/// `dir`.
 fn builder(inner: &Arc<CountingStore>, dir: impl AsRef<std::path::Path>) -> T4CachingBuilder {
     T4Caching::builder(Arc::clone(inner) as Arc<dyn ObjectStore>)
         .with_memory_capacity(4 * MIB)
         .with_disk_file(dir.as_ref().join("cache"), 8 * MIB)
 }
 
-/// Waits until `done`; the CI step bounds a hung test.
-/// The label names the state for the reader.
+/// Unbounded: the CI step bounds a hung test. `_what` names the state for the reader.
 fn wait_until(mut done: impl FnMut() -> bool, _what: &str) {
     while !done() {
         std::thread::yield_now();
     }
 }
 
-/// Wakers registered on the owned cache's fetches in flight.
 fn fetch_waiters_registered(cache: &T4Caching) -> usize {
     cache
         .cache_store()
@@ -329,8 +300,6 @@ fn fetch_waiters_registered(cache: &T4Caching) -> usize {
         .fetch_waiters_registered()
 }
 
-/// A cache over a [`CountingStore`], in a directory of its own that lives
-/// as long as the cache.
 fn t4_caching() -> (TempDir, T4Caching, Arc<CountingStore>) {
     let dir = tempfile::tempdir().unwrap();
     let inner = Arc::new(CountingStore::default());
@@ -338,7 +307,6 @@ fn t4_caching() -> (TempDir, T4Caching, Arc<CountingStore>) {
     (dir, store, inner)
 }
 
-/// A file's bytes: each a function of its offset and `seed`.
 fn file_bytes(size: u64, seed: u8) -> Bytes {
     (0..size)
         .map(|offset| (offset % 251) as u8 ^ seed)
@@ -381,8 +349,6 @@ fn a_builder_needs_a_memory_capacity_and_a_disk_file() {
         .unwrap();
 }
 
-/// A cache file allocated eagerly takes its whole capacity on its drive
-/// as the cache is built; one allocated on demand is only sized.
 #[test]
 fn a_cache_file_takes_its_room_at_build_unless_allocated_on_demand() {
     use std::os::unix::fs::MetadataExt;
@@ -408,8 +374,7 @@ fn a_cache_file_takes_its_room_at_build_unless_allocated_on_demand() {
     }
 }
 
-/// A cache file has one owner: a second cache on it fails to build, by
-/// any path that reaches the file, until the first is dropped.
+/// By any path that reaches the file, a symlink too.
 #[test]
 fn a_cache_file_has_one_owner() {
     let dir = tempfile::tempdir().unwrap();
@@ -432,8 +397,7 @@ fn a_cache_file_has_one_owner() {
     builder(&inner, &dir).build().unwrap();
 }
 
-/// Files of unequal size each hold as many chunks as the smallest, and
-/// take only those; the tier is all of them, and serves reads.
+/// Files of unequal size each hold as many chunks as the smallest.
 #[test]
 fn the_disk_tier_stripes_over_its_files() {
     let dir = tempfile::tempdir().unwrap();
@@ -457,7 +421,7 @@ fn the_disk_tier_stripes_over_its_files() {
         assert_eq!(std::fs::metadata(file).unwrap().len(), 3 * MIB);
     }
 
-    // More blocks than memory holds: most go to disk, and read back.
+    // More blocks than memory holds, so most go to disk.
     let path = Path::from("data");
     let bytes = file_bytes(6 * MIB, 3);
     put(inner.as_ref(), &path, &bytes);
@@ -590,8 +554,7 @@ fn a_write_through_the_cache_is_read_back() {
     assert_eq!(get_range(&store, &path, 0..MIB + 7), replaced);
 }
 
-/// The cache trusts the store's first answer: a hit asks nothing, so a file
-/// changed behind it reads as it was, until a remote read catches the change.
+/// A hit asks the store nothing, so the old file reads on until a remote read catches it.
 #[test]
 fn a_file_changed_behind_the_cache_is_caught_by_a_remote_read() {
     let (_dir, store, inner) = t4_caching();
@@ -606,15 +569,12 @@ fn a_file_changed_behind_the_cache_is_caught_by_a_remote_read() {
     // Block 1 is remote: its fetch, on the old e_tag, finds the new file.
     let bytes = get_range(&store, &path, MIB..MIB + 10);
     assert_eq!(bytes, new.slice(MIB as usize..MIB as usize + 10));
-    // The cache forgot the path: the next read asks again, and caches anew.
     assert_eq!(get_range(&store, &path, 0..10), new.slice(0..10));
     inner.take_asked();
     assert_eq!(get_range(&store, &path, 0..10), new.slice(0..10));
     assert_eq!(inner.take_asked(), Vec::<Asked>::new());
 }
 
-/// Two reads of one block at once, the first's GET still out when the
-/// second plans: the second waits for it, and the store sees one GET.
 #[test]
 fn overlapping_reads_of_a_block_send_one_get() {
     let (_dir, store, inner) = t4_caching();
@@ -634,9 +594,6 @@ fn overlapping_reads_of_a_block_send_one_get() {
     assert_eq!(inner.take_asked(), [bounded(0..MIB)]);
 }
 
-/// Reads of one block that no tier keeps, overlapping, send one GET too: the
-/// one waiting takes the block's bytes from the other's fetch. Nothing is
-/// cached, so a later read fetches it again.
 #[test]
 fn overlapping_reads_of_a_discarded_block_send_one_get() {
     let reads = ScriptedReads::new(|read| FetchRuns::default().plan(read));
@@ -680,14 +637,11 @@ fn a_deleted_file_is_not_found() {
     );
 }
 
-/// A write through the cache to `to`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum WriteThrough {
     Put,
     Multipart,
-    /// Of `from`, onto `to`.
     Copy,
-    /// Of `from`, onto `to`.
     Rename,
     Delete,
 }
@@ -701,8 +655,6 @@ impl WriteThrough {
         Self::Delete,
     ];
 
-    /// Writes `to` through `store`: `bytes` for a put, `from` for a copy or
-    /// a rename.
     async fn run(
         self,
         store: &T4Caching,
@@ -724,10 +676,6 @@ impl WriteThrough {
     }
 }
 
-/// A write given up on once the store has done it, its acknowledgement
-/// still on the way, as a caller dropping its future does: the cache
-/// forgets the path all the same, so a read gets what the store has, not
-/// the old file's cached blocks.
 #[test]
 fn a_write_given_up_on_after_it_lands_is_read_back() {
     let stale: Vec<_> = WriteThrough::ALL
@@ -747,7 +695,6 @@ fn a_write_given_up_on_after_it_lands_is_read_back() {
 
             let in_store = block_on(async { inner.get(&to).await?.bytes().await });
             let read = block_on(async { store.get(&to).await?.bytes().await });
-            // Both the same bytes, or both no file.
             in_store.ok() != read.ok()
         })
         .collect();
@@ -786,8 +733,6 @@ fn conditional_reads_go_to_the_store() {
     assert_eq!(inner.take_asked(), Vec::<Asked>::new());
 }
 
-/// A list through the cache tells it what each file it names is, as a
-/// HEAD would: a read of one fetches at once.
 #[test]
 fn a_listed_file_is_read_without_a_head() {
     let (_dir, store, inner) = t4_caching();
@@ -819,7 +764,6 @@ fn listing_passes_through() {
     assert_eq!(names, ["x/1", "x/2"]);
 }
 
-/// What a read policy heard of an I/O, its timings dropped.
 #[derive(Clone, Debug, PartialEq)]
 enum Heard {
     Get {
@@ -859,8 +803,6 @@ impl Heard {
     }
 }
 
-/// A read policy that plans each read with a script, and keeps the intent
-/// of each read it planned and every event it heard. Its clones share them.
 #[derive(Clone)]
 struct ScriptedReads {
     script: Arc<dyn Fn(&LocatedRead<'_>) -> ReadPlan + Send + Sync>,
@@ -893,12 +835,9 @@ impl ReadPolicy for ScriptedReads {
     }
 }
 
-/// Each block a placement policy was asked where to put: its number, the
-/// read's intent, and whether the read asked for it.
+/// Per block placed: its index, the read's intent, and whether the read asked for it.
 type RemoteReads = Arc<Mutex<Vec<(u32, Option<ReadIntent>, bool)>>>;
 
-/// A CLOCK that puts every block it is asked about where `admit` says, and
-/// keeps what it was asked.
 struct RecordingPlacement {
     clock: ClockPolicy,
     admit: Admit,
@@ -935,9 +874,6 @@ impl PlacementPolicy for RecordingPlacement {
     }
 }
 
-/// A cache over a [`CountingStore`] holding a 3 MiB file at `a`, its reads
-/// planned by `reads`, its blocks put where `admit` says; what the store was
-/// asked so far forgotten.
 fn planned_by(
     reads: &ScriptedReads,
     admit: Admit,
@@ -987,8 +923,6 @@ fn a_read_policy_splits_a_run_into_gets() {
     assert_eq!(inner.take_asked(), [], "every block cached");
 }
 
-/// One GET over a read's blocks, the hit between its remote blocks too: the hit's
-/// bytes fetched are dropped, its block left where it is.
 #[test]
 fn a_get_merged_over_a_hit_drops_its_bytes() {
     let reads = ScriptedReads::new(|read| ReadPlan::new(vec![PlannedGet::once(read.blocks())]));
@@ -1018,8 +952,6 @@ fn a_get_merged_over_a_hit_drops_its_bytes() {
         .unwrap();
 }
 
-/// A GET widened past the read caches the blocks it brings, where the
-/// placement policy says, told they weren't asked for.
 #[test]
 fn a_widened_get_caches_past_the_read() {
     let reads = ScriptedReads::new(|read| {
@@ -1045,8 +977,6 @@ fn a_widened_get_caches_past_the_read() {
     assert_eq!(inner.take_asked(), [], "the widened blocks were cached");
 }
 
-/// Three requests race for a run: the first answer takes its bytes, and the
-/// others are given up on.
 #[test]
 fn racing_gets_take_the_first_answer() {
     let three = std::num::NonZeroU8::new(3).unwrap();
@@ -1100,11 +1030,8 @@ fn racing_gets_take_the_first_answer() {
     );
 }
 
-/// A timer a cache's late racers wait on.
 type TestSleep = Box<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>;
 
-/// A cache like [`planned_by`]'s over `inner`, its blocks put where the
-/// CLOCK says, its GETs raced late on `sleep`, if given.
 fn raced_late_by(
     inner: &Arc<CountingStore>,
     reads: &ScriptedReads,
@@ -1123,7 +1050,6 @@ fn raced_late_by(
     (dir, store, data)
 }
 
-/// Every run of a read's remote blocks in one GET, raced late.
 fn late_racing() -> ScriptedReads {
     ScriptedReads::new(|read| {
         ReadPlan::new(
@@ -1134,8 +1060,6 @@ fn late_racing() -> ScriptedReads {
     })
 }
 
-/// A GET whose body stalls is raced late, for the bytes not in yet: the
-/// read gets them all, its first request given up on.
 #[test]
 fn a_straggling_get_is_raced_for_the_rest_of_its_body() {
     let reads = late_racing();
@@ -1176,8 +1100,6 @@ fn a_straggling_get_is_raced_for_the_rest_of_its_body() {
     }
 }
 
-/// Without a timer, or before its time, a GET planned to race late is sent
-/// once.
 #[test]
 fn a_late_race_waits_for_its_timer() {
     let never = |_| pending().boxed();
@@ -1201,8 +1123,6 @@ fn a_late_race_waits_for_its_timer() {
     }
 }
 
-/// A GET is heard finished once its body is in, and landed once its blocks
-/// are cached, here written to disk.
 #[test]
 fn a_get_is_heard_landed_after_it_finished() {
     let reads = ScriptedReads::new(|read| FetchRuns::default().plan(read));
@@ -1222,8 +1142,6 @@ fn a_get_is_heard_landed_after_it_finished() {
     assert_eq!(phases, ["started", "answered", "finished", "landed"]);
 }
 
-/// A plan that leaves a remote block out can't be carried out: the read fetches its
-/// runs, as the default does.
 #[test]
 fn a_plan_the_cache_cant_carry_out_fetches_the_runs() {
     let reads = ScriptedReads::new(|_| ReadPlan::default());
@@ -1259,8 +1177,6 @@ fn the_callers_intent_reaches_both_policies() {
     );
 }
 
-/// The read policy hears each read of the disk tier: which drive, how many
-/// bytes, started and finished.
 #[test]
 fn the_read_policy_hears_reads_from_disk() {
     let reads = ScriptedReads::new(|read| FetchRuns::default().plan(read));
@@ -1281,8 +1197,6 @@ fn the_read_policy_hears_reads_from_disk() {
     assert_eq!(reads.heard(), [read("started"), read("finished")]);
 }
 
-/// A read's GETs go out before its work on the drives is waited on: the
-/// read policy hears the GET start before the disk read finishes.
 #[test]
 fn a_reads_gets_go_out_before_its_disk_reads_are_waited_on() {
     let reads = ScriptedReads::new(|read| FetchRuns::default().plan(read));
@@ -1310,9 +1224,7 @@ fn a_reads_gets_go_out_before_its_disk_reads_are_waited_on() {
     assert!(get_started < disk_read_finished, "{heard:?}");
 }
 
-/// A cache over `inner` letting `most` bytes be in flight, a network of
-/// `most` a second whose GETs take a second, merging waiting ones into
-/// GETs of `merged_up_to` bytes, over a file "a" of six blocks.
+/// `most` a second over GETs of a second caps the bytes in flight at `most`.
 fn capped(inner: &Arc<CountingStore>, most: u64, merged_up_to: u64) -> (TempDir, T4Caching, Bytes) {
     let dir = tempfile::tempdir().unwrap();
     let store = builder(inner, &dir)
@@ -1328,7 +1240,6 @@ fn capped(inner: &Arc<CountingStore>, most: u64, merged_up_to: u64) -> (TempDir,
     (dir, store, data)
 }
 
-/// Reads of `ranges` of "a", at once.
 fn read_at_once(store: &T4Caching, data: &Bytes, ranges: &[Range<u64>]) {
     let path = Path::from("a");
     let reads = block_on(join_all(
@@ -1344,13 +1255,10 @@ fn read_at_once(store: &T4Caching, data: &Bytes, ranges: &[Range<u64>]) {
     }
 }
 
-/// The first bytes of `block`.
 fn block_start(block: u64) -> Range<u64> {
     block * MIB..block * MIB + 10
 }
 
-/// Past the cap, a GET waits for another's body to be in: the store never
-/// has more out at once.
 #[test]
 fn gets_past_the_cap_wait_for_a_place() {
     for (most, out) in [(MIB, 1), (8 * MIB, 3)] {
@@ -1374,9 +1282,6 @@ fn gets_past_the_cap_wait_for_a_place() {
     }
 }
 
-/// Reads of adjacent blocks waiting for room go as one GET when the
-/// first's turn comes, the one with the last block sending it; each
-/// block lands where its own read put it.
 #[test]
 fn waiting_gets_of_adjacent_blocks_go_as_one() {
     let inner = Arc::new(CountingStore::default());
@@ -1401,8 +1306,7 @@ fn waiting_gets_of_adjacent_blocks_go_as_one() {
     assert_eq!(inner.take_asked(), [], "each block cached");
 }
 
-/// A late racer goes at once, beside a full cap: a straggler's race doesn't
-/// wait behind the straggler.
+/// A straggler's race mustn't wait behind the straggler.
 #[test]
 fn a_late_race_goes_beside_the_cap() {
     let reads = late_racing();
@@ -1441,8 +1345,6 @@ fn a_late_race_goes_beside_the_cap() {
     );
 }
 
-/// Whether `bytes`, the file's from `offset`, lie where the file's pages
-/// would: the address and the offset agree mod a page.
 fn agrees_with_its_offset(bytes: &Bytes, offset: u64) -> bool {
     bytes.as_ptr() as u64 % crate::PAGE_SIZE_U64 == offset % crate::PAGE_SIZE_U64
 }
@@ -1460,12 +1362,10 @@ fn an_opened_file_reads_through_the_cache() {
     let bytes = block_on(file.read(10..MIB + 10, None)).unwrap();
     assert_eq!(bytes, data.slice(10..MIB as usize + 10));
     assert_eq!(inner.take_asked(), [bounded(0..2 * MIB)]);
-    // One cache: a hit through the file, and through the store.
     let bytes = block_on(file.read(5..2 * MIB, None)).unwrap();
     assert_eq!(bytes, data.slice(5..));
     assert_eq!(get_range(&store, &path, 5..15), data.slice(5..15));
     assert_eq!(inner.take_asked(), Vec::<Asked>::new());
-    // As a bounded GET: clamped to the file's end, an error past it.
     let bytes = block_on(file.read(MIB..10 * MIB, None)).unwrap();
     assert_eq!(bytes, data.slice(MIB as usize..));
     assert!(block_on(file.read(3 * MIB..3 * MIB + 1, None)).is_err());
@@ -1486,7 +1386,6 @@ fn a_listed_file_opens_without_a_head() {
         data.slice(10..20)
     );
     assert_eq!(inner.take_asked(), [bounded(0..MIB)]);
-    // The store's reads know the file too.
     assert_eq!(
         get_range(&store, &path, MIB..MIB + 1),
         data.slice(MIB as usize..MIB as usize + 1)
@@ -1503,7 +1402,6 @@ fn an_opened_files_bytes_agree_with_their_offsets() {
     put(inner.as_ref(), &path, &data);
 
     let file = block_on(store.open(&path)).unwrap();
-    // Fetched, then hits in memory.
     for _ in 0..2 {
         for range in [0..1, 100..MIB + 100, 4095..4097, 3 * MIB + 3..size] {
             let bytes = block_on(file.read(range.clone(), None)).unwrap();
@@ -1530,7 +1428,6 @@ fn a_file_with_no_e_tag_is_read_from_the_store_aligned() {
         let bytes = block_on(file.read(4097..MIB + 3, None)).unwrap();
         assert_eq!(bytes, data.slice(4097..MIB as usize + 3));
         assert!(agrees_with_its_offset(&bytes, 4097));
-        // Never cached: each read asks the store for its bytes alone.
         assert_eq!(inner.take_asked(), [bounded(4097..MIB + 3)]);
     }
 }
@@ -1545,8 +1442,7 @@ fn an_opened_file_changed_since_fails_to_read() {
     assert_eq!(block_on(file.read(0..10, None)).unwrap(), old.slice(0..10));
 
     put(inner.as_ref(), &path, &file_bytes(2 * MIB, 1));
-    // Block 1 is remote: its fetch, on the old e_tag, finds the new file,
-    // and so does the read from the store that follows.
+    // Block 1 is remote: its fetch, on the old e_tag, finds the new file.
     let error = block_on(file.read(MIB..MIB + 10, None)).unwrap_err();
     assert!(
         matches!(error, object_store::Error::Precondition { .. }),

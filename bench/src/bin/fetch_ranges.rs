@@ -1,14 +1,4 @@
-//! Fetches a table's files from their store in ranges, many at once, as
-//! fast as it can, straight from the store or through t4 reading every
-//! block from the remote: how fast those come in, how long a fetch takes
-//! (p50, p99, max),
-//! and the CPU time a GiB costs, for each HTTP transport (`--http`).
-//!
-//! The files are cut into `--range-mib` pieces, ordered by a hash of each
-//! (the same order every run), and fetched `--in-flight` at a time until
-//! `--gib` are in. Nothing is fetched twice, so t4 reads every block from
-//! the remote: its
-//! memory tier fills, then evicts. The table must hold `--gib`.
+//! No range is fetched twice, so through t4 every block comes from the remote.
 //!
 //! ```text
 //! cargo run --release -p t4-bench --bin fetch_ranges -- \
@@ -33,17 +23,13 @@ use t4_bench::host_counters::HostProbe;
 use t4_bench::replay::LatencySummary;
 use t4_bench::table_store::{CacheOptions, HttpOptions, TableLocation};
 
-/// The allocator: mimalloc unless built `--no-default-features`, as the
-/// `mimalloc` feature in `bench/Cargo.toml` explains. A static, as Rust takes
-/// a global allocator only so.
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Parser)]
 struct Args {
-    /// The table: a file, or a directory of files, a URL like
-    /// `s3://bucket/path` or `gs://bucket/path`, a directory's ending in `/`.
+    /// A file, or a directory ending in `/`: a local path, or an `s3://` or `gs://` URL.
     #[arg(long, value_parser = TableLocation::parse)]
     location: TableLocation,
     #[command(flatten)]
@@ -61,14 +47,11 @@ struct Args {
     cache: CacheOptions,
 }
 
-/// The ranges to fetch, in the order they're fetched.
 struct FetchPlan {
     ranges: Vec<(Path, Range<u64>)>,
 }
 
 impl FetchPlan {
-    /// `location`'s files cut into ranges of `range_bytes`, in the order of
-    /// a hash of each, enough of them for `total_bytes`.
     async fn new(
         origin: &dyn ObjectStore,
         location: &TableLocation,
@@ -124,8 +107,6 @@ impl FetchPlan {
             .sum()
     }
 
-    /// Fetches every range from `store`, `in_flight` at a time; how long
-    /// each took.
     async fn run(
         self,
         store: Arc<dyn ObjectStore>,

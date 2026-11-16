@@ -1,14 +1,10 @@
-//! One submission, run with a blocking positional syscall: how the thread
-//! pool touches the files.
-
 use std::fs::File;
 
 use crate::io::common::{CompletionEvent, SubmissionEntry};
 use crate::io::io_task::FilePosition;
 
 impl SubmissionEntry {
-    /// Runs the operation against its file of `files` and reports it as a
-    /// completion queue entry would: the byte count, or a negated errno.
+    /// Reports as an io_uring completion would: the byte count, or a negated errno.
     pub(crate) fn execute(&self, files: &[File]) -> CompletionEvent {
         let (user_data, result) = match *self {
             Self::Read {
@@ -17,8 +13,7 @@ impl SubmissionEntry {
                 at,
                 user_data,
             } => {
-                // SAFETY: the backend loop keeps the buffer alive, and touches
-                // it nowhere else, until this operation completes.
+                // SAFETY: the backend loop keeps the buffer alive and untouched until this completes.
                 let buf = unsafe { std::slice::from_raw_parts_mut(buf_ptr, buf_len as usize) };
                 (
                     user_data,
@@ -42,13 +37,12 @@ impl SubmissionEntry {
         };
         let result = match result {
             Ok(n) => n as i32,
-            // Fallback to EIO(5) if no raw_os_error
+            // EIO (5) when the error carries no errno.
             Err(err) => -err.raw_os_error().unwrap_or(5),
         };
         CompletionEvent { user_data, result }
     }
 
-    /// The file `at` names, or `EBADF` if `files` has none there.
     fn file(files: &[File], at: FilePosition) -> std::io::Result<&File> {
         files
             .get(at.file() as usize)

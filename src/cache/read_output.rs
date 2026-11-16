@@ -1,6 +1,3 @@
-//! [`ReadOutput`]: the buffer a read's bytes land in, handed to the caller
-//! as `Bytes` with no copy (`doc/03-cache.md`, decision 3).
-
 use std::alloc::{Layout, alloc, dealloc};
 use std::any::Any;
 use std::num::NonZeroU32;
@@ -14,53 +11,27 @@ use crate::io::aligned_buf::AlignedBuf;
 use crate::io::error::{Error, Result};
 use crate::{PAGE_SIZE, PAGE_SIZE_U64};
 
-/// The buffer a read's bytes land in: page-aligned, over the file's bytes
-/// the read asked for rounded out to whole pages. A block starts on a page
-/// boundary of the file, so its pages fall on pages of the buffer, and a
-/// direct read from a disk chunk lands in place, through a buffer the
-/// output lends ([`Self::lend`]). Hits in memory and fetched bytes are
-/// copied in ([`Self::copy_in`]): once, where they go.
-///
-/// Nothing zeroes the buffer: the reads and copies write every byte asked
-/// for, and the bytes the rounding adds, under a page at each end, are
-/// zeroed when it is made, so that it is initialized throughout once
-/// filled. The caller gets it as `Bytes`, sliced to the bytes asked for
-/// ([`Self::into_bytes`]), and it is freed when the last of them drops.
+/// Page-aligned to the file's pages, so a direct read from a disk chunk
+/// lands in place.
 #[derive(Debug)]
 pub(super) struct ReadOutput {
     memory: Arc<OutputMemory>,
-    /// The file's byte the buffer starts at: a page boundary.
     start: u64,
-    /// The file's bytes the read asked for.
     asked: Range<u64>,
-    /// The file's bytes written so far, to check that writes never overlap
-    /// and that they cover what was asked.
     #[cfg(debug_assertions)]
     written: Vec<Range<u64>>,
 }
 
 impl ReadOutput {
-    /// A buffer for `asked`, the file's bytes a read takes: a page at least.
     pub(super) fn new(asked: Range<u64>) -> Result<Self> {
         let memory = OutputMemory::new(Self::index(Self::padded_len(&asked)))?;
         Self::over_memory(asked, memory)
     }
 
-    /// A buffer for `asked` over `len` bytes at `memory`, another's memory,
-    /// which `keeper` keeps valid: a span of a client's region
-    /// (`doc/11-shared-mode.md`, decision 5). It isn't freed when the output
-    /// and the buffers it lent drop; `keeper` is dropped then.
-    ///
-    /// # Errors
-    ///
-    /// If `len` is shorter than an output of `asked` takes
-    /// ([`Self::padded_len`]).
-    ///
     /// # Safety
     ///
-    /// `memory` is page-aligned, and valid for reads and writes of `len`
-    /// bytes as long as `keeper` lives. Nothing of this process's but the
-    /// output and the buffers it lends touches them meanwhile.
+    /// `memory` is page-aligned, valid for `len` bytes while `keeper` lives,
+    /// and touched by nothing else of this process meanwhile.
     pub(super) unsafe fn over(
         asked: Range<u64>,
         memory: NonNull<u8>,
@@ -80,24 +51,18 @@ impl ReadOutput {
         Self::over_memory(asked, memory)
     }
 
-    /// The bytes an output of `asked` takes: the file's bytes asked rounded
-    /// out to whole pages, a page at least.
     pub(super) fn padded_len(asked: &Range<u64>) -> u64 {
         let start = asked.start / PAGE_SIZE_U64 * PAGE_SIZE_U64;
         let end = (asked.end.div_ceil(PAGE_SIZE_U64) * PAGE_SIZE_U64).max(start + PAGE_SIZE_U64);
         end - start
     }
 
-    /// The output of `asked` over `memory`, its bytes from the page that
-    /// holds the first asked, its padding zeroed.
     fn over_memory(asked: Range<u64>, memory: OutputMemory) -> Result<Self> {
         let start = asked.start / PAGE_SIZE_U64 * PAGE_SIZE_U64;
         let end = start + Self::padded_len(&asked);
         memory.fault_in();
-        // The rounding's bytes, which nothing reads into: zeroed, so the
-        // buffer is initialized throughout once every byte asked is written.
-        // SAFETY: both runs lie within the allocation, which nothing else
-        // holds yet.
+        // Nothing reads into the rounding's bytes: zero them so the buffer ends initialized.
+        // SAFETY: both runs lie within the allocation, which nothing else holds yet.
         unsafe {
             let base = memory.ptr.as_ptr();
             base.write_bytes(0, Self::index(asked.start - start));
@@ -113,10 +78,6 @@ impl ReadOutput {
         })
     }
 
-    /// A buffer over `pages`, the file's bytes a direct read of a disk chunk
-    /// or a fetch fills: whole pages, within the output. It holds the
-    /// output's memory until it drops, however long the read or the fetch
-    /// takes, whatever becomes of the output meanwhile.
     pub(super) fn lend(&mut self, pages: Range<u64>) -> Result<AlignedBuf> {
         let len = u32::try_from(pages.end - pages.start)
             .ok()
@@ -130,10 +91,7 @@ impl ReadOutput {
             "{pages:?} are whole pages within the output"
         );
         self.note_written(pages.clone());
-        // SAFETY: `pages` lie within the allocation, from a page boundary
-        // of it, as it starts on one. No other write touches them
-        // (`note_written`), and nothing reads them until every lent buffer
-        // is back (`into_bytes`). The buffer keeps the allocation alive.
+        // SAFETY: whole pages inside the allocation, which no other write touches (`note_written`).
         let buffer = unsafe {
             let at = self.memory.ptr.add(Self::index(pages.start - self.start));
             AlignedBuf::lent(at, len, Arc::clone(&self.memory) as _)
@@ -141,9 +99,6 @@ impl ReadOutput {
         Ok(buffer)
     }
 
-    /// The output's pages over `bytes`, the file's from a page boundary, as
-    /// [`Self::lend`] takes them: the pages they share with the output;
-    /// `None` if none.
     pub(super) fn pages_over(&self, bytes: Range<u64>) -> Option<Range<u64>> {
         assert!(
             bytes.start.is_multiple_of(PAGE_SIZE_U64),
@@ -154,7 +109,6 @@ impl ReadOutput {
         (start < end).then_some(start..end)
     }
 
-    /// Copies `bytes`, the file's from `at`, into the output.
     pub(super) fn copy_in(&mut self, at: u64, bytes: &[u8]) {
         let range = at..at + bytes.len() as u64;
         assert!(
@@ -162,8 +116,7 @@ impl ReadOutput {
             "{range:?} lie within the output"
         );
         self.note_written(range);
-        // SAFETY: the bytes lie within the allocation, and no other write
-        // touches them (`note_written`), so no lent buffer's read does.
+        // SAFETY: inside the allocation, and no other write touches the range (`note_written`).
         unsafe {
             let to = self.memory.ptr.add(Self::index(at - self.start));
             to.as_ptr()
@@ -171,17 +124,12 @@ impl ReadOutput {
         }
     }
 
-    /// Whether every byte asked for is written, in place, and no buffer the
-    /// output lent is left: so for an output over another's memory, whose
-    /// keeper goes with it.
     pub(super) fn filled_in_place(self) -> bool {
         #[cfg(debug_assertions)]
         self.assert_asked_written();
         Arc::try_unwrap(self.memory).is_ok()
     }
 
-    /// The bytes asked for, once every one is written: `None` while a
-    /// buffer the output lent isn't back, as after a read given up on.
     pub(super) fn into_bytes(self) -> Option<Bytes> {
         #[cfg(debug_assertions)]
         self.assert_asked_written();
@@ -191,7 +139,6 @@ impl ReadOutput {
         Some(Bytes::from_owner(FilledOutput(memory)).slice(at..at + len))
     }
 
-    /// The file's bytes the read asked for.
     pub(super) fn asked(&self) -> Range<u64> {
         self.asked.clone()
     }
@@ -200,8 +147,6 @@ impl ReadOutput {
         self.start + Self::padded_len(&self.asked)
     }
 
-    /// A length or an offset within the output, as a `usize`: the output is
-    /// in memory, so it fits.
     fn index(within: u64) -> usize {
         usize::try_from(within).expect("an output fits in memory")
     }
@@ -238,8 +183,6 @@ impl ReadOutput {
     }
 }
 
-/// The memory under a [`ReadOutput`]: an allocation, freed when the last
-/// of the output and the buffers it lent drops, or another's memory.
 #[derive(Debug)]
 struct OutputMemory {
     ptr: NonNull<u8>,
@@ -247,11 +190,8 @@ struct OutputMemory {
     place: OutputPlace,
 }
 
-/// Whose memory an output's is.
 enum OutputPlace {
-    /// The output's own, allocated with this layout.
     Allocated(Layout),
-    /// Another's, which the keeper keeps valid until it drops.
     Kept { _keeper: Box<dyn Any + Send + Sync> },
 }
 
@@ -264,14 +204,11 @@ impl std::fmt::Debug for OutputPlace {
     }
 }
 
-// SAFETY: the bytes are written through disjoint ranges, each by one
-// direct read or one copy (`ReadOutput::note_written`), and read only once
-// every write is done (`ReadOutput::into_bytes`).
+// SAFETY: writes are to disjoint ranges, and reads come after every write (`into_bytes`).
 unsafe impl Send for OutputMemory {}
 unsafe impl Sync for OutputMemory {}
 
 impl OutputMemory {
-    /// `len` bytes, page-aligned, as they come: not zeroed.
     fn new(len: usize) -> Result<Self> {
         let layout = Layout::from_size_align(len, PAGE_SIZE)
             .map_err(|_| Error::InvalidArgument("an output too large to allocate"))?;
@@ -289,15 +226,11 @@ impl OutputMemory {
         })
     }
 
-    /// Faults the pages in, here, on the reading task. A direct read pins
-    /// the pages it fills on the one I/O worker, which would otherwise fault
-    /// in, and the kernel zero, every read's fresh pages alone: the worker
-    /// then caps the disk tier (`doc/04-multi-device.md`, "Measured").
+    /// Faulted in on the reading task: on the one I/O worker, zeroing every read's fresh
+    /// pages caps the disk tier (`doc/04-multi-device.md`, "Measured").
     fn fault_in(&self) {
         #[cfg(target_os = "linux")]
-        // SAFETY: the range is the output's memory, page-aligned. Populating
-        // its pages changes no byte of them: fresh anonymous or shared pages
-        // read as zeros either way, and a page already there keeps its bytes.
+        // SAFETY: the output's own pages; populating them changes none of their bytes.
         unsafe {
             libc::madvise(
                 self.ptr.as_ptr().cast(),
@@ -310,7 +243,6 @@ impl OutputMemory {
 
 impl Drop for OutputMemory {
     fn drop(&mut self) {
-        // Another's memory goes back with its keeper.
         if let OutputPlace::Allocated(layout) = self.place {
             // SAFETY: allocated with this layout, and freed once, here.
             unsafe { dealloc(self.ptr.as_ptr(), layout) };
@@ -318,15 +250,11 @@ impl Drop for OutputMemory {
     }
 }
 
-/// An output's memory once every write to it is done: initialized
-/// throughout, so it can be read as a slice.
 struct FilledOutput(OutputMemory);
 
 impl AsRef<[u8]> for FilledOutput {
     fn as_ref(&self) -> &[u8] {
-        // SAFETY: every byte is written (`ReadOutput::new` and the reads and
-        // copies it took), and nothing writes it any more: no buffer it lent
-        // is left, or `into_bytes` couldn't have taken it.
+        // SAFETY: every byte is written, and no lent buffer is left to write more (`into_bytes`).
         unsafe { std::slice::from_raw_parts(self.0.ptr.as_ptr(), self.0.len) }
     }
 }
@@ -361,9 +289,6 @@ mod tests {
         drop(lent);
     }
 
-    /// An output over another's memory keeps its keeper until the output
-    /// and every buffer it lent have dropped: what the owner waits for
-    /// before it gives a client its span back (`doc/11-shared-mode.md`).
     #[test]
     fn an_output_over_kept_memory_drops_its_keeper_last() {
         struct Keeper {
@@ -382,8 +307,7 @@ mod tests {
             _memory: memory,
             dropped,
         });
-        // SAFETY: the keeper holds the two pages, page-aligned, and nothing
-        // else touches them.
+        // SAFETY: the keeper holds the two pages, page-aligned, and nothing else touches them.
         let output = unsafe { ReadOutput::over(0..2 * PAGE, ptr, 2 * PAGE as usize, keeper) };
         let mut output = output.unwrap();
         output.copy_in(0, &[1; PAGE as usize]);

@@ -5,8 +5,6 @@ pub(crate) mod io_task;
 pub(crate) mod io_worker;
 pub(crate) mod sync;
 
-// The driver under the backend loop: the simulated one in shuttle tests,
-// io_uring on Linux, a thread pool elsewhere.
 cfg_if::cfg_if! {
     if #[cfg(all(feature = "shuttle", test))] {
         pub(crate) mod simulated;

@@ -11,8 +11,6 @@ use crate::io::sync::{Arc, Mutex};
 pub(crate) type ReadCompletion = Arc<TaskCompletion<(AlignedBuf, usize)>>;
 pub(crate) type WriteCompletion = Arc<TaskCompletion<()>>;
 
-/// Where an I/O goes: one of the worker's files, by its place in the list
-/// the worker opened, and an offset in it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FilePosition {
     file: u32,
@@ -24,7 +22,6 @@ impl FilePosition {
         Self { file, offset }
     }
 
-    /// The file's place in the worker's list.
     pub fn file(self) -> u32 {
         self.file
     }
@@ -33,7 +30,6 @@ impl FilePosition {
         self.offset
     }
 
-    /// The position `bytes` further into the same file.
     pub fn advanced(self, bytes: u64) -> Self {
         Self {
             file: self.file,
@@ -150,11 +146,7 @@ pub struct FileReadTask {
 }
 
 impl FileReadTask {
-    /// Submit the read to the worker eagerly. The returned future just
-    /// waits for the completion to be signalled. Submitting inside
-    /// `IoWorker::read_at` (rather than on first poll) is what makes the
-    /// IoWorker channel order match caller-side request order — see the
-    /// comment on `FileWriteTask::new`.
+    /// Sends now, not on first poll, so the channel's order is the callers' order.
     pub(crate) fn new(
         tx: mpsc::Sender<WorkerRequest>,
         buf: AlignedBuf,
@@ -201,10 +193,7 @@ pub struct FileWriteTask {
 }
 
 impl FileWriteTask {
-    /// Submit the write to the worker eagerly. The request enters the
-    /// IoWorker channel at construction time, *not* on first poll, so the
-    /// channel's order is the order callers make requests in, not the
-    /// async scheduler's choice of poll order.
+    /// Sends now, not on first poll, so the channel's order is the callers', not the poll order.
     pub(crate) fn new(tx: mpsc::Sender<WorkerRequest>, writes: Vec<PageWrite>) -> Result<Self> {
         let completion = Arc::new(TaskCompletion::new());
         let request = WorkerRequest::Write {

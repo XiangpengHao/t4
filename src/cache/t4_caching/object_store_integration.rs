@@ -1,16 +1,3 @@
-//! `T4Caching` as an [`ObjectStore`]: an integration of t4's API
-//! (`doc/09-vortex-integration.md`, decision 2). A read opens its file
-//! ([`T4Caching::open`]) and reads its range through the cache.
-//!
-//! - **Writes,** puts, copies, renames and deletes, go to the inner store,
-//!   and the cache forgets the paths they change: the next read asks again.
-//!   It forgets them once the write is done, has failed, or was given up
-//!   on, its future dropped: a write given up on may have landed anyway.
-//! - **Reads the cache can't serve** go to the inner store as they are:
-//!   conditional ones but `If-Match` on the file's e_tag, reads of a named
-//!   version, of a file with no e_tag, those a read of the cache file
-//!   fails, and those whose fetch finds the file changed.
-
 use std::ops::Range;
 use std::sync::PoisonError;
 
@@ -29,8 +16,7 @@ use super::{KnownFiles, T4Caching};
 use crate::io::sync::{Arc, Mutex, MutexGuard};
 
 impl T4Caching {
-    /// Whether the cache may serve a read with `options`: no condition on
-    /// the file but `If-Match`, which it checks, and no version named.
+    /// `If-Match` is missing on purpose: `get_opts` checks it.
     fn serves(options: &GetOptions) -> bool {
         options.if_none_match.is_none()
             && options.if_modified_since.is_none()
@@ -38,7 +24,6 @@ impl T4Caching {
             && options.version.is_none()
     }
 
-    /// A get's answer: `bytes`, the file's `range`.
     fn answer(meta: &ObjectMeta, range: Range<u64>, bytes: Bytes) -> GetResult {
         GetResult {
             payload: GetResultPayload::Stream(stream::once(ready(Ok(bytes))).boxed()),
@@ -108,8 +93,7 @@ impl ObjectStore for T4Caching {
         &self,
         locations: BoxStream<'static, object_store::Result<Path>>,
     ) -> BoxStream<'static, object_store::Result<Path>> {
-        // Each location the inner store takes, forgotten as its delete is
-        // done, and when this stream drops, done or given up on.
+        // Forget each as its delete is done; the drop forgets those given up on.
         let forget = Arc::new(ForgetOnDrop::new(&self.known, []));
         let taken = Arc::clone(&forget);
         let locations = locations
@@ -172,9 +156,7 @@ impl ObjectStore for T4Caching {
     }
 }
 
-/// The paths a write through the cache changes, which it forgets when this
-/// drops: once the write is done, has failed, or was given up on, as a
-/// write given up on may have landed all the same.
+/// Forgets on drop, not on success: a write given up on may have landed all the same.
 struct ForgetOnDrop {
     known: Arc<KnownFiles>,
     paths: Mutex<Vec<Path>>,
@@ -188,7 +170,6 @@ impl ForgetOnDrop {
         }
     }
 
-    /// One more path the write changes.
     fn add(&self, path: &Path) {
         self.paths().push(path.clone());
     }
@@ -207,7 +188,6 @@ impl Drop for ForgetOnDrop {
     }
 }
 
-/// An upload through the cache, which forgets its path once done.
 #[derive(Debug)]
 struct ForgettingUpload {
     upload: Box<dyn MultipartUpload>,

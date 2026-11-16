@@ -1,13 +1,6 @@
 //! `t4`: a cache for object stores, in memory and on a local NVMe drive.
-//!
-//! [`T4Caching`] is an [`object_store::ObjectStore`] over another, which
-//! [`T4Caching::builder`] makes: it keeps what is read in two tiers of fixed
-//! size, and fetches what only the remote holds itself. [`policy`] holds what decides
-//! what it keeps: the [`policy::PlacementPolicy`] trait, and its default, a
-//! lock-free CLOCK.
+//! Start from [`T4Caching::builder`].
 
-// The object store cache (`doc/03-cache.md`). Linux and macOS: its memory
-// pool is an anonymous mapping.
 #[cfg(unix)]
 mod cache;
 mod io;

@@ -1,12 +1,3 @@
-//! The frames a shared cache's socket carries (`doc/11-shared-mode.md`,
-//! decision 5): a little-endian `u64` length, then the body, a tag and its
-//! fields, little-endian too. A client's frames ask its owner
-//! ([`ClientFrame`]); the owner's answer a call, by the number the client
-//! gave it, or tell of a read from disk made for one ([`OwnerFrame`]). Each
-//! field is decoded and checked here, as it arrives: a frame that ends
-//! early, runs past its end, or holds a value its field can't take is a
-//! protocol error, which closes the connection (decision 7).
-
 use std::num::NonZeroU8;
 use std::ops::Range;
 use std::time::Duration;
@@ -20,25 +11,18 @@ use crate::cache::storage::LocatedRun;
 use crate::cache::{BlockKey, FileVersionId};
 use crate::io::error::{Error, Result};
 
-/// The protocol's version: a client and an owner of different versions
-/// don't talk. They learn each other's from [`ClientFrame::Hello`] and
-/// [`OwnerFrame::Welcome`], which are the same in every version, their
-/// tags and descriptors with them: a version that needs more of a
-/// handshake says it in frames after the welcome.
+/// `Hello` and `Welcome` stay the same in every version, so that peers of different versions
+/// learn each other's; a version that needs more handshake adds frames after the welcome.
 pub(in crate::cache::cache_stores::shared) const PROTOCOL_VERSION: u32 = 4;
 
-/// A frame a client sends its owner. A call, which the owner answers,
-/// carries the number the client gave it, `call`; the other frames take no
-/// answer. A read is named by the number the client gave it, `read`, from
-/// its start to its end.
+/// A frame with a `call` is answered by that number.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::cache::cache_stores::shared) enum ClientFrame {
-    /// The first frame: the client's protocol version, sent with its
-    /// descriptor of the first cache file, and of its region if `region`.
-    Hello { version: u32, region: bool },
-    /// Starts a read of `range` of the version of the file at `path` with
-    /// `e_tag` and `size`, for `intent`; its output the span `output` of
-    /// the client's region, if it names one.
+    /// Sent with descriptors beside it: the first cache file's, and the region's if `region`.
+    Hello {
+        version: u32,
+        region: bool,
+    },
     StartRead {
         call: u64,
         read: u64,
@@ -49,61 +33,62 @@ pub(in crate::cache::cache_stores::shared) enum ClientFrame {
         intent: Option<ReadIntent>,
         output: Option<SpanName>,
     },
-    /// The GETs the client's read policy planned for the run of the read
-    /// the owner located last.
     TakeGets {
         call: u64,
         read: u64,
         plan: ReadPlan,
     },
-    /// The next bytes of the read's fetch `fetch`.
-    Land { read: u64, fetch: u32, bytes: Bytes },
-    /// The next bytes of the read's fetch `fetch`, staged in the span
-    /// `staged` of the client's region.
+    Land {
+        read: u64,
+        fetch: u32,
+        bytes: Bytes,
+    },
     LandStaged {
         read: u64,
         fetch: u32,
         staged: SpanName,
     },
-    /// The read's fetch `fetch` is all in: its blocks are cached.
-    Commit { call: u64, read: u64, fetch: u32 },
-    /// The read's fetch `fetch` failed: its blocks go uncached.
-    Abandon { read: u64, fetch: u32 },
-    /// The read's round: its work on the tiers, answered once it is done
-    /// and the round's fetches are committed or abandoned. Sent any time
-    /// after the round starts, with `StartRead` or after `Retry`, once a
-    /// round.
-    Finish { call: u64, read: u64 },
-    /// The client is done with the read, or gave it up; the owner answers
-    /// [`OwnerFrame::Ended`] once it is done with the read's spans.
-    EndRead { read: u64 },
-    /// The size of the version the cache holds of the file at `path`.
-    KnownSize { call: u64, path: Bytes },
+    Commit {
+        call: u64,
+        read: u64,
+        fetch: u32,
+    },
+    Abandon {
+        read: u64,
+        fetch: u32,
+    },
+    /// Sent once a round, any time after it starts (with `StartRead` or after `Retry`);
+    /// answered once the round's fetches are committed or abandoned.
+    Finish {
+        call: u64,
+        read: u64,
+    },
+    /// Answered by [`OwnerFrame::Ended`] once the owner is done with the read's spans.
+    EndRead {
+        read: u64,
+    },
+    KnownSize {
+        call: u64,
+        path: Bytes,
+    },
 }
 
-/// A frame an owner sends its client: the answer to one of its calls, or
-/// news of a read from disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::cache::cache_stores::shared) enum OwnerFrame {
-    /// The answer to [`ClientFrame::Hello`]: the owner's protocol version,
-    /// and whether it mapped the client's region; if not, the client's
-    /// reads' bytes go in the frames. A client of another version is told
-    /// it too, then refused.
+    /// Without `region`, the client's reads' bytes go in the frames. A client of another
+    /// version is told the owner's too, then refused.
     Welcome {
         version: u32,
         region: bool,
     },
-    /// The read started: its file's version, and its next step.
     Started {
         call: u64,
         version: FileVersion,
         next: NextStep,
     },
-    /// The cache can't hold the read's file: the read goes to the remote.
     Uncacheable {
         call: u64,
     },
-    /// The GETs are taken: the read's next step.
     Next {
         call: u64,
         next: NextStep,
@@ -111,58 +96,44 @@ pub(in crate::cache::cache_stores::shared) enum OwnerFrame {
     Committed {
         call: u64,
     },
-    /// The read waited for blocks that no fetch cached: it fetches them,
-    /// its next step.
+    /// The blocks the read waited for went uncached: it fetches them itself.
     Retry {
         call: u64,
         next: NextStep,
     },
-    /// The read's bytes, and its end; `None` if a read from disk is still
-    /// writing them, as after one failed.
+    /// `None` if a read from disk still writes the bytes, as after one failed.
     Served {
         call: u64,
         bytes: Option<Bytes>,
     },
-    /// The cache failed the call: the read is over, and goes to the remote.
     Failed {
         call: u64,
     },
-    /// The read's bytes, `asked` of the file, and its end: in its output's
-    /// span, where an output of them has them.
     ServedInSpan {
         call: u64,
         asked: Range<u64>,
     },
-    /// The owner is done with the read `read`, ended, and with its spans:
-    /// nothing of the owner's writes them, or reads them, any more.
     Ended {
         read: u64,
     },
-    /// A read from cache file `drive`, of `bytes`, made for one of the
-    /// client's reads, went on: for the client's read policy to hear.
     DiskRead {
         drive: u32,
         bytes: u32,
         phase: IoPhase,
     },
-    /// The size of the version the cache holds of the file asked of, if it
-    /// holds one.
     KnownSize {
         call: u64,
         size: Option<u64>,
     },
 }
 
-/// What a read does next: plan the GETs of a run of its blocks, or make
-/// the GETs planned, each landed as fetch number its place in the list.
+/// A fetch is numbered by its place in `Fetch`'s list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::cache::cache_stores::shared) enum NextStep {
     Plan(LocatedRun),
     Fetch(Vec<FetchSpec>),
 }
 
-/// A GET a read makes: the file's bytes it fetches, how many requests race
-/// for them at once, and when one more races late.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::cache::cache_stores::shared) struct FetchSpec {
     bytes: Range<u64>,
@@ -204,10 +175,8 @@ impl ClientFrame {
     const LAND_STAGED: u8 = 9;
     const KNOWN_SIZE: u8 = 10;
 
-    /// What a client's first frame starts with.
     const MAGIC: [u8; 4] = *b"t4sh";
 
-    /// The frame, its length first.
     pub(in crate::cache::cache_stores::shared) fn encode(&self) -> Vec<u8> {
         match self {
             Self::Hello { version, region } => {
@@ -296,11 +265,6 @@ impl ClientFrame {
         }
     }
 
-    /// The frame whose body, its length taken off, is `body`.
-    ///
-    /// # Errors
-    ///
-    /// If the body isn't a client frame's, whole.
     pub(in crate::cache::cache_stores::shared) fn decode(body: Bytes) -> Result<Self> {
         let mut frame = FrameReader::new(body);
         let decoded = match frame.u8()? {
@@ -367,7 +331,6 @@ impl ClientFrame {
 }
 
 impl OwnerFrame {
-    /// The number of the call the frame answers; `None` if it answers none.
     pub(in crate::cache::cache_stores::shared) fn call(&self) -> Option<u64> {
         match *self {
             Self::Started { call, .. }
@@ -396,7 +359,6 @@ impl OwnerFrame {
     const ENDED: u8 = 11;
     const KNOWN_SIZE: u8 = 12;
 
-    /// The frame, its length first.
     pub(in crate::cache::cache_stores::shared) fn encode(&self) -> Vec<u8> {
         match self {
             Self::Welcome { version, region } => {
@@ -474,11 +436,6 @@ impl OwnerFrame {
         }
     }
 
-    /// The frame whose body, its length taken off, is `body`.
-    ///
-    /// # Errors
-    ///
-    /// If the body isn't an owner frame's, whole.
     pub(in crate::cache::cache_stores::shared) fn decode(body: Bytes) -> Result<Self> {
         let mut frame = FrameReader::new(body);
         let decoded = match frame.u8()? {
@@ -534,14 +491,11 @@ impl OwnerFrame {
     }
 }
 
-/// A frame being written: its length, filled in once it is whole, then its
-/// tag and fields, each appended in order.
 pub(in crate::cache::cache_stores::shared) struct FrameWriter {
     frame: Vec<u8>,
 }
 
 impl FrameWriter {
-    /// The bytes of a frame's length.
     const LENGTH_BYTES: usize = size_of::<u64>();
 
     fn new(tag: u8) -> Self {
@@ -551,14 +505,12 @@ impl FrameWriter {
         Self { frame }
     }
 
-    /// A frame of `tag` whose one field is `number`: a call's, or a read's.
     fn numbered(tag: u8, number: u64) -> Vec<u8> {
         let mut frame = Self::new(tag);
         frame.u64(number);
         frame.finish()
     }
 
-    /// The frame, its length filled in.
     fn finish(mut self) -> Vec<u8> {
         let body = (self.frame.len() - Self::LENGTH_BYTES) as u64;
         self.frame[..Self::LENGTH_BYTES].copy_from_slice(&body.to_le_bytes());
@@ -577,7 +529,6 @@ impl FrameWriter {
         self.u8(u8::from(value));
     }
 
-    /// A span of the client's region, if any.
     fn span(&mut self, span: Option<SpanName>) {
         self.flag(span.is_some());
         if let Some(span) = span {
@@ -594,7 +545,6 @@ impl FrameWriter {
         self.raw(&value.to_le_bytes());
     }
 
-    /// `bytes`, their length first.
     fn bytes(&mut self, bytes: &[u8]) {
         self.u64(bytes.len() as u64);
         self.raw(bytes);
@@ -605,7 +555,7 @@ impl FrameWriter {
         self.u64(range.end);
     }
 
-    /// `duration` in nanoseconds, the most a `u64` holds at most: 584 years.
+    /// Saturates: a `u64` of nanoseconds is 584 years.
     fn duration(&mut self, duration: Duration) {
         self.u64(u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX));
     }
@@ -619,7 +569,6 @@ impl FrameWriter {
         });
     }
 
-    /// `sources`, their count first.
     pub(in crate::cache::cache_stores::shared) fn sources(&mut self, sources: &[BlockSource]) {
         self.u32(u32::try_from(sources.len()).expect("a run's blocks fit a u32"));
         for source in sources {
@@ -635,7 +584,6 @@ impl FrameWriter {
         }
     }
 
-    /// `plan`'s GETs, their count first.
     fn plan(&mut self, plan: &ReadPlan) {
         let gets = plan.gets();
         self.u32(u32::try_from(gets.len()).expect("a plan's GETs fit a u32"));
@@ -658,7 +606,6 @@ impl FrameWriter {
         }
     }
 
-    /// Writes `run`, for a client to plan its GETs by.
     fn located_run(&mut self, run: &LocatedRun) {
         self.u32(run.first());
         self.range(&run.asked());
@@ -719,10 +666,8 @@ impl FrameWriter {
     }
 }
 
-/// A frame's body being read: each field taken in order, checked as it is.
 pub(in crate::cache::cache_stores::shared) struct FrameReader {
     body: Bytes,
-    /// Where the next field starts.
     at: usize,
 }
 
@@ -731,7 +676,6 @@ impl FrameReader {
         Self { body, at: 0 }
     }
 
-    /// The error of a frame whose `field` is wrong.
     pub(in crate::cache::cache_stores::shared) fn malformed(field: &str) -> Error {
         Error::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -739,7 +683,6 @@ impl FrameReader {
         ))
     }
 
-    /// Whether the whole body was read: no field is left over.
     fn finish(self) -> Result<()> {
         if self.at == self.body.len() {
             Ok(())
@@ -748,7 +691,6 @@ impl FrameReader {
         }
     }
 
-    /// The next `len` bytes of the body.
     fn take(&mut self, len: usize) -> Result<Bytes> {
         if self.body.len() - self.at < len {
             return Err(Self::malformed("field: it ends early"));
@@ -774,8 +716,7 @@ impl FrameReader {
         }
     }
 
-    /// A span of the client's region, if the frame names one: the owner
-    /// checks it against the region it mapped.
+    /// Unchecked here: the owner checks it against the region it mapped.
     fn span(&mut self) -> Result<Option<SpanName>> {
         Ok(match self.flag()? {
             true => Some(SpanName::new(self.u64()?, self.u64()?)),
@@ -791,7 +732,6 @@ impl FrameReader {
         Ok(u64::from_le_bytes(self.array()?))
     }
 
-    /// Bytes, their length first; a slice of the body, not a copy.
     fn bytes(&mut self) -> Result<Bytes> {
         let len = usize::try_from(self.u64()?).map_err(|_| Self::malformed("length"))?;
         self.take(len)
@@ -869,13 +809,6 @@ impl FrameReader {
         }
     }
 
-    /// The run the frame holds next, as `FrameWriter::located_run` wrote
-    /// it.
-    ///
-    /// # Errors
-    ///
-    /// If the frame ends first, or the run holds no block or one past the
-    /// last a file has.
     fn located_run(&mut self) -> Result<LocatedRun> {
         let first = self.u32()?;
         let asked = self.range()?;

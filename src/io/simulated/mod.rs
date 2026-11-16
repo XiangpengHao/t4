@@ -1,9 +1,4 @@
-//! The driver shuttle tests run on, in place of the kernel and the drive.
-//! Each operation stays in flight for a random number of the loop's waits,
-//! drawn from shuttle's random source, and reaches the [`SimDisk`] only
-//! once it completes: a read can see a write that completes before it,
-//! whichever was submitted first, as with real asynchronous I/O. The
-//! scheduler decides every step, so a failing schedule replays exactly.
+//! An operation reaches the disk only when it completes, so reads see writes in completion order.
 
 mod disk;
 
@@ -20,11 +15,9 @@ use crate::io::io_task::{FilePosition, WorkerRequest};
 use crate::io::sync::mpsc;
 use disk::{Completion, WriteId};
 
-/// The most waits an operation stays in flight.
 const MAX_WAITS: u32 = 8;
 
 pub(crate) struct SimulatedDriver {
-    /// A disk for each of the worker's files, by its place in the list.
     disks: Vec<SimDisk>,
     queue_depth: usize,
     inflight: Vec<InflightOp>,
@@ -57,8 +50,7 @@ impl SimOp {
                 buf_len,
                 at,
             } => {
-                // SAFETY: the backend loop keeps the buffer alive, and touches
-                // it nowhere else, until this read completes.
+                // SAFETY: the backend loop keeps the buffer alive and untouched until this completes.
                 let buf = unsafe { std::slice::from_raw_parts_mut(buf_ptr, buf_len as usize) };
                 let offset = at.offset();
                 (at.file(), Completion::Read { offset, buf })
@@ -99,8 +91,7 @@ impl IoDriver for SimulatedDriver {
                 user_data,
                 ..
             } => {
-                // SAFETY: the backend loop keeps the buffer alive, and
-                // unchanged, until this write completes.
+                // SAFETY: the backend loop keeps the buffer alive and unchanged until this completes.
                 let bytes = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len as usize) };
                 let id = self.disk(at)?.submit_write(at.offset(), bytes.to_vec());
                 (
@@ -133,9 +124,6 @@ impl IoDriver for SimulatedDriver {
         self.completions.pop_front()
     }
 
-    /// One unit of I/O time: the other threads run first, then each
-    /// operation in flight either completes, if its waits are up, or ages
-    /// by one.
     fn wait_for_progress(&mut self, _request_rx: &mpsc::Receiver<WorkerRequest>) {
         shuttle::thread::yield_now();
         let disks = &mut self.disks;
@@ -155,7 +143,6 @@ impl IoDriver for SimulatedDriver {
 }
 
 impl SimulatedDriver {
-    /// The disk of the file `at` names.
     fn disk(&mut self, at: FilePosition) -> Result<&mut SimDisk> {
         self.disks
             .get_mut(at.file() as usize)
@@ -165,7 +152,6 @@ impl SimulatedDriver {
     }
 }
 
-/// The backend over `disks`, one for each file.
 pub(crate) fn new_backend_on(
     disks: Vec<SimDisk>,
     queue_depth: u32,
@@ -181,8 +167,6 @@ pub(crate) fn new_backend_on(
     BackendLoop::new(queue_depth, rx, driver)
 }
 
-/// Shuttle tests run on a [`SimDisk`] (`IoWorker::simulated`), never on a
-/// real file.
 pub(crate) fn new_backend(
     _files: Vec<File>,
     _queue_depth: u32,

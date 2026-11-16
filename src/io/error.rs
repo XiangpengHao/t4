@@ -5,10 +5,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]
 pub enum Error {
     Io(std::io::Error),
-    /// A range past what it reads from: a window of pages past `u32`.
     RangeOutOfBounds,
     InvalidArgument(&'static str),
-    /// Another cache owns a cache file: in this process or another.
+    /// Another cache, in this process or another, owns a cache file.
     Busy,
 }
 
