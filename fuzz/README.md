@@ -28,7 +28,7 @@ to four blocks, so eviction, moves to disk and promotions start within a few
 operations. Its placement policy is the default CLOCK, or one the input
 scripts, which also picks victims that hold nothing. Its read policy is the
 default, or one whose plans the input scripts, many of which the cache must
-refuse. Its files are allocated eagerly or on demand.
+refuse.
 
 It checks that:
 

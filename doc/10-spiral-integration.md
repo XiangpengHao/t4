@@ -10,8 +10,9 @@ through its owner, `11-shared-mode.md` (decision 8); the lock is built
 (plan step 3), and shared mode with it. Revised 2 Nov 2026: the disk tier
 survives a clean restart, built (decision 7, stage 1); a crash, Later. A
 user's machine's cache file is allocated on demand, built (decision 9).
-Revised 16 Nov 2026: the two allocations named eager and on demand,
-`with_growing_disk_files` renamed `with_on_demand_disk_allocation`.
+Revised 16 Nov 2026: every cache file allocated on demand, a server's
+too; the eager allocation and `with_on_demand_disk_allocation` gone
+(decision 9).
 
 The goal: t4 replaces spiraldb's local I/O cache, Kismet, and then
 takes over the rest of the work `spiral-io` does to read fast. The rest
@@ -149,7 +150,7 @@ nothing; Kismet's non-unix fallbacks have no user.
 | fetch-once | yes, within a process |
 | survives a restart | a clean one: the disk tier, kept in a snapshot as the cache drops (decision 7, built 2 Nov 2026); a crash loses everything |
 | several processes, one cache | shared mode: one process owns the cache and the others read through it (`11-shared-mode.md`, built); a cache not built for sharing on owned files fails to build, `Error::Busy` |
-| a laptop's footprint | cache files allocated on demand, each write leaving its drive Kismet's room (`with_on_demand_disk_allocation`, decision 9, built 2 Nov 2026); a memory capacity is required |
+| a laptop's footprint | cache files allocated on demand, each write leaving its drive Kismet's room (decision 9, built 2 Nov 2026); a memory capacity is required |
 | a disk error served from the remote | yes: a failed cache-file read goes to the inner store |
 | macOS | built and tested there, for development only until this doc (decision 12): a thread pool, `F_NOCACHE` |
 
@@ -254,12 +255,11 @@ hosts is one.
      `FixedPlacementPolicy` admitting every fetched block to disk, a disk
      hit staying there; direct I/O, so repeated reads come from the disk
      tier, not the OS's page cache; a memory tier of one chunk, the least
-     t4 takes; a cache file allocated on demand (decision 9). The disk tier
-     is what survives a restart (decision 7), so admitting straight to it loses
-     nothing at exit. Buffered, as this profile first ran, t4 took 1.45
-     times Kismet's time from disk on Linux: a buffered read's page-cache
-     work runs on the thread that submits it, there t4's one io_uring
-     thread (plan step 2).
+     t4 takes. The disk tier is what survives a restart (decision 7), so
+     admitting straight to it loses nothing at exit. Buffered, as this
+     profile first ran, t4 took 1.45 times Kismet's time from disk on
+     Linux: a buffered read's page-cache work runs on the thread that
+     submits it, there t4's one io_uring thread (plan step 2).
    - **A server**, if one opts in (Open questions): t4's defaults: the
      CLOCK, fetched blocks to memory and memory's victims to disk, direct
      I/O, a cache file on each drive.
@@ -373,13 +373,13 @@ hosts is one.
    and spiral-io runs it uncached, saying so once, rather than failing
    the session as a cache that can't be made does now.
 
-9. **A user's machine allocates its cache file on demand.** t4
-   allocated its cache files eagerly, in full at build: 20 GiB the first
-   time Studio starts, about 2 s on a Mac, and a failed build, so a
-   failed session, on a disk with less. Built 2 Nov 2026
-   (`T4CachingBuilder::with_on_demand_disk_allocation`, named
-   `with_growing_disk_files` until 16 Nov 2026,
-   `storage/disk/allocation.rs`):
+9. **Every cache file is allocated on demand.** t4 allocated its cache
+   files eagerly, in full at build: 20 GiB the first time Studio starts,
+   about 2 s on a Mac, and a failed build, so a failed session, on a disk
+   with less. Built 2 Nov 2026 as an option for a user's machine
+   (`with_growing_disk_files`, then `with_on_demand_disk_allocation`);
+   every cache's since 16 Nov 2026, a server's too, the user's call: one
+   way, and no eager allocation to keep (`storage/disk/headroom.rs`):
 
    - **The file is sized, not allocated** (`set_len`, never shortened): it
      takes the room of the chunks written to it, and a chunk written once
@@ -392,9 +392,6 @@ hosts is one.
      drive that can't say its free room takes no block. Memory's victims
      that can't move to disk stay, and go back to the policy, as when the
      disk tier has no room.
-   - **A server's cache files stay allocated eagerly,** in full, the
-     default: no
-     check, and no write finds its drive full.
 
    Unlike Kismet's target, t4's budget is never exceeded.
 
@@ -552,8 +549,8 @@ Phase 1, t4 in Kismet's place:
 
    Moved 2 Nov 2026 onto develop at 38c61bd33f, t4 by git at 2b7f093,
    still not committed: `with_multiprocess_sharing`; a user's machine's
-   file grows (`with_growing_disk_files`, since renamed
-   `with_on_demand_disk_allocation`, decision 9); an object's size
+   file grows (`with_growing_disk_files`, gone since 16 Nov 2026, when
+   every cache file came to grow, decision 9); an object's size
    from `known_size` rather than a HEAD of t4 itself, which a restarted
    cache refused (decision 7). New test: a session built again on a
    dropped one's directory reads what it cached with no HEAD and no read
@@ -723,10 +720,9 @@ Phase 1, t4 in Kismet's place:
    process killed keeps the last snapshot's blocks and no others. Later,
    once stage 1 is measured in Studio.
 5. **The cache file allocated on demand, in t4** (decision 9). Built 2
-   Nov 2026. Tests: a file allocated on demand is sized but takes room
-   only as blocks are written, and one allocated eagerly takes it all at
-   build (`a_cache_file_takes_its_room_at_build_unless_allocated_on_demand`,
-   `an_on_demand_cache_file_takes_room_as_blocks_are_written`); a drive
+   Nov 2026; every cache file since 16 Nov 2026. Tests: a file is sized
+   but takes room only as blocks are written
+   (`a_cache_file_takes_room_as_blocks_are_written`); a drive
    short of room takes no block, evicts no victim for one, and its blocks
    still serve (`a_drive_short_of_room_takes_no_block_and_evicts_none`,
    the room the rule keeps set past any drive's, the tier filled by a
@@ -819,7 +815,7 @@ Phase 2, t4 in the read path:
 | Repository | Path | What | Built |
 |---|---|---|---|
 | t4 | `src/cache/storage/disk/cache_files.rs` | the lock (decision 8) | yes |
-| t4 | `src/cache/storage/disk/allocation.rs` | cache files allocated eagerly or on demand, and the room the latter leave their drives (decision 9) | yes |
+| t4 | `src/cache/storage/disk/headroom.rs` | the room cache files, allocated on demand, leave their drives (decision 9) | yes |
 | t4 | `11-shared-mode.md`'s code map | shared mode (decision 8) | yes |
 | t4 | `src/cache/storage/snapshot/` | the disk tier's snapshot: its bytes and checks, and its file (decision 7) | stage 1 |
 | t4 | `src/cache/storage/cache_store/restart.rs` | the disk tier captured as the cache drops, restored as the next builds (decision 7) | stage 1 |

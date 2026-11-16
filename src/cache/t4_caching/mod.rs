@@ -22,7 +22,7 @@ use super::policy::Tier;
 use super::policy::{
     FetchRuns, PlacementPolicy, RaceStragglers, ReadIntent, ReadPolicy, TierSizes,
 };
-use super::storage::{DiskFile, FileAllocation};
+use super::storage::DiskFile;
 use super::{BLOCK_SIZE_U64, InsertOrAbort};
 use crate::io::sync::Arc;
 
@@ -57,7 +57,6 @@ pub struct T4CachingBuilder {
     disk_files: Vec<DiskFile>,
     queue_depth: u32,
     direct_io: bool,
-    disk_allocation: FileAllocation,
     placement: Option<PlacementMaker>,
     reads: Option<Arc<dyn ReadPolicy>>,
     sleep: Option<Sleep>,
@@ -99,7 +98,8 @@ impl T4CachingBuilder {
     }
 
     /// A cache file of `capacity` bytes, one a drive, one at least. Each file holds as many
-    /// chunks as the smallest has room for.
+    /// chunks as the smallest has room for. Files take room as blocks are written, and a block
+    /// goes to disk only while every drive keeps 64 MiB and two blocks free.
     pub fn with_disk_file(mut self, path: impl Into<PathBuf>, capacity: u64) -> Self {
         self.disk_files.push(DiskFile::new(path.into(), capacity));
         self
@@ -114,13 +114,6 @@ impl T4CachingBuilder {
     /// Whether the cache files bypass the page cache; true unless set.
     pub fn with_direct_io(mut self, direct_io: bool) -> Self {
         self.direct_io = direct_io;
-        self
-    }
-
-    /// For a drive the cache shares: files grow as blocks are written, and a block goes to disk
-    /// only while every drive keeps 64 MiB and two blocks free. Eager (whole capacity) unless set.
-    pub fn with_on_demand_disk_allocation(mut self) -> Self {
-        self.disk_allocation = FileAllocation::on_demand();
         self
     }
 
@@ -193,7 +186,6 @@ impl T4CachingBuilder {
             self.disk_files,
             queue_depth,
             self.direct_io,
-            self.disk_allocation,
             self.placement,
         );
         tiers.set_clock(self.clock.clone());
@@ -241,7 +233,6 @@ impl fmt::Debug for T4CachingBuilder {
             .field("disk_files", &self.disk_files)
             .field("queue_depth", &self.queue_depth)
             .field("direct_io", &self.direct_io)
-            .field("disk_allocation", &self.disk_allocation)
             .field("network_rate", &self.network_rate)
             .field("merged_up_to", &self.merged_up_to)
             .field("sharing", &self.sharing)
@@ -260,7 +251,6 @@ impl T4Caching {
             disk_files: Vec::new(),
             queue_depth: 64,
             direct_io: true,
-            disk_allocation: FileAllocation::Eager,
             placement: None,
             reads: None,
             sleep: None,

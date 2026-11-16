@@ -352,34 +352,6 @@ fn a_builder_needs_a_memory_capacity_and_a_disk_file() {
     });
 }
 
-#[cfg(feature = "shuttle")]
-#[test]
-fn a_cache_file_takes_its_room_at_build_unless_allocated_on_demand() {
-    crate::io::test_schedule::TestSchedule::check(|| {
-        use std::os::unix::fs::MetadataExt;
-        let inner = Arc::new(CountingStore::default());
-        for on_demand in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let cache = match on_demand {
-                true => builder(&inner, &dir).with_on_demand_disk_allocation(),
-                false => builder(&inner, &dir),
-            }
-            .build()
-            .unwrap();
-            let file = std::fs::metadata(dir.path().join("cache")).unwrap();
-            assert_eq!(file.len(), 8 * MIB);
-            // `st_blocks` counts 512-byte units.
-            let allocated = file.blocks() * 512;
-            assert_eq!(
-                allocated >= 8 * MIB,
-                !on_demand,
-                "{allocated} bytes allocated"
-            );
-            drop(cache);
-        }
-    });
-}
-
 /// By any path that reaches the file, a symlink too.
 #[cfg(feature = "shuttle")]
 #[test]
