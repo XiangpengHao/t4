@@ -1,6 +1,6 @@
 use vstd::prelude::*;
 
-use crate::cache::{ChunkId, check};
+use crate::cache::ChunkId;
 
 verus! {
 
@@ -23,7 +23,7 @@ impl View for FreeChunks {
 }
 
 impl FreeChunks {
-    const WORD_BITS: usize = 64;
+    const WORD_BITS: usize = u64::BITS as usize;
 
     pub(super) closed spec fn chunks(self) -> Set<int> {
         Set::range(0, self.chunk_count as int)
@@ -161,7 +161,7 @@ impl FreeChunks {
             final(self)@ == old(self)@.remove(chunk@ as int),
     {
         let (word_index, mask) = self.bit_of(chunk);
-        check(self.taken[word_index] & mask == 0, "a chunk taken twice");
+        assert_eq!(self.taken[word_index] & mask, 0, "{chunk:?} taken twice");
         self.take_bit(word_index, mask, Ghost(chunk@ as int));
     }
 
@@ -176,7 +176,7 @@ impl FreeChunks {
             final(self)@ == old(self)@.insert(chunk@ as int),
     {
         let (word_index, mask) = self.bit_of(chunk);
-        check(self.taken[word_index] & mask != 0, "a chunk freed twice");
+        assert_ne!(self.taken[word_index] & mask, 0, "{chunk:?} freed twice");
         self.taken[word_index] &= !mask;
         proof {
             Self::lemma_free_bit(old(self).taken@, self.chunk_count, chunk@ as int);
@@ -215,7 +215,11 @@ impl FreeChunks {
             (self.taken@[bit.0 as int] & bit.1 == 0) == !Self::is_taken(self.taken@, chunk@ as int),
     {
         // Padding bits are set: freeing one would hand out a chunk that doesn't exist.
-        check(chunk.index() < self.chunk_count, "a chunk past the tier's chunks");
+        assert!(
+            chunk.index() < self.chunk_count,
+            "{chunk:?} is past the tier's {} chunks",
+            self.chunk_count
+        );
         let index = chunk.index() as usize;
         proof {
             Self::lemma_mask(self.taken@[(index / 64) as int], (index % 64) as u64);

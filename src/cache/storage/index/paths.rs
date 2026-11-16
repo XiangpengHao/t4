@@ -4,7 +4,7 @@ use bbtree::BBTreeMap;
 use vstd::prelude::*;
 
 use crate::cache::InsertOrAbort;
-use crate::cache::{BLOCK_SIZE_U64, BlockKey, FileVersionId, check};
+use crate::cache::{BLOCK_SIZE_U64, BlockKey, FileVersionId};
 use crate::io::sync::atomic::{AtomicU64, Ordering};
 
 verus! {
@@ -68,7 +68,7 @@ impl FileVersion {
             bytes.end == vstd::math::min(bytes.start + BLOCK_SIZE_U64, self.size() as int),
     {
         let start = u64::from(index) * BLOCK_SIZE_U64;
-        check(start < self.size, "a block is past the file's end");
+        assert!(start < self.size, "block {index} is past the file's end");
         start..(start + BLOCK_SIZE_U64).min(self.size)
     }
 }

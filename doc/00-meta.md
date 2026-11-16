@@ -101,15 +101,15 @@ the free-chunk bitmap, where a bug would serve wrong bytes without failing.
   is the free set's size, so an allocation finds a chunk whenever the count
   says one is free.
 
-The proofs cover that code only, not the OS, filesystem or
-hardware. Outside `verus!`, Verus compiles the code but checks nothing:
-the plan's list of blocks and the index scan that feeds it, which lean on
-the facts above. Verus checks a verified function's preconditions only
-where verified code calls it; for other callers, the few that matter are
-also checked as the code runs (`check` in `src/cache/mod.rs`). A file's
-lemmas sit apart from its code, in a `#[cfg(verus_only)] mod proofs` at
-its end, so a function shows its contract and code, and at most a one-line
-call into them.
+The proofs cover that code only, not the OS, filesystem or hardware.
+Outside `verus!`, Verus compiles the code but checks nothing: the plan's
+list of blocks and the index scan that feeds it, which lean on the facts
+above. Verus checks a verified function's preconditions only where
+verified code calls it; for other callers, the few that matter are also
+`assert!`ed, which Verus proves never fails where verified code calls. A
+file's lemmas sit apart from its code, in a `#[cfg(verus_only)] mod
+proofs` at its end, so a function shows its contract and code, and at
+most a one-line call into them.
 
 ```bash
 cargo verus focus    # this crate's proofs only, as CI runs them

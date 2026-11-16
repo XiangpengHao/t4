@@ -62,21 +62,6 @@ impl ChunkId {
     }
 }
 
-/// `assert!(condition, message)`, which Verus can't verify: callers it
-/// verifies prove `condition`, and the others have it checked as they run.
-#[track_caller]
-fn check(condition: bool, message: &str)
-    requires
-        condition,
-{
-    let checked = if condition {
-        Some(())
-    } else {
-        None
-    };
-    checked.expect(message);
-}
-
 /// The id the cache gave a file's path and e_tag; never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileVersionId(u64);
@@ -93,7 +78,7 @@ impl FileVersionId {
         requires
             id < Self::LIMIT,
     {
-        check(id < Self::LIMIT, "file version ids ran out: 2^40 of them");
+        assert!(id < Self::LIMIT, "file version ids ran out: 2^40 of them");
         Self(id)
     }
 
@@ -125,7 +110,7 @@ impl BlockKey {
         ensures
             key@ == (version, index),
     {
-        check(index < Self::INDEX_LIMIT, "block numbers stop below 2^24");
+        assert!(index < Self::INDEX_LIMIT, "block numbers stop below 2^24");
         proof {
             use_type_invariant(version);
         }
