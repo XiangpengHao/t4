@@ -75,6 +75,7 @@
     "vs-foyer",
     "vs-kismet-files",
     "vs-kismet",
+    "cold-reads",
     "toc-optimizations",
     "net-tail",
     "net-race",

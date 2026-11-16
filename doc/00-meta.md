@@ -48,7 +48,7 @@ only the remote holds itself. The design: `03-cache.md`.
   through t4's existing API, Spiral naming each file as a path; then t4's
   merging and races in spiral-io's read path where they measure better.
   New in t4: a disk tier kept across restarts, one process per cache
-  file, a cache file that grows.
+  file, cache files allocated on demand.
 - `11-shared-mode.md`: one cache, several processes: the process that
   takes the cache files' lock owns the cache and serves it; the others
   read through it over a Unix socket and shared memory, and fetch what it
@@ -97,7 +97,8 @@ disk whose I/O completes in any order, is tested under
 [shuttle](https://github.com/awslabs/shuttle), which runs each test's
 threads through a thousand schedules. Shuttle runs threads one at a time,
 so it finds interleavings, not memory orderings too weak: those rest on the
-`Acquire` and `Release` pairs `src/cache/chunk_pool/chunk_table.rs` explains.
+`Acquire` and `Release` pairs `src/cache/storage/chunks/chunk_table.rs`
+explains.
 
 ```bash
 cargo test --features shuttle shuttle    # the shuttle tests, as CI runs them

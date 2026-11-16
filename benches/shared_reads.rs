@@ -18,7 +18,7 @@ use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
 use pollster::block_on;
-use t4::{CachedFile, T4Caching};
+use t4::{FileHandle, T4Caching};
 
 fn main() {
     divan::main();
@@ -37,8 +37,8 @@ struct SharedHotFile {
     _dir: tempfile::TempDir,
     _owner: T4Caching,
     _client: T4Caching,
-    through_owner: CachedFile,
-    through_client: CachedFile,
+    through_owner: FileHandle,
+    through_client: FileHandle,
 }
 
 impl SharedHotFile {
@@ -70,13 +70,13 @@ impl SharedHotFile {
         T4Caching::builder(Arc::clone(store) as Arc<dyn ObjectStore>)
             .with_memory_capacity(64 << 20)
             .with_disk_file(dir.join("t4.cache"), 64 << 20)
-            .with_sharing()
+            .with_multiprocess_sharing()
             .build()
             .unwrap()
     }
 
     /// Reads the file's first `len` bytes through `file`, and drops them.
-    fn read(file: &CachedFile, len: u64) {
+    fn read(file: &FileHandle, len: u64) {
         let bytes: Bytes = block_on(file.read(0..len, None)).unwrap();
         assert_eq!(bytes.len() as u64, len);
     }

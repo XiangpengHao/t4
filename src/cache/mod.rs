@@ -1,39 +1,29 @@
 //! The object store cache (`doc/03-cache.md`): aligned blocks of objects,
 //! held in memory chunks and disk chunks, found through an index on bbtree.
 //!
-//! - `chunk_pool`: each tier's chunks, which of them are free, and what
-//!   each holds (build step 1).
-//! - `block_index`: which blocks of which objects are cached, and where
-//!   (build step 2).
-//! - `cache_files`: the disk tier, its chunks striped over its cache files,
-//!   read and written by direct I/O (`doc/04-multi-device.md`).
+//! - `storage`: the storage half (`doc/11-shared-mode.md`, decision 2): the
+//!   memory and disk tiers, the index of which blocks are cached where, the
+//!   blocks being fetched, and reads, fills and evictions over them all.
+//! - `network`: the network half (decision 2's fetch half): the GETs of
+//!   what only the remote holds, their queue and their races, and the read
+//!   policy that plans them.
 //! - `policy`: what the cache asks of its policy, and the default one.
-//! - `in_flight`: the blocks being fetched, which a read that needs one
-//!   waits for rather than fetching again.
-//! - `object_cache`: reads, fills and evictions over them all.
 //! - `read_output`: the buffer a read's bytes land in, the caller's as
 //!   `Bytes` with no copy.
-//! - `t4_caching`: the front end over another `ObjectStore`: files opened
-//!   and read through the cache, and an `ObjectStore` itself.
-//! - `sharing`: one cache read by several processes, through the one that
-//!   owns it (`doc/11-shared-mode.md`).
-//! - `storage_link`: how the front end reaches the cache: its own, or its
-//!   owner's.
+//! - `t4_caching`: the front end over another `ObjectStore`: files opened,
+//!   a read run through both halves, and an `ObjectStore` itself.
+//! - `cache_stores`: the cache store a process reads through: in-process,
+//!   or shared by several processes (`doc/11-shared-mode.md`).
 
-mod block_index;
-mod cache_files;
-mod chunk_pool;
-mod get_queue;
-mod in_flight;
+mod cache_stores;
 mod io_report;
-mod object_cache;
+mod network;
 pub mod policy;
 mod read_output;
-mod sharing;
-mod storage_link;
+mod storage;
 mod t4_caching;
 
-pub use t4_caching::{CachedFile, T4Caching, T4CachingBuilder};
+pub use t4_caching::{FileHandle, T4Caching, T4CachingBuilder};
 
 use std::fmt;
 
