@@ -10,8 +10,6 @@ fn worker_failed_error(message: impl Into<String>) -> Error {
     Error::Io(std::io::Error::other(message.into()))
 }
 
-/// Fails a request never submitted. Its buffers drop first, as a completed
-/// request's do ([`InflightRequest::complete`]).
 fn complete_request_with_error(request: WorkerRequest, err: Error) {
     match request {
         WorkerRequest::Read {
@@ -63,10 +61,8 @@ enum InflightRequestKind {
 }
 
 impl InflightRequest {
-    /// Tells the request's caller how it went. The buffers it doesn't hand
-    /// back drop first: a write's, a failed read's. So once the caller's
-    /// future is ready, they are gone, and with them whatever a lent buffer
-    /// held for the I/O: the cache frees the chunks a write held then.
+    /// Buffers not handed back drop before the caller wakes, so what they held (a write's chunks)
+    /// is free once its future is ready.
     fn complete(self) {
         match self.kind {
             InflightRequestKind::Read {
@@ -93,7 +89,6 @@ impl InflightRequest {
         }
     }
 
-    /// [`Self::complete`] with `err`.
     fn complete_with_error(self, err: Error) {
         match self.kind {
             InflightRequestKind::Read {
@@ -125,8 +120,6 @@ fn request_op_count(request: &WorkerRequest) -> usize {
     }
 }
 
-/// Backend-agnostic submission record handed to a driver, which owns the
-/// files it goes to.
 pub(crate) enum SubmissionEntry {
     Read {
         buf_ptr: *mut u8,
@@ -139,7 +132,7 @@ pub(crate) enum SubmissionEntry {
         buf_len: u32,
         at: FilePosition,
         user_data: u64,
-        /// is_last_in_batch only required for io_uring backend
+        /// Only io_uring reads it.
         #[allow(dead_code)]
         is_last_in_batch: bool,
     },
@@ -150,19 +143,11 @@ unsafe impl Send for SubmissionEntry {}
 pub(crate) trait IoDriver {
     fn available_submission_slots(&mut self) -> usize;
     fn push(&mut self, entry: SubmissionEntry) -> Result<()>;
-    /// Flush any staged submissions to the kernel. No-op for backends that
-    /// dispatch eagerly inside `push`.
     fn submit(&mut self) -> Result<()>;
-    /// How many of the entries pushed the backend still holds, not taken
-    /// by the kernel yet: the last pushed. After a failed `submit` the loop
-    /// submits nothing more, so these never run, and no one fills their
-    /// buffers. 0 for a backend that dispatches eagerly inside `push`.
+    /// Pushed entries the kernel hasn't taken: after a failed `submit` they never run.
     fn unsubmitted(&mut self) -> usize;
     fn pop_completion(&mut self) -> Option<CompletionEvent>;
-    /// Wait until a new request may have landed on `request_rx` or an
-    /// inflight op may have completed. Returning early is fine: the loop
-    /// checks both and waits again. Only invoked when at least one op is
-    /// inflight.
+    /// Returning early is fine: the loop checks requests and completions, then waits again.
     fn wait_for_progress(&mut self, request_rx: &mpsc::Receiver<WorkerRequest>);
 }
 
@@ -213,13 +198,8 @@ impl<D: IoDriver> BackendLoop<D> {
         }
     }
 
-    /// Waits for every operation in flight to complete, each request
-    /// answered as usual, once no handle is left to send more: the loop
-    /// returns only then, so no buffer a pool thread or the kernel still
-    /// fills is freed, no caller waits forever for its answer, and no file
-    /// closes under an operation. A backend whose wait returns at once,
-    /// io_uring's always and the pool's with no request channel left,
-    /// busy-waits here.
+    /// The loop returns only after this, so no buffer the kernel still fills is freed, no caller
+    /// waits forever, and no file closes under an operation.
     fn finish_in_flight(&mut self) {
         while !self.inflight_requests.is_empty() {
             self.driver.wait_for_progress(&self.receiver);
@@ -227,10 +207,6 @@ impl<D: IoDriver> BackendLoop<D> {
         }
     }
 
-    /// Submits the requests waiting, as many as the queue has room for.
-    /// Returns whether no handle is left to send more: what was pushed
-    /// before that showed is submitted all the same, for the loop to wait
-    /// for ([`Self::finish_in_flight`]).
     fn submit_requests(&mut self, pending_request: &mut Option<WorkerRequest>) -> Result<bool> {
         let mut disconnected = false;
         let mut submitted_any = false;
@@ -423,12 +399,8 @@ impl<D: IoDriver> BackendLoop<D> {
         }
     }
 
-    /// Fails every request once a submit failed with `err`, after which
-    /// the loop submits nothing more. An operation the kernel took runs on
-    /// into its request's buffer, so the loop first waits for each of
-    /// those, answering its request as usual; only the entries the kernel
-    /// never took are left then, which nothing will fill, and their
-    /// requests fail with the waiting ones and those still to come.
+    /// Waits for the operations the kernel took first: they still use their buffers. Only the
+    /// untaken ones, which nothing will fill, fail at once.
     fn fail_all(&mut self, err: Error, pending_request: Option<WorkerRequest>) {
         let msg = format!("io worker failed: {err}");
 
@@ -450,8 +422,7 @@ impl<D: IoDriver> BackendLoop<D> {
         }
     }
 
-    /// The operations pushed whose completions aren't in yet, across every
-    /// request in flight: taken by the kernel or not.
+    /// Taken by the kernel or not.
     fn operations_in_flight(&self) -> usize {
         self.inflight_requests
             .values()
@@ -527,25 +498,17 @@ mod tests {
     use crate::PAGE_SIZE_NZ_U32;
     use crate::io::io_task::FileReadTask;
 
-    /// The kernel a [`ScriptedDriver`] stands for, which the test plays: it
-    /// takes the entries pushed at each submit, unless the test made that
-    /// submit fail, and completes those it took when the test says.
     #[derive(Default)]
     struct ScriptedKernel {
-        /// Pushed, not taken: each entry's user data and length.
         queued: Vec<(u64, u32)>,
-        /// Taken, and running until the test completes them.
         taken: Vec<(u64, u32)>,
-        /// Completions the test let out, for the loop to reap.
         completed: VecDeque<CompletionEvent>,
         fail_next_submit: bool,
         failed: bool,
-        /// Whether the loop waited for progress after a submit failed.
         waited_after_failure: bool,
     }
 
     impl ScriptedKernel {
-        /// Completes every entry taken, each reading its whole length.
         fn complete_taken(&mut self) {
             for (user_data, len) in self.taken.drain(..) {
                 let result = i32::try_from(len).unwrap();
@@ -555,7 +518,6 @@ mod tests {
         }
     }
 
-    /// The test's hold on a [`ScriptedKernel`].
     #[derive(Clone, Default)]
     struct Script(Arc<Mutex<ScriptedKernel>>);
 
@@ -564,7 +526,6 @@ mod tests {
             act(&mut self.0.lock().unwrap())
         }
 
-        /// Waits, 10 s at most, until `done` holds of the kernel.
         fn wait_until(&self, what: &str, done: impl Fn(&ScriptedKernel) -> bool) {
             let deadline = Instant::now() + Duration::from_secs(10);
             while !self.with(|kernel| done(kernel)) {
@@ -574,7 +535,6 @@ mod tests {
         }
     }
 
-    /// A backend over a [`ScriptedKernel`].
     struct ScriptedDriver(Script);
 
     impl IoDriver for ScriptedDriver {
@@ -621,9 +581,6 @@ mod tests {
         }
     }
 
-    /// A failed submit fails the reads the kernel never took, but waits for
-    /// those it took: their buffers are the kernel's until each completes,
-    /// and each is answered with its bytes.
     #[test]
     fn a_failed_submit_waits_for_what_the_kernel_took() {
         let script = Script::default();
@@ -639,8 +596,7 @@ mod tests {
         script.with(|kernel| kernel.fail_next_submit = true);
         let untaken = FileReadTask::new(tx.clone(), page(), FilePosition::new(0, 4096)).unwrap();
 
-        // The loop has handled the failure once it waits on the kernel, or
-        // once it has returned.
+        // The loop has handled the failure once it waits on the kernel or returns.
         let deadline = Instant::now() + Duration::from_secs(10);
         while !script.with(|kernel| kernel.waited_after_failure) && !backend.is_finished() {
             assert!(
@@ -658,8 +614,7 @@ mod tests {
         script.with(ScriptedKernel::complete_taken);
         let (buf, read_len) = block_on(taken).unwrap();
         assert_eq!(read_len, buf.len());
-        // A loop that waited for the read never taken would wait forever:
-        // the wait is bounded, so that fails rather than hangs.
+        // Bounded, so a loop waiting on the untaken read fails rather than hangs.
         let (failed_tx, failed_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || failed_tx.send(block_on(untaken).is_err()).unwrap());
         let failed = failed_rx

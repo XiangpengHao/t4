@@ -20,8 +20,7 @@ pub(crate) struct GenericIoDriver {
     files: Arc<[File]>,
     queue_size: usize,
     inflight: usize,
-    // Declared before `_pool`, so it drops first: the pool's threads see the
-    // job channel close and exit before the pool joins them.
+    // Before `_pool`, so it drops first: the threads see the channel close before the join.
     job_tx: Sender<IoJob>,
     completion_rx: Receiver<CompletionEvent>,
     _pool: IoThreadPool,
@@ -39,7 +38,6 @@ impl GenericIoDriver {
             .map(|_| {
                 let job_rx = job_rx.clone();
                 let completion_tx = completion_tx.clone();
-                // The pool stands in for the kernel's asynchronous I/O.
                 std::thread::spawn(move || worker_loop(job_rx, completion_tx))
             })
             .collect();
@@ -55,10 +53,7 @@ impl GenericIoDriver {
     }
 }
 
-/// The threads that run the jobs, joined when dropped: a thread holds the
-/// files a moment past reporting its last job done, so only the join makes
-/// sure no thread still holds them, and their locks, once the driver is
-/// gone.
+/// Joined on drop: a thread holds the files, and their locks, a moment past its last completion.
 struct IoThreadPool(Vec<JoinHandle<()>>);
 
 impl Drop for IoThreadPool {
