@@ -1,10 +1,13 @@
 use std::ops::{ControlFlow, Range};
 
 use bbtree::BBTreeMap;
+use vstd::prelude::*;
 
 use crate::cache::InsertOrAbort;
-use crate::cache::{BLOCK_SIZE_U64, BlockKey, FileVersionId};
+use crate::cache::{BLOCK_SIZE_U64, BlockKey, FileVersionId, check};
 use crate::io::sync::atomic::{AtomicU64, Ordering};
+
+verus! {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::cache) struct FileVersion {
@@ -14,26 +17,63 @@ pub(in crate::cache) struct FileVersion {
 
 impl FileVersion {
     /// Less a block, so the number one past an object's last block is a block number too.
-    const MAX_SIZE: u64 = (BlockKey::INDEX_LIMIT - 1) as u64 * BLOCK_SIZE_U64;
+    pub(in crate::cache) const MAX_SIZE: u64 = (BlockKey::INDEX_LIMIT - 1) as u64 * BLOCK_SIZE_U64;
 
-    pub(in crate::cache) fn named(id: FileVersionId, size: u64) -> Option<Self> {
-        (size <= Self::MAX_SIZE).then_some(Self { id, size })
+    #[verifier::type_invariant]
+    spec fn within_max_size(self) -> bool {
+        self.size <= Self::MAX_SIZE
     }
 
-    pub(in crate::cache) fn id(self) -> FileVersionId {
+    pub(in crate::cache) closed spec fn spec_id(self) -> FileVersionId {
         self.id
     }
 
-    pub(in crate::cache) fn size(self) -> u64 {
+    pub(in crate::cache) closed spec fn spec_size(self) -> u64 {
         self.size
     }
 
-    pub(in crate::cache) fn block_range(self, index: u32) -> Range<u64> {
+    pub(in crate::cache) fn named(id: FileVersionId, size: u64) -> Option<Self> {
+        if size <= Self::MAX_SIZE {
+            Some(Self { id, size })
+        } else {
+            None
+        }
+    }
+
+    #[verifier::when_used_as_spec(spec_id)]
+    pub(in crate::cache) fn id(self) -> (id: FileVersionId)
+        ensures
+            id == self.spec_id(),
+    {
+        self.id
+    }
+
+    #[verifier::when_used_as_spec(spec_size)]
+    pub(in crate::cache) fn size(self) -> (size: u64)
+        ensures
+            size == self.spec_size(),
+            size <= Self::MAX_SIZE,
+    {
+        proof {
+            use_type_invariant(self);
+        }
+        self.size
+    }
+
+    pub(in crate::cache) fn block_range(self, index: u32) -> (bytes: Range<u64>)
+        requires
+            index * BLOCK_SIZE_U64 < self.size(),
+        ensures
+            bytes.start == index * BLOCK_SIZE_U64,
+            bytes.end == vstd::math::min(bytes.start + BLOCK_SIZE_U64, self.size() as int),
+    {
         let start = u64::from(index) * BLOCK_SIZE_U64;
-        assert!(start < self.size, "block {index} is past the file's end");
+        check(start < self.size, "a block is past the file's end");
         start..(start + BLOCK_SIZE_U64).min(self.size)
     }
 }
+
+} // verus!
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::cache) enum UncacheableObject {

@@ -79,10 +79,29 @@ than the cache it replaces, nothing more.
 ## Verification
 
 Parts of the crate are written inside `verus!` and proven with
-[Verus](https://github.com/verus-lang/verus): alignment and range requests
-(`src/cache/storage/index/page_window.rs`). The proofs cover that
-arithmetic only, not the OS, filesystem or hardware. Outside `verus!`,
-Verus compiles the code but checks nothing.
+[Verus](https://github.com/verus-lang/verus): the block arithmetic, where
+a bug would serve wrong bytes without failing.
+
+- Block keys (`src/cache/mod.rs`): a key gives back the file version and
+  block number it was made of, and keys order by version, then block, so a
+  scan of the index from one key of a version to another finds that
+  version's blocks between them and nothing else.
+- Read plans (`src/cache/storage/index/read_plan.rs`, `paths.rs`): a read
+  covers exactly the blocks that hold its bytes, clamped to the file. Each
+  block's window holds the read's bytes in that block and only those, and
+  its pages, page-aligned, end within the block's chunk. No block number
+  or offset overflows.
+- Alignment and range requests (`src/cache/storage/index/page_window.rs`).
+- Disk chunks (`src/cache/storage/disk/disk_chunks.rs`): no two chunks
+  share a place in the cache files, and each ends within its file's
+  `chunks_per_file` blocks.
+
+The proofs cover that arithmetic only, not the OS, filesystem or
+hardware. Outside `verus!`, Verus compiles the code but checks nothing:
+the plan's list of blocks and the index scan that feeds it, which lean on
+the facts above. Verus checks a verified function's preconditions only
+where verified code calls it; for other callers, the few that matter are
+also checked as the code runs (`check` in `src/cache/mod.rs`).
 
 ```bash
 cargo verus focus    # this crate's proofs only, as CI runs them

@@ -1,6 +1,8 @@
 use std::any::Any;
 use std::num::NonZeroU32;
 
+use vstd::prelude::*;
+
 use crate::cache::storage::chunks::{ChunkLease, ChunkPin, ChunkTable, ChunkTier};
 use crate::cache::{BLOCK_SIZE_U64, BlockKey, ChunkId};
 use crate::io::error::{Error, Result};
@@ -8,26 +10,19 @@ use crate::io::io_task::FilePosition;
 use crate::io::sync::Arc;
 
 pub(in crate::cache) struct DiskChunks {
-    files: NonZeroU32,
+    striping: ChunkStriping,
     table: ChunkTable,
 }
 
 impl DiskChunks {
     pub(in crate::cache) fn new(files: NonZeroU32, chunks_per_file: u32) -> Result<Self> {
-        // A file holds at most 2^32 chunks of 2^20 bytes: no offset overflows.
+        let striping = ChunkStriping::new(files.get(), chunks_per_file).ok_or(
+            Error::InvalidArgument("a disk tier holds 2^32 chunks or fewer"),
+        )?;
         Ok(Self {
-            files,
-            table: ChunkTable::new(Self::total_chunks(files, chunks_per_file)?),
+            striping,
+            table: ChunkTable::new(striping.chunk_count()),
         })
-    }
-
-    fn total_chunks(files: NonZeroU32, chunks_per_file: u32) -> Result<u32> {
-        files
-            .get()
-            .checked_mul(chunks_per_file)
-            .ok_or(Error::InvalidArgument(
-                "a disk tier holds 2^32 chunks or fewer",
-            ))
     }
 
     pub(in crate::cache) fn chunk_count(&self) -> u32 {
@@ -85,10 +80,62 @@ impl DiskChunks {
     }
 
     fn position(&self, chunk: ChunkId) -> FilePosition {
-        let (index, files) = (chunk.index(), self.files.get());
-        FilePosition::new(index % files, u64::from(index / files) * BLOCK_SIZE_U64)
+        let (file, offset) = self.striping.position(chunk.index());
+        FilePosition::new(file, offset)
     }
 }
+
+verus! {
+
+#[derive(Clone, Copy)]
+struct ChunkStriping {
+    files: u32,
+    chunks_per_file: u32,
+}
+
+impl ChunkStriping {
+    #[verifier::type_invariant]
+    spec fn numbers_chunks_in_u32(self) -> bool {
+        0 < self.files && self.files * self.chunks_per_file <= u32::MAX
+    }
+
+    fn new(files: u32, chunks_per_file: u32) -> Option<Self>
+        requires
+            0 < files,
+    {
+        files.checked_mul(chunks_per_file)?;
+        Some(Self { files, chunks_per_file })
+    }
+
+    fn chunk_count(self) -> u32 {
+        proof {
+            use_type_invariant(self);
+        }
+        self.files * self.chunks_per_file
+    }
+
+    fn position(self, chunk: u32) -> (position: (u32, u64))
+        requires
+            chunk < self.files * self.chunks_per_file,
+        ensures
+            position.0 < self.files,
+            position.1 + BLOCK_SIZE_U64 <= self.chunks_per_file * BLOCK_SIZE_U64,
+            chunk == self.files * (position.1 / BLOCK_SIZE_U64) + position.0,
+    {
+        proof {
+            use_type_invariant(self);
+            vstd::arithmetic::div_mod::lemma_multiply_divide_lt(
+                chunk as int,
+                self.files as int,
+                self.chunks_per_file as int,
+            );
+            vstd::arithmetic::div_mod::lemma_fundamental_div_mod(chunk as int, self.files as int);
+        }
+        (chunk % self.files, u64::from(chunk / self.files) * BLOCK_SIZE_U64)
+    }
+}
+
+} // verus!
 
 impl ChunkTier for DiskChunks {
     fn chunk_table(&self) -> &ChunkTable {
@@ -183,7 +230,7 @@ mod tests {
         assert!(DiskChunks::new(TWO, u32::MAX).is_err());
         // Counted, not built: its chunk table would take 64 GiB, which CI's runners refuse.
         assert_eq!(
-            DiskChunks::total_chunks(TWO, u32::MAX / 2).unwrap(),
+            ChunkStriping::new(2, u32::MAX / 2).unwrap().chunk_count(),
             u32::MAX - 1
         );
     }

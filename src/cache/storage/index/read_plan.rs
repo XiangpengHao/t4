@@ -1,5 +1,7 @@
 use std::ops::Range;
 
+use vstd::prelude::*;
+
 use super::blocks::Location;
 use super::page_window::{PageWindow, RangeRequestU32};
 use super::paths::FileVersion;
@@ -57,6 +59,8 @@ impl PlannedBlock {
     }
 }
 
+verus! {
+
 /// A short last block's pages may end past its bytes, never past its chunk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::cache) struct BlockWindow {
@@ -65,26 +69,167 @@ pub(in crate::cache) struct BlockWindow {
 }
 
 impl BlockWindow {
-    fn new(bytes: Range<u32>, block_len: u32) -> Self {
-        let range = RangeRequestU32::from_u32(bytes.start, bytes.end - bytes.start)
-            .and_then(|range| range.checked_against(block_len))
-            .expect("a read's bytes in a block lie in the block");
+    #[verifier::type_invariant]
+    spec fn pages_hold_bytes_within_chunk(self) -> bool {
+        &&& self.pages.first_byte() <= self.start
+        &&& self.start + self.pages.len() <= self.pages.first_byte() + self.pages.buffer_len()
+        &&& self.pages.first_byte() + self.pages.buffer_len() <= BLOCK_SIZE_U64
+    }
+
+    fn new(bytes: Range<u32>, block_len: u32) -> (window: Self)
+        requires
+            bytes.start < bytes.end <= block_len <= BLOCK_SIZE_U64,
+        ensures
+            window.start == bytes.start,
+            window.pages.len() == bytes.end - bytes.start,
+    {
+        let range = RangeRequestU32::from_u32(bytes.start, bytes.end - bytes.start).expect(
+            "a range of u32s ends within u32",
+        ).checked_against(block_len).expect("a read's bytes in a block lie in the block");
         let pages = PageWindow::of(range).expect("a block's pages end within u32");
-        Self {
-            start: bytes.start,
-            pages,
-        }
+        Self { start: bytes.start, pages }
     }
 
     pub(in crate::cache) fn bytes(&self) -> Range<u32> {
+        proof {
+            use_type_invariant(self);
+        }
         self.start..self.start + self.pages.len()
     }
 
     pub(in crate::cache) fn pages(&self) -> Range<u32> {
+        proof {
+            use_type_invariant(self);
+        }
         let first = self.pages.first_byte();
         first..first + self.pages.buffer_len()
     }
+}
 
+/// The read planner's arithmetic, apart from its `Vec`, so Verus can prove it.
+struct ReadBlocks {
+    version: FileVersion,
+    bytes: Range<u64>,
+    unplanned: Range<u32>,
+}
+
+impl ReadBlocks {
+    spec fn holds_bytes(self, index: int) -> bool {
+        &&& self.bytes.start < self.bytes.end
+        &&& index * BLOCK_SIZE_U64 < self.bytes.end
+        &&& self.bytes.start < (index + 1) * BLOCK_SIZE_U64
+    }
+
+    spec fn first_block(self) -> int {
+        (self.bytes.start / BLOCK_SIZE_U64) as int
+    }
+
+    spec fn wf(self) -> bool {
+        &&& self.bytes.start <= self.bytes.end <= self.version.size()
+        &&& self.first_block() <= self.unplanned.start <= self.unplanned.end
+            < BlockKey::INDEX_LIMIT
+        &&& forall|index: int|
+            self.first_block() <= index < self.unplanned.end <==> #[trigger] self.holds_bytes(index)
+    }
+
+    fn new(version: FileVersion, range: Range<u64>) -> (blocks: Self)
+        ensures
+            blocks.wf(),
+            blocks.version == version,
+            blocks.bytes.end == vstd::math::min(range.end as int, version.size() as int),
+            blocks.bytes.start == vstd::math::min(range.start as int, blocks.bytes.end as int),
+            blocks.unplanned.start == blocks.first_block(),
+    {
+        let end = range.end.min(version.size());
+        let start = range.start.min(end);
+        let first_block = start / BLOCK_SIZE_U64;
+        let end_block = if start == end {
+            first_block
+        } else {
+            // `end.div_ceil(BLOCK_SIZE_U64)`, which Verus has no spec for.
+            (end - 1) / BLOCK_SIZE_U64 + 1
+        };
+        Self {
+            version,
+            bytes: start..end,
+            unplanned: Self::narrow(first_block)..Self::narrow(end_block),
+        }
+    }
+
+    fn keys(&self) -> (keys: Range<BlockKey>)
+        requires
+            self.wf(),
+        ensures
+            keys.start@ == (self.version.id(), self.unplanned.start),
+            keys.end@ == (self.version.id(), self.unplanned.end),
+    {
+        BlockKey::new(self.version.id(), self.unplanned.start)..BlockKey::new(
+            self.version.id(),
+            self.unplanned.end,
+        )
+    }
+
+    fn take_through(&mut self, key: BlockKey) -> (not_found: Range<u32>)
+        requires
+            old(self).wf(),
+            key@.0 == old(self).version.id(),
+            old(self).unplanned.start <= key@.1 < old(self).unplanned.end,
+        ensures
+            final(self).wf(),
+            final(self).version == old(self).version,
+            final(self).bytes == old(self).bytes,
+            not_found.start == old(self).unplanned.start && not_found.end == key@.1,
+            final(self).unplanned.start == key@.1 + 1,
+            final(self).unplanned.end == old(self).unplanned.end,
+    {
+        let index = key.index();
+        let not_found = self.unplanned.start..index;
+        self.unplanned.start = index + 1;
+        assert(forall|index: int| #[trigger]
+            self.holds_bytes(index) == old(self).holds_bytes(index));
+        not_found
+    }
+
+    fn block(&self, index: u32) -> (block: (BlockKey, u32, BlockWindow))
+        requires
+            self.wf(),
+            self.holds_bytes(index as int),
+        ensures
+            block.0@ == (self.version.id(), index),
+            index * BLOCK_SIZE_U64 + block.1 == vstd::math::min(
+                (index + 1) * BLOCK_SIZE_U64,
+                self.version.size() as int,
+            ),
+            index * BLOCK_SIZE_U64 + block.2.start == vstd::math::max(
+                self.bytes.start as int,
+                index * BLOCK_SIZE_U64,
+            ),
+            index * BLOCK_SIZE_U64 + block.2.start + block.2.pages.len() == vstd::math::min(
+                self.bytes.end as int,
+                (index + 1) * BLOCK_SIZE_U64,
+            ),
+    {
+        let block_range = self.version.block_range(index);
+        let needed_start = self.bytes.start.max(block_range.start) - block_range.start;
+        let needed_end = self.bytes.end.min(block_range.end) - block_range.start;
+        let len = Self::narrow(block_range.end - block_range.start);
+        let window = BlockWindow::new(Self::narrow(needed_start)..Self::narrow(needed_end), len);
+        (BlockKey::new(self.version.id(), index), len, window)
+    }
+
+    fn narrow(value: u64) -> (narrowed: u32)
+        requires
+            value <= u32::MAX,
+        ensures
+            narrowed == value,
+    {
+        u32::try_from(value).expect("block numbers and offsets in a block fit in u32")
+    }
+}
+
+} // verus!
+
+impl BlockWindow {
     #[cfg(all(test, not(feature = "shuttle")))]
     pub(in crate::cache) fn bytes_in_pages(&self) -> Range<u32> {
         self.pages.start()..self.pages.start() + self.pages.len()
@@ -92,77 +237,53 @@ impl BlockWindow {
 }
 
 pub(super) struct ReadPlanner {
-    version: FileVersion,
-    bytes: Range<u64>,
-    unplanned: Range<u32>,
+    blocks: ReadBlocks,
     planned: Vec<PlannedBlock>,
 }
 
 impl ReadPlanner {
     pub(super) fn new(version: FileVersion, range: Range<u64>) -> Self {
-        let end = range.end.min(version.size());
-        let start = range.start.min(end);
-        let first_block = start / BLOCK_SIZE_U64;
-        let end_block = if start == end {
-            first_block
-        } else {
-            end.div_ceil(BLOCK_SIZE_U64)
-        };
-        let unplanned = Self::narrow(first_block)..Self::narrow(end_block);
+        let blocks = ReadBlocks::new(version, range);
         Self {
-            version,
-            bytes: start..end,
-            planned: Vec::with_capacity(unplanned.len()),
-            unplanned,
+            planned: Vec::with_capacity(blocks.unplanned.len()),
+            blocks,
         }
     }
 
     pub(super) fn keys(&self) -> Range<BlockKey> {
-        BlockKey::new(self.version.id(), self.unplanned.start)
-            ..BlockKey::new(self.version.id(), self.unplanned.end)
+        self.blocks.keys()
     }
 
     /// Called in key order, within [`Self::keys`].
     pub(super) fn found(&mut self, key: BlockKey, location: Location) {
-        let index = key.index();
-        debug_assert!(key.file_version() == self.version.id() && self.unplanned.contains(&index));
-        for remote in self.unplanned.start..index {
+        debug_assert!(
+            key.file_version() == self.blocks.version.id()
+                && self.blocks.unplanned.contains(&key.index())
+        );
+        for remote in self.blocks.take_through(key) {
             self.plan(remote, None);
         }
-        self.plan(index, Some(location));
-        // Below `unplanned.end`, a `u32`: no overflow.
-        self.unplanned.start = index + 1;
+        self.plan(key.index(), Some(location));
     }
 
     pub(super) fn finish(mut self) -> ReadPlan {
-        for remote in self.unplanned.clone() {
+        for remote in self.blocks.unplanned.clone() {
             self.plan(remote, None);
         }
         ReadPlan {
-            bytes: self.bytes,
+            bytes: self.blocks.bytes,
             blocks: self.planned,
         }
     }
 
     fn plan(&mut self, index: u32, location: Option<Location>) {
-        let Range {
-            start: block_start,
-            end: block_end,
-        } = self.version.block_range(index);
-        let needed_start = self.bytes.start.max(block_start) - block_start;
-        let needed_end = self.bytes.end.min(block_end) - block_start;
-        let len = Self::narrow(block_end - block_start);
+        let (key, len, window) = self.blocks.block(index);
         self.planned.push(PlannedBlock {
-            key: BlockKey::new(self.version.id(), index),
+            key,
             len,
             location,
-            window: BlockWindow::new(Self::narrow(needed_start)..Self::narrow(needed_end), len),
+            window,
         });
-    }
-
-    /// `FileVersion::MAX_SIZE` keeps block numbers, and the one past the last, within `u32`.
-    fn narrow(value: u64) -> u32 {
-        u32::try_from(value).expect("block indices and offsets in a block fit in u32")
     }
 }
 
