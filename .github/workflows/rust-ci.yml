@@ -24,21 +24,21 @@ jobs:
         uses: DeterminateSystems/magic-nix-cache-action@v14
 
       - name: Check formatting
-        run: nix develop -c cargo fmt --all -- --check
+        run: nix build -L .#fmt
 
       - name: Run Clippy
-        run: nix develop -c cargo clippy --all-targets --all-features -- -D warnings
+        run: nix build -L .#clippy
 
       - name: Run tests
         timeout-minutes: 15
-        run: nix develop -c cargo test
+        run: nix build -L .#tests
 
       - name: Run proof check
-        run: nix develop -c cargo verus focus
+        run: nix build -L .#proofs
 
       - name: Run shuttle tests
         timeout-minutes: 15
-        run: nix develop -c cargo test --features shuttle shuttle
+        run: nix build -L .#shuttle
 
   macos:
     runs-on: macos-latest
@@ -53,11 +53,11 @@ jobs:
         uses: DeterminateSystems/magic-nix-cache-action@v14
 
       - name: Run Clippy
-        run: nix develop -c cargo clippy --all-targets --all-features -- -D warnings
+        run: nix build -L .#clippy
 
       - name: Run tests
         timeout-minutes: 15
-        run: nix develop -c cargo test
+        run: nix build -L .#tests
 
       - name: Run proof check
-        run: nix develop -c cargo verus focus
+        run: nix build -L .#proofs
