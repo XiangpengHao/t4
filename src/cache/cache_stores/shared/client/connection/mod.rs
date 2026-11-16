@@ -43,11 +43,12 @@ impl OwnerConnection {
         first_file: &Path,
         reads: Arc<dyn ReadPolicy>,
         number: u64,
-        #[cfg(all(test, feature = "shuttle"))] transport: &super::super::protocol::Transport,
+        #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
+        transport: &super::super::protocol::Transport,
     ) -> Result<Option<Self>> {
         match Self::admitted(
             first_file,
-            #[cfg(all(test, feature = "shuttle"))]
+            #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
             transport,
         ) {
             Ok((socket, frames, region)) => {
@@ -61,7 +62,8 @@ impl OwnerConnection {
     /// A client that can't make a region goes without: its reads' bytes go in the frames.
     fn admitted(
         first_file: &Path,
-        #[cfg(all(test, feature = "shuttle"))] transport: &super::super::protocol::Transport,
+        #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
+        transport: &super::super::protocol::Transport,
     ) -> Result<(
         FrameSocket,
         FrameReceiver,
@@ -70,7 +72,7 @@ impl OwnerConnection {
         let cache_file = File::options().read(true).write(true).open(first_file)?;
         let address = OwnerAddress::of(
             FileIdentity::of(&cache_file)?,
-            #[cfg(all(test, feature = "shuttle"))]
+            #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
             transport,
         )?;
         let socket = FrameSocket::new(address.connect(rustix::process::geteuid())?)?;
@@ -78,9 +80,9 @@ impl OwnerConnection {
         let region = ClientRegion::make().ok();
         let mut hello = Hello::new(PROTOCOL_VERSION, cache_file);
         if let Some(region) = &region {
-            #[cfg(not(all(test, feature = "shuttle")))]
+            #[cfg(not(all(feature = "shuttle", any(test, t4_simulated))))]
             let descriptor = region.descriptor().try_clone_to_owned()?;
-            #[cfg(all(test, feature = "shuttle"))]
+            #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
             let descriptor = region.descriptor();
             hello = hello.with_region(descriptor);
         }

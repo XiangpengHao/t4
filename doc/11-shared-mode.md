@@ -206,7 +206,7 @@ decision 9).
      where it comes (GETs where none were due, a fetch or a read the
      client never started, a fetch's bytes after its commit) closes the
      connection, as a protocol error does; the owner never panics on a
-     client's frame. Before the region (step
+     client's frame (fuzzed: `fuzz/README.md`, `shared_owner`). Before the region (step
      4), a fetched block's bytes cross the socket twice: to the owner,
      which lands them as its own fetches' (`FetchedBlocks`), and back in
      the read's bytes.
@@ -709,6 +709,7 @@ session ending the last read before it takes the next's frames, 1 µs.
 | `src/cache/cache_stores/shared/protocol/address.rs` | the owner's address, by the first cache file's identity (decision 6) | yes |
 | `src/cache/cache_stores/shared/protocol/handshake.rs` | a client's hello, its descriptor by `SCM_RIGHTS`, and the owner's check (decision 6) | yes |
 | `src/cache/cache_stores/shared/protocol/region/` | the region, its spans, and the checks the owner makes of it (decision 5) | yes |
+| `src/cache/cache_stores/shared/fuzzing/` | a client the `shared_owner` fuzz target scripts frame by frame against an owner, beside a well-behaved client (decisions 5, 8) | yes |
 | `src/cache/t4_caching/tests/sharing.rs`, `processes.rs` | an owner and its clients in one process, and in real ones (build step 3) | yes |
 
 The seeded schedule corpus, replay instructions, and retained OS-test coverage

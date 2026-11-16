@@ -65,6 +65,7 @@ impl Transport {
 }
 pub(in crate::cache::cache_stores::shared) struct Listener(mpsc::Receiver<FrameSocket>);
 impl Listener {
+    #[cfg(test)]
     pub(in crate::cache::cache_stores::shared) fn accept(&self) -> io::Result<(FrameSocket, ())> {
         self.0
             .recv()
@@ -114,7 +115,7 @@ pub(in crate::cache::cache_stores::shared) struct FrameSocket {
 }
 impl FrameSocket {
     pub(super) fn read_into(&self, buffer: &mut bytes::BytesMut) -> io::Result<usize> {
-        let mut bytes = vec![0; buffer.capacity() - buffer.len()];
+        let mut bytes = vec![0; (buffer.capacity() - buffer.len()).min(Self::CAPACITY)];
         let read = (&*self).read(&mut bytes)?;
         buffer.extend_from_slice(&bytes[..read]);
         Ok(read)
@@ -127,6 +128,7 @@ impl FrameSocket {
     pub(in crate::cache::cache_stores::shared) fn new(socket: Self) -> io::Result<Self> {
         Ok(socket)
     }
+    #[cfg(test)]
     pub(in crate::cache::cache_stores::shared) fn pair() -> io::Result<(Self, Self)> {
         Self::pair_on(Default::default())
     }

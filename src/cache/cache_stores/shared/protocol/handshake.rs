@@ -1,17 +1,17 @@
 use super::region::RegionDescriptor;
 use std::fs::File;
 use std::io::Read;
-#[cfg(not(all(test, feature = "shuttle")))]
+#[cfg(not(all(feature = "shuttle", any(test, t4_simulated))))]
 use std::io::{IoSlice, IoSliceMut};
-#[cfg(not(all(test, feature = "shuttle")))]
+#[cfg(not(all(feature = "shuttle", any(test, t4_simulated))))]
 use std::mem::MaybeUninit;
-#[cfg(not(all(test, feature = "shuttle")))]
+#[cfg(not(all(feature = "shuttle", any(test, t4_simulated))))]
 use std::os::fd::{AsFd, OwnedFd};
 use std::time::Duration;
 
 use bytes::Bytes;
 use rustix::fs::OFlags;
-#[cfg(not(all(test, feature = "shuttle")))]
+#[cfg(not(all(feature = "shuttle", any(test, t4_simulated))))]
 use rustix::net::{
     RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendAncillaryBuffer,
     SendAncillaryMessage,
@@ -33,14 +33,20 @@ impl Hello {
     pub(in crate::cache::cache_stores::shared) const WAIT: Duration = Duration::from_secs(5);
 
     /// All an owner reads from a peer it hasn't admitted, so that a peer can't make it allocate.
-    const FRAME_BYTES: usize = 8 + 1 + 4 + 4 + 1;
+    pub(in crate::cache::cache_stores::shared) const FRAME_BYTES: usize = 8 + 1 + 4 + 4 + 1;
 
-    #[cfg(not(all(test, feature = "shuttle")))]
+    #[cfg(not(all(feature = "shuttle", any(test, t4_simulated))))]
     const MOST_DESCRIPTORS: usize = 2;
 
-    #[cfg(all(target_os = "linux", not(all(test, feature = "shuttle"))))]
+    #[cfg(all(
+        target_os = "linux",
+        not(all(feature = "shuttle", any(test, t4_simulated)))
+    ))]
     const RECEIVE_FLAGS: RecvFlags = RecvFlags::CMSG_CLOEXEC;
-    #[cfg(all(not(target_os = "linux"), not(all(test, feature = "shuttle"))))]
+    #[cfg(all(
+        not(target_os = "linux"),
+        not(all(feature = "shuttle", any(test, t4_simulated)))
+    ))]
     const RECEIVE_FLAGS: RecvFlags = RecvFlags::empty();
 
     pub(in crate::cache::cache_stores::shared) fn new(version: u32, cache_file: File) -> Self {
@@ -88,12 +94,12 @@ impl Hello {
         frame: &[u8],
     ) -> std::io::Result<()> {
         debug_assert_eq!(frame.len(), Self::FRAME_BYTES);
-        #[cfg(all(test, feature = "shuttle"))]
+        #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
         {
             socket.send_descriptors(self.cache_file.try_clone()?, self.region.clone());
             socket.send(frame)
         }
-        #[cfg(not(all(test, feature = "shuttle")))]
+        #[cfg(not(all(feature = "shuttle", any(test, t4_simulated))))]
         {
             let mut space =
                 [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(Self::MOST_DESCRIPTORS))];
@@ -117,7 +123,7 @@ impl Hello {
 
     pub(in crate::cache::cache_stores::shared) fn receive(socket: &FrameSocket) -> Result<Self> {
         let mut frame = [0; Self::FRAME_BYTES];
-        #[cfg(not(all(test, feature = "shuttle")))]
+        #[cfg(not(all(feature = "shuttle", any(test, t4_simulated))))]
         let descriptors = {
             let mut space =
                 [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(Self::MOST_DESCRIPTORS))];
@@ -142,7 +148,10 @@ impl Hello {
                 }
             }
             // Set at once after the receive, but a process started meanwhile could still inherit them.
-            #[cfg(all(not(target_os = "linux"), not(all(test, feature = "shuttle"))))]
+            #[cfg(all(
+                not(target_os = "linux"),
+                not(all(feature = "shuttle", any(test, t4_simulated)))
+            ))]
             for descriptor in &descriptors {
                 rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC)
                     .map_err(std::io::Error::from)?;
@@ -150,7 +159,7 @@ impl Hello {
             (&*socket).read_exact(&mut frame[received.bytes..])?;
             descriptors
         };
-        #[cfg(all(test, feature = "shuttle"))]
+        #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
         let (cache_file, region_descriptor) = {
             (&*socket).read_exact(&mut frame)?;
             socket
@@ -167,7 +176,7 @@ impl Hello {
         else {
             return Err(FrameReader::malformed("hello: another frame"));
         };
-        #[cfg(not(all(test, feature = "shuttle")))]
+        #[cfg(not(all(feature = "shuttle", any(test, t4_simulated))))]
         let (cache_file, region_descriptor) = {
             if descriptors.len() != 1 + usize::from(region) {
                 return Err(FrameReader::malformed(
@@ -178,7 +187,7 @@ impl Hello {
             let cache_file = descriptors.next().expect("one descriptor at least");
             (File::from(cache_file), descriptors.next())
         };
-        #[cfg(all(test, feature = "shuttle"))]
+        #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
         if region != region_descriptor.is_some() {
             return Err(FrameReader::malformed("hello: region descriptor"));
         }
