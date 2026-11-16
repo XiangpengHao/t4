@@ -1,0 +1,46 @@
+name: Fuzz
+
+on:
+  schedule:
+    # Mondays at 10:00 UTC: 2 AM Pacific, 3 AM in summer.
+    - cron: "0 10 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  NIX_CONFIG: accept-flake-config = true
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [cache_equivalence, frames, snapshot]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+
+      - name: Configure Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - name: Build
+        run: nix develop -c cargo fuzz build ${{ matrix.target }}
+
+      # From an empty corpus: nothing is kept between runs.
+      - name: Fuzz for an hour
+        env:
+          TMPDIR: /dev/shm
+        run: nix develop -c cargo fuzz run ${{ matrix.target }} -- -max_total_time=3600 -timeout=10
+
+      - name: Keep the failing input
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
