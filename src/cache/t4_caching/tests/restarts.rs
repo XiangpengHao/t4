@@ -5,10 +5,6 @@ fn on_disk(inner: &Arc<CountingStore>, dir: &TempDir) -> T4CachingBuilder {
     builder(inner, dir).with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
 }
 
-fn snapshot_at(dir: &TempDir) -> std::path::PathBuf {
-    dir.path().join("cache.snapshot")
-}
-
 fn read_whole(cache: &T4Caching, meta: &ObjectMeta) -> Bytes {
     block_on(cache.open_listed(meta.clone()).read(0..meta.size, None)).unwrap()
 }

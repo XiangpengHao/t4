@@ -288,6 +288,11 @@ fn builder(inner: &Arc<CountingStore>, dir: impl AsRef<std::path::Path>) -> T4Ca
         .with_disk_file(dir.as_ref().join("cache"), 8 * MIB)
 }
 
+#[cfg(feature = "shuttle")]
+fn snapshot_at(dir: &TempDir) -> std::path::PathBuf {
+    dir.path().join("cache.snapshot")
+}
+
 /// No deadline: shuttle fails a schedule that stalls here.
 fn wait_until(mut done: impl FnMut() -> bool, _what: &str) {
     while !done() {
