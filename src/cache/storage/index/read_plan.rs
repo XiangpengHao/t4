@@ -1,9 +1,9 @@
 use std::ops::Range;
 
 use super::blocks::Location;
+use super::page_window::{PageWindow, RangeRequestU32};
 use super::paths::FileVersion;
 use crate::cache::{BLOCK_SIZE_U64, BlockKey};
-use crate::range::{PageWindow, RangeRequestU32};
 
 #[derive(Debug)]
 pub(in crate::cache) struct ReadPlan {

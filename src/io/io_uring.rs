@@ -124,7 +124,7 @@ pub(crate) fn new_backend(
 mod tests {
     use super::*;
     use crate::PAGE_SIZE_NZ_U32;
-    use crate::buffer::AlignedBuf;
+    use crate::io::aligned_buf::AlignedBuf;
 
     #[test]
     fn a_slot_frees_once_its_completion_is_reaped() {

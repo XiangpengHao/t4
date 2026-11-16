@@ -1,11 +1,9 @@
 //! `t4`: a cache for object stores, in memory and on a local NVMe drive.
 //! Start from [`T4Caching::builder`].
 
-mod buffer;
 #[cfg(unix)]
 mod cache;
 mod io;
-mod range;
 
 use std::num::NonZeroU32;
 
@@ -18,7 +16,7 @@ pub use io::error::{Error, Result};
 #[cfg(feature = "__bench")]
 #[doc(hidden)]
 pub mod __bench {
-    pub use crate::buffer::AlignedBuf;
+    pub use crate::io::aligned_buf::AlignedBuf;
     pub use crate::io::io_task::{FilePosition, PageWrite};
     pub use crate::io::io_worker::IoWorker;
 }

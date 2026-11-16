@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 
 use super::allocation::{DriveHeadroom, FileAllocation};
 use super::disk_chunks::{DiskChunkReader, DiskChunkWriter, DiskChunks};
-use crate::buffer::AlignedBuf;
 use crate::cache::BLOCK_SIZE_U64;
 use crate::cache::storage::snapshot::SnapshotFile;
+use crate::io::aligned_buf::AlignedBuf;
 use crate::io::error::{Error, Result};
 use crate::io::io_task::PageWrite;
 use crate::io::io_worker::IoWorker;

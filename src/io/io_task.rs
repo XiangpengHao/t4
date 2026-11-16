@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
-use crate::buffer::AlignedBuf;
+use crate::io::aligned_buf::AlignedBuf;
 use crate::io::error::{Error, Result};
 use crate::io::sync::cooperative_yield;
 use crate::io::sync::mpsc;
