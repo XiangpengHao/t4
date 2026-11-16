@@ -1,7 +1,8 @@
 use vstd::prelude::*;
 
+#[cfg(verus_only)]
+use crate::PAGE_SIZE_U32;
 use crate::PAGE_SIZE_U64;
-use crate::io::error::{Error, Result};
 
 verus! {
 
@@ -116,6 +117,7 @@ impl RangeRequestU32 {
             result.is_some() ==> result.unwrap().len == len,
             result.is_some() ==> result.unwrap().end >= start,
             result.is_some() ==> result.unwrap().end - start == len,
+            result.is_none() ==> start + len > u32::MAX,
     {
         let end = start.checked_add(len)?;
         Some(Self { start, len, end })
@@ -173,8 +175,6 @@ impl CheckedRangeU32 {
     }
 }
 
-} // verus!
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PageWindow {
     first_byte: u32,
@@ -184,45 +184,84 @@ pub(super) struct PageWindow {
 }
 
 impl PageWindow {
-    pub(super) fn of(range: CheckedRangeU32) -> Result<Self> {
-        if range.is_empty() {
-            return Ok(Self {
-                first_byte: 0,
-                buffer_len: 0,
-                start: 0,
-                len: 0,
-            });
-        }
-        let first_byte = align_down_u64(u64::from(range.start()), PAGE_SIZE_U64);
-        let last_byte =
-            align_up_u64(u64::from(range.end()), PAGE_SIZE_U64).ok_or(Error::RangeOutOfBounds)?;
-        let buffer_len =
-            u32::try_from(last_byte - first_byte).map_err(|_| Error::RangeOutOfBounds)?;
-        // `first_byte` is at most `range.start()`, a `u32`.
-        let first_byte = first_byte as u32;
-        Ok(Self {
-            first_byte,
-            buffer_len,
-            start: range.start() - first_byte,
-            len: range.len(),
-        })
-    }
-
-    pub(super) fn first_byte(&self) -> u32 {
+    pub(super) closed spec fn spec_first_byte(&self) -> u32 {
         self.first_byte
     }
 
-    pub(super) fn buffer_len(&self) -> u32 {
+    pub(super) closed spec fn spec_buffer_len(&self) -> u32 {
         self.buffer_len
     }
 
+    pub(super) closed spec fn spec_len(&self) -> u32 {
+        self.len
+    }
+
+    pub(super) fn of(range: CheckedRangeU32) -> (window: Option<Self>)
+        requires
+            range.end == range.start + range.len,
+        ensures
+            range.end + PAGE_SIZE_U32 <= u32::MAX + 1 ==> window is Some,
+            window is Some ==> window->0.len() == range.len,
+            window is Some && range.len > 0 ==> {
+                let pages = window->0;
+                &&& pages.first_byte() % PAGE_SIZE_U32 == 0
+                &&& pages.buffer_len() % PAGE_SIZE_U32 == 0
+                &&& pages.first_byte() <= range.start
+                &&& range.end <= pages.first_byte() + pages.buffer_len() < range.end + PAGE_SIZE_U32
+            },
+    {
+        if range.is_empty() {
+            return Some(Self { first_byte: 0, buffer_len: 0, start: 0, len: 0 });
+        }
+        proof {
+            assert(PAGE_SIZE_U64 & sub(PAGE_SIZE_U64, 1) == 0) by (compute_only);
+        }
+        let first_byte = align_down_u64(u64::from(range.start()), PAGE_SIZE_U64);
+        let last_byte = align_up_u64(u64::from(range.end()), PAGE_SIZE_U64)?;
+        let buffer_len = u32::try_from(last_byte - first_byte).ok()?;
+        proof {
+            assert(first_byte % 4096 == 0 && last_byte % 4096 == 0) by (bit_vector)
+                requires
+                    first_byte & 4095 == 0,
+                    last_byte & 4095 == 0,
+            ;
+        }
+        // `first_byte` is at most `range.start()`, a `u32`.
+        let first_byte = first_byte as u32;
+        Some(Self { first_byte, buffer_len, start: range.start() - first_byte, len: range.len() })
+    }
+
+    #[verifier::when_used_as_spec(spec_first_byte)]
+    pub(super) fn first_byte(&self) -> (first_byte: u32)
+        ensures
+            first_byte == self.spec_first_byte(),
+    {
+        self.first_byte
+    }
+
+    #[verifier::when_used_as_spec(spec_buffer_len)]
+    pub(super) fn buffer_len(&self) -> (buffer_len: u32)
+        ensures
+            buffer_len == self.spec_buffer_len(),
+    {
+        self.buffer_len
+    }
+
+    #[verifier::when_used_as_spec(spec_len)]
+    pub(super) fn len(&self) -> (len: u32)
+        ensures
+            len == self.spec_len(),
+    {
+        self.len
+    }
+}
+
+} // verus!
+
+impl PageWindow {
     #[cfg(all(test, not(feature = "shuttle")))]
     pub(super) fn start(&self) -> u32 {
         self.start
-    }
-
-    pub(super) fn len(&self) -> u32 {
-        self.len
     }
 }
 

@@ -11,9 +11,16 @@ pub use t4_caching::{FileHandle, T4Caching, T4CachingBuilder};
 use std::fmt;
 
 use bbtree::bbtree_map::InsertError;
+use vstd::prelude::*;
 
-const BLOCK_SIZE: usize = 1 << 20;
-const BLOCK_SIZE_U64: u64 = BLOCK_SIZE as u64;
+verus! {
+
+// The constants Verus reasons about are literals: it doesn't evaluate shifts.
+const BLOCK_SIZE_U64: u64 = 1024 * 1024;
+
+} // verus!
+
+const BLOCK_SIZE: usize = BLOCK_SIZE_U64 as usize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChunkId(u32);
@@ -28,15 +35,40 @@ impl ChunkId {
     }
 }
 
+verus! {
+
+/// `assert!(condition, message)`, which Verus can't verify: callers it
+/// verifies prove `condition`, and the others have it checked as they run.
+#[track_caller]
+fn check(condition: bool, message: &str)
+    requires
+        condition,
+{
+    let checked = if condition {
+        Some(())
+    } else {
+        None
+    };
+    checked.expect(message);
+}
+
 /// The id the cache gave a file's path and e_tag; never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileVersionId(u64);
 
 impl FileVersionId {
-    const LIMIT: u64 = 1 << (u64::BITS - BlockKey::INDEX_BITS);
+    const LIMIT: u64 = 0x100_0000_0000;
 
-    fn new(id: u64) -> Self {
-        assert!(id < Self::LIMIT, "file version ids ran out: 2^40 of them");
+    #[verifier::type_invariant]
+    spec fn below_limit(self) -> bool {
+        self.0 < Self::LIMIT
+    }
+
+    fn new(id: u64) -> Self
+        requires
+            id < Self::LIMIT,
+    {
+        check(id < Self::LIMIT, "file version ids ran out: 2^40 of them");
         Self(id)
     }
 
@@ -50,13 +82,41 @@ impl FileVersionId {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockKey(u64);
 
-impl BlockKey {
-    const INDEX_BITS: u32 = 24;
-    const INDEX_LIMIT: u32 = 1 << Self::INDEX_BITS;
+impl View for BlockKey {
+    type V = (FileVersionId, u32);
 
-    fn new(version: FileVersionId, index: u32) -> Self {
-        assert!(index < Self::INDEX_LIMIT, "block numbers stop below 2^24");
-        Self((version.0 << Self::INDEX_BITS) | u64::from(index))
+    closed spec fn view(&self) -> (FileVersionId, u32) {
+        let limit = Self::INDEX_LIMIT as u64;
+        (FileVersionId(self.0 / limit), (self.0 % limit) as u32)
+    }
+}
+
+impl BlockKey {
+    const INDEX_LIMIT: u32 = 0x100_0000;
+
+    fn new(version: FileVersionId, index: u32) -> (key: Self)
+        requires
+            index < Self::INDEX_LIMIT,
+        ensures
+            key@ == (version, index),
+    {
+        check(index < Self::INDEX_LIMIT, "block numbers stop below 2^24");
+        proof {
+            use_type_invariant(version);
+        }
+        Self(version.0 * u64::from(Self::INDEX_LIMIT) + u64::from(index))
+    }
+
+    /// A scan of the index between two keys of a version finds that
+    /// version's blocks between them, and nothing else.
+    proof fn lemma_scan_between(start: BlockKey, end: BlockKey, key: BlockKey)
+        requires
+            start@.0 == end@.0,
+        ensures
+            (start.0 <= key.0 < end.0) <==> (key@.0 == start@.0 && start@.1 <= key@.1 < end@.1),
+    {
+        let limit = Self::INDEX_LIMIT as u64;
+        assert(key@.1 == key.0 % limit && start@.1 == start.0 % limit && end@.1 == end.0 % limit);
     }
 
     fn from_packed(packed: u64) -> Self {
@@ -67,14 +127,22 @@ impl BlockKey {
         self.0
     }
 
-    pub fn file_version(self) -> FileVersionId {
-        FileVersionId(self.0 >> Self::INDEX_BITS)
+    pub fn file_version(self) -> (version: FileVersionId)
+        ensures
+            version == self@.0,
+    {
+        FileVersionId(self.0 / u64::from(Self::INDEX_LIMIT))
     }
 
-    pub fn index(self) -> u32 {
-        (self.0 & u64::from(Self::INDEX_LIMIT - 1)) as u32
+    pub fn index(self) -> (index: u32)
+        ensures
+            index == self@.1,
+    {
+        (self.0 % u64::from(Self::INDEX_LIMIT)) as u32
     }
 }
+
+} // verus!
 
 impl fmt::Debug for BlockKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
