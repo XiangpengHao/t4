@@ -20,6 +20,7 @@ pub(super) type Sleep = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + 
 
 #[derive(Clone)]
 pub(super) struct Network {
+    clock: crate::io::time::Clock,
     inner: Arc<dyn ObjectStore>,
     reads: Arc<dyn ReadPolicy>,
     gets: Arc<GetQueue>,
@@ -35,8 +36,10 @@ impl Network {
         bytes_in_flight: NonZeroU64,
         merged_up_to: u64,
         sleep: Option<Sleep>,
+        clock: crate::io::time::Clock,
     ) -> Self {
         Self {
+            clock,
             inner,
             reads,
             gets: Arc::new(GetQueue::new(bytes_in_flight, merged_up_to)),
@@ -48,7 +51,7 @@ impl Network {
         &*self.reads
     }
 
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(super) fn gets_waiting(&self) -> usize {
         self.gets.waiting()
     }

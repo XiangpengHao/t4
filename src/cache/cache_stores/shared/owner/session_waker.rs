@@ -16,11 +16,6 @@ pub(super) struct SessionWaker {
 }
 
 impl SessionWaker {
-    #[cfg(all(test, not(feature = "shuttle")))]
-    pub(super) fn has_pending_wake(&self) -> bool {
-        self.rung.load(Ordering::Acquire)
-    }
-
     pub(super) fn new() -> io::Result<Self> {
         let (ring, bell) = UnixStream::pair()?;
         ring.set_nonblocking(true)?;

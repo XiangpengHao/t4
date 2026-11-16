@@ -42,6 +42,7 @@ impl ObjectCache {
                 drive: on_disk.position().file(),
                 bytes: pages.get(),
             },
+            &self.clock,
         );
         let filled = report
             .awaiting(self.disk.read_chunk_start(&on_disk, buffer))

@@ -16,6 +16,14 @@ pub(in crate::cache) struct InFlight {
 }
 
 impl InFlight {
+    #[cfg(test)]
+    pub(in crate::cache) fn waiting_reads(&self) -> usize {
+        self.fetches()
+            .values()
+            .map(|fetch| fetch.state().waiters.len())
+            .sum()
+    }
+
     pub(in crate::cache) fn get(&self, key: BlockKey) -> Option<Arc<BlockFetch>> {
         Self::live(&self.fetches(), key).cloned()
     }
@@ -46,18 +54,9 @@ impl InFlight {
         })
     }
 
-    #[cfg(any(test, feature = "__fuzz"))]
+    #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
     pub(in crate::cache) fn is_empty(&self) -> bool {
         self.fetches().is_empty()
-    }
-
-    /// A read given up leaves its waker here until the fetch ends: not a live read count.
-    #[cfg(all(test, not(feature = "shuttle")))]
-    pub(in crate::cache::storage) fn fetch_waiters_registered(&self) -> usize {
-        self.fetches()
-            .values()
-            .map(|fetch| fetch.state().waiters.len())
-            .sum()
     }
 
     /// An ended fetch stays until its thread removes it; a read must not wait on it.
@@ -184,7 +183,7 @@ pub(in crate::cache) struct FetchClaim {
 }
 
 impl FetchClaim {
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(all(test, feature = "shuttle"))]
     fn fetch(&self) -> &Arc<BlockFetch> {
         &self.fetch
     }
@@ -218,7 +217,7 @@ impl Drop for FetchClaim {
     }
 }
 
-#[cfg(all(test, not(feature = "shuttle")))]
+#[cfg(all(test, feature = "shuttle"))]
 mod tests {
     use futures_util::FutureExt;
 
@@ -235,82 +234,92 @@ mod tests {
 
     #[test]
     fn a_block_is_claimed_once_until_its_fetch_ends() {
-        let in_flight = Arc::new(InFlight::default());
-        let claim = in_flight.claim(key(0), Admit::Memory).unwrap();
-        let fetch = in_flight.claim(key(0), Admit::Disk).unwrap_err();
-        assert!(Arc::ptr_eq(&fetch, claim.fetch()));
-        assert_eq!(fetch.admit(), Admit::Memory, "the claim's");
-        assert!(
-            in_flight.claim(key(1), Admit::Memory).is_ok(),
-            "another block"
-        );
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let in_flight = Arc::new(InFlight::default());
+            let claim = in_flight.claim(key(0), Admit::Memory).unwrap();
+            let fetch = in_flight.claim(key(0), Admit::Disk).unwrap_err();
+            assert!(Arc::ptr_eq(&fetch, claim.fetch()));
+            assert_eq!(fetch.admit(), Admit::Memory, "the claim's");
+            assert!(
+                in_flight.claim(key(1), Admit::Memory).is_ok(),
+                "another block"
+            );
 
-        claim.ended(Some(memory(3)));
-        assert_eq!(
-            fetch.ended().now_or_never(),
-            Some(FetchEnd::Cached(memory(3)))
-        );
-        assert!(in_flight.get(key(0)).is_none());
-        assert!(
-            in_flight.claim(key(0), Admit::Memory).is_ok(),
-            "fetched anew"
-        );
+            claim.ended(Some(memory(3)));
+            assert_eq!(
+                fetch.ended().now_or_never(),
+                Some(FetchEnd::Cached(memory(3)))
+            );
+            assert!(in_flight.get(key(0)).is_none());
+            assert!(
+                in_flight.claim(key(0), Admit::Memory).is_ok(),
+                "fetched anew"
+            );
+        });
     }
 
     #[test]
     fn a_waiter_waits_until_the_fetch_ends() {
-        let in_flight = Arc::new(InFlight::default());
-        let claim = in_flight.claim(key(0), Admit::Memory).unwrap();
-        let fetch = in_flight.get(key(0)).unwrap();
-        let mut ended = Box::pin(fetch.ended());
-        assert_eq!((&mut ended).now_or_never(), None);
-        claim.ended(Some(memory(1)));
-        assert_eq!(ended.now_or_never(), Some(FetchEnd::Cached(memory(1))));
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let in_flight = Arc::new(InFlight::default());
+            let claim = in_flight.claim(key(0), Admit::Memory).unwrap();
+            let fetch = in_flight.get(key(0)).unwrap();
+            let mut ended = Box::pin(fetch.ended());
+            assert_eq!((&mut ended).now_or_never(), None);
+            claim.ended(Some(memory(1)));
+            assert_eq!(ended.now_or_never(), Some(FetchEnd::Cached(memory(1))));
+        });
     }
 
     #[test]
     fn a_discarded_blocks_fetch_passes_its_bytes_to_its_waiters() {
-        let in_flight = Arc::new(InFlight::default());
-        let claim = in_flight.claim(key(0), Admit::Discard).unwrap();
-        let fetch = in_flight.get(key(0)).unwrap();
-        let mut ended = Box::pin(fetch.ended());
-        assert_eq!((&mut ended).now_or_never(), None);
-        claim.passed(Bytes::from_static(b"the block"));
-        let passed = FetchEnd::Passed(Bytes::from_static(b"the block"));
-        assert_eq!(ended.now_or_never(), Some(passed.clone()));
-        assert_eq!(fetch.ended().now_or_never(), Some(passed), "every waiter");
-        assert!(in_flight.get(key(0)).is_none());
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let in_flight = Arc::new(InFlight::default());
+            let claim = in_flight.claim(key(0), Admit::Discard).unwrap();
+            let fetch = in_flight.get(key(0)).unwrap();
+            let mut ended = Box::pin(fetch.ended());
+            assert_eq!((&mut ended).now_or_never(), None);
+            claim.passed(Bytes::from_static(b"the block"));
+            let passed = FetchEnd::Passed(Bytes::from_static(b"the block"));
+            assert_eq!(ended.now_or_never(), Some(passed.clone()));
+            assert_eq!(fetch.ended().now_or_never(), Some(passed), "every waiter");
+            assert!(in_flight.get(key(0)).is_none());
+        });
     }
 
     #[test]
     fn the_last_request_to_end_without_the_block_abandons_the_fetch() {
-        let in_flight = Arc::new(InFlight::default());
-        let mut claim = in_flight.claim(key(0), Admit::Memory).unwrap();
-        claim.fetched_by(NonZeroU8::new(2).unwrap());
-        let fetch = in_flight.get(key(0)).unwrap();
-        let racer = fetch.join(&in_flight, 1);
-        assert_eq!(fetch.requests(), 3);
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let in_flight = Arc::new(InFlight::default());
+            let mut claim = in_flight.claim(key(0), Admit::Memory).unwrap();
+            claim.fetched_by(NonZeroU8::new(2).unwrap());
+            let fetch = in_flight.get(key(0)).unwrap();
+            let racer = fetch.join(&in_flight, 1);
+            assert_eq!(fetch.requests(), 3);
 
-        drop(claim);
-        assert_eq!(fetch.requests(), 1);
-        assert_eq!(fetch.ended().now_or_never(), None, "a racer is in flight");
-        racer.ended(None);
-        assert_eq!(fetch.ended().now_or_never(), Some(FetchEnd::Abandoned));
-        assert!(in_flight.get(key(0)).is_none());
+            drop(claim);
+            assert_eq!(fetch.requests(), 1);
+            assert_eq!(fetch.ended().now_or_never(), None, "a racer is in flight");
+            racer.ended(None);
+            assert_eq!(fetch.ended().now_or_never(), Some(FetchEnd::Abandoned));
+            assert!(in_flight.get(key(0)).is_none());
+        });
     }
 
     #[test]
     fn the_first_request_to_cache_the_block_ends_the_fetch() {
-        let in_flight = Arc::new(InFlight::default());
-        let claim = in_flight.claim(key(0), Admit::Memory).unwrap();
-        let fetch = in_flight.get(key(0)).unwrap();
-        let racer = fetch.join(&in_flight, 1);
-        racer.ended(Some(memory(2)));
-        assert_eq!(
-            fetch.ended().now_or_never(),
-            Some(FetchEnd::Cached(memory(2)))
-        );
-        claim.ended(Some(memory(2)));
-        assert_eq!(fetch.requests(), 0);
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let in_flight = Arc::new(InFlight::default());
+            let claim = in_flight.claim(key(0), Admit::Memory).unwrap();
+            let fetch = in_flight.get(key(0)).unwrap();
+            let racer = fetch.join(&in_flight, 1);
+            racer.ended(Some(memory(2)));
+            assert_eq!(
+                fetch.ended().now_or_never(),
+                Some(FetchEnd::Cached(memory(2)))
+            );
+            claim.ended(Some(memory(2)));
+            assert_eq!(fetch.requests(), 0);
+        });
     }
 }

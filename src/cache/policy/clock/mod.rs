@@ -153,10 +153,11 @@ struct ClockWord {
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests;
 
-#[cfg(all(test, not(feature = "shuttle")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::cache::FileVersionId;
+    #[cfg(feature = "shuttle")]
     use crate::io::sync::atomic::{AtomicBool, fence};
 
     fn policy(chunk_count: u32) -> ClockPolicy {
@@ -201,70 +202,82 @@ mod tests {
 
     #[test]
     fn a_fetched_block_goes_to_memory_and_picks_take_admitted_chunks_only() {
-        let policy = policy(200);
-        assert_eq!(policy.on_remote_read(&read()), Admit::Memory);
-        admit(&policy, Tier::Memory, [3, 64, 130, 199]);
-        assert_eq!(pick(&policy, 10), [3, 64, 130, 199]);
-        assert!(policy.pick_disk_victims(10).is_empty(), "nothing on disk");
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let policy = policy(200);
+            assert_eq!(policy.on_remote_read(&read()), Admit::Memory);
+            admit(&policy, Tier::Memory, [3, 64, 130, 199]);
+            assert_eq!(pick(&policy, 10), [3, 64, 130, 199]);
+            assert!(policy.pick_disk_victims(10).is_empty(), "nothing on disk");
+        });
     }
 
     #[test]
     fn a_chunk_is_picked_once_and_some_picks_find_fewer_than_asked() {
-        let policy = policy(10);
-        admit(&policy, Tier::Memory, 0..10);
-        assert_eq!(pick(&policy, 4), [0, 1, 2, 3]);
-        assert_eq!(pick(&policy, 4), [4, 5, 6, 7]);
-        assert_eq!(pick(&policy, 4), [8, 9]);
-        assert!(pick(&policy, 4).is_empty());
-        assert!(pick(&policy, 0).is_empty());
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let policy = policy(10);
+            admit(&policy, Tier::Memory, 0..10);
+            assert_eq!(pick(&policy, 4), [0, 1, 2, 3]);
+            assert_eq!(pick(&policy, 4), [4, 5, 6, 7]);
+            assert_eq!(pick(&policy, 4), [8, 9]);
+            assert!(pick(&policy, 4).is_empty());
+            assert!(pick(&policy, 0).is_empty());
+        });
     }
 
     #[test]
     fn a_victim_admitted_again_is_picked_again_unreferenced() {
-        let policy = policy(2);
-        admit(&policy, Tier::Memory, [0, 1]);
-        assert_eq!(pick(&policy, 2), [0, 1]);
-        assert!(pick(&policy, 2).is_empty());
-        // A read of the block chunk 1 held, racing its eviction.
-        hit(&policy, 1);
-        admit(&policy, Tier::Memory, [0, 1]);
-        hit(&policy, 0);
-        assert_eq!(pick(&policy, 1), [1], "the admit cleared the stale hit");
-        assert_eq!(pick(&policy, 1), [0]);
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let policy = policy(2);
+            admit(&policy, Tier::Memory, [0, 1]);
+            assert_eq!(pick(&policy, 2), [0, 1]);
+            assert!(pick(&policy, 2).is_empty());
+            // A read of the block chunk 1 held, racing its eviction.
+            hit(&policy, 1);
+            admit(&policy, Tier::Memory, [0, 1]);
+            hit(&policy, 0);
+            assert_eq!(pick(&policy, 1), [1], "the admit cleared the stale hit");
+            assert_eq!(pick(&policy, 1), [0]);
+        });
     }
 
     #[test]
     fn a_chunk_hit_since_the_hand_passed_survives_one_sweep() {
-        // One word: every pick sweeps it.
-        let policy = policy(64);
-        admit(&policy, Tier::Memory, 0..4);
-        hit(&policy, 0);
-        assert_eq!(pick(&policy, 3), [1, 2, 3]);
-        assert_eq!(pick(&policy, 1), [0]);
+        crate::io::test_schedule::TestSchedule::once(|| {
+            // One word: every pick sweeps it.
+            let policy = policy(64);
+            admit(&policy, Tier::Memory, 0..4);
+            hit(&policy, 0);
+            assert_eq!(pick(&policy, 3), [1, 2, 3]);
+            assert_eq!(pick(&policy, 1), [0]);
+        });
     }
 
     #[test]
     fn a_chunk_hit_before_every_pick_goes_last() {
-        // Two words: a pick sweeps the other between its two passes of chunk 0's word.
-        let policy = policy(100);
-        admit(&policy, Tier::Memory, 0..100);
-        let mut others = Vec::new();
-        for _ in 1..100 {
+        crate::io::test_schedule::TestSchedule::once(|| {
+            // Two words: a pick sweeps the other between its two passes of chunk 0's word.
+            let policy = policy(100);
+            admit(&policy, Tier::Memory, 0..100);
+            let mut others = Vec::new();
+            for _ in 1..100 {
+                hit(&policy, 0);
+                others.extend(pick(&policy, 1));
+            }
+            others.sort_unstable();
+            assert_eq!(others, (1..100).collect::<Vec<_>>());
+            // Alone, it goes on the second rotation, hit or not.
             hit(&policy, 0);
-            others.extend(pick(&policy, 1));
-        }
-        others.sort_unstable();
-        assert_eq!(others, (1..100).collect::<Vec<_>>());
-        // Alone, it goes on the second rotation, hit or not.
-        hit(&policy, 0);
-        assert_eq!(pick(&policy, 1), [0]);
+            assert_eq!(pick(&policy, 1), [0]);
+        });
     }
 
     #[test]
     fn a_tier_of_a_partial_word_picks_its_chunks_only() {
-        let policy = policy(70);
-        admit(&policy, Tier::Memory, 0..70);
-        assert_eq!(pick(&policy, 100), (0..70).collect::<Vec<_>>());
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let policy = policy(70);
+            admit(&policy, Tier::Memory, 0..70);
+            assert_eq!(pick(&policy, 100), (0..70).collect::<Vec<_>>());
+        });
     }
 
     #[test]
@@ -275,54 +288,59 @@ mod tests {
 
     #[test]
     fn a_disk_block_moves_to_memory_on_its_second_hit() {
-        let policy = policy(2);
-        admit(&policy, Tier::Disk, [0, 1]);
-        assert_eq!(disk_hit(&policy, 0), DiskHit::Stay);
-        assert_eq!(disk_hit(&policy, 0), DiskHit::Promote);
-        // The hand's pass clears the hits: the next is a first again.
-        assert_eq!(policy.pick_disk_victims(1), [ChunkId::new(1)]);
-        assert_eq!(disk_hit(&policy, 0), DiskHit::Stay);
-        admit(&policy, Tier::Disk, [0]);
-        assert_eq!(disk_hit(&policy, 0), DiskHit::Stay);
-        assert_eq!(disk_hit(&policy, 0), DiskHit::Promote);
-        assert!(pick(&policy, 2).is_empty(), "memory holds none");
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let policy = policy(2);
+            admit(&policy, Tier::Disk, [0, 1]);
+            assert_eq!(disk_hit(&policy, 0), DiskHit::Stay);
+            assert_eq!(disk_hit(&policy, 0), DiskHit::Promote);
+            // The hand's pass clears the hits: the next is a first again.
+            assert_eq!(policy.pick_disk_victims(1), [ChunkId::new(1)]);
+            assert_eq!(disk_hit(&policy, 0), DiskHit::Stay);
+            admit(&policy, Tier::Disk, [0]);
+            assert_eq!(disk_hit(&policy, 0), DiskHit::Stay);
+            assert_eq!(disk_hit(&policy, 0), DiskHit::Promote);
+            assert!(pick(&policy, 2).is_empty(), "memory holds none");
+        });
     }
 
+    #[cfg(feature = "shuttle")]
     #[test]
     fn concurrent_pickers_never_hold_one_chunk_at_once() {
-        const CHUNKS: u32 = 64;
-        let policy = policy(CHUNKS);
-        let held: Vec<_> = (0..CHUNKS).map(|_| AtomicBool::new(false)).collect();
-        admit(&policy, Tier::Memory, 0..CHUNKS / 2);
-        std::thread::scope(|scope| {
-            scope.spawn(|| admit(&policy, Tier::Memory, CHUNKS / 2..CHUNKS));
-            scope.spawn(|| {
-                for _ in 0..1000 {
-                    (0..CHUNKS).for_each(|chunk| hit(&policy, chunk));
-                }
-            });
-            for _ in 0..4 {
+        crate::io::test_schedule::TestSchedule::check(|| {
+            const CHUNKS: u32 = 64;
+            let policy = policy(CHUNKS);
+            let held: Vec<_> = (0..CHUNKS).map(|_| AtomicBool::new(false)).collect();
+            admit(&policy, Tier::Memory, 0..CHUNKS / 2);
+            crate::io::sync::thread::scope(|scope| {
+                scope.spawn(|| admit(&policy, Tier::Memory, CHUNKS / 2..CHUNKS));
                 scope.spawn(|| {
-                    for _ in 0..20_000 {
-                        let victims = pick(&policy, 2);
-                        // Relaxed policy atomics: these fences, paired via the admit and the
-                        // next claim, order one picker's flags before the next one's.
-                        fence(Ordering::Acquire);
-                        for &chunk in &victims {
-                            let taken = held[chunk as usize].swap(true, Ordering::Relaxed);
-                            assert!(!taken, "two pickers hold chunk {chunk}");
-                        }
-                        for &chunk in &victims {
-                            held[chunk as usize].store(false, Ordering::Relaxed);
-                        }
-                        fence(Ordering::Release);
-                        admit(&policy, Tier::Memory, victims);
+                    for _ in 0..3 {
+                        (0..CHUNKS).for_each(|chunk| hit(&policy, chunk));
                     }
                 });
-            }
+                for _ in 0..4 {
+                    scope.spawn(|| {
+                        for _ in 0..3 {
+                            let victims = pick(&policy, 2);
+                            // Relaxed policy atomics: these fences, paired via the admit and the
+                            // next claim, order one picker's flags before the next one's.
+                            fence(Ordering::Acquire);
+                            for &chunk in &victims {
+                                let taken = held[chunk as usize].swap(true, Ordering::Relaxed);
+                                assert!(!taken, "two pickers hold chunk {chunk}");
+                            }
+                            for &chunk in &victims {
+                                held[chunk as usize].store(false, Ordering::Relaxed);
+                            }
+                            fence(Ordering::Release);
+                            admit(&policy, Tier::Memory, victims);
+                        }
+                    });
+                }
+            });
+            // Alone, two rotations take every chunk: each was given back.
+            let every_chunk: Vec<_> = (0..CHUNKS).collect();
+            assert_eq!(pick(&policy, CHUNKS as usize), every_chunk);
         });
-        // Alone, two rotations take every chunk: each was given back.
-        let every_chunk: Vec<_> = (0..CHUNKS).collect();
-        assert_eq!(pick(&policy, CHUNKS as usize), every_chunk);
     }
 }

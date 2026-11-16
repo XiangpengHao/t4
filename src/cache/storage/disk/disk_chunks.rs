@@ -34,12 +34,12 @@ impl DiskChunks {
         self.table.chunk_count()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::cache) fn free_count(&self) -> u32 {
         self.table.free_count()
     }
 
-    #[cfg(any(test, feature = "__fuzz"))]
+    #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
     pub(in crate::cache) fn blocks_at_rest(
         &self,
     ) -> std::result::Result<Vec<Option<BlockKey>>, String> {

@@ -33,7 +33,7 @@ impl MemoryPool {
         self.table.free_count()
     }
 
-    #[cfg(any(test, feature = "__fuzz"))]
+    #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
     pub(in crate::cache) fn blocks_at_rest(
         &self,
     ) -> std::result::Result<Vec<Option<BlockKey>>, String> {
@@ -272,10 +272,11 @@ impl Drop for PoolMemory {
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests;
 
-#[cfg(all(test, not(feature = "shuttle")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::cache::FileVersionId;
+    #[cfg(feature = "shuttle")]
     use crate::io::sync::Mutex;
 
     fn pool(chunk_count: u32) -> MemoryPool {
@@ -307,106 +308,117 @@ mod tests {
 
     #[test]
     fn the_chunks_start_at_a_huge_pages_boundary() {
-        let pool = pool(3);
-        let first = pool.memory.chunk_start(ChunkId::new(0)).as_ptr() as usize;
-        assert!(first.is_multiple_of(PoolMemory::HUGE_PAGE));
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let pool = pool(3);
+            let first = pool.memory.chunk_start(ChunkId::new(0)).as_ptr() as usize;
+            assert!(first.is_multiple_of(PoolMemory::HUGE_PAGE));
+        });
     }
 
     #[test]
     fn chunks_are_page_aligned_and_apart() {
-        let pool = pool(4);
-        let mut writers: Vec<_> = std::iter::from_fn(|| pool.allocate()).collect();
-        assert_eq!(writers.len(), 4);
-        let mut starts: Vec<usize> = writers
-            .iter_mut()
-            .map(|writer| writer.bytes_mut().as_ptr() as usize)
-            .collect();
-        assert!(starts.iter().all(|start| start.is_multiple_of(PAGE_SIZE)));
-        starts.sort_unstable();
-        assert!(
-            starts
-                .windows(2)
-                .all(|pair| pair[1] - pair[0] >= BLOCK_SIZE)
-        );
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let pool = pool(4);
+            let mut writers: Vec<_> = std::iter::from_fn(|| pool.allocate()).collect();
+            assert_eq!(writers.len(), 4);
+            let mut starts: Vec<usize> = writers
+                .iter_mut()
+                .map(|writer| writer.bytes_mut().as_ptr() as usize)
+                .collect();
+            assert!(starts.iter().all(|start| start.is_multiple_of(PAGE_SIZE)));
+            starts.sort_unstable();
+            assert!(
+                starts
+                    .windows(2)
+                    .all(|pair| pair[1] - pair[0] >= BLOCK_SIZE)
+            );
+        });
     }
 
     #[test]
     fn a_published_chunk_reads_back_its_block() {
-        let pool = pool(2);
-        let block = BlockKey::new(FileVersionId::new(7), 3);
-        let chunk = publish(&pool, block);
-        let reader = pool.read(chunk, block).unwrap();
-        assert_eq!(reader.bytes().len(), BLOCK_SIZE);
-        assert!(holds_its_block(&reader));
-        assert!(
-            pool.read(chunk, BlockKey::new(FileVersionId::new(7), 4))
-                .is_none()
-        );
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let pool = pool(2);
+            let block = BlockKey::new(FileVersionId::new(7), 3);
+            let chunk = publish(&pool, block);
+            let reader = pool.read(chunk, block).unwrap();
+            assert_eq!(reader.bytes().len(), BLOCK_SIZE);
+            assert!(holds_its_block(&reader));
+            assert!(
+                pool.read(chunk, BlockKey::new(FileVersionId::new(7), 4))
+                    .is_none()
+            );
+        });
     }
 
     #[test]
     fn an_evicted_chunk_is_freed_after_its_last_reader() {
-        let pool = pool(1);
-        let block = BlockKey::new(FileVersionId::new(1), 0);
-        let chunk = publish(&pool, block);
-        let reader = pool.read(chunk, block).unwrap();
-        assert!(pool.pin_for_eviction(chunk).unwrap().unpublish());
-        assert!(pool.allocate().is_none(), "the reader still copies from it");
-        assert!(holds_its_block(&reader));
-        drop(reader);
-        assert_eq!(pool.free_count(), 1);
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let pool = pool(1);
+            let block = BlockKey::new(FileVersionId::new(1), 0);
+            let chunk = publish(&pool, block);
+            let reader = pool.read(chunk, block).unwrap();
+            assert!(pool.pin_for_eviction(chunk).unwrap().unpublish());
+            assert!(pool.allocate().is_none(), "the reader still copies from it");
+            assert!(holds_its_block(&reader));
+            drop(reader);
+            assert_eq!(pool.free_count(), 1);
+        });
     }
 
     /// A pool too small for every thread, so chunks are reused under readers with stale entries.
+    #[cfg(feature = "shuttle")]
     #[test]
     fn concurrent_allocate_read_and_evict() {
-        const THREADS: u64 = 4;
-        const ROUNDS: u32 = 200;
-        let pool = pool(4);
-        // Stands in for the index.
-        let published = Mutex::new(Vec::<(ChunkId, BlockKey)>::new());
-        std::thread::scope(|scope| {
-            for thread in 0..THREADS {
-                let (pool, published) = (&pool, &published);
-                scope.spawn(move || {
-                    for round in 0..ROUNDS {
-                        let block = BlockKey::new(FileVersionId::new(thread), round);
-                        if let Some(mut writer) = pool.allocate() {
-                            fill(&mut writer, block);
-                            let reader = writer.publish(block);
-                            assert!(holds_its_block(&reader));
-                            published.lock().unwrap().push((reader.chunk(), block));
-                        }
-                        let entry = {
-                            let published = published.lock().unwrap();
-                            published
-                                .get(round as usize % published.len().max(1))
-                                .copied()
-                        };
-                        // Maybe evicted, and its chunk reused, by now.
-                        if let Some((chunk, block)) = entry
-                            && let Some(reader) = pool.read(chunk, block)
-                        {
-                            assert!(holds_its_block(&reader));
-                        }
-                        if round % 2 == 1 {
-                            let oldest = {
-                                let mut published = published.lock().unwrap();
-                                (!published.is_empty()).then(|| published.remove(0))
+        crate::io::test_schedule::TestSchedule::check(|| {
+            const THREADS: u64 = 4;
+            const ROUNDS: u32 = 3;
+            let pool = pool(4);
+            // Stands in for the index.
+            let published = Mutex::new(Vec::<(ChunkId, BlockKey)>::new());
+            crate::io::sync::thread::scope(|scope| {
+                for thread in 0..THREADS {
+                    let (pool, published) = (&pool, &published);
+                    scope.spawn(move || {
+                        for round in 0..ROUNDS {
+                            let block = BlockKey::new(FileVersionId::new(thread), round);
+                            if let Some(mut writer) = pool.allocate() {
+                                fill(&mut writer, block);
+                                let reader = writer.publish(block);
+                                assert!(holds_its_block(&reader));
+                                published.lock().unwrap().push((reader.chunk(), block));
+                            }
+                            let entry = {
+                                let published = published.lock().unwrap();
+                                published
+                                    .get(round as usize % published.len().max(1))
+                                    .copied()
                             };
-                            if let Some((chunk, block)) = oldest {
-                                let victim = pool.pin_for_eviction(chunk).unwrap();
-                                assert_eq!(victim.block(), block);
-                                assert!(victim.unpublish());
+                            // Maybe evicted, and its chunk reused, by now.
+                            if let Some((chunk, block)) = entry
+                                && let Some(reader) = pool.read(chunk, block)
+                            {
+                                assert!(holds_its_block(&reader));
+                            }
+                            if round % 2 == 1 {
+                                let oldest = {
+                                    let mut published = published.lock().unwrap();
+                                    (!published.is_empty()).then(|| published.remove(0))
+                                };
+                                if let Some((chunk, block)) = oldest {
+                                    let victim = pool.pin_for_eviction(chunk).unwrap();
+                                    assert_eq!(victim.block(), block);
+                                    assert!(victim.unpublish());
+                                }
                             }
                         }
-                    }
-                });
+                    });
+                }
+            });
+            for (chunk, block) in published.into_inner().unwrap() {
+                assert!(pool.read(chunk, block).unwrap().unpublish());
             }
+            assert_eq!(pool.free_count(), pool.chunk_count());
         });
-        for (chunk, block) in published.into_inner().unwrap() {
-            assert!(pool.read(chunk, block).unwrap().unpublish());
-        }
-        assert_eq!(pool.free_count(), pool.chunk_count());
     }
 }

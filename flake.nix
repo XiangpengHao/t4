@@ -222,15 +222,13 @@
                   doInstallCargoArtifacts = false;
                 }
               );
-            }
-            // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+              # Every test, not a name filter: the concurrent ones run only in this build.
               shuttle = craneLib.cargoTest (
                 checkArgs
                 // {
                   pname = "t4-shuttle";
                   cargoArtifacts = shuttleArtifacts;
                   cargoExtraArgs = "${commonArgs.cargoExtraArgs} --features shuttle";
-                  cargoTestExtraArgs = "shuttle";
                 }
               );
             };

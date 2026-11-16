@@ -1,8 +1,12 @@
+#[cfg(all(test, feature = "shuttle"))]
+use super::protocol::{Listener as UnixListener, Transport};
+use crate::io::sync::Mutex;
+use crate::io::sync::atomic::{AtomicBool, Ordering};
+use crate::io::sync::thread::{self, JoinHandle};
+#[cfg(not(all(test, feature = "shuttle")))]
 use std::os::unix::net::UnixListener;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::PoisonError;
 use std::task::{Context, Waker};
-use std::thread::{self, JoinHandle};
 
 use super::protocol::{
     ClientFrame, FrameReceiver, FrameSocket, Hello, OwnerAddress, OwnerFrame, OwnerRegion,
@@ -13,6 +17,10 @@ use crate::io::error::Result;
 use crate::io::sync::Arc;
 
 mod client_reads;
+#[cfg(not(all(test, feature = "shuttle")))]
+mod session_waker;
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "simulated_waker.rs"]
 mod session_waker;
 
 use client_reads::ClientReads;
@@ -28,8 +36,16 @@ pub(super) struct OwnerListener {
 }
 
 impl OwnerListener {
-    pub(super) fn listen(cache: Arc<ObjectCache>, first_file: FileIdentity) -> Result<Self> {
-        let address = OwnerAddress::of(first_file)?;
+    pub(super) fn listen(
+        cache: Arc<ObjectCache>,
+        first_file: FileIdentity,
+        #[cfg(all(test, feature = "shuttle"))] transport: &Transport,
+    ) -> Result<Self> {
+        let address = OwnerAddress::of(
+            first_file,
+            #[cfg(all(test, feature = "shuttle"))]
+            transport,
+        )?;
         let acceptor = Acceptor {
             listener: address.listen()?,
             stopping: std::sync::Arc::default(),
@@ -113,6 +129,7 @@ impl Acceptor {
                 continue;
             };
             let mut sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
+            #[cfg(not(all(test, feature = "shuttle")))]
             sessions.retain(|session| !session.thread.is_finished());
             sessions.push(Session {
                 socket: shut,
@@ -198,5 +215,8 @@ impl ClientSession {
     }
 }
 
-#[cfg(all(test, not(feature = "shuttle")))]
+#[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_tests;

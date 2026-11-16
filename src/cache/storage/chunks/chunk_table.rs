@@ -31,7 +31,7 @@ impl ChunkTable {
         self.free_chunks().free_count()
     }
 
-    #[cfg(any(test, feature = "__fuzz"))]
+    #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
     pub(in crate::cache::storage) fn blocks_at_rest(
         &self,
     ) -> Result<Vec<Option<BlockKey>>, String> {

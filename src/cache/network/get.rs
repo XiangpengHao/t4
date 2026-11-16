@@ -1,7 +1,7 @@
 use std::num::NonZeroU8;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::future::{Either, FutureExt, pending, select, select_ok};
@@ -48,7 +48,7 @@ impl Network {
         mut blocks: Box<dyn CacheStoreFetch<'c> + 'c>,
         extensions: &Extensions,
     ) -> object_store::Result<()> {
-        let waiting = Instant::now();
+        let waiting = self.clock.now();
         let Some((place, joined)) = self.turn(&mut *blocks).await? else {
             // Its bytes came with another GET's.
             return blocks.finish().await.map_err(Self::cache_error);
@@ -63,7 +63,7 @@ impl Network {
             ..GetOptions::default()
         };
         let path = location.as_ref().as_bytes();
-        let sent = Instant::now();
+        let sent = self.clock.now();
         let waited = sent - waiting;
         let late = body.blocks.late_race().zip(self.sleep.clone());
         let racers = body.blocks.race();
@@ -76,10 +76,10 @@ impl Network {
             let received = async {
                 let mut answer = answer.into_stream();
                 while let Some(piece) = answer.try_next().await? {
-                    let started = Instant::now();
+                    let started = self.clock.now();
                     let len = piece.len() as u64;
                     body.land(piece).await?;
-                    landing += started.elapsed();
+                    landing += self.clock.now() - started;
                     landed.fetch_add(len, Ordering::Relaxed);
                 }
                 Ok::<_, object_store::Error>(())
@@ -116,9 +116,9 @@ impl Network {
                     Either::Right((from, rest, report)) => {
                         let skip = usize::try_from(bytes.start + body.received - from)
                             .expect("a GET's bytes fit in memory");
-                        let started = Instant::now();
+                        let started = self.clock.now();
                         body.land(rest.slice(skip..)).await?;
-                        landing += started.elapsed();
+                        landing += self.clock.now() - started;
                         report
                     }
                 }
@@ -169,7 +169,7 @@ impl Network {
                 bytes: bytes.clone(),
                 racer,
             };
-            let mut report = IoReport::start(&*self.reads, get);
+            let mut report = IoReport::start(&*self.reads, get, &self.clock);
             let get = self.inner.get_opts(location, options.clone());
             async move {
                 match get.await {
@@ -197,7 +197,7 @@ impl Network {
         path: &'a [u8],
         rest: Range<u64>,
         racer: u8,
-        sent: Instant,
+        sent: Duration,
     ) -> object_store::Result<(u64, Bytes, IoReport<'a>)> {
         if rest.is_empty() {
             return pending().await;
@@ -207,7 +207,7 @@ impl Network {
             bytes: rest.clone(),
             racer,
         };
-        let mut report = IoReport::start_at(&*self.reads, get, sent);
+        let mut report = IoReport::start_at(&*self.reads, get, sent, &self.clock);
         let options = GetOptions {
             range: Some(GetRange::Bounded(rest.clone())),
             ..options.clone()

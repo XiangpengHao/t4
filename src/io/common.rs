@@ -483,15 +483,15 @@ impl<D: IoDriver> BackendLoop<D> {
     }
 }
 
-#[cfg(all(test, not(feature = "shuttle")))]
+#[cfg(all(test, feature = "shuttle"))]
 mod tests {
+    use crate::io::sync::{Arc, Mutex};
     use std::collections::VecDeque;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::{Arc, Mutex};
     use std::task::{Context, Waker};
 
-    use pollster::block_on;
+    use shuttle::future::block_on;
 
     use super::*;
     use crate::PAGE_SIZE_NZ_U32;
@@ -525,10 +525,10 @@ mod tests {
             act(&mut self.0.lock().unwrap())
         }
 
-        /// Unbounded: the CI step bounds a hung test. `_what` names the state.
+        /// No deadline: shuttle fails a schedule that stalls here.
         fn wait_until(&self, _what: &str, done: impl Fn(&ScriptedKernel) -> bool) {
             while !self.with(|kernel| done(kernel)) {
-                std::thread::yield_now();
+                crate::io::sync::thread::yield_now();
             }
         }
     }
@@ -575,40 +575,50 @@ mod tests {
         fn wait_for_progress(&mut self, _request_rx: &mpsc::Receiver<WorkerRequest>) {
             self.0
                 .with(|kernel| kernel.waited_after_failure |= kernel.failed);
-            std::thread::yield_now();
+            crate::io::sync::thread::yield_now();
         }
     }
 
     #[test]
     fn a_failed_submit_waits_for_what_the_kernel_took() {
-        let script = Script::default();
-        let (tx, rx) = mpsc::channel();
-        let driver = ScriptedDriver(script.clone());
-        let backend = std::thread::spawn(move || BackendLoop::new(8, rx, driver).run());
-        let page = || AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
+        crate::io::test_schedule::TestSchedule::check(|| {
+            let script = Script::default();
+            let (tx, rx) = mpsc::channel();
+            let driver = ScriptedDriver(script.clone());
+            let backend =
+                crate::io::sync::thread::spawn(move || BackendLoop::new(8, rx, driver).run());
+            let page = || AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
 
-        let mut taken = FileReadTask::new(tx.clone(), page(), FilePosition::new(0, 0)).unwrap();
-        script.wait_until("the kernel takes the first read", |kernel| {
-            kernel.taken.len() == 1
+            let mut taken = FileReadTask::new(tx.clone(), page(), FilePosition::new(0, 0)).unwrap();
+            script.wait_until("the kernel takes the first read", |kernel| {
+                kernel.taken.len() == 1
+            });
+            script.with(|kernel| kernel.fail_next_submit = true);
+            let untaken =
+                FileReadTask::new(tx.clone(), page(), FilePosition::new(0, 4096)).unwrap();
+
+            // The loop has handled the failure once it waits on the kernel or returns.
+            while !script.with(|kernel| kernel.waited_after_failure) {
+                crate::io::sync::thread::yield_now();
+            }
+            let answered = Pin::new(&mut taken).poll(&mut Context::from_waker(Waker::noop()));
+            assert!(
+                answered.is_pending(),
+                "a read the kernel holds isn't answered, its buffer dropped: {answered:?}"
+            );
+
+            script.with(ScriptedKernel::complete_taken);
+            let (buf, read_len) = block_on(taken).unwrap();
+            assert_eq!(read_len, buf.len());
+            // Shuttle detects a deadlock if the loop waits for the untaken read.
+            let (failed_tx, failed_rx) = mpsc::channel();
+            crate::io::sync::thread::spawn(move || {
+                failed_tx.send(block_on(untaken).is_err()).unwrap()
+            });
+            let failed = failed_rx.recv().expect("the read never taken is answered");
+            assert!(failed, "a read never taken fails");
+            drop(tx);
+            backend.join().unwrap();
         });
-        script.with(|kernel| kernel.fail_next_submit = true);
-        let untaken = FileReadTask::new(tx.clone(), page(), FilePosition::new(0, 4096)).unwrap();
-
-        // The loop has handled the failure once it waits on the kernel or returns.
-        while !script.with(|kernel| kernel.waited_after_failure) && !backend.is_finished() {
-            std::thread::yield_now();
-        }
-        let answered = Pin::new(&mut taken).poll(&mut Context::from_waker(Waker::noop()));
-        assert!(
-            answered.is_pending(),
-            "a read the kernel holds isn't answered, its buffer dropped: {answered:?}"
-        );
-
-        script.with(ScriptedKernel::complete_taken);
-        let (buf, read_len) = block_on(taken).unwrap();
-        assert_eq!(read_len, buf.len());
-        assert!(block_on(untaken).is_err(), "a read never taken fails");
-        drop(tx);
-        backend.join().unwrap();
     }
 }

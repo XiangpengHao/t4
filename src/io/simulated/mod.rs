@@ -167,12 +167,16 @@ pub(crate) fn new_backend_on(
     BackendLoop::new(queue_depth, rx, driver)
 }
 
+/// Files are read and written at the scheduled completion: restart bytes and locks hold
+/// with no OS I/O worker.
 pub(crate) fn new_backend(
-    _files: Vec<File>,
-    _queue_depth: u32,
-    _rx: mpsc::Receiver<WorkerRequest>,
+    files: Vec<File>,
+    queue_depth: u32,
+    rx: mpsc::Receiver<WorkerRequest>,
 ) -> Result<BackendLoop<SimulatedDriver>> {
-    Err(Error::InvalidArgument(
-        "shuttle tests run on a SimDisk: IoWorker::simulated",
+    Ok(new_backend_on(
+        files.into_iter().map(SimDisk::on_file).collect(),
+        queue_depth,
+        rx,
     ))
 }

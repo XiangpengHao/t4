@@ -49,6 +49,9 @@ pub struct T4Caching {
 /// # }
 /// ```
 pub struct T4CachingBuilder {
+    clock: crate::io::time::Clock,
+    #[cfg(all(test, feature = "shuttle"))]
+    transport: crate::cache::cache_stores::TestTransport,
     inner: Arc<dyn ObjectStore>,
     memory_capacity: Option<u64>,
     disk_files: Vec<DiskFile>,
@@ -64,6 +67,22 @@ pub struct T4CachingBuilder {
 }
 
 impl T4CachingBuilder {
+    #[cfg(all(test, feature = "shuttle"))]
+    fn with_test_clock(mut self, clock: crate::io::time::Clock) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    #[cfg(all(test, feature = "shuttle"))]
+    pub(in crate::cache) fn with_test_transport(
+        mut self,
+        transport: crate::cache::cache_stores::TestTransport,
+    ) -> Self {
+        self.clock = transport.clock().clone();
+        self.transport = transport;
+        self
+    }
+
     /// The NIC's rate t4 assumes unless told, in bytes a second: 50 Gbit/s.
     pub const DEFAULT_NETWORK_RATE: u64 = 50_000_000_000 / 8;
     pub const DEFAULT_UNLOADED_GET_TIME: Duration = Duration::from_millis(32);
@@ -177,9 +196,17 @@ impl T4CachingBuilder {
             self.disk_allocation,
             self.placement,
         );
+        tiers.set_clock(self.clock.clone());
         let cache_store: Arc<dyn CacheStore> = if self.sharing {
             let reads = Arc::clone(&reads);
-            Arc::new(SharedCacheStore::open(tiers, reads, Self::OWNER_WAIT)?)
+            Arc::new(SharedCacheStore::open(
+                tiers,
+                reads,
+                Self::OWNER_WAIT,
+                self.clock.clone(),
+                #[cfg(all(test, feature = "shuttle"))]
+                self.transport,
+            )?)
         } else {
             Arc::new(InProcessCacheStore::open(&mut tiers)?)
         };
@@ -189,6 +216,7 @@ impl T4CachingBuilder {
             bytes_in_flight,
             self.merged_up_to,
             self.sleep,
+            self.clock,
         );
         Ok(T4Caching {
             inner: self.inner,
@@ -224,6 +252,9 @@ impl fmt::Debug for T4CachingBuilder {
 impl T4Caching {
     pub fn builder(inner: Arc<dyn ObjectStore>) -> T4CachingBuilder {
         T4CachingBuilder {
+            clock: Default::default(),
+            #[cfg(all(test, feature = "shuttle"))]
+            transport: Default::default(),
             inner,
             memory_capacity: None,
             disk_files: Vec::new(),
@@ -345,7 +376,7 @@ impl T4Caching {
         }
     }
 
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(test)]
     pub(super) fn cache_store(&self) -> Arc<dyn CacheStore> {
         Arc::clone(&self.cache_store)
     }
@@ -421,5 +452,6 @@ mod object_store_integration;
 
 pub use file_handle::FileHandle;
 
-#[cfg(all(test, not(feature = "shuttle")))]
+#[cfg(test)]
+#[allow(dead_code, unused_imports)] // OS process tests use a subset of these fixtures.
 mod tests;

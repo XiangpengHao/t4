@@ -43,20 +43,14 @@ impl TestPolicy {
         *self.disk_hit.lock().unwrap() = disk_hit;
     }
 
-    // The shuttle tests don't steer or check by it.
-    #[cfg(not(feature = "shuttle"))]
     pub(super) fn set_victim_action(&self, action: VictimAction) {
         *self.victim_action.lock().unwrap() = action;
     }
 
-    // The shuttle tests don't steer or check by it.
-    #[cfg(not(feature = "shuttle"))]
     pub(super) fn heard(&self) -> Vec<Heard> {
         self.heard.lock().unwrap().clone()
     }
 
-    // The shuttle tests don't steer or check by it.
-    #[cfg(not(feature = "shuttle"))]
     pub(super) fn queued(&self, tier: Tier) -> Vec<ChunkId> {
         self.queue(tier).lock().unwrap().iter().copied().collect()
     }

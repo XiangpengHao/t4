@@ -179,11 +179,12 @@ impl PathTable {
     }
 }
 
-// Std threads, which shuttle's atomics refuse.
-#[cfg(all(test, not(feature = "shuttle")))]
+// State tests run in both modes; concurrent resolutions use the seeded runner.
+#[cfg(test)]
 mod tests {
+    #[cfg(feature = "shuttle")]
+    use crate::io::sync::Barrier;
     use std::collections::HashSet;
-    use std::sync::Barrier;
 
     use super::*;
 
@@ -196,138 +197,157 @@ mod tests {
 
     #[test]
     fn blocks_are_whole_but_the_last() {
-        let block = BLOCK_SIZE_U64;
-        let version = PathTable::new()
-            .resolve(b"p", Some("v1"), 2 * block + 10)
-            .unwrap();
-        assert_eq!(version.block_range(0), 0..block);
-        assert_eq!(version.block_range(1), block..2 * block);
-        assert_eq!(version.block_range(2), 2 * block..2 * block + 10);
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let block = BLOCK_SIZE_U64;
+            let version = PathTable::new()
+                .resolve(b"p", Some("v1"), 2 * block + 10)
+                .unwrap();
+            assert_eq!(version.block_range(0), 0..block);
+            assert_eq!(version.block_range(1), block..2 * block);
+            assert_eq!(version.block_range(2), 2 * block..2 * block + 10);
+        });
     }
 
     #[test]
     #[should_panic(expected = "past the file's end")]
     fn no_block_lies_past_the_end() {
-        let version = PathTable::new()
-            .resolve(b"p", Some("v1"), BLOCK_SIZE_U64)
-            .unwrap();
-        version.block_range(1);
+        crate::io::test_schedule::TestSchedule::check(|| {
+            let version = PathTable::new()
+                .resolve(b"p", Some("v1"), BLOCK_SIZE_U64)
+                .unwrap();
+            version.block_range(1);
+        });
     }
 
     #[test]
     fn the_same_version_resolves_to_the_same_id() {
-        let table = PathTable::new();
-        let file = table.resolve(b"a/b.parquet", Some("v1"), 100).unwrap();
-        assert_eq!(file.size(), 100);
-        assert_eq!(id_of(&table, "a/b.parquet", "v1", 100), file.id());
-        assert_ne!(id_of(&table, "a/c.parquet", "v1", 100), file.id());
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let table = PathTable::new();
+            let file = table.resolve(b"a/b.parquet", Some("v1"), 100).unwrap();
+            assert_eq!(file.size(), 100);
+            assert_eq!(id_of(&table, "a/b.parquet", "v1", 100), file.id());
+            assert_ne!(id_of(&table, "a/c.parquet", "v1", 100), file.id());
+        });
     }
 
     #[test]
     fn a_new_version_takes_a_fresh_id_and_the_path() {
-        let table = PathTable::new();
-        let v1 = id_of(&table, "p", "v1", 100);
-        let v2 = id_of(&table, "p", "v2", 100);
-        assert_ne!(v1, v2);
-        assert_eq!(id_of(&table, "p", "v2", 100), v2);
-        // The path holds one version: going back to the first is new again.
-        let v1_again = id_of(&table, "p", "v1", 100);
-        assert_ne!(v1_again, v1);
-        assert_ne!(v1_again, v2);
-        assert_ne!(id_of(&table, "p", "v1", 101), v1_again);
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let table = PathTable::new();
+            let v1 = id_of(&table, "p", "v1", 100);
+            let v2 = id_of(&table, "p", "v2", 100);
+            assert_ne!(v1, v2);
+            assert_eq!(id_of(&table, "p", "v2", 100), v2);
+            // The path holds one version: going back to the first is new again.
+            let v1_again = id_of(&table, "p", "v1", 100);
+            assert_ne!(v1_again, v1);
+            assert_ne!(v1_again, v2);
+            assert_ne!(id_of(&table, "p", "v1", 101), v1_again);
+        });
     }
 
     #[test]
     fn objects_the_cache_cannot_hold_are_refused() {
-        let table = PathTable::new();
-        assert_eq!(
-            table.resolve(b"p", None, 100),
-            Err(UncacheableObject::NoETag)
-        );
-        let longest = vec![b'x'; PathTable::MAX_PATH_LEN];
-        assert!(table.resolve(&longest, Some("v1"), 100).is_ok());
-        let too_long = vec![b'x'; PathTable::MAX_PATH_LEN + 1];
-        assert_eq!(
-            table.resolve(&too_long, Some("v1"), 100),
-            Err(UncacheableObject::PathTooLong)
-        );
-        assert!(
-            table
-                .resolve(b"p", Some("v1"), FileVersion::MAX_SIZE)
-                .is_ok()
-        );
-        assert_eq!(
-            table.resolve(b"p", Some("v1"), FileVersion::MAX_SIZE + 1),
-            Err(UncacheableObject::TooLarge)
-        );
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let table = PathTable::new();
+            assert_eq!(
+                table.resolve(b"p", None, 100),
+                Err(UncacheableObject::NoETag)
+            );
+            let longest = vec![b'x'; PathTable::MAX_PATH_LEN];
+            assert!(table.resolve(&longest, Some("v1"), 100).is_ok());
+            let too_long = vec![b'x'; PathTable::MAX_PATH_LEN + 1];
+            assert_eq!(
+                table.resolve(&too_long, Some("v1"), 100),
+                Err(UncacheableObject::PathTooLong)
+            );
+            assert!(
+                table
+                    .resolve(b"p", Some("v1"), FileVersion::MAX_SIZE)
+                    .is_ok()
+            );
+            assert_eq!(
+                table.resolve(b"p", Some("v1"), FileVersion::MAX_SIZE + 1),
+                Err(UncacheableObject::TooLarge)
+            );
+        });
     }
 
     #[test]
     fn fresh_ids_never_repeat() {
-        let table = PathTable::new();
-        let mut seen = HashSet::new();
-        for round in 0..50 {
-            for path in ["a", "b", "c"] {
-                let id = id_of(&table, path, &format!("v{round}"), 10);
-                assert!(seen.insert(id), "{id:?} handed out twice");
-            }
-        }
-    }
-
-    #[test]
-    fn concurrent_resolutions_of_one_version_share_one_id() {
-        const THREADS: usize = 8;
-        let table = PathTable::new();
-        for round in 0..200 {
-            let path = format!("objects/{round}");
-            let barrier = Barrier::new(THREADS);
-            let ids: Vec<FileVersionId> = std::thread::scope(|scope| {
-                let resolvers: Vec<_> = (0..THREADS)
-                    .map(|_| {
-                        scope.spawn(|| {
-                            barrier.wait();
-                            id_of(&table, &path, "v1", 10)
-                        })
-                    })
-                    .collect();
-                resolvers
-                    .into_iter()
-                    .map(|resolver| resolver.join().unwrap())
-                    .collect()
-            });
-            assert!(ids.iter().all(|id| *id == ids[0]), "{ids:?}");
-            assert_eq!(id_of(&table, &path, "v1", 10), ids[0]);
-        }
-    }
-
-    #[test]
-    fn concurrent_resolutions_of_two_versions_never_share_an_id() {
-        const THREADS: usize = 8;
-        let table = PathTable::new();
-        for round in 0..200 {
-            let path = format!("objects/{round}");
-            let barrier = Barrier::new(THREADS);
-            let resolved: Vec<(&str, FileVersionId)> = std::thread::scope(|scope| {
-                let resolvers: Vec<_> = (0..THREADS)
-                    .map(|thread| {
-                        let e_tag = if thread % 2 == 0 { "v1" } else { "v2" };
-                        let (table, path, barrier) = (&table, &path, &barrier);
-                        scope.spawn(move || {
-                            barrier.wait();
-                            (e_tag, id_of(table, path, e_tag, 10))
-                        })
-                    })
-                    .collect();
-                resolvers
-                    .into_iter()
-                    .map(|resolver| resolver.join().unwrap())
-                    .collect()
-            });
-            for (e_tag, id) in &resolved {
-                for (other_e_tag, other_id) in &resolved {
-                    assert!(e_tag == other_e_tag || id != other_id, "{resolved:?}");
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let table = PathTable::new();
+            let mut seen = HashSet::new();
+            for round in 0..50 {
+                for path in ["a", "b", "c"] {
+                    let id = id_of(&table, path, &format!("v{round}"), 10);
+                    assert!(seen.insert(id), "{id:?} handed out twice");
                 }
             }
-        }
+        });
+    }
+
+    #[cfg(feature = "shuttle")]
+    #[test]
+    fn concurrent_resolutions_of_one_version_share_one_id() {
+        crate::io::test_schedule::TestSchedule::check(|| {
+            const THREADS: usize = 8;
+            let table = PathTable::new();
+            for round in 0..2 {
+                let path = format!("objects/{round}");
+                let barrier = Barrier::new(THREADS);
+                let ids: Vec<FileVersionId> = crate::io::sync::thread::scope(|scope| {
+                    let resolvers: Vec<_> = (0..THREADS)
+                        .map(|_| {
+                            scope.spawn(|| {
+                                barrier.wait();
+                                id_of(&table, &path, "v1", 10)
+                            })
+                        })
+                        .collect();
+                    resolvers
+                        .into_iter()
+                        .map(|resolver| resolver.join().unwrap())
+                        .collect()
+                });
+                assert!(ids.iter().all(|id| *id == ids[0]), "{ids:?}");
+                assert_eq!(id_of(&table, &path, "v1", 10), ids[0]);
+            }
+        });
+    }
+
+    #[cfg(feature = "shuttle")]
+    #[test]
+    fn concurrent_resolutions_of_two_versions_never_share_an_id() {
+        crate::io::test_schedule::TestSchedule::check(|| {
+            const THREADS: usize = 8;
+            let table = PathTable::new();
+            for round in 0..2 {
+                let path = format!("objects/{round}");
+                let barrier = Barrier::new(THREADS);
+                let resolved: Vec<(&str, FileVersionId)> =
+                    crate::io::sync::thread::scope(|scope| {
+                        let resolvers: Vec<_> = (0..THREADS)
+                            .map(|thread| {
+                                let e_tag = if thread % 2 == 0 { "v1" } else { "v2" };
+                                let (table, path, barrier) = (&table, &path, &barrier);
+                                scope.spawn(move || {
+                                    barrier.wait();
+                                    (e_tag, id_of(table, path, e_tag, 10))
+                                })
+                            })
+                            .collect();
+                        resolvers
+                            .into_iter()
+                            .map(|resolver| resolver.join().unwrap())
+                            .collect()
+                    });
+                for (e_tag, id) in &resolved {
+                    for (other_e_tag, other_id) in &resolved {
+                        assert!(e_tag == other_e_tag || id != other_id, "{resolved:?}");
+                    }
+                }
+            }
+        });
     }
 }

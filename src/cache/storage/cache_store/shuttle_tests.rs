@@ -2,9 +2,9 @@
 
 use std::num::NonZeroU32;
 
+use crate::io::test_schedule::TestSchedule;
 use futures_util::FutureExt;
 use shuttle::future::block_on;
-use shuttle::scheduler::PctScheduler;
 
 use super::eviction::MoveToDisk;
 use super::test_policy::TestPolicy;
@@ -21,10 +21,7 @@ use crate::io::sync::{Arc, thread};
 const FILE_SIZE: u64 = 64;
 
 fn explore(test: impl Fn() + Send + Sync + 'static) {
-    let mut config = shuttle::Config::new();
-    // The default 60 KiB stack is too small for bbtree's descent in a debug build.
-    config.stack_size = 256 * 1024;
-    shuttle::Runner::new(PctScheduler::new(3, 1000), config).run(test);
+    TestSchedule::iterations(500, test);
 }
 
 fn cache(memory_chunks: u32, disk_chunks: u32) -> (Arc<ObjectCache>, Arc<TestPolicy>) {

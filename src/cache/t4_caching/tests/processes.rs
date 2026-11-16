@@ -1,32 +1,23 @@
+use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 
 use super::*;
 
-struct ChildProcess {
-    child: Child,
-    stdin: Option<ChildStdin>,
-}
-
-impl From<Child> for ChildProcess {
-    fn from(mut child: Child) -> Self {
-        let stdin = Some(child.stdin.take().expect("a child with piped stdin"));
-        Self { child, stdin }
-    }
-}
+struct ChildProcess(Child);
 
 impl ChildProcess {
     const ROLE: &str = "T4_SHARED_TEST_ROLE";
     const DIR: &str = "T4_SHARED_TEST_DIR";
 
     fn spawn(role: &str, dir: &std::path::Path) -> Self {
-        Self::from(Self::command(role, dir).spawn().unwrap())
+        Self(Self::command(role, dir).spawn().unwrap())
     }
 
     fn spawn_with_temp_dir(role: &str, dir: &std::path::Path, temp_dir: &std::path::Path) -> Self {
         let mut command = Self::command(role, dir);
-        Self::from(command.env("TMPDIR", temp_dir).spawn().unwrap())
+        Self(command.env("TMPDIR", temp_dir).spawn().unwrap())
     }
 
     fn command(role: &str, dir: &std::path::Path) -> Command {
@@ -37,30 +28,26 @@ impl ChildProcess {
             .args([test.as_str(), "--exact", "--nocapture", "--test-threads=1"])
             .env(Self::ROLE, role)
             .env(Self::DIR, dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null());
+            .stdout(Stdio::null())
+            .stdin(Stdio::piped());
         command
     }
 
     fn kill(&mut self) {
-        self.child.kill().unwrap();
-        self.child.wait().unwrap();
-    }
-
-    /// EOF releases the child's stdin read, as the parent's death does without destructors.
-    fn close_stdin(&mut self) {
-        drop(self.stdin.take());
+        self.0.kill().unwrap();
+        self.0.wait().unwrap();
     }
 
     fn exited_ok(&mut self) -> bool {
-        self.child.wait().unwrap().success()
+        drop(self.0.stdin.take());
+        self.0.wait().unwrap().success()
     }
 }
 
 impl Drop for ChildProcess {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 
@@ -82,13 +69,17 @@ impl Markers {
         std::fs::rename(aside, self.dir.join(name)).unwrap();
     }
 
-    fn said(&self, name: &str) -> String {
+    fn wait_for(&self, name: &str) -> String {
         loop {
             if let Ok(what) = std::fs::read_to_string(self.dir.join(name)) {
                 return what;
             }
             std::thread::yield_now();
         }
+    }
+
+    fn said(&self, name: &str) -> String {
+        self.wait_for(name)
     }
 }
 
@@ -207,8 +198,8 @@ fn a_child_process_plays_its_role() {
             markers.set(&format!("fetched-{index}"), &fetched);
         }
     }
-    // EOF means the parent finished, or died without running destructors.
-    std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink()).unwrap();
+    // EOF means the parent finished, or died: no wall-clock deadline or orphan.
+    let _ = std::io::stdin().read(&mut [0]);
     drop(held);
 }
 
@@ -285,9 +276,10 @@ fn a_client_killed_holding_a_claim_hands_it_to_its_waiter() {
 
     let read = owner.read_on_thread(0..MIB);
     wait_until(
-        || fetch_waiters_registered(&owner.cache) == 1,
-        "the owner's read waits on the client's claim",
+        || owner.cache.cache_store().owned().unwrap().waiting_reads() == 1,
+        "the owner's read registered on the client's claim",
     );
+    assert!(read.try_recv().is_err());
     client.kill();
     assert_eq!(
         read.recv().unwrap(),
@@ -315,9 +307,6 @@ fn eight_processes_starting_at_once_fetch_each_block_once() {
                 .unwrap()
         })
         .sum();
-    for reader in &mut readers {
-        reader.close_stdin();
-    }
 
     for reader in &mut readers {
         assert!(reader.exited_ok(), "each read its bytes right");

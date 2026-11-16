@@ -107,10 +107,14 @@ impl IoWorker {
 
 #[cfg(test)]
 mod test {
+    #[cfg(feature = "shuttle")]
     use std::fs::File;
     use std::num::NonZero;
 
+    #[cfg(not(feature = "shuttle"))]
     use pollster::block_on;
+    #[cfg(feature = "shuttle")]
+    use shuttle::future::block_on;
     use tempfile::tempfile;
 
     use crate::io::aligned_buf::AlignedBuf;
@@ -127,128 +131,145 @@ mod test {
 
     #[test]
     fn basic_io_worker_test() {
-        let tmp_file = tempfile().unwrap();
-        let io_worker = IoWorker::new(NonZero::new(12).unwrap(), vec![tmp_file]).unwrap();
-        let start = FilePosition::new(0, 0);
+        crate::io::test_schedule::TestSchedule::check(|| {
+            let tmp_file = tempfile().unwrap();
+            let io_worker = IoWorker::new(NonZero::new(12).unwrap(), vec![tmp_file]).unwrap();
+            let start = FilePosition::new(0, 0);
 
-        block_on(
-            io_worker
-                .write(vec![PageWrite {
-                    buf: page_of("hello"),
-                    at: start,
-                }])
-                .unwrap(),
-        )
-        .unwrap();
+            block_on(
+                io_worker
+                    .write(vec![PageWrite {
+                        buf: page_of("hello"),
+                        at: start,
+                    }])
+                    .unwrap(),
+            )
+            .unwrap();
 
-        let read_buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
-        let read_buf = block_on(io_worker.read_exact_at(read_buf, start)).unwrap();
+            let read_buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
+            let read_buf = block_on(io_worker.read_exact_at(read_buf, start)).unwrap();
 
-        assert_eq!(&read_buf.as_slice()[..5], b"hello");
+            assert_eq!(&read_buf.as_slice()[..5], b"hello");
+        });
     }
 
     #[test]
     fn one_worker_reads_and_writes_several_files() {
-        let files = vec![tempfile().unwrap(), tempfile().unwrap()];
-        let io_worker = IoWorker::new(NonZero::new(4).unwrap(), files).unwrap();
-        let writes = ["zero", "one"]
-            .iter()
-            .enumerate()
-            .map(|(file, text)| PageWrite {
-                buf: page_of(text),
-                at: FilePosition::new(file as u32, PAGE_SIZE_U64),
-            })
-            .collect();
-        block_on(io_worker.write(writes).unwrap()).unwrap();
+        crate::io::test_schedule::TestSchedule::check(|| {
+            let files = vec![tempfile().unwrap(), tempfile().unwrap()];
+            let io_worker = IoWorker::new(NonZero::new(4).unwrap(), files).unwrap();
+            let writes = ["zero", "one"]
+                .iter()
+                .enumerate()
+                .map(|(file, text)| PageWrite {
+                    buf: page_of(text),
+                    at: FilePosition::new(file as u32, PAGE_SIZE_U64),
+                })
+                .collect();
+            block_on(io_worker.write(writes).unwrap()).unwrap();
 
-        for (file, text) in ["zero", "one"].iter().enumerate() {
-            let at = FilePosition::new(file as u32, PAGE_SIZE_U64);
+            for (file, text) in ["zero", "one"].iter().enumerate() {
+                let at = FilePosition::new(file as u32, PAGE_SIZE_U64);
+                let buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
+                let buf = block_on(io_worker.read_exact_at(buf, at)).unwrap();
+                assert_eq!(&buf.as_slice()[..text.len()], text.as_bytes());
+            }
             let buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
-            let buf = block_on(io_worker.read_exact_at(buf, at)).unwrap();
-            assert_eq!(&buf.as_slice()[..text.len()], text.as_bytes());
-        }
-        let buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
-        assert!(block_on(io_worker.read_exact_at(buf, FilePosition::new(2, 0))).is_err());
-        assert!(IoWorker::new(NonZero::new(4).unwrap(), Vec::new()).is_err());
+            assert!(block_on(io_worker.read_exact_at(buf, FilePosition::new(2, 0))).is_err());
+            assert!(IoWorker::new(NonZero::new(4).unwrap(), Vec::new()).is_err());
+        });
     }
 
+    #[cfg(feature = "shuttle")]
     #[test]
     fn pool_io_worker_test() {
-        const THREADS: u64 = 4;
-        const PAGES_PER_THREAD: u64 = 8;
-        const QUEUE_DEPTH: u32 = 32;
+        crate::io::test_schedule::TestSchedule::check(|| {
+            const THREADS: u64 = 4;
+            const PAGES_PER_THREAD: u64 = 8;
+            const QUEUE_DEPTH: u32 = 32;
 
-        let tmp_file = tempfile().unwrap();
-        let io_worker = IoWorker::new(NonZero::new(QUEUE_DEPTH).unwrap(), vec![tmp_file]).unwrap();
+            let tmp_file = tempfile().unwrap();
+            let io_worker =
+                IoWorker::new(NonZero::new(QUEUE_DEPTH).unwrap(), vec![tmp_file]).unwrap();
 
-        let marker = |t: u64, i: u64| format!("t{t}-p{i}");
+            let marker = |t: u64, i: u64| format!("t{t}-p{i}");
 
-        let mut handles = Vec::with_capacity(THREADS as usize);
-        for t in 0..THREADS {
-            let worker = io_worker.clone();
-            handles.push(std::thread::spawn(move || {
-                let base = t * PAGES_PER_THREAD;
+            let mut handles = Vec::with_capacity(THREADS as usize);
+            for t in 0..THREADS {
+                let worker = io_worker.clone();
+                handles.push(crate::io::sync::thread::spawn(move || {
+                    let base = t * PAGES_PER_THREAD;
 
-                let mut writes = Vec::with_capacity(PAGES_PER_THREAD as usize);
-                for i in 0..PAGES_PER_THREAD {
-                    let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
-                    let bytes = marker(t, i);
-                    buf.as_mut_slice()[..bytes.len()].copy_from_slice(bytes.as_bytes());
-                    writes.push(PageWrite {
-                        buf,
-                        at: FilePosition::new(0, (base + i) * PAGE_SIZE_U64),
-                    });
-                }
-                block_on(worker.write(writes).unwrap()).unwrap();
+                    let mut writes = Vec::with_capacity(PAGES_PER_THREAD as usize);
+                    for i in 0..PAGES_PER_THREAD {
+                        let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
+                        let bytes = marker(t, i);
+                        buf.as_mut_slice()[..bytes.len()].copy_from_slice(bytes.as_bytes());
+                        writes.push(PageWrite {
+                            buf,
+                            at: FilePosition::new(0, (base + i) * PAGE_SIZE_U64),
+                        });
+                    }
+                    block_on(worker.write(writes).unwrap()).unwrap();
 
-                for i in 0..PAGES_PER_THREAD {
-                    let read_buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
-                    let at = FilePosition::new(0, (base + i) * PAGE_SIZE_U64);
-                    let read_buf = block_on(worker.read_exact_at(read_buf, at)).unwrap();
-                    let expected = marker(t, i);
-                    assert_eq!(&read_buf.as_slice()[..expected.len()], expected.as_bytes(),);
-                }
-            }));
-        }
+                    for i in 0..PAGES_PER_THREAD {
+                        let read_buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
+                        let at = FilePosition::new(0, (base + i) * PAGE_SIZE_U64);
+                        let read_buf = block_on(worker.read_exact_at(read_buf, at)).unwrap();
+                        let expected = marker(t, i);
+                        assert_eq!(&read_buf.as_slice()[..expected.len()], expected.as_bytes(),);
+                    }
+                }));
+            }
 
-        for h in handles {
-            h.join().unwrap();
-        }
+            for h in handles {
+                h.join().unwrap();
+            }
+        });
     }
 
+    #[cfg(feature = "shuttle")]
     #[test]
     fn dropping_the_worker_finishes_its_reads_and_closes_its_files() {
-        const READS: u32 = 64;
-        const MIB: u32 = 1 << 20;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("file");
-        let file = File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .unwrap();
-        file.set_len(u64::from(READS * MIB)).unwrap();
-        file.try_lock().unwrap();
-        let io_worker = IoWorker::new(NonZero::new(READS).unwrap(), vec![file]).unwrap();
-        let reads: Vec<_> = (0..READS)
-            .map(|index| {
-                let buf = AlignedBuf::new_zeroed(NonZero::new(MIB).unwrap()).unwrap();
-                let at = FilePosition::new(0, u64::from(index * MIB));
-                io_worker.read_at(buf, at).unwrap()
-            })
-            .collect();
+        crate::io::test_schedule::TestSchedule::check(|| {
+            const READS: u32 = 64;
+            const MIB: u32 = 1 << 20;
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("file");
+            let file = File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .unwrap();
+            file.set_len(u64::from(READS * MIB)).unwrap();
+            file.try_lock().unwrap();
+            let io_worker = IoWorker::new(NonZero::new(READS).unwrap(), vec![file]).unwrap();
+            let reads: Vec<_> = (0..READS)
+                .map(|index| {
+                    let buf = AlignedBuf::new_zeroed(NonZero::new(MIB).unwrap()).unwrap();
+                    let at = FilePosition::new(0, u64::from(index * MIB));
+                    io_worker.read_at(buf, at).unwrap()
+                })
+                .collect();
 
-        drop(io_worker);
+            drop(io_worker);
 
-        let reopened = File::open(&path).unwrap();
-        reopened
-            .try_lock()
-            .expect("the worker's file is closed once it drops");
-        for read in reads {
-            let (buf, read_len) = block_on(read).unwrap();
-            assert_eq!(read_len, buf.len());
-        }
+            let reopened = File::open(&path).unwrap();
+            reopened
+                .try_lock()
+                .expect("the worker's file is closed once it drops");
+            // Shuttle detects a deadlock if a read was dropped unanswered.
+            let (done_tx, done_rx) = crate::io::sync::mpsc::channel();
+            crate::io::sync::thread::spawn(move || {
+                for read in reads {
+                    let (buf, read_len) = block_on(read).unwrap();
+                    assert_eq!(read_len, buf.len());
+                }
+                done_tx.send(()).unwrap();
+            });
+            done_rx.recv().expect("every read in flight completes");
+        });
     }
 }

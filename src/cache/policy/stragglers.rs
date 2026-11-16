@@ -144,32 +144,36 @@ mod tests {
 
     #[test]
     fn races_a_normal_reads_gets_at_the_start_then_the_quantile_heard() {
-        let policy = RaceStragglers::at(0.9);
-        for ms in 1..RaceStragglers::HEARD as u64 {
-            policy.on_io(&finished(ms));
-        }
-        assert_eq!(
-            late_races(&policy, None),
-            [Some(RaceStragglers::START)],
-            "not learned yet"
-        );
-        policy.on_io(&finished(RaceStragglers::HEARD as u64));
-        // 1..=64 ms heard: their p90, the 58th.
-        let trigger = Duration::from_millis(58);
-        assert_eq!(policy.trigger(), trigger);
-        assert_eq!(late_races(&policy, None), [Some(trigger)]);
-        assert_eq!(late_races(&policy, Some(ReadIntent::Warm)), [None]);
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let policy = RaceStragglers::at(0.9);
+            for ms in 1..RaceStragglers::HEARD as u64 {
+                policy.on_io(&finished(ms));
+            }
+            assert_eq!(
+                late_races(&policy, None),
+                [Some(RaceStragglers::START)],
+                "not learned yet"
+            );
+            policy.on_io(&finished(RaceStragglers::HEARD as u64));
+            // 1..=64 ms heard: their p90, the 58th.
+            let trigger = Duration::from_millis(58);
+            assert_eq!(policy.trigger(), trigger);
+            assert_eq!(late_races(&policy, None), [Some(trigger)]);
+            assert_eq!(late_races(&policy, Some(ReadIntent::Warm)), [None]);
+        });
     }
 
     #[test]
     fn learns_from_the_latest_times() {
-        let policy = RaceStragglers::at(0.5);
-        for _ in 0..RaceStragglers::HEARD {
-            policy.on_io(&finished(1000));
-        }
-        for _ in 0..RaceStragglers::HEARD {
-            policy.on_io(&finished(10));
-        }
-        assert_eq!(policy.trigger(), Duration::from_millis(10));
+        crate::io::test_schedule::TestSchedule::once(|| {
+            let policy = RaceStragglers::at(0.5);
+            for _ in 0..RaceStragglers::HEARD {
+                policy.on_io(&finished(1000));
+            }
+            for _ in 0..RaceStragglers::HEARD {
+                policy.on_io(&finished(10));
+            }
+            assert_eq!(policy.trigger(), Duration::from_millis(10));
+        });
     }
 }

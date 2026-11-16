@@ -65,7 +65,7 @@ impl ObjectCache {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::cache) async fn take_fetched(
         &self,
         read: &mut PartialRead,

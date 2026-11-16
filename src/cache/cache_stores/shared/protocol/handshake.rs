@@ -1,11 +1,17 @@
+use super::region::RegionDescriptor;
 use std::fs::File;
-use std::io::{IoSlice, IoSliceMut, Read};
+use std::io::Read;
+#[cfg(not(all(test, feature = "shuttle")))]
+use std::io::{IoSlice, IoSliceMut};
+#[cfg(not(all(test, feature = "shuttle")))]
 use std::mem::MaybeUninit;
+#[cfg(not(all(test, feature = "shuttle")))]
 use std::os::fd::{AsFd, OwnedFd};
 use std::time::Duration;
 
 use bytes::Bytes;
 use rustix::fs::OFlags;
+#[cfg(not(all(test, feature = "shuttle")))]
 use rustix::net::{
     RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendAncillaryBuffer,
     SendAncillaryMessage,
@@ -20,7 +26,7 @@ use crate::io::error::{Error, Result};
 pub(in crate::cache::cache_stores::shared) struct Hello {
     version: u32,
     cache_file: File,
-    region: Option<OwnedFd>,
+    region: Option<RegionDescriptor>,
 }
 
 impl Hello {
@@ -29,11 +35,12 @@ impl Hello {
     /// All an owner reads from a peer it hasn't admitted, so that a peer can't make it allocate.
     const FRAME_BYTES: usize = 8 + 1 + 4 + 4 + 1;
 
+    #[cfg(not(all(test, feature = "shuttle")))]
     const MOST_DESCRIPTORS: usize = 2;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(all(test, feature = "shuttle"))))]
     const RECEIVE_FLAGS: RecvFlags = RecvFlags::CMSG_CLOEXEC;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(not(target_os = "linux"), not(all(test, feature = "shuttle"))))]
     const RECEIVE_FLAGS: RecvFlags = RecvFlags::empty();
 
     pub(in crate::cache::cache_stores::shared) fn new(version: u32, cache_file: File) -> Self {
@@ -45,7 +52,10 @@ impl Hello {
     }
 
     #[must_use]
-    pub(in crate::cache::cache_stores::shared) fn with_region(self, region: OwnedFd) -> Self {
+    pub(in crate::cache::cache_stores::shared) fn with_region(
+        self,
+        region: RegionDescriptor,
+    ) -> Self {
         Self {
             region: Some(region),
             ..self
@@ -56,7 +66,7 @@ impl Hello {
         self.version
     }
 
-    pub(in crate::cache::cache_stores::shared) fn into_region(self) -> Option<OwnedFd> {
+    pub(in crate::cache::cache_stores::shared) fn into_region(self) -> Option<RegionDescriptor> {
         self.region
     }
 
@@ -78,56 +88,75 @@ impl Hello {
         frame: &[u8],
     ) -> std::io::Result<()> {
         debug_assert_eq!(frame.len(), Self::FRAME_BYTES);
-        let mut space =
-            [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(Self::MOST_DESCRIPTORS))];
-        let mut control = SendAncillaryBuffer::new(&mut space);
-        let cache_file = self.cache_file.as_fd();
-        let descriptors = match &self.region {
-            Some(region) => vec![cache_file, region.as_fd()],
-            None => vec![cache_file],
-        };
-        let pushed = control.push(SendAncillaryMessage::ScmRights(&descriptors));
-        assert!(pushed, "the buffer has room for every descriptor");
-        let sent = rustix::net::sendmsg(
-            socket,
-            &[IoSlice::new(frame)],
-            &mut control,
-            FrameSocket::SEND_FLAGS,
-        )?;
-        socket.send(&frame[sent..])
+        #[cfg(all(test, feature = "shuttle"))]
+        {
+            socket.send_descriptors(self.cache_file.try_clone()?, self.region.clone());
+            socket.send(frame)
+        }
+        #[cfg(not(all(test, feature = "shuttle")))]
+        {
+            let mut space =
+                [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(Self::MOST_DESCRIPTORS))];
+            let mut control = SendAncillaryBuffer::new(&mut space);
+            let cache_file = self.cache_file.as_fd();
+            let descriptors = match &self.region {
+                Some(region) => vec![cache_file, region.as_fd()],
+                None => vec![cache_file],
+            };
+            let pushed = control.push(SendAncillaryMessage::ScmRights(&descriptors));
+            assert!(pushed, "the buffer has room for every descriptor");
+            let sent = rustix::net::sendmsg(
+                socket,
+                &[IoSlice::new(frame)],
+                &mut control,
+                FrameSocket::SEND_FLAGS,
+            )?;
+            socket.send(&frame[sent..])
+        }
     }
 
     pub(in crate::cache::cache_stores::shared) fn receive(socket: &FrameSocket) -> Result<Self> {
         let mut frame = [0; Self::FRAME_BYTES];
-        let mut space =
-            [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(Self::MOST_DESCRIPTORS))];
-        let mut control = RecvAncillaryBuffer::new(&mut space);
-        let received = rustix::net::recvmsg(
-            socket,
-            &mut [IoSliceMut::new(&mut frame)],
-            &mut control,
-            Self::RECEIVE_FLAGS,
-        )
-        .map_err(std::io::Error::from)?;
-        if received.bytes == 0 {
-            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
-        }
-        if received.flags.contains(ReturnFlags::CTRUNC) {
-            return Err(FrameReader::malformed("hello: more than two descriptors"));
-        }
-        let mut descriptors: Vec<OwnedFd> = Vec::new();
-        for message in control.drain() {
-            if let RecvAncillaryMessage::ScmRights(sent) = message {
-                descriptors.extend(sent);
+        #[cfg(not(all(test, feature = "shuttle")))]
+        let descriptors = {
+            let mut space =
+                [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(Self::MOST_DESCRIPTORS))];
+            let mut control = RecvAncillaryBuffer::new(&mut space);
+            let received = rustix::net::recvmsg(
+                socket,
+                &mut [IoSliceMut::new(&mut frame)],
+                &mut control,
+                Self::RECEIVE_FLAGS,
+            )
+            .map_err(std::io::Error::from)?;
+            if received.bytes == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
             }
-        }
-        // Set at once after the receive, but a process started meanwhile could still inherit them.
-        #[cfg(not(target_os = "linux"))]
-        for descriptor in &descriptors {
-            rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC)
-                .map_err(std::io::Error::from)?;
-        }
-        (&*socket).read_exact(&mut frame[received.bytes..])?;
+            if received.flags.contains(ReturnFlags::CTRUNC) {
+                return Err(FrameReader::malformed("hello: more than two descriptors"));
+            }
+            let mut descriptors: Vec<OwnedFd> = Vec::new();
+            for message in control.drain() {
+                if let RecvAncillaryMessage::ScmRights(sent) = message {
+                    descriptors.extend(sent);
+                }
+            }
+            // Set at once after the receive, but a process started meanwhile could still inherit them.
+            #[cfg(all(not(target_os = "linux"), not(all(test, feature = "shuttle"))))]
+            for descriptor in &descriptors {
+                rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC)
+                    .map_err(std::io::Error::from)?;
+            }
+            (&*socket).read_exact(&mut frame[received.bytes..])?;
+            descriptors
+        };
+        #[cfg(all(test, feature = "shuttle"))]
+        let (cache_file, region_descriptor) = {
+            (&*socket).read_exact(&mut frame)?;
+            socket
+                .take_descriptors()
+                .ok_or_else(|| FrameReader::malformed("hello: descriptors missing"))?
+        };
         let (length, body) = frame.split_at(size_of::<u64>());
         let length = u64::from_le_bytes(length.try_into().expect("a u64's bytes"));
         if length != body.len() as u64 {
@@ -138,17 +167,25 @@ impl Hello {
         else {
             return Err(FrameReader::malformed("hello: another frame"));
         };
-        if descriptors.len() != 1 + usize::from(region) {
-            return Err(FrameReader::malformed(
-                "hello: other descriptors than it says",
-            ));
+        #[cfg(not(all(test, feature = "shuttle")))]
+        let (cache_file, region_descriptor) = {
+            if descriptors.len() != 1 + usize::from(region) {
+                return Err(FrameReader::malformed(
+                    "hello: other descriptors than it says",
+                ));
+            }
+            let mut descriptors = descriptors.into_iter();
+            let cache_file = descriptors.next().expect("one descriptor at least");
+            (File::from(cache_file), descriptors.next())
+        };
+        #[cfg(all(test, feature = "shuttle"))]
+        if region != region_descriptor.is_some() {
+            return Err(FrameReader::malformed("hello: region descriptor"));
         }
-        let mut descriptors = descriptors.into_iter();
-        let cache_file = descriptors.next().expect("one descriptor at least");
         Ok(Self {
             version,
-            cache_file: File::from(cache_file),
-            region: descriptors.next(),
+            cache_file,
+            region: region_descriptor,
         })
     }
 

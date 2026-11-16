@@ -36,10 +36,6 @@ jobs:
       - name: Run proof check
         run: nix build -L .#proofs
 
-      - name: Run shuttle tests
-        timeout-minutes: 15
-        run: nix build -L .#shuttle
-
   macos:
     runs-on: macos-latest
     steps:
@@ -61,3 +57,21 @@ jobs:
 
       - name: Run proof check
         run: nix build -L .#proofs
+
+  shuttle:
+    # Independent of lint/proof jobs: a failure there must not hide a schedule failure.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+      - name: Configure Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+      - name: Run every shuttle test
+        timeout-minutes: 15
+        run: nix build -L .#shuttle
