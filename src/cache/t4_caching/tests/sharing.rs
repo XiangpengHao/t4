@@ -25,7 +25,11 @@ fn listed(store: &CountingStore, path: &Path) -> ObjectMeta {
 }
 
 fn read_listed(cache: &T4Caching, meta: &ObjectMeta, range: Range<u64>) -> Bytes {
-    block_on(cache.open_listed(meta.clone()).read(range, None)).unwrap()
+    let bytes = block_on(cache.open_listed(meta.clone()).read(range, None)).unwrap();
+    if let Some(cache) = cache.cache_store().owned() {
+        cache.wait_for_disk_writes();
+    }
+    bytes
 }
 
 #[test]

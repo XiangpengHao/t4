@@ -6,7 +6,9 @@ fn on_disk(inner: &Arc<CountingStore>, dir: &TempDir) -> T4CachingBuilder {
 }
 
 fn read_whole(cache: &T4Caching, meta: &ObjectMeta) -> Bytes {
-    block_on(cache.open_listed(meta.clone()).read(0..meta.size, None)).unwrap()
+    let bytes = block_on(cache.open_listed(meta.clone()).read(0..meta.size, None)).unwrap();
+    cache.cache_store().owned().unwrap().wait_for_disk_writes();
+    bytes
 }
 
 #[test]

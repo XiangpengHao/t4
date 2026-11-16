@@ -319,7 +319,11 @@ fn put(store: &dyn ObjectStore, path: &Path, bytes: &Bytes) {
 }
 
 fn get_range(store: &T4Caching, path: &Path, range: Range<u64>) -> Bytes {
-    block_on(store.get_range(path, range)).unwrap()
+    let bytes = block_on(store.get_range(path, range)).unwrap();
+    if let Some(cache) = store.cache_store().owned() {
+        cache.wait_for_disk_writes();
+    }
+    bytes
 }
 
 fn bounded(range: Range<u64>) -> Asked {
@@ -1316,6 +1320,7 @@ fn a_reads_gets_go_out_before_its_disk_reads_are_waited_on() {
 fn capped(inner: &Arc<CountingStore>, most: u64, merged_up_to: u64) -> (TempDir, T4Caching, Bytes) {
     let dir = tempfile::tempdir().unwrap();
     let store = builder(inner, &dir)
+        .with_memory_capacity(8 * MIB)
         .with_network_rate(most, Duration::from_secs(1))
         .with_waiting_gets_merged(merged_up_to)
         .build()

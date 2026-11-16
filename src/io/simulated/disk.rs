@@ -3,6 +3,8 @@ pub(crate) struct SimDisk {
     file: Option<std::fs::File>,
     in_flight: Vec<InFlightWrite>,
     next_write: u64,
+    #[cfg(test)]
+    write_gate: Option<crate::io::sync::mpsc::Receiver<()>>,
 }
 
 struct InFlightWrite {
@@ -26,7 +28,19 @@ impl SimDisk {
             file: None,
             in_flight: Vec::new(),
             next_write: 0,
+            #[cfg(test)]
+            write_gate: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_paused_writes() -> (Self, crate::io::sync::mpsc::Sender<()>) {
+        let (release, write_gate) = crate::io::sync::mpsc::channel();
+        let disk = Self {
+            write_gate: Some(write_gate),
+            ..Self::new()
+        };
+        (disk, release)
     }
 
     pub(super) fn on_file(file: std::fs::File) -> Self {
@@ -64,6 +78,10 @@ impl SimDisk {
     }
 
     fn complete_write(&mut self, id: WriteId) -> usize {
+        #[cfg(test)]
+        if let Some(gate) = self.write_gate.take() {
+            gate.recv().unwrap();
+        }
         let index = self
             .in_flight
             .iter()

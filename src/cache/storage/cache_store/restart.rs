@@ -41,6 +41,9 @@ impl ObjectCache {
     /// the snapshot names only chunks no write will touch.
     pub(in crate::cache) fn shut_down(&self) -> std::io::Result<()> {
         self.disk.chunks().close();
+        if let Some(writer) = &self.writer {
+            writer.stop();
+        }
         match self.disk.snapshot() {
             Some(snapshot) => snapshot.keep(&self.capture_snapshot()),
             None => Ok(()),
@@ -55,8 +58,8 @@ impl ObjectCache {
 /// Kept again after `shut_down`: writes in flight then may have published blocks since.
 impl Drop for ObjectCache {
     fn drop(&mut self) {
-        if let Some(snapshot) = self.disk.snapshot() {
-            let _ = snapshot.keep(&self.capture_snapshot());
+        if self.writer.is_some() {
+            let _ = self.shut_down();
         }
     }
 }

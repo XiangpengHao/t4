@@ -1,8 +1,8 @@
 # 13 — Persistence
 
-Status: build step 1 built (2026-11-16): the log format and strict replay.
-The running cache still takes and removes a clean snapshot; batched writes
-and a live log are next. Stage 1, a clean restart, is built
+Status: build steps 1 and 2 built (2026-11-16): the log format, strict
+replay, and disk writes off the read path. A live log is next; the running
+cache still takes and removes a clean snapshot. Stage 1, a clean restart, is built
 (`10-spiral-integration.md`, decision 7, 2 Nov 2026) and measured here.
 Stage 2, a log that keeps the disk tier across a killed process, is the
 design below, with its format built.
@@ -106,9 +106,16 @@ bytes.
    returns once the block is on disk (`cache_landed`, in
    `cache_store/fill.rs`); with batches, once it is in memory, and a writer
    flushes the batches behind it: `03-cache.md`'s Later, eviction off the
-   insertion path. Memory needs a batch's 16 chunks at least, so a desktop's
-   one chunk becomes 16. A batch not full waits for its next block; its
+   insertion path. A memory capacity under 16 chunks keeps its budget
+   and uses one-block batches; larger capacities use 16. Raising a caller's
+   memory budget silently would break the fixed-capacity contract.
+   A batch not full waits for its next block; its
    blocks are memory's meanwhile and, as memory's, not written at shutdown.
+   One owned writer thread waits on a condition variable, submits a whole
+   batch, and parks until its I/O completes. It holds no cache handle
+   that keeps its own owner alive; shutdown closes the tier and joins it.
+   At most 16 blocks wait behind the batch in flight. With no free memory,
+   a fill may go uncached; it never waits for the writer to make room.
 
 10. **A shared cache's owner keeps the log.** It holds the tier; a client
     keeps nothing, and its next owner takes the log back as any next cache

@@ -1,3 +1,4 @@
+#[cfg(any(test, feature = "__bench"))]
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::any::Any;
 use std::num::NonZeroU32;
@@ -5,6 +6,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::PAGE_SIZE;
+#[cfg(any(test, feature = "__bench"))]
 use crate::io::error::{Error, Result};
 
 #[derive(Debug)]
@@ -12,19 +14,22 @@ pub struct AlignedBuf {
     ptr: NonNull<u8>,
     len_u32: NonZeroU32,
     memory: BufMemory,
-    held: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 #[derive(Debug)]
 enum BufMemory {
+    #[cfg(any(test, feature = "__bench"))]
     Owned(Layout),
-    Lent { _guard: Arc<dyn Any + Send + Sync> },
+    Lent {
+        _guard: Arc<dyn Any + Send + Sync>,
+    },
 }
 
 // SAFETY: the bytes are mutated only through `&mut self`, and a lent buffer's guard is `Send`.
 unsafe impl Send for AlignedBuf {}
 
 impl AlignedBuf {
+    #[cfg(any(test, feature = "__bench"))]
     pub fn new_zeroed(len_u32: NonZeroU32) -> Result<Self> {
         let len = len_u32.get() as usize;
         let layout = Layout::from_size_align(len, PAGE_SIZE)
@@ -40,7 +45,6 @@ impl AlignedBuf {
             ptr,
             len_u32,
             memory: BufMemory::Owned(layout),
-            held: None,
         })
     }
 
@@ -56,7 +60,6 @@ impl AlignedBuf {
             ptr,
             len_u32,
             memory: BufMemory::Lent { _guard: guard },
-            held: None,
         }
     }
 
@@ -111,13 +114,6 @@ impl AlignedBuf {
         }
     }
 
-    /// Keeps `held` alive until the buffer drops: its I/O may outlive a caller who gave up on it.
-    pub(crate) fn holding(mut self, held: Arc<dyn Any + Send + Sync>) -> Self {
-        assert!(self.held.is_none(), "a buffer holds one thing");
-        self.held = Some(held);
-        self
-    }
-
     #[cfg(test)]
     fn is_owned(&self) -> bool {
         matches!(self.memory, BufMemory::Owned(_))
@@ -126,8 +122,10 @@ impl AlignedBuf {
 
 impl Drop for AlignedBuf {
     fn drop(&mut self) {
-        if let BufMemory::Owned(layout) = self.memory {
-            unsafe { dealloc(self.ptr.as_ptr(), layout) };
+        match self.memory {
+            #[cfg(any(test, feature = "__bench"))]
+            BufMemory::Owned(layout) => unsafe { dealloc(self.ptr.as_ptr(), layout) },
+            BufMemory::Lent { .. } => {}
         }
     }
 }

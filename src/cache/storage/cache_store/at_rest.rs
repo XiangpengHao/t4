@@ -7,6 +7,7 @@ impl ObjectCache {
     pub(in crate::cache) fn check_at_rest(
         &self,
     ) -> std::result::Result<Vec<(Tier, ChunkId)>, String> {
+        self.wait_for_disk_writes();
         if !self.in_flight.is_empty() {
             return Err("a block is still in flight".to_owned());
         }

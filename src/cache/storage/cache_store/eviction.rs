@@ -1,10 +1,10 @@
 use std::num::NonZeroU32;
 
-use futures_util::future::join_all;
-
 use crate::PAGE_SIZE_U32;
 use crate::cache::io_report::IoReport;
-use crate::cache::policy::{Io, MemoryVictim, PlacementPolicy, ReadPolicy, Tier, VictimAction};
+#[cfg(all(test, feature = "shuttle"))]
+use crate::cache::policy::PlacementPolicy;
+use crate::cache::policy::{Io, MemoryVictim, ReadPolicy, Tier, VictimAction};
 use crate::cache::storage::disk::{DiskChunkReader, DiskChunkWriter};
 use crate::cache::storage::index::{Location, PlannedBlock};
 use crate::cache::storage::memory::{MemoryChunkReader, MemoryChunkWriter};
@@ -105,22 +105,73 @@ impl ObjectCache {
     }
 
     async fn evict_memory_victims(&self, victims: &[MemoryVictim]) -> Result<()> {
-        let mut moves = Vec::new();
         for victim in victims {
             match victim.action() {
                 VictimAction::Drop => {
                     self.evict_from_memory(victim.chunk());
                 }
-                VictimAction::ToDisk => moves.push(self.move_to_disk(victim.chunk())),
+                VictimAction::ToDisk => {
+                    if let Some(held) = self.memory.pin_for_eviction(victim.chunk())
+                        && !self.pending.enqueue(held.chunk(), held.block())
+                    {
+                        self.placement
+                            .on_admit(Tier::Memory, held.chunk(), held.block());
+                    }
+                }
             }
-        }
-        for moved in join_all(moves).await {
-            moved?;
         }
         Ok(())
     }
 
+    pub(super) async fn write_disk_batch(
+        &self,
+        batch: &[(ChunkId, BlockKey)],
+    ) -> Vec<(ChunkId, BlockKey)> {
+        let mut moves = Vec::new();
+        let mut writes = Vec::new();
+        let mut retry = Vec::new();
+        for &(chunk, block) in batch {
+            let Some(victim) = self.memory.read(chunk, block) else {
+                continue;
+            };
+            let Some(writer) = self.allocate_disk() else {
+                retry.push((chunk, block));
+                continue;
+            };
+            let hold = writer.hold_for_write(self.disk.chunks());
+            writes.push(crate::io::io_task::PageWrite {
+                buf: victim.lend_for_write(&self.memory, hold),
+                at: writer.position(),
+            });
+            moves.push((victim, writer));
+        }
+        if writes.is_empty() || self.disk.write_batch(writes).await.is_err() {
+            retry.extend(
+                moves
+                    .iter()
+                    .map(|(victim, _)| (victim.chunk(), victim.block())),
+            );
+            return retry;
+        }
+        for (victim, writer) in moves {
+            let block = victim.block();
+            let on_disk = writer.publish(block);
+            if self.blocks.replace_if(
+                block,
+                Location::Memory(victim.chunk()),
+                Location::Disk(on_disk.chunk()),
+            ) {
+                victim.unpublish();
+                self.placement.on_admit(Tier::Disk, on_disk.chunk(), block);
+            } else {
+                on_disk.unpublish();
+            }
+        }
+        retry
+    }
+
     /// The write holds both chunks until it is done, even if this future is dropped first.
+    #[cfg(all(test, feature = "shuttle"))]
     pub(super) async fn move_to_disk(&self, chunk: ChunkId) -> Result<MoveToDisk> {
         let Some(victim) = self.memory.pin_for_eviction(chunk) else {
             return Ok(MoveToDisk::NoBlock);
@@ -179,6 +230,7 @@ pub(super) enum Promotion<'cache> {
 
 /// The policy forgot the chunk when it picked it: a move that leaves the block
 /// in memory must give it back, or the policy never picks it again.
+#[cfg(all(test, feature = "shuttle"))]
 struct PickedVictim<'c> {
     policy: &'c dyn PlacementPolicy,
     chunk: ChunkId,
@@ -186,6 +238,7 @@ struct PickedVictim<'c> {
     settled: bool,
 }
 
+#[cfg(all(test, feature = "shuttle"))]
 impl<'c> PickedVictim<'c> {
     fn new(policy: &'c dyn PlacementPolicy, chunk: ChunkId, block: BlockKey) -> Self {
         Self {
@@ -201,6 +254,7 @@ impl<'c> PickedVictim<'c> {
     }
 }
 
+#[cfg(all(test, feature = "shuttle"))]
 impl Drop for PickedVictim<'_> {
     fn drop(&mut self) {
         if !self.settled {
@@ -210,6 +264,7 @@ impl Drop for PickedVictim<'_> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(all(test, feature = "shuttle"))]
 pub(super) enum MoveToDisk {
     Moved,
     NoBlock,

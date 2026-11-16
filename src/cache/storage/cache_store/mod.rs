@@ -11,9 +11,11 @@ use crate::cache::policy::{PlacementPolicy, ReadIntent, ReadPolicy};
 use crate::cache::read_output::ReadOutput;
 use crate::io::error::Result;
 use crate::io::sync::Arc;
+use disk_writer::{DiskWriter, PendingDisk};
 
 #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
 mod at_rest;
+mod disk_writer;
 mod eviction;
 mod fill;
 #[cfg(feature = "__fuzz")]
@@ -33,6 +35,12 @@ pub(in crate::cache) use tier_work::TierWork;
 
 pub(in crate::cache) struct ObjectCache {
     clock: crate::io::time::Clock,
+    state: Arc<CacheState>,
+    writer: Option<DiskWriter>,
+}
+
+pub(in crate::cache) struct CacheState {
+    pending: Arc<PendingDisk>,
     paths: PathTable,
     blocks: BlockTable,
     memory: Arc<MemoryPool>,
@@ -41,7 +49,20 @@ pub(in crate::cache) struct ObjectCache {
     in_flight: Arc<InFlight>,
 }
 
+impl std::ops::Deref for ObjectCache {
+    type Target = CacheState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
 impl ObjectCache {
+    #[cfg(any(test, feature = "__fuzz"))]
+    pub(in crate::cache) fn wait_for_disk_writes(&self) {
+        self.pending.wait_for_idle();
+    }
+
     pub(in crate::cache) fn with_clock(mut self, clock: crate::io::time::Clock) -> Self {
         self.clock = clock;
         self
@@ -61,14 +82,20 @@ impl ObjectCache {
             Some(snapshot) => snapshot.take()?,
             None => None,
         };
-        let cache = Self {
-            clock: Default::default(),
+        let state = Arc::new(CacheState {
+            pending: Arc::new(PendingDisk::new(memory_chunks.get())),
             paths: PathTable::new(),
             blocks: BlockTable::new(),
             memory: Arc::new(MemoryPool::new(memory_chunks)?),
             disk,
             placement,
             in_flight: Arc::default(),
+        });
+        let writer = DiskWriter::start(Arc::clone(&state))?;
+        let cache = Self {
+            clock: Default::default(),
+            state,
+            writer: Some(writer),
         };
         if let Some(kept) = kept {
             cache.restore(&kept);

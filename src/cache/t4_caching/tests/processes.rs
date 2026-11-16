@@ -125,7 +125,11 @@ impl SharedProcess {
 
     fn read(&self, range: Range<u64>) -> Bytes {
         let file = self.cache.open_listed(self.meta.clone());
-        block_on(file.read(range, None)).unwrap()
+        let bytes = block_on(file.read(range, None)).unwrap();
+        if let Some(cache) = self.cache.cache_store().owned() {
+            cache.wait_for_disk_writes();
+        }
+        bytes
     }
 
     fn read_on_thread(&self, range: Range<u64>) -> mpsc::Receiver<Bytes> {

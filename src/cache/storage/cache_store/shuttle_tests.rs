@@ -71,6 +71,7 @@ fn read_fetching(cache: &ObjectCache, file: &CacheableFile<'static>, fill: bool)
     if fill {
         block_on(cache.take_fetched(&mut read, 0..FILE_SIZE, &contents(file.path))).unwrap();
     }
+    cache.pending.wait_for_idle();
     true
 }
 
@@ -369,6 +370,9 @@ fn a_dropped_eviction_gives_its_victim_back() {
             thread::yield_now();
         }
         read(&cache, &c, true);
+        if memory_chunk(&cache, &c).is_none() {
+            read(&cache, &c, true);
+        }
         assert!(
             memory_chunk(&cache, &c).is_some(),
             "memory made room for it"
@@ -458,5 +462,54 @@ fn racing_resolutions_of_two_versions_never_share_an_id() {
                 assert!(e_tag == other_e_tag || id != other_id, "{resolved:?}");
             }
         }
+    });
+}
+
+#[test]
+fn disk_admissions_wait_readably_in_memory_until_sixteen_are_ready() {
+    TestSchedule::check(|| {
+        let (disk, release_writes) = SimDisk::with_paused_writes();
+        let io = IoWorker::simulated(NonZeroU32::new(16).unwrap(), vec![disk]).unwrap();
+        let disk = CacheFiles::on(io, NonZeroU32::MIN, 32).unwrap();
+        let policy = Arc::new(TestPolicy::new());
+        policy.set_admit(Admit::Disk);
+        let cache = ObjectCache::new(NonZeroU32::new(16).unwrap(), disk, policy).unwrap();
+        for index in 0..16 {
+            let path = format!("{index}");
+            let file = cache
+                .resolve(path.as_bytes(), Some("v1"), FILE_SIZE)
+                .unwrap();
+            let mut read =
+                block_on(cache.read(&file, 0..FILE_SIZE, None, &FetchRuns::default())).unwrap();
+            let bytes = vec![index as u8; FILE_SIZE as usize];
+            assert!(
+                cache
+                    .take_fetched(&mut read, 0..FILE_SIZE, &bytes)
+                    .now_or_never()
+                    .unwrap()
+                    .is_ok()
+            );
+            assert_eq!(read.into_bytes().unwrap(), bytes);
+            let key = BlockKey::new(file.version().id(), 0);
+            let Some(Location::Memory(chunk)) = cache.blocks.get(key) else {
+                panic!("the write is still paused");
+            };
+            assert_eq!(
+                &cache.memory.read(chunk, key).unwrap().bytes()[..bytes.len()],
+                bytes
+            );
+            if index < 15 {
+                assert_eq!(
+                    cache.disk.chunks().free_count(),
+                    32,
+                    "no partial batch goes"
+                );
+            }
+        }
+        release_writes.send(()).unwrap();
+        cache.wait_for_disk_writes();
+        assert_eq!(cache.disk.chunks().free_count(), 16);
+        assert_eq!(cache.memory.free_count(), 16);
+        cache.check_at_rest().unwrap();
     });
 }

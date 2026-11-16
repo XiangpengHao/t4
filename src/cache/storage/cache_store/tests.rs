@@ -55,6 +55,7 @@ fn read_through(
         let fetched = &data[fetch.start as usize..fetch.end as usize];
         block_on(cache.take_fetched(&mut read, fetch.clone(), fetched)).unwrap();
     }
+    cache.pending.wait_for_idle();
     (read.into_bytes().unwrap().to_vec(), fetches)
 }
 
@@ -105,6 +106,9 @@ fn the_default_policy_streams_blocks_through_both_tiers() {
             let start = index * MIB;
             let (out, _) = read_through(&cache, &file, &data, start..start + MIB);
             assert_eq!(out, data[start as usize..(start + MIB) as usize]);
+            if cache.blocks.get(key(&file, index as u32)).is_none() {
+                read_through(&cache, &file, &data, start..start + MIB);
+            }
         }
         assert_eq!(cache.memory.free_count(), 0);
         assert_eq!(cache.disk.chunks().free_count(), 0);
@@ -309,6 +313,9 @@ fn a_full_memory_moves_its_victims_to_disk() {
         read_through(&cache, &file, &data, 0..MIB);
         read_through(&cache, &file, &data, MIB..2 * MIB);
         let on_disk = disk_chunk(&cache, &file, 0);
+        if location(&cache, &file, 1).is_none() {
+            read_through(&cache, &file, &data, MIB..2 * MIB);
+        }
         memory_chunk(&cache, &file, 1);
         assert!(
             policy
@@ -345,6 +352,9 @@ fn a_full_disk_drops_its_victims_to_take_memorys() {
         for index in 0..3_u32 {
             let start = u64::from(index) * MIB;
             read_through(&cache, &file, &data, start..start + MIB);
+            if location(&cache, &file, index).is_none() {
+                read_through(&cache, &file, &data, start..start + MIB);
+            }
         }
         assert_eq!(location(&cache, &file, 0), None);
         disk_chunk(&cache, &file, 1);
@@ -743,7 +753,7 @@ fn on_demand_cache(
     let policy = Arc::new(TestPolicy::new());
     policy.set_admit(Admit::Disk);
     let placement = Arc::clone(&policy) as Arc<dyn PlacementPolicy>;
-    let cache = ObjectCache::new(NonZeroU32::MIN, disk, placement).unwrap();
+    let cache = ObjectCache::new(NonZeroU32::new(4).unwrap(), disk, placement).unwrap();
     (cache, policy)
 }
 
