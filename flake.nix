@@ -2,6 +2,7 @@
   description = "t4";
 
   inputs = {
+    crane.url = "github:ipetkov/crane";
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url = "github:numtide/flake-utils";
@@ -9,6 +10,7 @@
 
   outputs =
     {
+      crane,
       nixpkgs,
       rust-overlay,
       flake-utils,
@@ -144,6 +146,12 @@
           });
         in
         {
+          checks = import ./nix/ci.nix {
+            inherit pkgs verus;
+            craneLib = (crane.mkLib pkgs).overrideToolchain ciRustToolchain;
+            src = (crane.mkLib pkgs).cleanCargoSource ./.;
+          };
+
           packages.verus = verus;
           packages.verusfmt = verusfmt;
 
