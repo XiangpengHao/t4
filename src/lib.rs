@@ -24,7 +24,7 @@ pub mod __bench {
 #[cfg(all(unix, feature = "__fuzz"))]
 #[doc(hidden)]
 pub mod __fuzz {
-    pub use crate::cache::{FuzzedFrame, FuzzedSnapshot};
+    pub use crate::cache::{FuzzedFrame, FuzzedSnapshot, FuzzedVersion};
 }
 
 verus! {

@@ -6,8 +6,9 @@ use std::path::Path;
 
 use super::ObjectCache;
 use crate::cache::policy::{ClockPolicy, PlacementPolicy, Tier};
-use crate::cache::storage::CacheFiles;
-use crate::cache::storage::snapshot::DiskSnapshot;
+use crate::cache::storage::snapshot::{DiskSnapshot, VersionOnDisk};
+use crate::cache::storage::{CacheFiles, FileVersion};
+use crate::cache::{ChunkId, FileVersionId};
 use crate::io::io_worker::IoWorker;
 use crate::io::sync::Arc;
 
@@ -15,18 +16,60 @@ pub struct FuzzedSnapshot {
     body: Vec<u8>,
 }
 
+/// A file version as a snapshot names it, valid or not.
+pub struct FuzzedVersion {
+    id: u64,
+    size: u64,
+    path: Vec<u8>,
+    e_tag: String,
+    blocks: Vec<(u32, u32)>,
+}
+
+impl FuzzedVersion {
+    /// `blocks` are each a block's number and its chunk's.
+    pub fn new(id: u64, size: u64, path: Vec<u8>, e_tag: String, blocks: Vec<(u32, u32)>) -> Self {
+        Self {
+            id,
+            size,
+            path,
+            e_tag,
+            blocks,
+        }
+    }
+
+    fn on_disk(self) -> VersionOnDisk {
+        let id = FileVersionId::new(self.id % FileVersionId::LIMIT);
+        let version = FileVersion::named(id, self.size).expect("a size a cache holds");
+        let blocks = self
+            .blocks
+            .into_iter()
+            .map(|(index, chunk)| (index, ChunkId::new(chunk)))
+            .collect();
+        VersionOnDisk::new(self.path.into(), self.e_tag.into(), version, blocks)
+    }
+}
+
 impl FuzzedSnapshot {
     const DISK_CHUNKS: NonZeroU32 = NonZeroU32::new(8).unwrap();
 
+    /// A snapshot whose body, after a valid header, is `body`.
     pub fn new(body: &[u8]) -> Self {
         Self {
             body: body.to_vec(),
         }
     }
 
-    /// Panics unless the body, after a valid header, is refused, or is a
-    /// snapshot a cache takes back with its index and tiers agreeing. The
-    /// cache's file is made in `dir`.
+    /// A snapshot of `versions`, in this order and as they are, for a cache
+    /// of 8 disk chunks: valid or not.
+    pub fn of_versions(next_id: u64, versions: Vec<FuzzedVersion>) -> Self {
+        let versions = versions.into_iter().map(FuzzedVersion::on_disk).collect();
+        Self {
+            body: DiskSnapshot::new(next_id, versions).fuzzed_body(Self::DISK_CHUNKS.get()),
+        }
+    }
+
+    /// Panics unless the snapshot is refused, or a cache takes it back with
+    /// its index and tiers agreeing. The cache's file is made in `dir`.
     pub fn check(&self, dir: &Path) {
         let Some(snapshot) = DiskSnapshot::fuzzed(&self.body, Self::DISK_CHUNKS.get()) else {
             return;

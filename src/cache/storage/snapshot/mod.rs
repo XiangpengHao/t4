@@ -162,6 +162,15 @@ impl DiskSnapshot {
         );
         Some(snapshot)
     }
+
+    /// The body it encodes to after the header [`Self::fuzzed`] puts before
+    /// one, whether or not it is valid.
+    pub(in crate::cache) fn fuzzed_body(&self, chunks: u32) -> Vec<u8> {
+        let layout = CacheLayout::fuzzed(chunks);
+        let mut header = SnapshotWriter::default();
+        Self::encode_header(&layout, &mut header);
+        self.encode(&layout).split_off(header.0.len())
+    }
 }
 
 #[derive(Default)]

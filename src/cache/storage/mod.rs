@@ -7,7 +7,7 @@ mod memory;
 mod snapshot;
 
 #[cfg(feature = "__fuzz")]
-pub use cache_store::FuzzedSnapshot;
+pub use cache_store::{FuzzedSnapshot, FuzzedVersion};
 
 pub(in crate::cache) use disk::{CacheFiles, DiskFile, FileAllocation, FileIdentity};
 

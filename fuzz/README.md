@@ -55,9 +55,11 @@ the same bytes.
 
 ## `snapshot`
 
-The disk tier's snapshot, its body from the input after a valid header: it
-is refused, or encodes back to the same bytes and is taken back by a cache
-whose index and tiers then agree, each version's size known. A snapshot has
+The disk tier's snapshot, after a valid header: its body as the input's
+bytes, or encoded from versions and blocks the input picks, small enough
+that many are valid and many are off by a little. Each is refused, or
+encodes back to the same bytes and is taken back by a cache whose index and
+tiers then agree, each version's size known. A snapshot has
 no checksum: one whose bytes were changed into another valid snapshot is
 taken back as written, so this target checks the cache's consistency, not
 the bytes it would serve.
