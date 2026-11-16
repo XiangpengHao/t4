@@ -173,17 +173,20 @@
                 buildPhaseCargoCommand = "cargo verus focus ${commonArgs.cargoExtraArgs}";
               };
               verusArtifacts = craneLib.buildDepsOnly (
-                verusArgs
+                builtins.removeAttrs verusArgs [ "src" ]
                 // {
-                  # Crane normally strips package metadata from its dummy sources.
-                  # Preserve Verus's opt-in so the dependency build uses the same driver.
-                  cleanCargoTomlFilter =
-                    path:
-                    pkgs.lib.take 2 path == [
-                      "package"
-                      "metadata"
-                    ]
-                    || craneLib.filters.cargoTomlDefault path;
+                  cargoToml = ./Cargo.toml;
+                  dummySrc = craneLib.mkDummySrc {
+                    inherit src;
+                    # Preserve Verus's opt-in metadata in the dummy manifest.
+                    cleanCargoTomlFilter =
+                      path:
+                      pkgs.lib.take 2 path == [
+                        "package"
+                        "metadata"
+                      ]
+                      || craneLib.filters.cargoTomlDefault path;
+                  };
                 }
               );
 
