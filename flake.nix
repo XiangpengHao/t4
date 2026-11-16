@@ -231,8 +231,9 @@
         {
           checks = ciChecks;
 
-          packages.verus = verus;
-          packages.verusfmt = verusfmt;
+          packages = ciChecks // {
+            inherit verus verusfmt;
+          };
 
           # CI checks only the root crate; benchmark and editor tools stay below.
           devShells.ci = pkgs.mkShell {

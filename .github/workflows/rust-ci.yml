@@ -24,21 +24,21 @@ jobs:
         uses: DeterminateSystems/magic-nix-cache-action@v14
 
       - name: Check formatting
-        run: nix build --no-link --print-build-logs .#checks.x86_64-linux.fmt
+        run: nix build -L .#fmt
 
       - name: Run Clippy
-        run: nix build --no-link --print-build-logs .#checks.x86_64-linux.clippy
+        run: nix build -L .#clippy
 
       - name: Run tests
         timeout-minutes: 15
-        run: nix build --no-link --print-build-logs .#checks.x86_64-linux.tests
+        run: nix build -L .#tests
 
       - name: Run proof check
-        run: nix build --no-link --print-build-logs .#checks.x86_64-linux.proofs
+        run: nix build -L .#proofs
 
       - name: Run shuttle tests
         timeout-minutes: 15
-        run: nix build --no-link --print-build-logs .#checks.x86_64-linux.shuttle
+        run: nix build -L .#shuttle
 
   macos:
     runs-on: macos-latest
@@ -53,11 +53,11 @@ jobs:
         uses: DeterminateSystems/magic-nix-cache-action@v14
 
       - name: Run Clippy
-        run: nix build --no-link --print-build-logs .#checks.aarch64-darwin.clippy
+        run: nix build -L .#clippy
 
       - name: Run tests
         timeout-minutes: 15
-        run: nix build --no-link --print-build-logs .#checks.aarch64-darwin.tests
+        run: nix build -L .#tests
 
       - name: Run proof check
-        run: nix build --no-link --print-build-logs .#checks.aarch64-darwin.proofs
+        run: nix build -L .#proofs
