@@ -8,6 +8,9 @@ mod frames;
 mod handshake;
 mod region;
 
+#[cfg(feature = "__fuzz")]
+pub use frames::FuzzedFrame;
+
 pub(super) use address::OwnerAddress;
 #[cfg(all(test, feature = "shuttle"))]
 pub(in crate::cache) use frame_socket::Transport;

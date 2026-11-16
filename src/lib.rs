@@ -21,6 +21,12 @@ pub mod __bench {
     pub use crate::io::io_worker::IoWorker;
 }
 
+#[cfg(all(unix, feature = "__fuzz"))]
+#[doc(hidden)]
+pub mod __fuzz {
+    pub use crate::cache::{FuzzedFrame, FuzzedSnapshot, FuzzedVersion};
+}
+
 verus! {
 
 pub const PAGE_SIZE: usize = 4096;

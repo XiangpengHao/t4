@@ -138,6 +138,20 @@ impl CacheLayout {
     }
 }
 
+#[cfg(feature = "__fuzz")]
+impl CacheLayout {
+    pub(super) fn fuzzed(chunks_per_file: u32) -> Self {
+        let file = FileStamp {
+            identity: FileIdentity::new(0, 0),
+            created: Duration::ZERO,
+        };
+        Self {
+            chunks_per_file,
+            files: vec![file],
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileStamp {
     identity: FileIdentity,

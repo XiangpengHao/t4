@@ -16,6 +16,8 @@ use crate::io::sync::Arc;
 mod at_rest;
 mod eviction;
 mod fill;
+#[cfg(feature = "__fuzz")]
+mod fuzzing;
 mod locate;
 mod located_run;
 mod partial_read;
@@ -23,6 +25,8 @@ mod restart;
 mod tier_work;
 
 pub(in crate::cache) use fill::FetchedBlocks;
+#[cfg(feature = "__fuzz")]
+pub use fuzzing::{FuzzedSnapshot, FuzzedVersion};
 pub(in crate::cache) use located_run::LocatedRun;
 pub(in crate::cache) use partial_read::PartialRead;
 pub(in crate::cache) use tier_work::TierWork;

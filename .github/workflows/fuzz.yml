@@ -1,0 +1,53 @@
+name: Fuzz
+
+on:
+  schedule:
+    # Mondays at 10:00 UTC: 2 AM Pacific, 3 AM in summer.
+    - cron: "0 10 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  NIX_CONFIG: accept-flake-config = true
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [cache_equivalence, frames, snapshot]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+
+      - name: Configure Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - name: Build
+        run: nix develop -c cargo fuzz build ${{ matrix.target }}
+
+      # AddressSanitizer's memory grows with every cache an input builds, past
+      # libFuzzer's limit in minutes: each half minute is a fresh process.
+      - name: Fuzz for an hour
+        env:
+          TMPDIR: /dev/shm
+          TARGET: ${{ matrix.target }}
+        run: |
+          nix develop -c bash -c '
+            end=$((SECONDS + 3600))
+            while [ "$SECONDS" -lt "$end" ]; do
+              cargo fuzz run "$TARGET" -- -max_total_time=30 -timeout=10 -rss_limit_mb=8192 || exit 1
+            done'
+
+      - name: Keep the failing input
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
