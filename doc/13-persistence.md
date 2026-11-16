@@ -88,9 +88,11 @@ bytes.
    file, in order, by device, inode and creation time. An add must find its
    chunk free, a free its chunk held, a path a version id never given
    before. No base is written while the cache runs (decision 8), so no
-   entry races one. A record cut short, or failing its CRC, ends the log
-   there, as a kill can cut the last. An entry that fails a check starts
-   the cache cold: a cold start costs refills, never wrong bytes.
+   entry races one. A record whose 8-byte header or declared body runs
+   past the file's end ends replay there: a kill can cut the last write.
+   A complete record failing its CRC starts cold, even the last one:
+   records after corruption may hold frees. Any other failed check starts
+   cold too: a cold start costs refills, never wrong bytes.
 
 8. **The log grows until the next build** (the user, 16 Nov 2026: keep
    it simple). Nothing compacts it while the cache runs; the next build
@@ -125,8 +127,9 @@ bytes.
     16-byte boot UUID, then the base's 64-bit byte length, CRC32C and
     bytes. The base reuses stage 1's complete encoding and decoder.
     Records have a 32-bit byte length and CRC32C before their entries;
-    integers are little endian. A bad base starts cold; a bad record
-    ends replay before any of its entries. Unknown entries start cold.
+    integers are little endian. A bad base or complete record starts cold;
+    a record cut short ends replay before any of its entries. Unknown
+    entries start cold.
     A path may replace a path, in record order, but never reuse an id,
     including any id below the base's next id. The clean mark carries the
     next id too, including ids a racing resolution allocated and wasted.
@@ -212,8 +215,9 @@ build with the snapshot removed is the baseline.
 
 1. **The log's format:** header, base, records and their CRC, replay and
    its checks. Tests: each entry's checks, as the snapshot's
-   (`storage/snapshot/tests.rs`); a record cut short or corrupted is
-   dropped; a log from another boot, not clean, starts the cache cold.
+   (`storage/snapshot/tests.rs`); a record cut short is dropped, a
+   complete corrupted record starts cold; a log from another boot, not
+   clean, starts the cache cold.
 2. **Batched disk writes off the read path** (decision 9), with no log
    yet. Tests: a read returns once its block is in memory; a batch goes at
    16 blocks; the shuttle suite's eviction and promotion races.

@@ -109,34 +109,32 @@ fn replay_applies_paths_adds_and_frees_in_order() {
 }
 
 #[test]
-fn torn_and_corrupt_records_stop_before_any_of_their_entries() {
+fn a_last_record_cut_short_in_its_header_or_body_replays_the_prefix() {
     let fixture = LogFixture::new();
-    let base = fixture.base();
-    let record = DiskLog::record(&[LogEntry::Free(0), LogFixture::add(1, 1, 0)]);
+    let prefix = fixture.with_entries(&[LogFixture::add(1, 1, 2)]);
+    let expected = fixture.replay(&prefix);
+    assert_ne!(expected, Some(LogFixture::snapshot()));
+    let record = DiskLog::record(&[LogEntry::Free(0), LogFixture::add(1, 0, 1)]);
     for cut in 0..record.len() {
-        let bytes = [&base[..], &record[..cut]].concat();
-        assert_eq!(
-            fixture.replay(&bytes),
-            Some(LogFixture::snapshot()),
-            "cut {cut}"
-        );
+        let bytes = [&prefix[..], &record[..cut]].concat();
+        assert_eq!(fixture.replay(&bytes), expected, "cut {cut}");
     }
-    for at in 0..record.len() {
+}
+
+#[test]
+fn a_complete_record_with_a_bad_crc_starts_cold_in_the_middle_or_at_the_end() {
+    let fixture = LogFixture::new();
+    let prefix = fixture.with_entries(&[LogFixture::add(1, 1, 2)]);
+    let record = DiskLog::record(&[LogEntry::Free(0), LogFixture::add(1, 0, 1)]);
+    let following = DiskLog::record(&[LogEntry::Free(2)]);
+    for at in 4..record.len() {
         let mut corrupt = record.clone();
         corrupt[at] ^= 1;
-        let bytes = [&base[..], &corrupt, &DiskLog::record(&[LogEntry::Free(3)])].concat();
-        assert_eq!(
-            fixture.replay(&bytes),
-            Some(LogFixture::snapshot()),
-            "byte {at}"
-        );
+        let last = [&prefix[..], &corrupt].concat();
+        assert_eq!(fixture.replay(&last), None, "last record, byte {at}");
+        let middle = [&last[..], &following].concat();
+        assert_eq!(fixture.replay(&middle), None, "middle record, byte {at}");
     }
-    let valid = [&base[..], &record].concat();
-    let expected = fixture.replay(&valid);
-    assert_eq!(
-        fixture.replay(&[&valid[..], &record[..record.len() - 1]].concat()),
-        expected
-    );
 }
 
 #[test]

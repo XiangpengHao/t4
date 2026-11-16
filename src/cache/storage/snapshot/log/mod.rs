@@ -52,9 +52,12 @@ impl DiskLog {
         }
         let mut replay = LogReplay::new(DiskSnapshot::decode(base, layout)?, layout.chunk_count()?);
         while !input.bytes.is_empty() {
-            let Some(body) = Self::take_record(&mut input) else {
+            let Some((checksum, body)) = Self::take_record(&mut input) else {
                 break;
             };
+            if RecordChecksum::of(body) != checksum {
+                return None;
+            }
             let mut record = SnapshotReader { bytes: body };
             while !record.bytes.is_empty() {
                 replay.apply(LogEntry::decode(&mut record)?)?;
@@ -63,11 +66,11 @@ impl DiskLog {
         (same_boot || replay.clean).then(|| replay.snapshot())
     }
 
-    fn take_record<'b>(input: &mut SnapshotReader<'b>) -> Option<&'b [u8]> {
+    fn take_record<'b>(input: &mut SnapshotReader<'b>) -> Option<(u32, &'b [u8])> {
         let len = input.u32()? as usize;
         let checksum = input.u32()?;
         let body = input.take(len)?;
-        (RecordChecksum::of(body) == checksum).then_some(body)
+        Some((checksum, body))
     }
 }
 
