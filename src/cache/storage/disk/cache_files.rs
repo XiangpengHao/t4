@@ -5,8 +5,6 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use super::allocation::{DriveHeadroom, FileAllocation};
-#[cfg(all(test, feature = "shuttle"))]
-use super::disk_chunks::DiskChunkWriter;
 use super::disk_chunks::{DiskChunkReader, DiskChunks};
 use crate::cache::BLOCK_SIZE_U64;
 use crate::cache::storage::BootIdReader;
@@ -138,19 +136,6 @@ impl CacheFiles {
                 .headroom
                 .as_ref()
                 .is_none_or(DriveHeadroom::allows_a_block)
-    }
-
-    #[cfg(all(test, feature = "shuttle"))]
-    pub(in crate::cache) async fn write(
-        &self,
-        writer: &DiskChunkWriter<'_>,
-        pages: AlignedBuf,
-    ) -> Result<()> {
-        let write = PageWrite {
-            buf: pages,
-            at: writer.position(),
-        };
-        self.io.write(vec![write])?.await
     }
 
     pub(in crate::cache) async fn write_batch(&self, writes: Vec<PageWrite>) -> Result<()> {

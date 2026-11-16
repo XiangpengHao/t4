@@ -3,7 +3,6 @@ use crate::io::sync::Arc;
 use shuttle::future::block_on;
 use tempfile::TempDir;
 
-use super::eviction::MoveToDisk;
 use super::locate::HeldBlock;
 use super::test_policy::{Heard, TestPolicy};
 use super::*;
@@ -182,10 +181,12 @@ fn the_policy_hears_each_block_where_it_is() {
         let file = cache.resolve(b"a", Some("v1"), 3 * MIB).unwrap();
         read_through(&cache, &file, &data, 0..2 * MIB);
         let in_memory = memory_chunk(&cache, &file, 0);
-        assert_eq!(
-            block_on(cache.move_to_disk(memory_chunk(&cache, &file, 1))).unwrap(),
-            MoveToDisk::Moved
+        assert!(
+            cache
+                .pending
+                .enqueue(memory_chunk(&cache, &file, 1), key(&file, 1))
         );
+        cache.wait_for_disk_writes();
         let on_disk = disk_chunk(&cache, &file, 1);
 
         let before = policy.heard().len();
@@ -288,10 +289,8 @@ fn blocks_moved_to_disk_read_back_from_disk() {
         read_through(&cache, &file, &data, 0..size);
         for index in 0..3 {
             let chunk = memory_chunk(&cache, &file, index);
-            assert_eq!(
-                block_on(cache.move_to_disk(chunk)).unwrap(),
-                MoveToDisk::Moved
-            );
+            assert!(cache.pending.enqueue(chunk, key(&file, index)));
+            cache.wait_for_disk_writes();
             disk_chunk(&cache, &file, index);
         }
         assert_eq!(cache.memory.free_count(), 4);
@@ -493,10 +492,9 @@ fn a_free_chunk_has_no_block_to_move_or_evict() {
     crate::io::test_schedule::TestSchedule::check(|| {
         let (_dir, cache, _policy) = cache(1, 1);
         let free = ChunkId::new(0);
-        assert_eq!(
-            block_on(cache.move_to_disk(free)).unwrap(),
-            MoveToDisk::NoBlock
-        );
+        let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
+        assert!(cache.pending.enqueue(free, key(&file, 0)));
+        cache.wait_for_disk_writes();
         assert!(!cache.evict_from_memory(free));
         assert!(!cache.evict_from_disk(free));
         assert_eq!(cache.disk.chunks().free_count(), 1);

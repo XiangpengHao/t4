@@ -2,8 +2,6 @@ use std::num::NonZeroU32;
 
 use crate::PAGE_SIZE_U32;
 use crate::cache::io_report::IoReport;
-#[cfg(all(test, feature = "shuttle"))]
-use crate::cache::policy::PlacementPolicy;
 use crate::cache::policy::{Io, MemoryVictim, ReadPolicy, Tier, VictimAction};
 use crate::cache::storage::disk::{DiskChunkReader, DiskChunkWriter};
 use crate::cache::storage::index::{Location, PlannedBlock};
@@ -207,36 +205,6 @@ impl ObjectCache {
         retry
     }
 
-    /// The write holds both chunks until it is done, even if this future is dropped first.
-    #[cfg(all(test, feature = "shuttle"))]
-    pub(super) async fn move_to_disk(&self, chunk: ChunkId) -> Result<MoveToDisk> {
-        let Some(victim) = self.memory.pin_for_eviction(chunk) else {
-            return Ok(MoveToDisk::NoBlock);
-        };
-        let block = victim.block();
-        let picked = PickedVictim::new(self.placement.as_ref(), chunk, block);
-        let Some(writer) = self.allocate_disk() else {
-            return Ok(MoveToDisk::DiskFull);
-        };
-        let hold = writer.hold_for_write(self.disk.chunks());
-        let pages = victim.lend_for_write(&self.memory, hold);
-        self.disk.write(&writer, pages).await?;
-        picked.settle();
-        let on_disk = writer.publish(block);
-        let to_disk = Location::Disk(on_disk.chunk());
-        if self
-            .blocks
-            .replace_if(block, Location::Memory(chunk), to_disk)
-        {
-            victim.unpublish();
-            self.placement.on_admit(Tier::Disk, on_disk.chunk(), block);
-            Ok(MoveToDisk::Moved)
-        } else {
-            on_disk.unpublish();
-            Ok(MoveToDisk::Superseded)
-        }
-    }
-
     pub(super) fn evict_from_memory(&self, chunk: ChunkId) -> bool {
         let Some(victim) = self.memory.pin_for_eviction(chunk) else {
             return false;
@@ -268,48 +236,4 @@ impl ObjectCache {
 pub(super) enum Promotion<'cache> {
     InMemory(MemoryChunkReader<'cache>),
     NoRoom(DiskChunkReader<'cache>),
-}
-
-/// The policy forgot the chunk when it picked it: a move that leaves the block
-/// in memory must give it back, or the policy never picks it again.
-#[cfg(all(test, feature = "shuttle"))]
-struct PickedVictim<'c> {
-    policy: &'c dyn PlacementPolicy,
-    chunk: ChunkId,
-    block: BlockKey,
-    settled: bool,
-}
-
-#[cfg(all(test, feature = "shuttle"))]
-impl<'c> PickedVictim<'c> {
-    fn new(policy: &'c dyn PlacementPolicy, chunk: ChunkId, block: BlockKey) -> Self {
-        Self {
-            policy,
-            chunk,
-            block,
-            settled: false,
-        }
-    }
-
-    fn settle(mut self) {
-        self.settled = true;
-    }
-}
-
-#[cfg(all(test, feature = "shuttle"))]
-impl Drop for PickedVictim<'_> {
-    fn drop(&mut self) {
-        if !self.settled {
-            self.policy.on_admit(Tier::Memory, self.chunk, self.block);
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(all(test, feature = "shuttle"))]
-pub(super) enum MoveToDisk {
-    Moved,
-    NoBlock,
-    DiskFull,
-    Superseded,
 }

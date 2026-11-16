@@ -6,7 +6,6 @@ use crate::io::test_schedule::TestSchedule;
 use futures_util::FutureExt;
 use shuttle::future::block_on;
 
-use super::eviction::MoveToDisk;
 use super::test_policy::TestPolicy;
 use super::{CacheableFile, ObjectCache};
 use crate::cache::policy::{Admit, DiskHit, FetchRuns, PlacementPolicy};
@@ -233,14 +232,18 @@ fn a_read_racing_a_move_to_disk_reads_its_bytes() {
         read(&cache, &a, true);
         let chunk = memory_chunk(&cache, &a).unwrap();
         let reader = spawn(&cache, move |cache| {
-            read(cache, &a, false);
-            read(cache, &a, false);
+            assert!(!read_fetching(cache, &a, false));
+            assert!(!read_fetching(cache, &a, false));
         });
         let mover = spawn(&cache, move |cache| {
-            block_on(cache.move_to_disk(chunk)).unwrap()
+            assert!(
+                cache
+                    .pending
+                    .enqueue(chunk, BlockKey::new(a.version().id(), 0))
+            );
+            cache.wait_for_disk_writes();
         });
-        reader.join().unwrap();
-        assert_eq!(mover.join().unwrap(), MoveToDisk::Moved);
+        join_all([reader, mover]);
         assert!(disk_chunk(&cache, &a).is_some());
         cache.check_at_rest().unwrap();
     });
@@ -254,38 +257,80 @@ fn a_move_racing_an_eviction_from_memory_keeps_the_tiers_in_step() {
         read(&cache, &a, true);
         let chunk = memory_chunk(&cache, &a).unwrap();
         let mover = spawn(&cache, move |cache| {
-            block_on(cache.move_to_disk(chunk)).unwrap()
+            assert!(
+                cache
+                    .pending
+                    .enqueue(chunk, BlockKey::new(a.version().id(), 0))
+            );
+            cache.wait_for_disk_writes();
         });
-        let evictor = spawn(&cache, move |cache| cache.evict_from_memory(chunk));
+        let evictor = spawn(&cache, move |cache| {
+            cache.evict_from_memory(chunk);
+        });
         let reader = spawn(&cache, move |cache| read(cache, &a, false));
-        let moved = mover.join().unwrap();
-        let evicted = evictor.join().unwrap();
-        reader.join().unwrap();
-        assert_eq!(disk_chunk(&cache, &a).is_some(), moved == MoveToDisk::Moved);
-        assert!(moved == MoveToDisk::Moved || evicted);
+        join_all([mover, evictor, reader]);
+        assert!(matches!(
+            location(&cache, &a),
+            None | Some(Location::Disk(_))
+        ));
         cache.check_at_rest().unwrap();
     });
 }
 
 #[test]
-fn of_two_moves_of_one_chunk_one_moves() {
+fn concurrent_requests_to_move_one_block_leave_one_disk_copy() {
     explore(|| {
         let (cache, _policy) = cache(1, 2);
         let a = resolve(&cache, b"a");
         read(&cache, &a, true);
         let chunk = memory_chunk(&cache, &a).unwrap();
-        let outcomes = join_all((0..2).map(|_| {
+        join_all((0..2).map(|_| {
             spawn(&cache, move |cache| {
-                block_on(cache.move_to_disk(chunk)).unwrap()
+                assert!(
+                    cache
+                        .pending
+                        .enqueue(chunk, BlockKey::new(a.version().id(), 0))
+                );
+                cache.wait_for_disk_writes();
             })
         }));
-        let moved = outcomes
-            .iter()
-            .filter(|&&outcome| outcome == MoveToDisk::Moved)
-            .count();
-        assert_eq!(moved, 1, "{outcomes:?}");
+        assert!(disk_chunk(&cache, &a).is_some());
         cache.check_at_rest().unwrap();
         assert_eq!(cache.disk.chunks().free_count(), 1, "one copy on disk");
+    });
+}
+
+#[test]
+fn concurrent_requests_to_move_distinct_blocks_use_distinct_disk_chunks() {
+    explore(|| {
+        let (cache, _policy) = cache(2, 2);
+        let (a, b) = (resolve(&cache, b"a"), resolve(&cache, b"b"));
+        read(&cache, &a, true);
+        read(&cache, &b, true);
+        let chunk_a = memory_chunk(&cache, &a).unwrap();
+        let chunk_b = memory_chunk(&cache, &b).unwrap();
+        join_all(
+            [(a, chunk_a), (b, chunk_b)]
+                .into_iter()
+                .map(|(file, chunk)| {
+                    spawn(&cache, move |cache| {
+                        assert!(
+                            cache
+                                .pending
+                                .enqueue(chunk, BlockKey::new(file.version().id(), 0))
+                        );
+                        cache.wait_for_disk_writes();
+                    })
+                }),
+        );
+        assert_ne!(
+            disk_chunk(&cache, &a).unwrap(),
+            disk_chunk(&cache, &b).unwrap()
+        );
+        assert!(!read_fetching(&cache, &a, false));
+        assert!(!read_fetching(&cache, &b, false));
+        cache.check_at_rest().unwrap();
+        assert_eq!(cache.disk.chunks().free_count(), 0);
     });
 }
 
@@ -313,36 +358,95 @@ fn a_read_racing_eviction_from_disk_and_reuse_reads_its_bytes_or_reads_remote() 
     });
 }
 
-/// Freed sooner, the disk chunk could go to another move, and the dropped write land over it.
 #[test]
-fn a_dropped_move_frees_its_chunks_after_its_write() {
+fn a_dropped_batch_keeps_its_chunks_until_its_io_completes() {
     explore(|| {
-        let (cache, _policy) = cache(2, 1);
+        let (disk, pause) = SimDisk::with_paused_writes();
+        let io = IoWorker::simulated(NonZeroU32::new(4).unwrap(), vec![disk]).unwrap();
+        let disk = CacheFiles::on(io, NonZeroU32::MIN, 1).unwrap();
+        let policy = Arc::new(TestPolicy::new());
+        let cache = ObjectCache::new(NonZeroU32::new(2).unwrap(), disk, policy.clone()).unwrap();
         let (a, b) = (resolve(&cache, b"a"), resolve(&cache, b"b"));
         read(&cache, &a, true);
         read(&cache, &b, true);
-        let (chunk_a, chunk_b) = (
-            memory_chunk(&cache, &a).unwrap(),
-            memory_chunk(&cache, &b).unwrap(),
+        let chunk_a = memory_chunk(&cache, &a).unwrap();
+        let chunk_b = memory_chunk(&cache, &b).unwrap();
+        let key_a = BlockKey::new(a.version().id(), 0);
+        let key_b = BlockKey::new(b.version().id(), 0);
+        assert_eq!(policy.pick_memory_victims(2).len(), 2);
+
+        assert!(
+            cache
+                .write_disk_batch(&[(chunk_a, key_a)])
+                .now_or_never()
+                .is_none()
         );
-        // One poll submits the write; dropping the future then is a caller giving up on it.
-        let moved_a = cache.move_to_disk(chunk_a).now_or_never();
-        // The disk is full while `a`'s write may still land.
-        let moved_b = block_on(cache.move_to_disk(chunk_b)).unwrap();
-        read(&cache, &b, false);
-        read(&cache, &a, false);
+        pause.wait_until_started();
+        assert!(cache.evict_from_memory(chunk_a));
+        assert_eq!(
+            cache.memory.free_count(),
+            0,
+            "the I/O still holds a's source"
+        );
+        assert!(cache.memory.allocate().is_none());
+        assert_eq!(
+            cache.disk.chunks().free_count(),
+            0,
+            "the I/O still holds its destination"
+        );
+        assert!(cache.allocate_disk().is_none());
+
+        assert!(cache.pending.enqueue(chunk_b, key_b));
+        cache.wait_for_disk_writes();
+        assert_eq!(memory_chunk(&cache, &b), Some(chunk_b));
+        assert_eq!(policy.queued(crate::cache::policy::Tier::Memory), [chunk_b]);
+        pause.resume();
         let mut waits = 0;
-        while cache.check_at_rest().is_err() {
+        while cache.disk.chunks().free_count() != 1 || cache.memory.free_count() != 1 {
             waits += 1;
-            assert!(waits < 1000, "the dropped write's chunks never went free");
+            assert!(waits < 1000, "the completed I/O's chunks were not released");
             thread::yield_now();
         }
-        match moved_a {
-            Some(outcome) => assert_eq!(outcome.unwrap(), MoveToDisk::Moved),
-            None => assert_eq!(location(&cache, &a), Some(Location::Memory(chunk_a))),
-        }
-        assert!(matches!(moved_b, MoveToDisk::Moved | MoveToDisk::DiskFull));
-        read(&cache, &b, false);
+        assert_eq!(policy.pick_memory_victims(1).len(), 1);
+        assert!(cache.pending.enqueue(chunk_b, key_b));
+        cache.wait_for_disk_writes();
+        assert!(!read_fetching(&cache, &b, false));
+        assert!(disk_chunk(&cache, &b).is_some());
+        assert_eq!(location(&cache, &a), None);
+        cache.check_at_rest().unwrap();
+    });
+}
+
+#[test]
+fn giving_up_a_read_does_not_cancel_its_queued_write() {
+    explore(|| {
+        let (disk, pause) = SimDisk::with_paused_writes();
+        let io = IoWorker::simulated(NonZeroU32::new(4).unwrap(), vec![disk]).unwrap();
+        let disk = CacheFiles::on(io, NonZeroU32::MIN, 1).unwrap();
+        let policy = Arc::new(TestPolicy::new());
+        policy.set_admit(Admit::Disk);
+        let cache = ObjectCache::new(NonZeroU32::MIN, disk, policy).unwrap();
+        let a = resolve(&cache, b"a");
+        let mut read = block_on(cache.read(&a, 0..FILE_SIZE, None, &FetchRuns::default())).unwrap();
+        assert!(
+            cache
+                .take_fetched(&mut read, 0..FILE_SIZE, &contents(a.path))
+                .now_or_never()
+                .unwrap()
+                .is_ok()
+        );
+        pause.wait_until_started();
+        let chunk = memory_chunk(&cache, &a).unwrap();
+        drop(read);
+        assert!(cache.evict_from_memory(chunk));
+        assert!(cache.memory.allocate().is_none());
+        assert!(cache.allocate_disk().is_none());
+        pause.resume();
+        cache.wait_for_disk_writes();
+        assert_eq!(cache.memory.free_count(), 1);
+        assert_eq!(cache.disk.chunks().free_count(), 1);
+        assert_eq!(location(&cache, &a), None);
+        cache.check_at_rest().unwrap();
     });
 }
 
@@ -356,8 +460,7 @@ fn a_dropped_eviction_gives_its_victim_back() {
             resolve(&cache, b"c"),
         );
         read(&cache, &a, true);
-        // `b`'s fill picks `a` and writes it to disk; one poll submits the write,
-        // and dropping the fill then is a caller giving up on it.
+        // Giving up the fill must not give up the victim's queued write.
         let mut remote =
             block_on(cache.read(&b, 0..FILE_SIZE, None, &FetchRuns::default())).unwrap();
         let _ = cache
@@ -506,7 +609,8 @@ fn disk_admissions_wait_readably_in_memory_until_sixteen_are_ready() {
                 );
             }
         }
-        release_writes.send(()).unwrap();
+        release_writes.wait_until_started();
+        release_writes.resume();
         cache.wait_for_disk_writes();
         assert_eq!(cache.disk.chunks().free_count(), 16);
         assert_eq!(cache.memory.free_count(), 16);

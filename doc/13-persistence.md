@@ -118,6 +118,8 @@ bytes.
    that keeps its own owner alive; shutdown closes the tier and joins it.
    At most 16 blocks wait behind the batch in flight. With no free memory,
    a fill may go uncached; it never waits for the writer to make room.
+   Giving up a read does not cancel its queued batch. A batch's chunks
+   stay pinned until its I/O completes, even if its future is dropped.
 
 10. **A shared cache's owner keeps the log.** It holds the tier; a client
     keeps nothing, and its next owner takes the log back as any next cache

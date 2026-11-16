@@ -4,7 +4,30 @@ pub(crate) struct SimDisk {
     in_flight: Vec<InFlightWrite>,
     next_write: u64,
     #[cfg(test)]
-    write_gate: Option<crate::io::sync::mpsc::Receiver<()>>,
+    write_gate: Option<PausedWrite>,
+}
+
+#[cfg(test)]
+struct PausedWrite {
+    started: crate::io::sync::mpsc::Sender<()>,
+    release: crate::io::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+pub(crate) struct WritePause {
+    started: crate::io::sync::mpsc::Receiver<()>,
+    release: crate::io::sync::mpsc::Sender<()>,
+}
+
+#[cfg(test)]
+impl WritePause {
+    pub(crate) fn wait_until_started(&self) {
+        self.started.recv().unwrap();
+    }
+
+    pub(crate) fn resume(self) {
+        self.release.send(()).unwrap();
+    }
 }
 
 struct InFlightWrite {
@@ -34,13 +57,17 @@ impl SimDisk {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_paused_writes() -> (Self, crate::io::sync::mpsc::Sender<()>) {
-        let (release, write_gate) = crate::io::sync::mpsc::channel();
+    pub(crate) fn with_paused_writes() -> (Self, WritePause) {
+        let (announce, started) = crate::io::sync::mpsc::channel();
+        let (release, resume) = crate::io::sync::mpsc::channel();
         let disk = Self {
-            write_gate: Some(write_gate),
+            write_gate: Some(PausedWrite {
+                started: announce,
+                release: resume,
+            }),
             ..Self::new()
         };
-        (disk, release)
+        (disk, WritePause { started, release })
     }
 
     pub(super) fn on_file(file: std::fs::File) -> Self {
@@ -80,7 +107,8 @@ impl SimDisk {
     fn complete_write(&mut self, id: WriteId) -> usize {
         #[cfg(test)]
         if let Some(gate) = self.write_gate.take() {
-            gate.recv().unwrap();
+            gate.started.send(()).unwrap();
+            gate.release.recv().unwrap();
         }
         let index = self
             .in_flight

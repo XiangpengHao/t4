@@ -1,4 +1,4 @@
-#[cfg(any(test, feature = "__bench"))]
+#[cfg(test)]
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::any::Any;
 use std::num::NonZeroU32;
@@ -6,7 +6,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::PAGE_SIZE;
-#[cfg(any(test, feature = "__bench"))]
+#[cfg(test)]
 use crate::io::error::{Error, Result};
 
 #[derive(Debug)]
@@ -18,7 +18,7 @@ pub struct AlignedBuf {
 
 #[derive(Debug)]
 enum BufMemory {
-    #[cfg(any(test, feature = "__bench"))]
+    #[cfg(test)]
     Owned(Layout),
     Lent {
         _guard: Arc<dyn Any + Send + Sync>,
@@ -29,8 +29,8 @@ enum BufMemory {
 unsafe impl Send for AlignedBuf {}
 
 impl AlignedBuf {
-    #[cfg(any(test, feature = "__bench"))]
-    pub fn new_zeroed(len_u32: NonZeroU32) -> Result<Self> {
+    #[cfg(test)]
+    pub(crate) fn new_zeroed(len_u32: NonZeroU32) -> Result<Self> {
         let len = len_u32.get() as usize;
         let layout = Layout::from_size_align(len, PAGE_SIZE)
             .map_err(|_| Error::InvalidArgument("invalid aligned buffer layout"))?;
@@ -123,7 +123,7 @@ impl AlignedBuf {
 impl Drop for AlignedBuf {
     fn drop(&mut self) {
         match self.memory {
-            #[cfg(any(test, feature = "__bench"))]
+            #[cfg(test)]
             BufMemory::Owned(layout) => unsafe { dealloc(self.ptr.as_ptr(), layout) },
             BufMemory::Lent { .. } => {}
         }
