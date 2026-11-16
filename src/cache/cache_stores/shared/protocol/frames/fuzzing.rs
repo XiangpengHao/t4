@@ -1,5 +1,3 @@
-//! The frames' codec on bytes a peer could send, for the fuzz target `frames`.
-
 use std::fmt::Debug;
 
 use bytes::Bytes;
@@ -17,15 +15,12 @@ impl FuzzedFrame {
         }
     }
 
-    /// Panics unless the body is refused as a client's frame, or encodes
-    /// back from the frame it decodes to.
     pub fn check_as_client_frame(&self) {
         if let Ok(frame) = ClientFrame::decode(self.body.clone()) {
             self.assert_encoded(&frame.encode(), &frame);
         }
     }
 
-    /// As [`Self::check_as_client_frame`], for an owner's frame.
     pub fn check_as_owner_frame(&self) {
         if let Ok(frame) = OwnerFrame::decode(self.body.clone()) {
             self.assert_encoded(&frame.encode(), &frame);

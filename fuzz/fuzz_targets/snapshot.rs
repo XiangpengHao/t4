@@ -1,10 +1,5 @@
 #![no_main]
 
-//! The disk tier's snapshot, from arbitrary bytes after a valid header, or
-//! from versions and blocks the input picks, valid or not: each is refused,
-//! or encodes back to the same bytes and is taken back by a cache whose
-//! index and tiers then agree.
-
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use t4::__fuzz::{FuzzedSnapshot, FuzzedVersion};
@@ -32,9 +27,7 @@ enum Input {
     },
 }
 
-/// Small ids, sizes, paths and chunk numbers, so that the input often makes
-/// a valid snapshot, and often one off by a little: a chunk past the tier's
-/// 8, a block past its file, an id at the next, a path or chunk twice.
+/// Small values, so that snapshots are often valid and often just off: a chunk past the tier's 8.
 #[derive(Debug)]
 struct Version {
     id: u64,

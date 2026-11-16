@@ -103,9 +103,7 @@ enum PolicyChoice {
 
 #[derive(Clone, Debug)]
 enum ReadsChoice {
-    /// The cache's default.
     Default,
-    /// [`ScriptedReads`] on these bytes.
     Scripted(Vec<u8>),
 }
 
@@ -729,7 +727,6 @@ impl PlacementPolicy for ScriptedPolicy {
     }
 }
 
-/// Bytes of the input a policy decides by.
 struct Script {
     bytes: Vec<u8>,
     next: AtomicUsize,
@@ -743,7 +740,6 @@ impl Script {
         }
     }
 
-    /// The next byte, round and round; 0 if there are none.
     fn next_byte(&self) -> u8 {
         if self.bytes.is_empty() {
             return 0;
@@ -753,9 +749,7 @@ impl Script {
     }
 }
 
-/// A read policy whose plans the input makes: up to three GETs around the
-/// read's blocks, racing one to three requests. Many are plans the cache
-/// must refuse, and plan by its default instead.
+/// Many of its plans are ones the cache must refuse: `LocatedRead::accepts` is under test.
 struct ScriptedReads {
     script: Script,
 }

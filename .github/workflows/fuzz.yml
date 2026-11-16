@@ -31,10 +31,8 @@ jobs:
       - name: Build
         run: nix develop -c cargo fuzz build ${{ matrix.target }}
 
-      # From an empty corpus: nothing is kept between runs. AddressSanitizer's
-      # own memory grows with every cache an input builds, past libFuzzer's
-      # limit within minutes, so the hour runs a minute at a time, each a
-      # fresh process on the corpus so far.
+      # AddressSanitizer's memory grows with every cache an input builds, past
+      # libFuzzer's limit in minutes: each minute is a fresh process.
       - name: Fuzz for an hour
         env:
           TMPDIR: /dev/shm
