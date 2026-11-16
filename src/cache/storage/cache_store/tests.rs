@@ -11,8 +11,8 @@ use crate::cache::policy::{
     Admit, BlockSource, DiskHit, FetchRuns, IoEvent, LocatedRead, PlannedGet, ReadPlan, Tier,
     VictimAction,
 };
+use crate::cache::storage::DiskFile;
 use crate::cache::storage::index::Location;
-use crate::cache::storage::{DiskFile, FileAllocation};
 use crate::cache::{BLOCK_SIZE_U64, BlockKey, ChunkId};
 use std::num::NonZeroU8;
 
@@ -21,13 +21,7 @@ const MIB: u64 = BLOCK_SIZE_U64;
 fn cache(memory_chunks: u32, disk_chunks: u32) -> (TempDir, ObjectCache, Arc<TestPolicy>) {
     let dir = tempfile::tempdir().unwrap();
     let file = DiskFile::new(dir.path().join("cache"), u64::from(disk_chunks) * MIB);
-    let disk = CacheFiles::open(
-        &[file],
-        NonZeroU32::new(8).unwrap(),
-        true,
-        FileAllocation::Eager,
-    )
-    .unwrap();
+    let disk = CacheFiles::open(&[file], NonZeroU32::new(8).unwrap(), true).unwrap();
     let policy = Arc::new(TestPolicy::new());
     let memory = NonZeroU32::new(memory_chunks).unwrap();
     let cache = ObjectCache::new(
@@ -88,13 +82,7 @@ fn the_default_policy_streams_blocks_through_both_tiers() {
             .iter()
             .map(|name| DiskFile::new(dir.path().join(name), MIB))
             .collect();
-        let disk = CacheFiles::open(
-            &files,
-            NonZeroU32::new(8).unwrap(),
-            true,
-            FileAllocation::Eager,
-        )
-        .unwrap();
+        let disk = CacheFiles::open(&files, NonZeroU32::new(8).unwrap(), true).unwrap();
         let (memory, disk_chunks) = (NonZeroU32::new(2).unwrap(), NonZeroU32::new(3).unwrap());
         let policy = Arc::new(crate::cache::policy::ClockPolicy::new(memory, disk_chunks));
         let cache = ObjectCache::new(memory, disk, policy).unwrap();
@@ -732,14 +720,15 @@ fn a_plan_taken_that_the_cache_cant_carry_out_fetches_as_the_default() {
     });
 }
 
-fn on_demand_cache(
+fn disk_admitting_cache(
     dir: &TempDir,
     disk_chunks: u32,
     keep_free: u64,
 ) -> (ObjectCache, Arc<TestPolicy>) {
     let file = DiskFile::new(dir.path().join("cache"), u64::from(disk_chunks) * MIB);
-    let on_demand = FileAllocation::OnDemand { keep_free };
-    let disk = CacheFiles::open(&[file], NonZeroU32::new(8).unwrap(), true, on_demand).unwrap();
+    let disk = CacheFiles::open(&[file], NonZeroU32::new(8).unwrap(), true)
+        .unwrap()
+        .keeping_free(keep_free);
     let policy = Arc::new(TestPolicy::new());
     policy.set_admit(Admit::Disk);
     let placement = Arc::clone(&policy) as Arc<dyn PlacementPolicy>;
@@ -754,10 +743,10 @@ fn allocated(path: &std::path::Path) -> u64 {
 }
 
 #[test]
-fn an_on_demand_cache_file_takes_room_as_blocks_are_written() {
+fn a_cache_file_takes_room_as_blocks_are_written() {
     crate::io::test_schedule::TestSchedule::check(|| {
         let dir = tempfile::tempdir().unwrap();
-        let (cache, _policy) = on_demand_cache(&dir, 8, 0);
+        let (cache, _policy) = disk_admitting_cache(&dir, 8, 0);
         let path = dir.path().join("cache");
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 8 * MIB, "sized");
         assert!(
@@ -784,12 +773,12 @@ fn a_drive_short_of_room_takes_no_block_and_evicts_none() {
         let a = file_bytes(4 * MIB);
         {
             // A cache with room fills the tier, and keeps it as it drops.
-            let (cache, _policy) = on_demand_cache(&dir, 4, 0);
+            let (cache, _policy) = disk_admitting_cache(&dir, 4, 0);
             let file = cache.resolve(b"a", Some("v1"), 4 * MIB).unwrap();
             read_through(&cache, &file, &a, 0..4 * MIB);
             assert_eq!(cache.disk.chunks().free_count(), 0);
         }
-        let (cache, policy) = on_demand_cache(&dir, 4, u64::MAX);
+        let (cache, policy) = disk_admitting_cache(&dir, 4, u64::MAX);
         let kept = policy.queued(Tier::Disk);
         assert_eq!(kept.len(), 4, "taken back");
 
