@@ -81,8 +81,8 @@ pub(in crate::cache) struct CacheFiles {
     /// Where the disk tier is kept across a restart; `None` for simulated
     /// files, and files that don't say when they were made.
     snapshot: Option<SnapshotFile>,
-    /// The room files that grow leave their drives; `None` for files
-    /// allocated whole, and simulated ones.
+    /// The room files allocated on demand leave their drives; `None` for
+    /// files allocated eagerly, and simulated ones.
     headroom: Option<DriveHeadroom>,
 }
 
@@ -160,8 +160,8 @@ impl CacheFiles {
     }
 
     /// Whether a block may be written now: never once the tier is closed;
-    /// always to files allocated whole; to files that grow, while every
-    /// drive keeps its room.
+    /// always to files allocated eagerly; to files allocated on demand,
+    /// while every drive keeps its room.
     pub(in crate::cache) fn takes_a_block(&self) -> bool {
         !self.chunks.is_closed()
             && self

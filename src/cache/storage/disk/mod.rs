@@ -3,8 +3,9 @@
 //! time, read and written by direct I/O.
 //!
 //! - `cache_files`: the files, their lock, and the I/O over them.
-//! - `allocation`: how the files take room on their drives, whole at build
-//!   or as they grow, and the room a growing file leaves its drive.
+//! - `allocation`: how the files take room on their drives, eagerly at
+//!   build or on demand as blocks are written, and the room a file
+//!   allocated on demand leaves its drive.
 //! - `disk_chunks`: the files' data chunks, written and read at their
 //!   offsets.
 

@@ -28,7 +28,7 @@ fn cache(memory_chunks: u32, disk_chunks: u32) -> (TempDir, ObjectCache, Arc<Tes
         &[file],
         NonZeroU32::new(8).unwrap(),
         true,
-        FileAllocation::Whole,
+        FileAllocation::Eager,
     )
     .unwrap();
     let policy = Arc::new(TestPolicy::new());
@@ -101,7 +101,7 @@ fn the_default_policy_streams_blocks_through_both_tiers() {
         &files,
         NonZeroU32::new(8).unwrap(),
         true,
-        FileAllocation::Whole,
+        FileAllocation::Eager,
     )
     .unwrap();
     let (memory, disk_chunks) = (NonZeroU32::new(2).unwrap(), NonZeroU32::new(3).unwrap());
@@ -717,17 +717,17 @@ fn a_plan_taken_that_the_cache_cant_carry_out_fetches_as_the_default() {
     cache.check_at_rest().unwrap();
 }
 
-/// A cache over a file of `disk_chunks` chunks in `dir` that grows, each
-/// write leaving its drive `keep_free` bytes, and a chunk of memory; run by
-/// a [`TestPolicy`] that admits each fetched block to disk.
-fn growing_cache(
+/// A cache over a file of `disk_chunks` chunks in `dir` allocated on
+/// demand, each write leaving its drive `keep_free` bytes, and a chunk of
+/// memory; run by a [`TestPolicy`] that admits each fetched block to disk.
+fn on_demand_cache(
     dir: &TempDir,
     disk_chunks: u32,
     keep_free: u64,
 ) -> (ObjectCache, Arc<TestPolicy>) {
     let file = DiskFile::new(dir.path().join("cache"), u64::from(disk_chunks) * MIB);
-    let growing = FileAllocation::Growing { keep_free };
-    let disk = CacheFiles::open(&[file], NonZeroU32::new(8).unwrap(), true, growing).unwrap();
+    let on_demand = FileAllocation::OnDemand { keep_free };
+    let disk = CacheFiles::open(&[file], NonZeroU32::new(8).unwrap(), true, on_demand).unwrap();
     let policy = Arc::new(TestPolicy::new());
     policy.set_admit(Admit::Disk);
     let placement = Arc::clone(&policy) as Arc<dyn PlacementPolicy>;
@@ -742,13 +742,13 @@ fn allocated(path: &std::path::Path) -> u64 {
     std::fs::metadata(path).unwrap().blocks() * 512
 }
 
-/// A cache file that grows is sized as the cache is built, but takes room
-/// on its drive only as blocks are written to it (`doc/10-spiral-integration.md`,
-/// decision 9).
+/// A cache file allocated on demand is sized as the cache is built, but
+/// takes room on its drive only as blocks are written to it
+/// (`doc/10-spiral-integration.md`, decision 9).
 #[test]
-fn a_cache_file_that_grows_takes_room_as_blocks_are_written() {
+fn an_on_demand_cache_file_takes_room_as_blocks_are_written() {
     let dir = tempfile::tempdir().unwrap();
-    let (cache, _policy) = growing_cache(&dir, 8, 0);
+    let (cache, _policy) = on_demand_cache(&dir, 8, 0);
     let path = dir.path().join("cache");
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 8 * MIB, "sized");
     assert!(
@@ -776,12 +776,12 @@ fn a_drive_short_of_room_takes_no_block_and_evicts_none() {
     let a = file_bytes(4 * MIB);
     {
         // A cache with room fills the tier, and keeps it as it drops.
-        let (cache, _policy) = growing_cache(&dir, 4, 0);
+        let (cache, _policy) = on_demand_cache(&dir, 4, 0);
         let file = cache.resolve(b"a", Some("v1"), 4 * MIB).unwrap();
         read_through(&cache, &file, &a, 0..4 * MIB);
         assert_eq!(cache.disk.chunks().free_count(), 0);
     }
-    let (cache, policy) = growing_cache(&dir, 4, u64::MAX);
+    let (cache, policy) = on_demand_cache(&dir, 4, u64::MAX);
     let kept = policy.queued(Tier::Disk);
     assert_eq!(kept.len(), 4, "taken back");
 

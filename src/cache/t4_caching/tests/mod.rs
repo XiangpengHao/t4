@@ -373,16 +373,16 @@ fn a_builder_needs_a_memory_capacity_and_a_disk_file() {
         .unwrap();
 }
 
-/// A cache file takes its whole capacity on its drive as the cache is
-/// built, unless built to grow, when it is only sized.
+/// A cache file allocated eagerly takes its whole capacity on its drive
+/// as the cache is built; one allocated on demand is only sized.
 #[test]
-fn a_cache_file_takes_its_room_at_build_unless_it_grows() {
+fn a_cache_file_takes_its_room_at_build_unless_allocated_on_demand() {
     use std::os::unix::fs::MetadataExt;
     let inner = Arc::new(CountingStore::default());
-    for growing in [false, true] {
+    for on_demand in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let cache = match growing {
-            true => builder(&inner, &dir).with_growing_disk_files(),
+        let cache = match on_demand {
+            true => builder(&inner, &dir).with_on_demand_disk_allocation(),
             false => builder(&inner, &dir),
         }
         .build()
@@ -393,7 +393,7 @@ fn a_cache_file_takes_its_room_at_build_unless_it_grows() {
         let allocated = file.blocks() * 512;
         assert_eq!(
             allocated >= 8 * MIB,
-            !growing,
+            !on_demand,
             "{allocated} bytes allocated"
         );
         drop(cache);

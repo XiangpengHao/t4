@@ -48,7 +48,7 @@ only the remote holds itself. The design: `03-cache.md`.
   through t4's existing API, Spiral naming each file as a path; then t4's
   merging and races in spiral-io's read path where they measure better.
   New in t4: a disk tier kept across restarts, one process per cache
-  file, a cache file that grows.
+  file, cache files allocated on demand.
 - `11-shared-mode.md`: one cache, several processes: the process that
   takes the cache files' lock owns the cache and serves it; the others
   read through it over a Unix socket and shared memory, and fetch what it
