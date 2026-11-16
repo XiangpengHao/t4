@@ -1,3 +1,4 @@
+pub(crate) mod aligned_buf;
 mod common;
 pub(crate) mod error;
 pub(crate) mod io_task;

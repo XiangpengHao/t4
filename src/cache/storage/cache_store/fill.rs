@@ -9,13 +9,13 @@ use bytes::Bytes;
 use futures_util::future::join_all;
 
 use crate::PAGE_SIZE_U32;
-use crate::buffer::AlignedBuf;
 use crate::cache::policy::{Admit, Tier};
 use crate::cache::storage::disk::DiskChunkWriter;
 use crate::cache::storage::in_flight::FetchClaim;
 use crate::cache::storage::index::{FileVersion, Location};
 use crate::cache::storage::memory::LentMemoryChunk;
 use crate::cache::{BLOCK_SIZE_U64, BlockKey, FileVersionId};
+use crate::io::aligned_buf::AlignedBuf;
 use crate::io::error::{Error, Result};
 use crate::io::sync::Arc;
 

@@ -1,4 +1,4 @@
-use crate::buffer::AlignedBuf;
+use crate::io::aligned_buf::AlignedBuf;
 use crate::io::common::{BackendLoop, IoDriver};
 use crate::io::io_task::{
     FilePosition, FileReadTask, FileWriteTask, PageWrite, WorkerRequest, worker_disconnected_error,
@@ -125,7 +125,7 @@ mod test {
     use pollster::block_on;
     use tempfile::tempfile;
 
-    use crate::buffer::AlignedBuf;
+    use crate::io::aligned_buf::AlignedBuf;
     use crate::io::io_task::{FilePosition, PageWrite};
     use crate::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U64};
 

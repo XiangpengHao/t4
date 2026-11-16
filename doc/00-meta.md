@@ -79,10 +79,10 @@ than the cache it replaces, nothing more.
 ## Verification
 
 Parts of the crate are written inside `verus!` and proven with
-[Verus](https://github.com/verus-lang/verus): alignment (`src/buffer.rs`)
-and range requests (`src/range.rs`). The proofs cover that arithmetic only,
-not the OS, filesystem or hardware. Outside `verus!`, Verus compiles the
-code but checks nothing.
+[Verus](https://github.com/verus-lang/verus): alignment and range requests
+(`src/cache/storage/index/page_window.rs`). The proofs cover that
+arithmetic only, not the OS, filesystem or hardware. Outside `verus!`,
+Verus compiles the code but checks nothing.
 
 ```bash
 cargo verus focus    # this crate's proofs only, as CI runs them

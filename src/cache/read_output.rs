@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::buffer::AlignedBuf;
+use crate::io::aligned_buf::AlignedBuf;
 use crate::io::error::{Error, Result};
 use crate::{PAGE_SIZE, PAGE_SIZE_U64};
 

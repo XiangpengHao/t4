@@ -256,12 +256,10 @@ chunk table the frame table.
 | `src/cache/storage/cache_store/` | reads, fills, promotions and evictions over the index and the tiers; the disk tier captured as the cache drops, and restored (`restart.rs`) | 3, 7, 8, 9 |
 | `src/cache/storage/snapshot/` | the snapshot of the disk tier: its bytes and checks, and its file beside the cache files | 9 |
 | `src/cache/policy/` | the `PlacementPolicy` trait, and `ClockPolicy`, the default | 7 |
-| `src/cache/storage/index/` | `paths` and `blocks` on bbtree, and planning a read's blocks | 1, 4, 5, 6 |
+| `src/cache/storage/index/` | `paths` and `blocks` on bbtree, and planning a read's blocks and the whole pages around the bytes it needs | 1, 4, 5, 6 |
 | `src/cache/storage/{chunks,memory,disk}/` | each tier's chunks: the free bitmap, the chunk table, the memory pool, the disk chunks | 2, 8 |
 | `src/cache/storage/disk/cache_files.rs` | the cache files and the I/O worker that reads and writes them | 2, 9 |
-| `src/io/` | the I/O worker: io_uring on Linux, a thread pool elsewhere, and a simulated drive for shuttle tests | 2 |
-| `src/buffer.rs` | page-aligned buffers for direct I/O, and alignment arithmetic | |
-| `src/range.rs` | byte ranges, and the whole pages around one | 1 |
+| `src/io/` | the I/O worker: io_uring on Linux, a thread pool elsewhere, and a simulated drive for shuttle tests; the page-aligned buffers direct I/O reads into and writes from | 2 |
 
 Tests sit beside each module. Shuttle tests (`cargo test --features
 shuttle shuttle`) drive the chunk table, the CLOCK, and the cache on a
