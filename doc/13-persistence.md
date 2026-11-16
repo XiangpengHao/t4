@@ -117,8 +117,9 @@ bytes.
    A batch not full waits for its next block; its
    blocks are memory's meanwhile and, as memory's, not written at shutdown.
    One owned writer thread waits on a condition variable, submits a whole
-   batch, and parks until its I/O completes. It holds no cache handle
-   that keeps its own owner alive; shutdown closes the tier and joins it.
+   batch, and parks until its I/O completes. It holds the index and the
+   tiers (`Tiers`), which reads share, not the cache; shutdown closes the
+   tier and joins it.
    At most 16 blocks wait behind the batch in flight. With no free memory,
    a fill may go uncached; it never waits for the writer to make room.
    Giving up a read does not cancel its queued batch. A batch's chunks
@@ -238,5 +239,5 @@ build with the snapshot removed is the baseline.
 |---|---|---|
 | `src/cache/storage/persistence/` | the base, `LogBase`, and its checks; `log/` frames and replays entries; `log_file.rs` appends, finishes and rebases the file | 2, 6, 7 |
 | `src/cache/storage/cache_store/restart.rs` | the disk tier closed and its log finished, and restored as the next builds | 6 |
-| `src/cache/storage/cache_store/disk_writer/`, `eviction.rs` | one writer, batches, and adds and frees ordered with chunk ownership | 3, 9 |
+| `src/cache/storage/cache_store/disk_writer/`, `eviction.rs` | one writer on `Tiers`, batches, and adds and frees ordered with chunk ownership; a version's path logged where `Tiers::resolve` names it | 3, 9 |
 | `bench/src/bin/disk_restart.rs`, `bench/disk_restart/` | the restart's cost | Measured |
