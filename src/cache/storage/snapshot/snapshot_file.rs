@@ -4,12 +4,14 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
+use super::log::{BootId, DiskLog, LogEntry};
 use super::{DiskSnapshot, SnapshotReader, SnapshotWriter};
 use crate::cache::storage::FileIdentity;
 
 pub(in crate::cache) struct SnapshotFile {
     path: PathBuf,
     layout: CacheLayout,
+    boot: BootId,
     /// Clones share the files' `flock`: it is held until these close too.
     cache_files: Vec<File>,
 }
@@ -35,6 +37,7 @@ impl SnapshotFile {
                 files,
             },
             cache_files,
+            boot: BootId::current().ok()?,
         })
     }
 
@@ -50,7 +53,7 @@ impl SnapshotFile {
         self.sync_directory()?;
         Ok(read
             .ok()
-            .and_then(|bytes| DiskSnapshot::decode(&bytes, &self.layout)))
+            .and_then(|bytes| DiskLog::replay(&bytes, &self.layout, self.boot)))
     }
 
     /// Flushes the cache files first, so every chunk the snapshot names is on the drive.
@@ -61,7 +64,9 @@ impl SnapshotFile {
         let mut temporary = self.path.as_os_str().to_owned();
         temporary.push(".tmp");
         let temporary = PathBuf::from(temporary);
-        let written = Self::write_whole(&temporary, &snapshot.encode(&self.layout))
+        let mut bytes = DiskLog::base(snapshot, &self.layout, self.boot);
+        bytes.extend(DiskLog::record(&[LogEntry::Clean]));
+        let written = Self::write_whole(&temporary, &bytes)
             .and_then(|()| std::fs::rename(&temporary, &self.path));
         if written.is_err() {
             let _ = std::fs::remove_file(&temporary);

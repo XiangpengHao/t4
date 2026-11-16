@@ -203,7 +203,7 @@ impl PassReport {
 
     fn mean_request_kib(&self) -> Option<f64> {
         let requests = self.requests?;
-        (requests.requests > 0).then(|| requests.bytes as f64 / 1024.0 / requests.requests as f64)
+        (requests.requests > 0).then_some(requests.bytes as f64 / 1024.0 / requests.requests as f64)
     }
 
     fn mean_in_flight(&self) -> Option<f64> {

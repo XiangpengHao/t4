@@ -1,9 +1,11 @@
 # 13 — Persistence
 
-Status: design (2026-11-16). Stage 1, a clean restart, is built
+Status: build step 1 built (2026-11-16): the log format and strict replay.
+The running cache still takes and removes a clean snapshot; batched writes
+and a live log are next. Stage 1, a clean restart, is built
 (`10-spiral-integration.md`, decision 7, 2 Nov 2026) and measured here.
 Stage 2, a log that keeps the disk tier across a killed process, is the
-design below, not built.
+design below, with its format built.
 
 t4 is a cache: the object store holds the true data, so the cache may lose
 any block, but never returns wrong bytes (`03-cache.md`). Persistence keeps
@@ -111,6 +113,15 @@ bytes.
 10. **A shared cache's owner keeps the log.** It holds the tier; a client
     keeps nothing, and its next owner takes the log back as any next cache
     builds (`11-shared-mode.md`, decision 7).
+
+11. **The base is checked too.** The header is a magic, format and a
+    16-byte boot UUID, then the base's 64-bit byte length, CRC32C and
+    bytes. The base reuses stage 1's complete encoding and decoder.
+    Records have a 32-bit byte length and CRC32C before their entries;
+    integers are little endian. A bad base starts cold; a bad record
+    ends replay before any of its entries. Unknown entries start cold.
+    A path may replace a path, in record order, but never reuse an id,
+    including any id below the base's next id.
 
 ## Measured: stage 1's restart
 

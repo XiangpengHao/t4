@@ -1,3 +1,4 @@
+mod log;
 mod snapshot_file;
 
 use std::collections::HashSet;
