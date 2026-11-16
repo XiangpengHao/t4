@@ -178,6 +178,13 @@
                   cargoToml = ./Cargo.toml;
                   dummySrc = craneLib.mkDummySrc {
                     inherit src;
+                    # Verus needs its prelude even when checking a dependency stub.
+                    dummyrs = pkgs.writeText "verus-dummy.rs" ''
+                      use vstd::prelude::*;
+                      fn main() {}
+                    '';
+                    # Build scripts have no access to the crate's dependencies.
+                    dummyBuildrs = pkgs.writeText "dummy-build.rs" "fn main() {}";
                     # Preserve Verus's opt-in metadata in the dummy manifest.
                     cleanCargoTomlFilter =
                       path:
