@@ -106,7 +106,7 @@ impl ObjectCache {
         e_tag: Option<&str>,
         size: u64,
     ) -> std::result::Result<CacheableFile<'p>, UncacheableObject> {
-        let version = self.tiers.paths.resolve(path, e_tag, size)?;
+        let version = self.tiers.resolve(path, e_tag, size)?;
         Ok(CacheableFile { path, version })
     }
 
@@ -221,6 +221,28 @@ impl ObjectCache {
             }
             work = self.retry_planned(&mut read, file, range.clone(), intent, retry, reads)?;
         }
+    }
+}
+
+impl Tiers {
+    /// A new version's path is logged under the log's lock, which every add takes too: no add
+    /// can name a version before its path. A lookup that finds its version takes no lock.
+    fn resolve(
+        &self,
+        path: &[u8],
+        e_tag: Option<&str>,
+        size: u64,
+    ) -> std::result::Result<FileVersion, UncacheableObject> {
+        let e_tag = PathTable::cacheable(path, e_tag, size)?;
+        if let Some(version) = self.paths.find(path, e_tag, size) {
+            return Ok(version);
+        }
+        let mut changes = self.disk.log().map(|log| log.changes());
+        let (version, named_here) = self.paths.name(path, e_tag, size);
+        if named_here && let Some(log) = &mut changes {
+            log.path(path, e_tag, version);
+        }
+        Ok(version)
     }
 }
 

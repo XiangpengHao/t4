@@ -136,32 +136,10 @@ impl Tiers {
         let mut moves = Vec::new();
         let mut writes = Vec::new();
         let mut retry = Vec::new();
-        let mut versions = Vec::new();
-        self.paths.scan(|path, e_tag, version| {
-            if batch
-                .iter()
-                .any(|(_, block)| block.file_version() == version.id())
-            {
-                versions.push(crate::cache::storage::persistence::VersionOnDisk::new(
-                    path.into(),
-                    e_tag.into(),
-                    version,
-                    Vec::new(),
-                ));
-            }
-        });
         for &(chunk, block) in batch {
             let Some(victim) = self.memory.read(chunk, block) else {
                 continue;
             };
-            if self.disk.log().is_some()
-                && !versions
-                    .iter()
-                    .any(|version| version.version().id() == block.file_version())
-            {
-                self.forget_if_closed(victim.unpublish(), block, Location::Memory(chunk));
-                continue;
-            }
             let Some(writer) = self.allocate_disk() else {
                 retry.push((chunk, block));
                 continue;
@@ -173,14 +151,14 @@ impl Tiers {
             });
             moves.push((victim, writer));
         }
-        let prepared = self
+        let frees_logged = self
             .disk
             .log()
-            .is_none_or(|log| log.changes().prepare(versions).is_ok());
-        if !prepared {
+            .is_none_or(|log| log.changes().flush().is_ok());
+        if !frees_logged {
             self.disk.chunks().close();
         }
-        if !prepared || writes.is_empty() || self.disk.write_batch(writes).await.is_err() {
+        if !frees_logged || writes.is_empty() || self.disk.write_batch(writes).await.is_err() {
             retry.extend(
                 moves
                     .iter()

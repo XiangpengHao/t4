@@ -51,7 +51,7 @@ bytes.
    waits in a memory chunk, read from there, until its batch goes. A batch:
    - takes its 16 chunks, evicting if it must;
    - appends a record of the chunks freed since the last record, by
-     eviction or promotion, and the paths its blocks need;
+     eviction or promotion, and the paths named since;
    - writes its 16 chunks, all at once;
    - once all are written, appends their adds, in the next batch's record
      if that batch is waiting, so that a busy cache makes one `write()` a
@@ -59,7 +59,9 @@ bytes.
 
    So the log names a chunk only once its block is written, and stops
    naming it before the chunk is written again. A failed write, or a block
-   another fetch cached first, is never added, so needs no free.
+   another fetch cached first, is never added, so needs no free. A path
+   entry is queued as the cache names a new version, under the log's lock
+   that adds take too, so no add names a version before its path.
 
 4. **No sync while the cache runs.** A process's death loses nothing it
    wrote: the kernel holds the log's appended bytes, and a direct-I/O write,
@@ -96,8 +98,9 @@ bytes.
 
 8. **The log grows until the next build** (the user, 16 Nov 2026: keep
    it simple). Nothing compacts it while the cache runs; the next build
-   does (decision 6). It grows about 25 bytes a MiB written to disk: an
-   add, a later free, a share of its record and its path. That is 5 MB
+   does (decision 6). It grows about 25 bytes a MiB written to disk (an
+   add, a later free, a share of its record) and some 150 bytes a version
+   the cache names, cached on disk or not. That is 5 MB
    for a heavy desktop session that writes its 20 GiB tier ten times
    over, and 6 GB for a server filling at 100 MB/s for a month. The next
    build replays all of it, after a clean exit as after a kill: if an
@@ -139,9 +142,7 @@ bytes.
 12. **Failure stops reuse.** A failed log append closes the disk tier
     before its batch writes; nothing appends past a possibly torn record.
     Reads keep using memory, disk and the remote. A failed data write is
-    never added. A memory victim whose path was replaced before its batch
-    is dropped; a batch scans paths once for the versions it needs.
-    An unreadable boot UUID or missing creation times discard any old log
+    never added. An unreadable boot UUID or missing creation times discard any old log
     durably and disable persistence. The cache builds and serves normally;
     a restart is cold.
     The file is `<first cache file>.log`; old `.snapshot` files are ignored.

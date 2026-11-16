@@ -153,15 +153,14 @@ fn a_log_only_grows_until_its_next_build_rebases_it() {
     let version = FileVersion::named(FileVersionId::new(9), MIB).unwrap();
     {
         let mut changes = log.changes();
-        changes
-            .prepare(vec![on_disk(b"digest/c", 9, MIB, &[])])
-            .unwrap();
+        changes.path(b"digest/c", "e-9", version);
+        changes.flush().unwrap();
         changes.add(
             crate::cache::BlockKey::new(version.id(), 0),
             ChunkId::new(1),
         );
         changes.free(ChunkId::new(5));
-        changes.prepare(Vec::new()).unwrap();
+        changes.flush().unwrap();
     }
     log.finish(10).unwrap();
     let appended = std::fs::read(log.path()).unwrap();

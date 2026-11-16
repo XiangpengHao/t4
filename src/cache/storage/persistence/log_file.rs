@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
@@ -8,6 +7,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use super::log::{BootId, BootIdReader, DiskLog, LogEntry};
 use super::{LogBase, LogReader, LogWriter, VersionOnDisk};
 use crate::cache::storage::FileIdentity;
+use crate::cache::storage::FileVersion;
 use crate::cache::{BlockKey, ChunkId};
 use crate::io::sync::{Mutex, MutexGuard};
 
@@ -159,21 +159,23 @@ impl PersistenceLog {
 pub(in crate::cache) struct LogChanges<'a>(MutexGuard<'a, Option<LogAppend>>);
 
 impl LogChanges<'_> {
-    pub(in crate::cache) fn prepare(&mut self, versions: Vec<VersionOnDisk>) -> io::Result<()> {
+    /// Before any chunk the pending frees name is written again.
+    pub(in crate::cache) fn flush(&mut self) -> io::Result<()> {
         let append = self.0.as_mut().expect("the log was rebased before writes");
-        for version in versions {
-            if append.versions.insert(version.version().id().get()) {
-                append.pending.push(LogEntry::Path(version));
-            }
-        }
         append.write_pending()
+    }
+
+    pub(in crate::cache) fn path(&mut self, path: &[u8], e_tag: &str, version: FileVersion) {
+        if let Some(append) = self.0.as_mut() {
+            let named = VersionOnDisk::new(path.into(), e_tag.into(), version, Vec::new());
+            append.pending.push(LogEntry::Path(named));
+        }
     }
 
     pub(in crate::cache) fn add(&mut self, block: BlockKey, chunk: ChunkId) {
         let append = self.0.as_mut().unwrap();
         let held = &mut append.chunks[chunk.index() as usize];
         assert!(held.is_none(), "a log add finds its chunk free");
-        assert!(append.versions.contains(&block.file_version().get()));
         *held = Some(block);
         append.pending.push(LogEntry::Add {
             version: block.file_version().get(),
@@ -194,7 +196,6 @@ impl LogChanges<'_> {
 struct LogAppend {
     file: File,
     pending: Vec<LogEntry>,
-    versions: HashSet<u64>,
     chunks: Vec<Option<BlockKey>>,
     failed: bool,
     abandoned: bool,
@@ -205,13 +206,11 @@ impl LogAppend {
         let mut append = Self {
             file,
             pending: Vec::new(),
-            versions: HashSet::new(),
             chunks: vec![None; chunks as usize],
             failed: false,
             abandoned: false,
         };
         for version in base.versions() {
-            append.versions.insert(version.version().id().get());
             for &(index, chunk) in version.blocks() {
                 append.chunks[chunk.index() as usize] =
                     Some(BlockKey::new(version.version().id(), index));
