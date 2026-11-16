@@ -5,6 +5,7 @@
 pub(crate) struct SimDisk {
     /// Every completed write: what reads see.
     bytes: Vec<u8>,
+    file: Option<std::fs::File>,
     /// Writes submitted and not yet completed, oldest first.
     in_flight: Vec<InFlightWrite>,
     next_write: u64,
@@ -31,8 +32,16 @@ impl SimDisk {
     pub(crate) fn new() -> Self {
         Self {
             bytes: Vec::new(),
+            file: None,
             in_flight: Vec::new(),
             next_write: 0,
+        }
+    }
+
+    pub(super) fn on_file(file: std::fs::File) -> Self {
+        Self {
+            file: Some(file),
+            ..Self::new()
         }
     }
 
@@ -47,7 +56,13 @@ impl SimDisk {
     /// byte count.
     pub(super) fn complete(&mut self, completion: Completion<'_>) -> i32 {
         match completion {
-            Completion::Read { offset, buf } => self.read(offset, buf) as i32,
+            Completion::Read { offset, buf } => {
+                if let Some(file) = &self.file {
+                    use std::os::unix::fs::FileExt;
+                    return file.read_at(buf, offset).map(|n| n as i32).unwrap_or(-5);
+                }
+                self.read(offset, buf) as i32
+            }
             Completion::Write(id) => self.complete_write(id) as i32,
         }
     }
@@ -66,6 +81,11 @@ impl SimDisk {
             .position(|write| write.id == id)
             .expect("a write completes once");
         let write = self.in_flight.remove(index);
+        if let Some(file) = &self.file {
+            use std::os::unix::fs::FileExt;
+            file.write_all_at(&write.bytes, write.offset).unwrap();
+            return write.bytes.len();
+        }
         let start = write.offset as usize;
         let end = start + write.bytes.len();
         if self.bytes.len() < end {

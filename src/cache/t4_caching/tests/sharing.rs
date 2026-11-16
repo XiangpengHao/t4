@@ -3,8 +3,8 @@
 //! over a store of its own, which holds the same file under the same e_tag,
 //! as two processes' stores reach one bucket.
 
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use crate::io::sync::mpsc;
+use std::time::Duration;
 
 use super::*;
 use crate::cache::policy::FixedPlacementPolicy;
@@ -41,27 +41,30 @@ fn read_listed(cache: &T4Caching, meta: &ObjectMeta, range: Range<u64>) -> Bytes
 /// what it fetched: the owner's read of it asks its store nothing.
 #[test]
 fn a_clients_cold_read_is_cached_for_its_owner() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(2 * MIB, 1);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (owner, owners, owners_meta) = process(&path, &data, shared);
-    let (client, clients, clients_meta) = process(&path, &data, shared);
-    assert_eq!(
-        owners_meta.e_tag, clients_meta.e_tag,
-        "one file, one version"
-    );
-    assert!(client.cache_store().owner_connection().is_some());
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(2 * MIB, 1);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (owner, owners, owners_meta) = process(&path, &data, shared);
+        let (client, clients, clients_meta) = process(&path, &data, shared);
+        assert_eq!(
+            owners_meta.e_tag, clients_meta.e_tag,
+            "one file, one version"
+        );
+        assert!(client.cache_store().owner_connection().is_some());
 
-    let read = read_listed(&client, &clients_meta, 10..2 * MIB);
-    assert_eq!(read, data.slice(10..));
-    assert_eq!(clients.take_asked(), [bounded(0..2 * MIB)]);
-    assert_eq!(read_listed(&owner, &owners_meta, 0..2 * MIB), data);
-    assert_eq!(
-        owners.take_asked(),
-        Vec::<Asked>::new(),
-        "the owner holds the client's fetch"
-    );
+        let read = read_listed(&client, &clients_meta, 10..2 * MIB);
+        assert_eq!(read, data.slice(10..));
+        assert_eq!(clients.take_asked(), [bounded(0..2 * MIB)]);
+        assert_eq!(read_listed(&owner, &owners_meta, 0..2 * MIB), data);
+        assert_eq!(
+            owners.take_asked(),
+            Vec::<Asked>::new(),
+            "the owner holds the client's fetch"
+        );
+    });
 }
 
 /// A block the owner holds is served to its client, whose store is asked
@@ -69,19 +72,22 @@ fn a_clients_cold_read_is_cached_for_its_owner() {
 /// address agreeing with their file offset mod 4 KiB.
 #[test]
 fn a_block_the_owner_holds_is_served_to_its_client() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(2 * MIB, 2);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (owner, owners, owners_meta) = process(&path, &data, shared);
-    let (client, clients, clients_meta) = process(&path, &data, shared);
-    assert_eq!(read_listed(&owner, &owners_meta, 0..2 * MIB), data);
-    assert_eq!(owners.take_asked(), [bounded(0..2 * MIB)]);
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(2 * MIB, 2);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (owner, owners, owners_meta) = process(&path, &data, shared);
+        let (client, clients, clients_meta) = process(&path, &data, shared);
+        assert_eq!(read_listed(&owner, &owners_meta, 0..2 * MIB), data);
+        assert_eq!(owners.take_asked(), [bounded(0..2 * MIB)]);
 
-    let read = read_listed(&client, &clients_meta, 4097..MIB + 3);
-    assert_eq!(read, data.slice(4097..MIB as usize + 3));
-    assert_eq!(read.as_ptr() as u64 % 4096, 4097 % 4096);
-    assert_eq!(clients.take_asked(), Vec::<Asked>::new());
+        let read = read_listed(&client, &clients_meta, 4097..MIB + 3);
+        assert_eq!(read, data.slice(4097..MIB as usize + 3));
+        assert_eq!(read.as_ptr() as u64 % 4096, 4097 % 4096);
+        assert_eq!(clients.take_asked(), Vec::<Asked>::new());
+    });
 }
 
 /// Reads of one block in the owner and its client, at once, fetch it once:
@@ -89,105 +95,116 @@ fn a_block_the_owner_holds_is_served_to_its_client() {
 /// it landed.
 #[test]
 fn reads_of_one_block_across_owner_and_client_fetch_it_once() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(MIB, 3);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (owner, owners, owners_meta) = process(&path, &data, shared);
-    let (client, clients, clients_meta) = process(&path, &data, shared);
-    let open = clients.gate_next_get();
-    let (client_done, client_read) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = client_done.send(read_listed(&client, &clients_meta, 0..MIB));
-    });
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while clients.gets_out_now() == 0 {
-        assert!(Instant::now() < deadline, "the client's GET goes out");
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(MIB, 3);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (owner, owners, owners_meta) = process(&path, &data, shared);
+        let (client, clients, clients_meta) = process(&path, &data, shared);
+        let open = clients.gate_next_get();
+        let (client_done, client_read) = mpsc::channel();
+        crate::io::sync::thread::spawn(move || {
+            let _ = client_done.send(read_listed(&client, &clients_meta, 0..MIB));
+        });
+        wait_until(|| clients.gets_out_now() == 1, "the client's GET goes out");
 
-    let (owner_done, owner_read) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = owner_done.send(read_listed(&owner, &owners_meta, 0..MIB));
+        let observed_owner = owner.clone();
+        let (owner_done, owner_read) = mpsc::channel();
+        crate::io::sync::thread::spawn(move || {
+            let _ = owner_done.send(read_listed(&owner, &owners_meta, 0..MIB));
+        });
+        wait_until(
+            || {
+                observed_owner
+                    .cache_store()
+                    .owned()
+                    .unwrap()
+                    .waiting_reads()
+                    == 1
+            },
+            "the owner's read registered on the claim",
+        );
+        assert!(owner_read.try_recv().is_err());
+        drop(open);
+        assert_eq!(client_read.recv().unwrap(), data);
+        assert_eq!(owner_read.recv().unwrap(), data);
+        assert_eq!(owners.take_asked(), [], "one GET, the client's");
     });
-    let early = owner_read.recv_timeout(Duration::from_millis(200));
-    assert!(
-        early.is_err(),
-        "the owner's read waits for the client's GET"
-    );
-    drop(open);
-    let timeout = Duration::from_secs(5);
-    assert_eq!(client_read.recv_timeout(timeout).unwrap(), data);
-    assert_eq!(owner_read.recv_timeout(timeout).unwrap(), data);
-    assert_eq!(owners.take_asked(), [], "one GET, the client's");
 }
 
 /// A client's read policy hears its own GETs, and each read from disk its
 /// owner makes for it.
 #[test]
 fn a_clients_read_policy_hears_its_gets_and_its_owners_disk_reads() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("on_disk");
-    let data = file_bytes(MIB, 4);
-    let on_disk = |inner: &Arc<CountingStore>| {
-        builder(inner, &dir)
-            .with_multiprocess_sharing()
-            .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
-    };
-    let (owner, _, owners_meta) = process(&path, &data, on_disk);
-    let reads = ScriptedReads::new(|read| FetchRuns::default().plan(read));
-    let (client, clients, clients_meta) = process(&path, &data, |inner| {
-        on_disk(inner).with_read_policy(reads.clone())
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("on_disk");
+        let data = file_bytes(MIB, 4);
+        let on_disk = |inner: &Arc<CountingStore>| {
+            sharing_builder(inner, &dir, &transport)
+                .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
+        };
+        let (owner, _, owners_meta) = process(&path, &data, on_disk);
+        let reads = ScriptedReads::new(|read| FetchRuns::default().plan(read));
+        let (client, clients, clients_meta) = process(&path, &data, |inner| {
+            on_disk(inner).with_read_policy(reads.clone())
+        });
+        assert_eq!(read_listed(&owner, &owners_meta, 0..MIB), data);
+
+        assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+        let disk_read = |phase| Heard::DiskRead {
+            drive: 0,
+            bytes: MIB as u32,
+            phase,
+        };
+        assert_eq!(reads.heard(), [disk_read("started"), disk_read("finished")]);
+
+        let fetched = Path::from("fetched");
+        let other = file_bytes(MIB, 5);
+        put(clients.as_ref(), &fetched, &other);
+        let meta = listed(&clients, &fetched);
+        reads.heard.lock().unwrap().clear();
+        assert_eq!(read_listed(&client, &meta, 0..MIB), other);
+        let get = |phase| Heard::Get {
+            bytes: 0..MIB,
+            racer: 0,
+            phase,
+        };
+        let phases = ["started", "answered", "finished", "landed"].map(get);
+        assert_eq!(reads.heard(), phases);
     });
-    assert_eq!(read_listed(&owner, &owners_meta, 0..MIB), data);
-
-    assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
-    let disk_read = |phase| Heard::DiskRead {
-        drive: 0,
-        bytes: MIB as u32,
-        phase,
-    };
-    assert_eq!(reads.heard(), [disk_read("started"), disk_read("finished")]);
-
-    let fetched = Path::from("fetched");
-    let other = file_bytes(MIB, 5);
-    put(clients.as_ref(), &fetched, &other);
-    let meta = listed(&clients, &fetched);
-    reads.heard.lock().unwrap().clear();
-    assert_eq!(read_listed(&client, &meta, 0..MIB), other);
-    let get = |phase| Heard::Get {
-        bytes: 0..MIB,
-        racer: 0,
-        phase,
-    };
-    let phases = ["started", "answered", "finished", "landed"].map(get);
-    assert_eq!(reads.heard(), phases);
 }
 
 /// A client whose owner went reads from its store, the right bytes: the
 /// cache may lose anything, and its callers see none of it.
 #[test]
 fn a_client_whose_owner_went_reads_from_its_store() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(MIB, 6);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (owner, _, owners_meta) = process(&path, &data, shared);
-    let (client, clients, clients_meta) = process(&path, &data, shared);
-    assert_eq!(read_listed(&owner, &owners_meta, 0..MIB), data);
-    assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
-    assert_eq!(clients.take_asked(), [], "served by its owner");
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(MIB, 6);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (owner, _, owners_meta) = process(&path, &data, shared);
+        let (client, clients, clients_meta) = process(&path, &data, shared);
+        assert_eq!(read_listed(&owner, &owners_meta, 0..MIB), data);
+        assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+        assert_eq!(clients.take_asked(), [], "served by its owner");
 
-    drop(owner);
-    assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
-    assert_eq!(clients.take_asked(), [bounded(0..MIB)]);
+        drop(owner);
+        assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+        assert_eq!(clients.take_asked(), [bounded(0..MIB)]);
+    });
 }
 
 /// `range` of the file `meta` names, read through `cache` on a thread of
 /// its own: its bytes, once read, come through the receiver returned.
 fn read_on_thread(cache: T4Caching, meta: ObjectMeta, range: Range<u64>) -> mpsc::Receiver<Bytes> {
     let (done, read) = mpsc::channel();
-    std::thread::spawn(move || {
+    crate::io::sync::thread::spawn(move || {
         let _ = done.send(read_listed(&cache, &meta, range));
     });
     read
@@ -198,24 +215,27 @@ fn read_on_thread(cache: T4Caching, meta: ObjectMeta, range: Range<u64>) -> mpsc
 /// had nowhere to go but the owner.
 #[test]
 fn a_clients_read_whose_owner_goes_mid_get_reads_from_its_store() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(MIB, 7);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (owner, _, _) = process(&path, &data, shared);
-    let (client, clients, clients_meta) = process(&path, &data, shared);
-    let open = clients.gate_next_get();
-    let read = read_on_thread(client, clients_meta, 0..MIB);
-    wait_until(|| clients.gets_out_now() == 1, "the client's GET goes out");
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(MIB, 7);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (owner, _, _) = process(&path, &data, shared);
+        let (client, clients, clients_meta) = process(&path, &data, shared);
+        let open = clients.gate_next_get();
+        let read = read_on_thread(client, clients_meta, 0..MIB);
+        wait_until(|| clients.gets_out_now() == 1, "the client's GET goes out");
 
-    drop(owner);
-    drop(open);
-    assert_eq!(read.recv_timeout(Duration::from_secs(5)).unwrap(), data);
-    assert_eq!(
-        clients.take_asked(),
-        [bounded(0..MIB), bounded(0..MIB)],
-        "its GET, then the read from its store"
-    );
+        drop(owner);
+        drop(open);
+        assert_eq!(read.recv().unwrap(), data);
+        assert_eq!(
+            clients.take_asked(),
+            [bounded(0..MIB), bounded(0..MIB)],
+            "its GET, then the read from its store"
+        );
+    });
 }
 
 /// The owner gone while its client waits for a block another client is
@@ -223,29 +243,35 @@ fn a_clients_read_whose_owner_goes_mid_get_reads_from_its_store() {
 /// once; the fetching read, once its GET is in, from its own.
 #[test]
 fn a_clients_read_waiting_on_another_when_the_owner_goes_reads_from_its_store() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(MIB, 8);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (owner, _, _) = process(&path, &data, shared);
-    let (fetching, fetchings, fetchings_meta) = process(&path, &data, shared);
-    let (waiting, waitings, waitings_meta) = process(&path, &data, shared);
-    let open = fetchings.gate_next_get();
-    let fetched = read_on_thread(fetching, fetchings_meta, 0..MIB);
-    wait_until(
-        || fetchings.gets_out_now() == 1,
-        "the fetching GET goes out",
-    );
-    let waited = read_on_thread(waiting, waitings_meta, 0..MIB);
-    let early = waited.recv_timeout(Duration::from_millis(200));
-    assert!(early.is_err(), "the read waits for the other client's GET");
+    crate::io::test_schedule::TestSchedule::iterations(16, || {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(MIB, 8);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (owner, _, _) = process(&path, &data, shared);
+        let (fetching, fetchings, fetchings_meta) = process(&path, &data, shared);
+        let (waiting, waitings, waitings_meta) = process(&path, &data, shared);
+        let open = fetchings.gate_next_get();
+        let fetched = read_on_thread(fetching, fetchings_meta, 0..MIB);
+        wait_until(
+            || fetchings.gets_out_now() == 1,
+            "the fetching GET goes out",
+        );
+        let waited = read_on_thread(waiting, waitings_meta, 0..MIB);
+        wait_until(
+            || owner.cache_store().owned().unwrap().waiting_reads() == 1,
+            "the other session registered its wait",
+        );
+        assert!(waited.try_recv().is_err());
 
-    drop(owner);
-    assert_eq!(waited.recv_timeout(Duration::from_secs(5)).unwrap(), data);
-    assert_eq!(waitings.take_asked(), [bounded(0..MIB)]);
-    drop(open);
-    assert_eq!(fetched.recv_timeout(Duration::from_secs(5)).unwrap(), data);
-    assert_eq!(fetchings.take_asked(), [bounded(0..MIB), bounded(0..MIB)]);
+        drop(owner);
+        assert_eq!(waited.recv().unwrap(), data);
+        assert_eq!(waitings.take_asked(), [bounded(0..MIB)]);
+        drop(open);
+        assert_eq!(fetched.recv().unwrap(), data);
+        assert_eq!(fetchings.take_asked(), [bounded(0..MIB), bounded(0..MIB)]);
+    });
 }
 
 /// Whether `cache` owns its files now.
@@ -263,76 +289,82 @@ fn reads_through_an_owner(cache: &T4Caching) -> bool {
 /// is its client.
 #[test]
 fn a_client_whose_owner_went_comes_to_own_the_cache() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(MIB, 9);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (owner, _, _) = process(&path, &data, shared);
-    let (client, clients, clients_meta) = process(&path, &data, shared);
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(MIB, 9);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (owner, _, _) = process(&path, &data, shared);
+        let (client, clients, clients_meta) = process(&path, &data, shared);
 
-    drop(owner);
-    wait_until(
-        || {
-            assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
-            owns(&client)
-        },
-        "a read makes the client the owner",
-    );
-    clients.take_asked();
-    assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
-    assert_eq!(clients.take_asked(), [], "the read that took over cached");
+        drop(owner);
+        wait_until(
+            || {
+                assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+                owns(&client)
+            },
+            "a read makes the client the owner",
+        );
+        clients.take_asked();
+        assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+        assert_eq!(clients.take_asked(), [], "the read that took over cached");
 
-    let (next, nexts, nexts_meta) = process(&path, &data, shared);
-    assert!(reads_through_an_owner(&next));
-    assert_eq!(read_listed(&next, &nexts_meta, 0..MIB), data);
-    assert_eq!(
-        nexts.take_asked(),
-        Vec::<Asked>::new(),
-        "served by the client that took over"
-    );
+        let (next, nexts, nexts_meta) = process(&path, &data, shared);
+        assert!(reads_through_an_owner(&next));
+        assert_eq!(read_listed(&next, &nexts_meta, 0..MIB), data);
+        assert_eq!(
+            nexts.take_asked(),
+            Vec::<Asked>::new(),
+            "served by the client that took over"
+        );
+    });
 }
 
 /// Two clients whose owner went: one comes to own the cache, and the other
 /// reads through it.
 #[test]
 fn two_clients_whose_owner_went_one_owns_and_the_other_reads_through_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(MIB, 10);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (owner, _, _) = process(&path, &data, shared);
-    let (first, firsts, firsts_meta) = process(&path, &data, shared);
-    let (second, seconds, seconds_meta) = process(&path, &data, shared);
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(MIB, 10);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (owner, _, _) = process(&path, &data, shared);
+        let (first, firsts, firsts_meta) = process(&path, &data, shared);
+        let (second, seconds, seconds_meta) = process(&path, &data, shared);
 
-    drop(owner);
-    wait_until(
-        || {
-            assert_eq!(read_listed(&first, &firsts_meta, 0..MIB), data);
-            assert_eq!(read_listed(&second, &seconds_meta, 0..MIB), data);
-            let first_owns = owns(&first) && reads_through_an_owner(&second);
-            first_owns || owns(&second) && reads_through_an_owner(&first)
-        },
-        "one owns the cache, and the other reads through it",
-    );
-    let (owning, owners) = if owns(&first) {
-        (&first, &firsts)
-    } else {
-        (&second, &seconds)
-    };
-    let (reading, readers) = if owns(&first) {
-        (&second, &seconds)
-    } else {
-        (&first, &firsts)
-    };
-    let fresh = Path::from("b");
-    let other = file_bytes(MIB, 11);
-    put(owners.as_ref(), &fresh, &other);
-    put(readers.as_ref(), &fresh, &other);
-    let (owners_meta, readers_meta) = (listed(owners, &fresh), listed(readers, &fresh));
-    readers.take_asked();
-    assert_eq!(read_listed(owning, &owners_meta, 0..MIB), other);
-    assert_eq!(read_listed(reading, &readers_meta, 0..MIB), other);
-    assert_eq!(readers.take_asked(), [], "served by the new owner");
+        drop(owner);
+        wait_until(
+            || {
+                assert_eq!(read_listed(&first, &firsts_meta, 0..MIB), data);
+                assert_eq!(read_listed(&second, &seconds_meta, 0..MIB), data);
+                let first_owns = owns(&first) && reads_through_an_owner(&second);
+                first_owns || owns(&second) && reads_through_an_owner(&first)
+            },
+            "one owns the cache, and the other reads through it",
+        );
+        let (owning, owners) = if owns(&first) {
+            (&first, &firsts)
+        } else {
+            (&second, &seconds)
+        };
+        let (reading, readers) = if owns(&first) {
+            (&second, &seconds)
+        } else {
+            (&first, &firsts)
+        };
+        let fresh = Path::from("b");
+        let other = file_bytes(MIB, 11);
+        put(owners.as_ref(), &fresh, &other);
+        put(readers.as_ref(), &fresh, &other);
+        let (owners_meta, readers_meta) = (listed(owners, &fresh), listed(readers, &fresh));
+        readers.take_asked();
+        assert_eq!(read_listed(owning, &owners_meta, 0..MIB), other);
+        assert_eq!(read_listed(reading, &readers_meta, 0..MIB), other);
+        assert_eq!(readers.take_asked(), [], "served by the new owner");
+    });
 }
 
 /// A client's GET waiting for room as its owner goes merges with no GET of
@@ -341,63 +373,58 @@ fn two_clients_whose_owner_went_one_owns_and_the_other_reads_through_it() {
 /// takes its own file's bytes.
 #[test]
 fn a_get_waiting_as_its_owner_goes_merges_with_none_of_the_next_cache() {
-    let dir = tempfile::tempdir().unwrap();
-    let (b, c) = (Path::from("b"), Path::from("c"));
-    let (b_data, c_data) = (file_bytes(3 * MIB, 13), file_bytes(3 * MIB, 14));
-    // Two blocks' GETs out at a time: room for two waiting to go as one.
-    let shared = |inner: &Arc<CountingStore>| {
-        builder(inner, &dir)
-            .with_network_rate(2 * MIB, Duration::from_secs(1))
-            .with_multiprocess_sharing()
-    };
-    let (owner, _, _) = process(&b, &b_data, shared);
-    let (client, clients, b_meta) = process(&b, &b_data, shared);
-    put(clients.as_ref(), &c, &c_data);
-    // A path too long to cache: a read of it hands the cache over, and
-    // names no version.
-    let long = Path::from("l".repeat(1025));
-    let long_data = file_bytes(10, 15);
-    put(clients.as_ref(), &long, &long_data);
-    let (c_meta, long_meta) = (listed(&clients, &c), listed(&clients, &long));
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let (b, c) = (Path::from("b"), Path::from("c"));
+        let (b_data, c_data) = (file_bytes(3 * MIB, 13), file_bytes(3 * MIB, 14));
+        // Two blocks' GETs out at a time: room for two waiting to go as one.
+        let shared = |inner: &Arc<CountingStore>| {
+            sharing_builder(inner, &dir, &transport)
+                .with_network_rate(2 * MIB, Duration::from_secs(1))
+        };
+        let (owner, _, _) = process(&b, &b_data, shared);
+        let (client, clients, b_meta) = process(&b, &b_data, shared);
+        put(clients.as_ref(), &c, &c_data);
+        // A path too long to cache: a read of it hands the cache over, and
+        // names no version.
+        let long = Path::from("l".repeat(1025));
+        let long_data = file_bytes(10, 15);
+        put(clients.as_ref(), &long, &long_data);
+        let (c_meta, long_meta) = (listed(&clients, &c), listed(&clients, &long));
 
-    let open = clients.gate_next_get();
-    let first = read_on_thread(client.clone(), b_meta.clone(), 0..2 * MIB);
-    wait_until(|| clients.gets_out_now() == 1, "b's first blocks go out");
-    let third = read_on_thread(client.clone(), b_meta, 2 * MIB..3 * MIB);
-    wait_until(
-        || client.network.gets_waiting() == 1,
-        "b's third block waits",
-    );
+        let open = clients.gate_next_get();
+        let first = read_on_thread(client.clone(), b_meta.clone(), 0..2 * MIB);
+        wait_until(|| clients.gets_out_now() == 1, "b's first blocks go out");
+        let third = read_on_thread(client.clone(), b_meta, 2 * MIB..3 * MIB);
+        wait_until(
+            || client.network.gets_waiting() == 1,
+            "b's third block waits",
+        );
 
-    drop(owner);
-    wait_until(
-        || {
-            assert_eq!(read_listed(&client, &long_meta, 0..10), long_data);
-            owns(&client)
-        },
-        "a read makes the client the owner",
-    );
-    // `c`'s second block, just before `b`'s third.
-    let second = read_on_thread(client.clone(), c_meta, MIB..2 * MIB);
-    wait_until(
-        || client.network.gets_waiting() == 2,
-        "c's second block waits",
-    );
+        drop(owner);
+        wait_until(
+            || {
+                assert_eq!(read_listed(&client, &long_meta, 0..10), long_data);
+                owns(&client)
+            },
+            "a read makes the client the owner",
+        );
+        // `c`'s second block, just before `b`'s third.
+        let second = read_on_thread(client.clone(), c_meta, MIB..2 * MIB);
+        wait_until(
+            || client.network.gets_waiting() == 2,
+            "c's second block waits",
+        );
 
-    drop(open);
-    let wait = Duration::from_secs(5);
-    assert_eq!(
-        second.recv_timeout(wait).unwrap(),
-        c_data.slice(MIB as usize..2 * MIB as usize)
-    );
-    assert_eq!(
-        third.recv_timeout(wait).unwrap(),
-        b_data.slice(2 * MIB as usize..)
-    );
-    assert_eq!(
-        first.recv_timeout(wait).unwrap(),
-        b_data.slice(..2 * MIB as usize)
-    );
+        drop(open);
+        assert_eq!(
+            second.recv().unwrap(),
+            c_data.slice(MIB as usize..2 * MIB as usize)
+        );
+        assert_eq!(third.recv().unwrap(), b_data.slice(2 * MIB as usize..));
+        assert_eq!(first.recv().unwrap(), b_data.slice(..2 * MIB as usize));
+    });
 }
 
 /// A client that comes to own the cache once its owner went takes the disk
@@ -406,61 +433,66 @@ fn a_get_waiting_as_its_owner_goes_merges_with_none_of_the_next_cache() {
 /// nothing.
 #[test]
 fn a_client_that_comes_to_own_the_cache_takes_its_owners_disk_tier() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(2 * MIB, 16);
-    let on_disk = |inner: &Arc<CountingStore>| {
-        builder(inner, &dir)
-            .with_multiprocess_sharing()
-            .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
-    };
-    let (owner, _, owners_meta) = process(&path, &data, on_disk);
-    let (client, clients, clients_meta) = process(&path, &data, on_disk);
-    // A path too long to cache: a read of it hands the cache over, and
-    // caches nothing.
-    let long = Path::from("l".repeat(1025));
-    let long_data = file_bytes(10, 17);
-    put(clients.as_ref(), &long, &long_data);
-    let long_meta = listed(&clients, &long);
-    assert_eq!(read_listed(&owner, &owners_meta, 0..2 * MIB), data);
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(2 * MIB, 16);
+        let on_disk = |inner: &Arc<CountingStore>| {
+            sharing_builder(inner, &dir, &transport)
+                .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
+        };
+        let (owner, _, owners_meta) = process(&path, &data, on_disk);
+        let (client, clients, clients_meta) = process(&path, &data, on_disk);
+        // A path too long to cache: a read of it hands the cache over, and
+        // caches nothing.
+        let long = Path::from("l".repeat(1025));
+        let long_data = file_bytes(10, 17);
+        put(clients.as_ref(), &long, &long_data);
+        let long_meta = listed(&clients, &long);
+        assert_eq!(read_listed(&owner, &owners_meta, 0..2 * MIB), data);
 
-    drop(owner);
-    wait_until(
-        || {
-            assert_eq!(read_listed(&client, &long_meta, 0..10), long_data);
-            owns(&client)
-        },
-        "a read makes the client the owner",
-    );
-    clients.take_asked();
-    assert_eq!(block_on(client.known_size(&path)), Some(2 * MIB));
-    assert_eq!(read_listed(&client, &clients_meta, 0..2 * MIB), data);
-    assert_eq!(
-        clients.take_asked(),
-        [],
-        "the owner's disk tier, taken over"
-    );
+        drop(owner);
+        wait_until(
+            || {
+                assert_eq!(read_listed(&client, &long_meta, 0..10), long_data);
+                owns(&client)
+            },
+            "a read makes the client the owner",
+        );
+        clients.take_asked();
+        assert_eq!(block_on(client.known_size(&path)), Some(2 * MIB));
+        assert_eq!(read_listed(&client, &clients_meta, 0..2 * MIB), data);
+        assert_eq!(
+            clients.take_asked(),
+            [],
+            "the owner's disk tier, taken over"
+        );
+    });
 }
 
 /// A client asks its owner the size it knows of a file: none before a read
 /// through either names the file, and its size after.
 #[test]
 fn a_client_asks_its_owner_the_size_it_knows() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(MIB + 3, 18);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (owner, _, owners_meta) = process(&path, &data, shared);
-    let (client, clients, _) = process(&path, &data, shared);
-    assert!(reads_through_an_owner(&client));
-    assert_eq!(block_on(client.known_size(&path)), None);
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(MIB + 3, 18);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (owner, _, owners_meta) = process(&path, &data, shared);
+        let (client, clients, _) = process(&path, &data, shared);
+        assert!(reads_through_an_owner(&client));
+        assert_eq!(block_on(client.known_size(&path)), None);
 
-    assert_eq!(
-        read_listed(&owner, &owners_meta, 0..MIB),
-        data.slice(..MIB as usize)
-    );
-    assert_eq!(block_on(client.known_size(&path)), Some(MIB + 3));
-    assert_eq!(clients.take_asked(), [], "asked of the owner alone");
+        assert_eq!(
+            read_listed(&owner, &owners_meta, 0..MIB),
+            data.slice(..MIB as usize)
+        );
+        assert_eq!(block_on(client.known_size(&path)), Some(MIB + 3));
+        assert_eq!(clients.take_asked(), [], "asked of the owner alone");
+    });
 }
 
 /// A client shut down leaves its owner be: the owner still caches what
@@ -468,27 +500,30 @@ fn a_client_asks_its_owner_the_size_it_knows() {
 /// is exiting, and reads from its store.
 #[test]
 fn a_client_shut_down_leaves_its_owner_be_and_takes_over_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(MIB, 19);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (owner, owners, owners_meta) = process(&path, &data, shared);
-    let (client, clients, clients_meta) = process(&path, &data, shared);
-    client.shut_down().unwrap();
-    assert!(reads_through_an_owner(&client));
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(MIB, 19);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (owner, owners, owners_meta) = process(&path, &data, shared);
+        let (client, clients, clients_meta) = process(&path, &data, shared);
+        client.shut_down().unwrap();
+        assert!(reads_through_an_owner(&client));
 
-    assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
-    assert_eq!(clients.take_asked(), [bounded(0..MIB)]);
-    assert_eq!(read_listed(&owner, &owners_meta, 0..MIB), data);
-    assert_eq!(owners.take_asked(), [], "the owner caches still");
-
-    drop(owner);
-    wait_until(|| !reads_through_an_owner(&client), "the owner goes");
-    for _ in 0..5 {
         assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(!owns(&client), "it took over nothing");
+        assert_eq!(clients.take_asked(), [bounded(0..MIB)]);
+        assert_eq!(read_listed(&owner, &owners_meta, 0..MIB), data);
+        assert_eq!(owners.take_asked(), [], "the owner caches still");
+
+        drop(owner);
+        wait_until(|| !reads_through_an_owner(&client), "the owner goes");
+        for _ in 0..5 {
+            assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+            transport.clock().advance(Duration::from_millis(20));
+        }
+        assert!(!owns(&client), "it took over nothing");
+    });
 }
 
 /// A client whose files a cache not built for sharing took once its owner
@@ -496,33 +531,34 @@ fn a_client_shut_down_leaves_its_owner_be_and_takes_over_nothing() {
 /// store, no read waiting long for an owner.
 #[test]
 fn a_client_that_finds_no_owner_reads_from_its_store_without_waiting() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(MIB, 12);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (owner, _, _) = process(&path, &data, shared);
-    let (client, clients, clients_meta) = process(&path, &data, shared);
-    drop(owner);
-    // A child process another test starts meanwhile holds the dropped
-    // owner's descriptors, and so its lock, until its own program starts:
-    // the files come free within moments.
-    let others = Arc::new(CountingStore::default());
-    let mut _unshared = None;
-    wait_until(
-        || {
-            _unshared = builder(&others, &dir).build().ok();
-            _unshared.is_some()
-        },
-        "the dropped owner's files come free",
-    );
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(MIB, 12);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (owner, _, _) = process(&path, &data, shared);
+        let (client, clients, clients_meta) = process(&path, &data, shared);
+        drop(owner);
+        // A child process another test starts meanwhile holds the dropped
+        // owner's descriptors, and so its lock, until its own program starts:
+        // the files come free within moments.
+        let others = Arc::new(CountingStore::default());
+        let mut _unshared = None;
+        wait_until(
+            || {
+                _unshared = builder(&others, &dir).build().ok();
+                _unshared.is_some()
+            },
+            "the dropped owner's files come free",
+        );
 
-    let started = Instant::now();
-    for _ in 0..3 {
-        assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
-    }
-    assert!(started.elapsed() < Duration::from_secs(1), "no read waits");
-    assert!(!owns(&client) && !reads_through_an_owner(&client));
-    assert_eq!(clients.take_asked().len(), 3, "each read from its store");
+        for _ in 0..3 {
+            assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+        }
+        assert!(!owns(&client) && !reads_through_an_owner(&client));
+        assert_eq!(clients.take_asked().len(), 3, "each read from its store");
+    });
 }
 
 /// The pages of `cache`'s region free, `cache` a client whose owner mapped
@@ -551,54 +587,60 @@ fn in_region(cache: &T4Caching, bytes: &Bytes) -> bool {
 /// bytes, and every span is free once the reads are dropped.
 #[test]
 fn a_clients_reads_are_served_in_its_region() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(3 * MIB, 21);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (_owner, _, _) = process(&path, &data, shared);
-    let (client, _, clients_meta) = process(&path, &data, shared);
-    let all = region_free_pages(&client);
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(3 * MIB, 21);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (_owner, _, _) = process(&path, &data, shared);
+        let (client, _, clients_meta) = process(&path, &data, shared);
+        let all = region_free_pages(&client);
 
-    let cold = 10..2 * MIB + 20;
-    let hot = 4096 + 3..MIB;
-    let reads: Vec<_> = [cold, hot]
-        .into_iter()
-        .map(|range| {
-            let read = read_listed(&client, &clients_meta, range.clone());
-            assert_eq!(read, data.slice(range.start as usize..range.end as usize));
-            assert!(in_region(&client, &read), "{range:?} in a span");
-            assert_eq!(read.as_ptr() as u64 % 4096, range.start % 4096);
-            read
-        })
-        .collect();
-    assert!(
-        region_free_pages(&client) < all,
-        "the reads hold their spans"
-    );
-    drop(reads);
-    wait_until(|| region_free_pages(&client) == all, "every span is free");
+        let cold = 10..2 * MIB + 20;
+        let hot = 4096 + 3..MIB;
+        let reads: Vec<_> = [cold, hot]
+            .into_iter()
+            .map(|range| {
+                let read = read_listed(&client, &clients_meta, range.clone());
+                assert_eq!(read, data.slice(range.start as usize..range.end as usize));
+                assert!(in_region(&client, &read), "{range:?} in a span");
+                assert_eq!(read.as_ptr() as u64 % 4096, range.start % 4096);
+                read
+            })
+            .collect();
+        assert!(
+            region_free_pages(&client) < all,
+            "the reads hold their spans"
+        );
+        drop(reads);
+        wait_until(|| region_free_pages(&client) == all, "every span is free");
+    });
 }
 
 /// A client's read in flight when its owner goes: the read goes to its
 /// store, and its spans come back with the owner gone.
 #[test]
 fn a_clients_spans_come_back_once_its_owner_goes() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(MIB, 22);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (owner, _, _) = process(&path, &data, shared);
-    let (client, clients, clients_meta) = process(&path, &data, shared);
-    let all = region_free_pages(&client);
-    let open = clients.gate_next_get();
-    let read = read_on_thread(client.clone(), clients_meta, 0..MIB);
-    wait_until(|| clients.gets_out_now() == 1, "the client's GET goes out");
-    assert!(region_free_pages(&client) < all, "the read's span is lent");
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(MIB, 22);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (owner, _, _) = process(&path, &data, shared);
+        let (client, clients, clients_meta) = process(&path, &data, shared);
+        let all = region_free_pages(&client);
+        let open = clients.gate_next_get();
+        let read = read_on_thread(client.clone(), clients_meta, 0..MIB);
+        wait_until(|| clients.gets_out_now() == 1, "the client's GET goes out");
+        assert!(region_free_pages(&client) < all, "the read's span is lent");
 
-    drop(owner);
-    drop(open);
-    assert_eq!(read.recv_timeout(Duration::from_secs(5)).unwrap(), data);
-    wait_until(|| region_free_pages(&client) == all, "every span is free");
+        drop(owner);
+        drop(open);
+        assert_eq!(read.recv().unwrap(), data);
+        wait_until(|| region_free_pages(&client) == all, "every span is free");
+    });
 }
 
 /// A fetch dropped after its read still gives its span back, and keeps
@@ -607,33 +649,35 @@ fn a_clients_spans_come_back_once_its_owner_goes() {
 /// breaks the protocol, nor keeps a span for one.
 #[test]
 fn a_fetch_dropped_after_its_read_gives_its_span_back() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(MIB, 23);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (_owner, _, _) = process(&path, &data, shared);
-    let (client, _, meta) = process(&path, &data, shared);
-    let all = region_free_pages(&client);
-    let cache_store = client.cache_store();
-    let e_tag = meta.e_tag.clone().unwrap();
-    let reads = FetchRuns::default();
-    let path = path.as_ref().as_bytes();
-    let started = cache_store.start_read(path, &e_tag, meta.size, 0..MIB, None, &reads);
-    let mut read = block_on(started).unwrap().expect("a cacheable file");
-    while let Some(run) = read.locate_next_run().unwrap() {
-        let gets = run.planned_by(&reads, &read.file(), None);
-        block_on(read.take_gets(&gets)).unwrap();
-    }
-    let fetches = read.fetches().unwrap();
-    assert!(!fetches.is_empty(), "the read fetches its block");
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(MIB, 23);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (_owner, _, _) = process(&path, &data, shared);
+        let (client, _, meta) = process(&path, &data, shared);
+        let all = region_free_pages(&client);
+        let cache_store = client.cache_store();
+        let e_tag = meta.e_tag.clone().unwrap();
+        let reads = FetchRuns::default();
+        let path = path.as_ref().as_bytes();
+        let started = cache_store.start_read(path, &e_tag, meta.size, 0..MIB, None, &reads);
+        let mut read = block_on(started).unwrap().expect("a cacheable file");
+        while let Some(run) = read.locate_next_run().unwrap() {
+            let gets = run.planned_by(&reads, &read.file(), None);
+            block_on(read.take_gets(&gets)).unwrap();
+        }
+        let fetches = read.fetches().unwrap();
+        assert!(!fetches.is_empty(), "the read fetches its block");
 
-    drop(read);
-    // Time for the owner to end the read, had the client ended it.
-    std::thread::sleep(Duration::from_millis(100));
-    drop(fetches);
-    wait_until(|| region_free_pages(&client) == all, "every span is free");
-    let owner = cache_store.owner_connection().expect("a client");
-    assert!(!owner.owner_gone(), "the connection kept");
+        drop(read);
+        thread::yield_now();
+        drop(fetches);
+        wait_until(|| region_free_pages(&client) == all, "every span is free");
+        let owner = cache_store.owner_connection().expect("a client");
+        assert!(!owner.owner_gone(), "the connection kept");
+    });
 }
 
 /// The calls `cache`, a client, waits on its owner for, by number.
@@ -650,42 +694,45 @@ fn calls_waiting(cache: &T4Caching) -> Vec<u64> {
 /// and the client fetches the block itself.
 #[test]
 fn a_clients_read_whose_wait_ends_uncached_fetches_in_a_second_round() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(MIB, 17);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (owner, owners, owners_meta) = process(&path, &data, shared);
-    let (client, clients, clients_meta) = process(&path, &data, shared);
-    let open = owners.gate_next_get();
-    let (owned, owners_read) = mpsc::channel();
-    let file = owner.open_listed(owners_meta.clone());
-    std::thread::spawn(move || {
-        let _ = owned.send(block_on(file.read(0..MIB, None)).is_err());
-    });
-    wait_until(|| owners.gets_out_now() == 1, "the owner's GET goes out");
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(MIB, 17);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (owner, owners, owners_meta) = process(&path, &data, shared);
+        let (client, clients, clients_meta) = process(&path, &data, shared);
+        let open = owners.gate_next_get();
+        let (owned, owners_read) = mpsc::channel();
+        let file = owner.open_listed(owners_meta.clone());
+        crate::io::sync::thread::spawn(move || {
+            let _ = owned.send(block_on(file.read(0..MIB, None)).is_err());
+        });
+        wait_until(|| owners.gets_out_now() == 1, "the owner's GET goes out");
 
-    let clients_read = read_on_thread(client.clone(), clients_meta, 0..MIB);
-    wait_until(
-        || calls_waiting(&client) == [1],
-        "the client's finish waits",
-    );
-    // The owner's GET finds the file gone: its fetch ends with no block
-    // cached, and the client's read fetches it in a round of its own.
-    block_on(owners.delete(&path)).unwrap();
-    drop(open);
-    assert_eq!(owners_read.recv_timeout(Duration::from_secs(5)), Ok(true));
-    let read = clients_read.recv_timeout(Duration::from_secs(5));
-    assert_eq!(read.unwrap(), data);
-    assert_eq!(
-        clients.take_asked(),
-        [bounded(0..MIB)],
-        "fetched once, itself"
-    );
-    assert!(reads_through_an_owner(&client));
-    // Through its owner, not the store: the owner holds the block, which
-    // only the client's fetch could have brought, the file gone from the
-    // owner's store.
-    assert_eq!(read_listed(&owner, &owners_meta, 0..MIB), data);
+        let clients_read = read_on_thread(client.clone(), clients_meta, 0..MIB);
+        wait_until(
+            || calls_waiting(&client) == [1],
+            "the client's finish waits",
+        );
+        // The owner's GET finds the file gone: its fetch ends with no block
+        // cached, and the client's read fetches it in a round of its own.
+        block_on(owners.delete(&path)).unwrap();
+        drop(open);
+        assert_eq!(owners_read.recv(), Ok(true));
+        let read = clients_read.recv();
+        assert_eq!(read.unwrap(), data);
+        assert_eq!(
+            clients.take_asked(),
+            [bounded(0..MIB)],
+            "fetched once, itself"
+        );
+        assert!(reads_through_an_owner(&client));
+        // Through its owner, not the store: the owner holds the block, which
+        // only the client's fetch could have brought, the file gone from the
+        // owner's store.
+        assert_eq!(read_listed(&owner, &owners_meta, 0..MIB), data);
+    });
 }
 
 /// A client's read given up while it waits for its owner, its `Finish`
@@ -693,40 +740,43 @@ fn a_clients_read_whose_wait_ends_uncached_fetches_in_a_second_round() {
 /// connection serves the client's next read.
 #[test]
 fn a_clients_read_given_up_leaves_no_call_waiting() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(MIB, 13);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (owner, owners, owners_meta) = process(&path, &data, shared);
-    let (client, clients, clients_meta) = process(&path, &data, shared);
-    let open = owners.gate_next_get();
-    let owned = read_on_thread(owner.clone(), owners_meta, 0..MIB);
-    wait_until(|| owners.gets_out_now() == 1, "the owner's GET goes out");
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(MIB, 13);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (owner, owners, owners_meta) = process(&path, &data, shared);
+        let (client, clients, clients_meta) = process(&path, &data, shared);
+        let open = owners.gate_next_get();
+        let owned = read_on_thread(owner.clone(), owners_meta, 0..MIB);
+        wait_until(|| owners.gets_out_now() == 1, "the owner's GET goes out");
 
-    let file = client.open_listed(clients_meta.clone());
-    let mut read = Box::pin(file.read(0..MIB, None));
-    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    // Its start (call 0) and its GETs (2) answered, its `Finish` (1), sent
-    // with its start, waits on the owner's GET.
-    wait_until(
-        || {
-            assert!(read.as_mut().poll(&mut context).is_pending());
-            calls_waiting(&client) == [1]
-        },
-        "the read's Finish waits",
-    );
-    drop(read);
-    assert_eq!(
-        calls_waiting(&client),
-        Vec::<u64>::new(),
-        "the call given up with its read"
-    );
+        let file = client.open_listed(clients_meta.clone());
+        let mut read = Box::pin(file.read(0..MIB, None));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        // Its start (call 0) and its GETs (2) answered, its `Finish` (1), sent
+        // with its start, waits on the owner's GET.
+        wait_until(
+            || {
+                assert!(read.as_mut().poll(&mut context).is_pending());
+                calls_waiting(&client) == [1]
+            },
+            "the read's Finish waits",
+        );
+        drop(read);
+        assert_eq!(
+            calls_waiting(&client),
+            Vec::<u64>::new(),
+            "the call given up with its read"
+        );
 
-    drop(open);
-    assert_eq!(owned.recv_timeout(Duration::from_secs(5)).unwrap(), data);
-    assert!(reads_through_an_owner(&client));
-    assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
-    assert_eq!(clients.take_asked(), [], "served by the owner");
+        drop(open);
+        assert_eq!(owned.recv().unwrap(), data);
+        assert!(reads_through_an_owner(&client));
+        assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+        assert_eq!(clients.take_asked(), [], "served by the owner");
+    });
 }
 
 /// A client's read given up while its GET is out, part of its body landed:
@@ -735,38 +785,41 @@ fn a_clients_read_given_up_leaves_no_call_waiting() {
 /// stays whole.
 #[test]
 fn a_clients_read_given_up_mid_get_abandons_its_claim() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(MIB, 14);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (owner, owners, owners_meta) = process(&path, &data, shared);
-    let (client, clients, clients_meta) = process(&path, &data, shared);
-    clients.stall_next_body(MIB as usize / 2);
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(MIB, 14);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (owner, owners, owners_meta) = process(&path, &data, shared);
+        let (client, clients, clients_meta) = process(&path, &data, shared);
+        clients.stall_next_body(MIB as usize / 2);
 
-    let file = client.open_listed(clients_meta.clone());
-    let mut read = Box::pin(file.read(0..MIB, None));
-    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    wait_until(
-        || {
-            assert!(read.as_mut().poll(&mut context).is_pending());
-            clients.stalled.load(Ordering::Relaxed)
-        },
-        "the client's GET stalls halfway",
-    );
-    drop(read);
-    assert_eq!(calls_waiting(&client), Vec::<u64>::new());
+        let file = client.open_listed(clients_meta.clone());
+        let mut read = Box::pin(file.read(0..MIB, None));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        wait_until(
+            || {
+                assert!(read.as_mut().poll(&mut context).is_pending());
+                clients.stalled.load(Ordering::Relaxed)
+            },
+            "the client's GET stalls halfway",
+        );
+        drop(read);
+        assert_eq!(calls_waiting(&client), Vec::<u64>::new());
 
-    let owned = read_on_thread(owner.clone(), owners_meta, 0..MIB);
-    assert_eq!(owned.recv_timeout(Duration::from_secs(5)).unwrap(), data);
-    assert_eq!(
-        owners.take_asked(),
-        [bounded(0..MIB)],
-        "the owner's own GET"
-    );
-    assert!(reads_through_an_owner(&client));
-    clients.take_asked();
-    assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
-    assert_eq!(clients.take_asked(), [], "served by the owner");
+        let owned = read_on_thread(owner.clone(), owners_meta, 0..MIB);
+        assert_eq!(owned.recv().unwrap(), data);
+        assert_eq!(
+            owners.take_asked(),
+            [bounded(0..MIB)],
+            "the owner's own GET"
+        );
+        assert!(reads_through_an_owner(&client));
+        clients.take_asked();
+        assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
+        assert_eq!(clients.take_asked(), [], "served by the owner");
+    });
 }
 
 /// A client's GET that fails, the file changed since the client opened it:
@@ -774,22 +827,35 @@ fn a_clients_read_given_up_mid_get_abandons_its_claim() {
 /// read ends, in bounded time, with the store's answer.
 #[test]
 fn a_clients_failed_get_abandons_its_fetch() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Path::from("a");
-    let data = file_bytes(MIB, 15);
-    let shared = |inner: &Arc<CountingStore>| builder(inner, &dir).with_multiprocess_sharing();
-    let (_owner, _, _) = process(&path, &data, shared);
-    let (client, clients, clients_meta) = process(&path, &data, shared);
-    put(clients.as_ref(), &path, &file_bytes(MIB, 16));
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = crate::cache::cache_stores::TestTransport::default();
+        let path = Path::from("a");
+        let data = file_bytes(MIB, 15);
+        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
+        let (_owner, _, _) = process(&path, &data, shared);
+        let (client, clients, clients_meta) = process(&path, &data, shared);
+        put(clients.as_ref(), &path, &file_bytes(MIB, 16));
 
-    let (done, read) = mpsc::channel();
-    std::thread::spawn(move || {
-        let file = client.open_listed(clients_meta);
-        let _ = done.send(block_on(file.read(0..MIB, None)));
+        let (done, read) = mpsc::channel();
+        crate::io::sync::thread::spawn(move || {
+            let file = client.open_listed(clients_meta);
+            let _ = done.send(block_on(file.read(0..MIB, None)));
+        });
+        let read = read.recv().unwrap();
+        assert!(
+            matches!(read, Err(object_store::Error::Precondition { .. })),
+            "{read:?}"
+        );
     });
-    let read = read.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert!(
-        matches!(read, Err(object_store::Error::Precondition { .. })),
-        "{read:?}"
-    );
+}
+
+fn sharing_builder(
+    inner: &Arc<CountingStore>,
+    dir: &TempDir,
+    transport: &crate::cache::cache_stores::TestTransport,
+) -> T4CachingBuilder {
+    builder(inner, dir)
+        .with_multiprocess_sharing()
+        .with_test_transport(transport.clone())
 }

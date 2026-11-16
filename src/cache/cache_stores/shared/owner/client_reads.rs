@@ -5,12 +5,13 @@
 //! owner's own: the client plans the GETs of each run the task locates, and
 //! lands their bytes, which the task lands as an owner's fetches land.
 
+use crate::io::sync::Mutex;
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::future::poll_fn;
 use std::ops::Range;
 use std::rc::Rc;
-use std::sync::{Mutex, PoisonError};
+use std::sync::PoisonError;
 use std::task::{Context, Poll, Waker};
 
 use bytes::Bytes;
@@ -38,7 +39,7 @@ pub(super) struct ClientReads<'c> {
     outbox: Outbox,
     /// Each read the client started and hasn't ended. A read's task may
     /// have ended before: the frames the client sent it since are dropped.
-    reads: HashMap<u64, ReadInbox>,
+    reads: BTreeMap<u64, ReadInbox>,
     tasks: FuturesUnordered<Abortable<LocalBoxFuture<'c, ()>>>,
 }
 
@@ -55,7 +56,7 @@ impl<'c> ClientReads<'c> {
             cache,
             region,
             outbox: Outbox::new(session),
-            reads: HashMap::new(),
+            reads: BTreeMap::new(),
             tasks: FuturesUnordered::new(),
         }
     }
@@ -270,7 +271,7 @@ impl Outbox {
         }
     }
 
-    fn frames(&self) -> std::sync::MutexGuard<'_, OutboxFrames> {
+    fn frames(&self) -> crate::io::sync::MutexGuard<'_, OutboxFrames> {
         self.frames.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }

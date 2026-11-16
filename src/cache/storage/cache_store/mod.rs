@@ -48,7 +48,7 @@ use crate::cache::read_output::ReadOutput;
 use crate::io::error::Result;
 use crate::io::sync::Arc;
 
-#[cfg(any(test, feature = "__fuzz"))]
+#[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
 mod at_rest;
 mod eviction;
 mod fill;
@@ -66,6 +66,7 @@ pub(in crate::cache) use tier_work::TierWork;
 /// A cache of file versions' blocks in memory and disk chunks, found
 /// through the index, placed and evicted by its policy.
 pub(in crate::cache) struct ObjectCache {
+    clock: crate::io::time::Clock,
     paths: PathTable,
     blocks: BlockTable,
     /// Shared with the I/O in flight that lends its chunks.
@@ -77,6 +78,16 @@ pub(in crate::cache) struct ObjectCache {
 }
 
 impl ObjectCache {
+    pub(in crate::cache) fn with_clock(mut self, clock: crate::io::time::Clock) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    #[cfg(test)]
+    pub(in crate::cache) fn waiting_reads(&self) -> usize {
+        self.in_flight.waiting_reads()
+    }
+
     /// A cache of `memory_chunks` chunks of memory and the chunks of
     /// `disk`: its blocks placed by `placement`, which is built for both
     /// counts. Memory holds nothing; the disk holds what the snapshot the
@@ -97,6 +108,7 @@ impl ObjectCache {
             None => None,
         };
         let cache = Self {
+            clock: Default::default(),
             paths: PathTable::new(),
             blocks: BlockTable::new(),
             memory: Arc::new(MemoryPool::new(memory_chunks)?),
@@ -223,7 +235,7 @@ impl ObjectCache {
     ///
     /// If the read's output can't be made, or a read from the cache file
     /// can't be submitted.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::cache) fn start_planned_read<'c>(
         &'c self,
         file: &CacheableFile<'c>,
@@ -241,7 +253,7 @@ impl ObjectCache {
     /// # Errors
     ///
     /// If a read from the cache file can't be submitted.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::cache) fn retry_planned<'c>(
         &'c self,
         read: &mut PartialRead,
@@ -258,7 +270,7 @@ impl ObjectCache {
 
     /// Plans `read`'s GETs with `reads`, run by run as `work` locates them,
     /// as `T4Caching` plans them with its own: for tests.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "shuttle"))]
     fn plan_gets(
         read: &mut PartialRead,
         work: &mut TierWork<'_>,
@@ -278,7 +290,7 @@ impl ObjectCache {
     /// cached: for tests, whose fetches come after. A read that waits for a
     /// block another read is fetching waits until another test thread fills
     /// that read.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::cache) async fn read(
         &self,
         file: &CacheableFile<'_>,
@@ -329,13 +341,13 @@ impl BlocksToFetch {
         self.0.is_empty()
     }
 
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::cache) fn len(&self) -> usize {
         self.0.len()
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "shuttle"))]
 mod test_policy;
 
 #[cfg(all(test, feature = "shuttle"))]
@@ -343,5 +355,5 @@ mod shuttle_tests;
 
 // `[0..MIB]` is a list of one fetch, not the range's offsets.
 #[allow(clippy::single_range_in_vec_init)]
-#[cfg(all(test, not(feature = "shuttle")))]
+#[cfg(all(test, feature = "shuttle"))]
 mod tests;

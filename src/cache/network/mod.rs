@@ -34,6 +34,7 @@ pub(super) type Sleep = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + 
 /// those waiting for room, and a timer for late racers. A clone shares them.
 #[derive(Clone)]
 pub(super) struct Network {
+    clock: crate::io::time::Clock,
     /// The store the cache fetches what only the remote holds from.
     inner: Arc<dyn ObjectStore>,
     /// What plans each read's GETs, as the cache locates its blocks, and
@@ -59,8 +60,10 @@ impl Network {
         bytes_in_flight: NonZeroU64,
         merged_up_to: u64,
         sleep: Option<Sleep>,
+        clock: crate::io::time::Clock,
     ) -> Self {
         Self {
+            clock,
             inner,
             reads,
             gets: Arc::new(GetQueue::new(bytes_in_flight, merged_up_to)),
@@ -74,7 +77,7 @@ impl Network {
     }
 
     /// The GETs waiting for room now: for tests.
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(super) fn gets_waiting(&self) -> usize {
         self.gets.waiting()
     }

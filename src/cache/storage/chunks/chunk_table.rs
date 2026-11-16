@@ -54,7 +54,7 @@ impl ChunkTable {
     /// The block published in each chunk, `None` for a free one, as they
     /// are once nothing holds any: no writer, reader or I/O. `Err` names a
     /// chunk held still, or one the free bitmap has wrong.
-    #[cfg(any(test, feature = "__fuzz"))]
+    #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
     pub(in crate::cache::storage) fn blocks_at_rest(
         &self,
     ) -> Result<Vec<Option<BlockKey>>, String> {

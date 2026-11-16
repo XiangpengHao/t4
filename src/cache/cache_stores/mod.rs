@@ -18,7 +18,7 @@ use futures_util::future::BoxFuture;
 
 use super::FileVersionId;
 use super::policy::{ReadIntent, ReadPlan, ReadPolicy};
-#[cfg(any(all(test, not(feature = "shuttle")), feature = "__fuzz"))]
+#[cfg(any(test, feature = "__fuzz"))]
 use super::storage::ObjectCache;
 use super::storage::{CacheableFile, LocatedRun};
 use crate::io::error::Result;
@@ -27,7 +27,7 @@ mod in_process;
 mod shared;
 
 pub(super) use in_process::{InProcessCacheStore, PlacementMaker, TierSettings};
-#[cfg(all(test, not(feature = "shuttle")))]
+#[cfg(test)]
 use shared::OwnerConnection;
 pub(super) use shared::SharedCacheStore;
 
@@ -70,14 +70,14 @@ pub(super) trait CacheStore: Send + Sync {
     fn shut_down(&self) -> Result<()>;
 
     /// The storage half, if this process runs it.
-    #[cfg(any(all(test, not(feature = "shuttle")), feature = "__fuzz"))]
+    #[cfg(any(test, feature = "__fuzz"))]
     fn owned(&self) -> Option<&ObjectCache> {
         None
     }
 
     /// The connection to the owner, if another process runs the storage
     /// half: for tests.
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(test)]
     fn owner_connection(&self) -> Option<std::sync::Arc<OwnerConnection>> {
         None
     }
@@ -188,3 +188,6 @@ pub(super) enum VersionIdSource {
     /// connection a number of its own, one to each owner in turn.
     Owner { connection: u64 },
 }
+
+#[cfg(all(test, feature = "shuttle"))]
+pub(in crate::cache) use shared::TestTransport;

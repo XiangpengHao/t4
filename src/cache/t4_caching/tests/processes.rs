@@ -6,19 +6,12 @@
 //! owner's lock, a killed client's connection closing, and many processes
 //! starting at once.
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
 
 use super::*;
-
-/// The most a test waits for a child's marker, its read, or its exit.
-const PATIENCE: Duration = Duration::from_secs(10);
-
-/// The most a child waits for its parent, which may have died, before it
-/// exits: no test leaves a process behind for long.
-const CHILD_PATIENCE: Duration = Duration::from_secs(30);
 
 /// A child process of the test binary, playing `role` over a directory
 /// its parent shares with it ([`Self::spawn`]): killed, and reaped, as it
@@ -51,7 +44,8 @@ impl ChildProcess {
             .args([test.as_str(), "--exact", "--nocapture", "--test-threads=1"])
             .env(Self::ROLE, role)
             .env(Self::DIR, dir)
-            .stdout(Stdio::null());
+            .stdout(Stdio::null())
+            .stdin(Stdio::piped());
         command
     }
 
@@ -63,14 +57,8 @@ impl ChildProcess {
 
     /// Whether the child exited successfully, once it exits.
     fn exited_ok(&mut self) -> bool {
-        let deadline = Instant::now() + PATIENCE;
-        loop {
-            if let Some(status) = self.0.try_wait().unwrap() {
-                return status.success();
-            }
-            assert!(Instant::now() < deadline, "a child process exits");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        drop(self.0.stdin.take());
+        self.0.wait().unwrap().success()
     }
 }
 
@@ -101,25 +89,19 @@ impl Markers {
         std::fs::rename(aside, self.dir.join(name)).unwrap();
     }
 
-    /// What marker `name` says, once set; `None` if it isn't within
-    /// `patience`.
-    fn wait_for(&self, name: &str, patience: Duration) -> Option<String> {
-        let deadline = Instant::now() + patience;
+    /// What marker `name` says, once the peer sets it.
+    fn wait_for(&self, name: &str) -> String {
         loop {
             if let Ok(what) = std::fs::read_to_string(self.dir.join(name)) {
-                return Some(what);
+                return what;
             }
-            if Instant::now() >= deadline {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(2));
+            std::thread::yield_now();
         }
     }
 
-    /// What marker `name` says, which a test waits [`PATIENCE`] for.
+    /// Waits for the peer to acknowledge `name`.
     fn said(&self, name: &str) -> String {
-        self.wait_for(name, PATIENCE)
-            .unwrap_or_else(|| panic!("marker {name} is set"))
+        self.wait_for(name)
     }
 }
 
@@ -256,7 +238,8 @@ fn a_child_process_plays_its_role() {
             markers.set(&format!("fetched-{index}"), &fetched);
         }
     }
-    markers.wait_for("done", CHILD_PATIENCE);
+    // EOF means the parent finished, or died: no wall-clock deadline or orphan.
+    let _ = std::io::stdin().read(&mut [0]);
     drop(held);
 }
 
@@ -281,7 +264,7 @@ fn an_owner_killed_mid_read_leaves_its_client_the_cache() {
 
     owner.kill();
     drop(open);
-    assert_eq!(read.recv_timeout(PATIENCE).unwrap(), SharedProcess::data());
+    assert_eq!(read.recv().unwrap(), SharedProcess::data());
     wait_until(
         || {
             assert_eq!(client.read(0..SharedProcess::SIZE), SharedProcess::data());
@@ -345,14 +328,14 @@ fn a_client_killed_holding_a_claim_hands_it_to_its_waiter() {
     markers.said("get-out");
 
     let read = owner.read_on_thread(0..MIB);
-    let early = read.recv_timeout(Duration::from_millis(200));
-    assert!(
-        early.is_err(),
-        "the owner's read waits on the client's claim"
+    wait_until(
+        || owner.cache.cache_store().owned().unwrap().waiting_reads() == 1,
+        "the owner's read registered on the client's claim",
     );
+    assert!(read.try_recv().is_err());
     client.kill();
     assert_eq!(
-        read.recv_timeout(PATIENCE).unwrap(),
+        read.recv().unwrap(),
         SharedProcess::data().slice(..MIB as usize)
     );
     assert_eq!(owner.fetched_bytes(), MIB, "the owner's own GET");
@@ -380,7 +363,6 @@ fn eight_processes_starting_at_once_fetch_each_block_once() {
                 .unwrap()
         })
         .sum();
-    markers.set("done", "");
 
     for reader in &mut readers {
         assert!(reader.exited_ok(), "each read its bytes right");

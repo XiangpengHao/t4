@@ -91,7 +91,7 @@ impl FreeChunks {
         self.free_count
     }
 
-    #[cfg(any(test, feature = "__fuzz"))]
+    #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
     pub(super) fn is_free(&self, chunk: ChunkId) -> bool {
         let (word_index, mask) = self.bit_of(chunk);
         self.taken[word_index] & mask == 0

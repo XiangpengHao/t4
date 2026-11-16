@@ -281,6 +281,7 @@ impl<'c> TierWork<'c> {
                 drive: on_disk.position().file(),
                 bytes: pages.end - pages.start,
             },
+            &self.cache.clock,
         )
     }
 

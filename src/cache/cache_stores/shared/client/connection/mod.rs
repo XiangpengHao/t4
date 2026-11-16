@@ -5,16 +5,17 @@
 //! owner goes. The shared cache store's reads and fetches call the owner
 //! through it.
 
-use std::collections::HashMap;
+use crate::io::sync::Mutex;
+use crate::io::sync::atomic::{AtomicU64, Ordering};
+use crate::io::sync::thread::{self, JoinHandle};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::future::Future;
 use std::io;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::PoisonError;
 use std::task::{Context, Poll};
-use std::thread::{self, JoinHandle};
 
 use bytes::Bytes;
 
@@ -40,7 +41,7 @@ pub(in crate::cache) struct OwnerConnection {
     /// The spans of the reads the client ended, until the owner has too.
     lent: std::sync::Arc<LentSpans>,
     /// The bytes sent and taken on the socket so far: for tests.
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(test)]
     traffic: std::sync::Arc<Traffic>,
     /// The calls waiting for their answers, shared with the reader.
     calls: std::sync::Arc<CallTable>,
@@ -77,8 +78,13 @@ impl OwnerConnection {
         first_file: &Path,
         reads: Arc<dyn ReadPolicy>,
         number: u64,
+        #[cfg(all(test, feature = "shuttle"))] transport: &super::super::protocol::Transport,
     ) -> Result<Option<Self>> {
-        match Self::admitted(first_file) {
+        match Self::admitted(
+            first_file,
+            #[cfg(all(test, feature = "shuttle"))]
+            transport,
+        ) {
             Ok((socket, frames, region)) => {
                 Ok(Some(Self::start(socket, frames, region, reads, number)?))
             }
@@ -95,19 +101,28 @@ impl OwnerConnection {
     /// without: its reads' bytes go in the frames.
     fn admitted(
         first_file: &Path,
+        #[cfg(all(test, feature = "shuttle"))] transport: &super::super::protocol::Transport,
     ) -> Result<(
         FrameSocket,
         FrameReceiver,
         Option<std::sync::Arc<ClientRegion>>,
     )> {
         let cache_file = File::options().read(true).write(true).open(first_file)?;
-        let address = OwnerAddress::of(FileIdentity::of(&cache_file)?)?;
+        let address = OwnerAddress::of(
+            FileIdentity::of(&cache_file)?,
+            #[cfg(all(test, feature = "shuttle"))]
+            transport,
+        )?;
         let socket = FrameSocket::new(address.connect(rustix::process::geteuid())?)?;
         socket.set_read_timeout(Some(Hello::WAIT))?;
         let region = ClientRegion::make().ok();
         let mut hello = Hello::new(PROTOCOL_VERSION, cache_file);
         if let Some(region) = &region {
-            hello = hello.with_region(region.descriptor().try_clone_to_owned()?);
+            #[cfg(not(all(test, feature = "shuttle")))]
+            let descriptor = region.descriptor().try_clone_to_owned()?;
+            #[cfg(all(test, feature = "shuttle"))]
+            let descriptor = region.descriptor();
+            hello = hello.with_region(descriptor);
         }
         hello.send(&socket)?;
         let mut frames = FrameReceiver::new(socket.try_clone()?);
@@ -165,14 +180,14 @@ impl OwnerConnection {
         let outgoing = FrameSender::start(socket.try_clone()?, FrameSender::SEND_WAIT)?;
         let calls = std::sync::Arc::new(CallTable::default());
         let lent = std::sync::Arc::new(LentSpans::default());
-        #[cfg(all(test, not(feature = "shuttle")))]
+        #[cfg(test)]
         let traffic = std::sync::Arc::new(Traffic::default());
         let reader = OwnerFrames {
             frames,
             calls: std::sync::Arc::clone(&calls),
             lent: std::sync::Arc::clone(&lent),
             reads,
-            #[cfg(all(test, not(feature = "shuttle")))]
+            #[cfg(test)]
             traffic: std::sync::Arc::clone(&traffic),
         };
         let reader = thread::Builder::new()
@@ -182,7 +197,7 @@ impl OwnerConnection {
             socket,
             region,
             lent,
-            #[cfg(all(test, not(feature = "shuttle")))]
+            #[cfg(test)]
             traffic,
             calls,
             next_read: AtomicU64::new(0),
@@ -234,7 +249,7 @@ impl OwnerConnection {
     /// owner is gone.
     pub(super) fn tell(&self, frames: &[ClientFrame]) {
         let frames: Vec<Vec<u8>> = frames.iter().map(ClientFrame::encode).collect();
-        #[cfg(all(test, not(feature = "shuttle")))]
+        #[cfg(test)]
         for frame in &frames {
             (self.traffic.sent).fetch_add(frame.len() as u64, Ordering::Relaxed);
         }
@@ -294,20 +309,20 @@ impl OwnerConnection {
     }
 
     /// Whether the owner mapped the client's region: for tests.
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::cache::cache_stores::shared) fn has_region(&self) -> bool {
         self.region.is_some()
     }
 
     /// How many of the region's pages are free, if the owner mapped it:
     /// for tests.
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::cache) fn region_free_pages(&self) -> Option<u64> {
         self.region.as_ref().map(|region| region.free_pages())
     }
 
     /// The client's region, if its owner mapped it: for tests.
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::cache::cache_stores::shared) fn region(
         &self,
     ) -> Option<&std::sync::Arc<ClientRegion>> {
@@ -316,7 +331,7 @@ impl OwnerConnection {
 
     /// The bytes the connection has sent and taken so far, its frames whole:
     /// for tests.
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(test)]
     pub(in crate::cache::cache_stores::shared) fn socket_bytes(&self) -> (u64, u64) {
         let traffic = &self.traffic;
         (
@@ -326,7 +341,7 @@ impl OwnerConnection {
     }
 
     /// Whether `bytes` lie in the client's region: for tests.
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::cache) fn region_holds(&self, bytes: &[u8]) -> bool {
         self.region
             .as_ref()
@@ -335,7 +350,7 @@ impl OwnerConnection {
 
     /// The numbers of the calls waiting for their answers, in order: for
     /// tests.
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::cache) fn calls_waiting(&self) -> Vec<u64> {
         let mut waiting: Vec<u64> = self.calls.calls().waiting.keys().copied().collect();
         waiting.sort_unstable();
@@ -373,7 +388,7 @@ struct CallTable {
 struct WaitingCalls {
     /// The number the next call takes.
     next: u64,
-    waiting: HashMap<u64, Arc<TaskCompletion<OwnerFrame>>>,
+    waiting: BTreeMap<u64, Arc<TaskCompletion<OwnerFrame>>>,
     owner_gone: bool,
 }
 
@@ -453,7 +468,7 @@ impl CallTable {
         ))
     }
 
-    fn calls(&self) -> std::sync::MutexGuard<'_, WaitingCalls> {
+    fn calls(&self) -> crate::io::sync::MutexGuard<'_, WaitingCalls> {
         self.calls.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -488,13 +503,13 @@ impl Drop for WaitingCall {
 /// ([`OwnerFrame::Ended`]); every one once the owner is gone, and those
 /// lent after at once (`None`).
 struct LentSpans {
-    reads: Mutex<Option<HashMap<u64, Vec<RegionSpan>>>>,
+    reads: Mutex<Option<BTreeMap<u64, Vec<RegionSpan>>>>,
 }
 
 impl Default for LentSpans {
     fn default() -> Self {
         Self {
-            reads: Mutex::new(Some(HashMap::new())),
+            reads: Mutex::new(Some(BTreeMap::new())),
         }
     }
 }
@@ -526,7 +541,7 @@ impl LentSpans {
         drop(reads);
     }
 
-    fn reads(&self) -> std::sync::MutexGuard<'_, Option<HashMap<u64, Vec<RegionSpan>>>> {
+    fn reads(&self) -> crate::io::sync::MutexGuard<'_, Option<BTreeMap<u64, Vec<RegionSpan>>>> {
         self.reads.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -541,12 +556,12 @@ struct OwnerFrames {
     calls: std::sync::Arc<CallTable>,
     lent: std::sync::Arc<LentSpans>,
     reads: Arc<dyn ReadPolicy>,
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(test)]
     traffic: std::sync::Arc<Traffic>,
 }
 
 /// The bytes a connection has sent and taken, its frames whole: for tests.
-#[cfg(all(test, not(feature = "shuttle")))]
+#[cfg(test)]
 #[derive(Default)]
 struct Traffic {
     sent: AtomicU64,
@@ -577,7 +592,7 @@ impl OwnerFrames {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(error) => return Err(error.into()),
             };
-            #[cfg(all(test, not(feature = "shuttle")))]
+            #[cfg(test)]
             (self.traffic.taken).fetch_add(8 + body.len() as u64, Ordering::Relaxed);
             match OwnerFrame::decode(body)? {
                 OwnerFrame::DiskRead {
@@ -595,5 +610,5 @@ impl OwnerFrames {
     }
 }
 
-#[cfg(all(test, not(feature = "shuttle")))]
+#[cfg(all(test, feature = "shuttle"))]
 mod tests;

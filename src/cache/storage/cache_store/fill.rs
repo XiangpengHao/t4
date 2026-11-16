@@ -85,7 +85,7 @@ impl ObjectCache {
     /// Takes `fetched`, the file's bytes of `fetch`, in one piece, as a
     /// fetch whose answer comes in one does: for tests, which have the
     /// bytes at hand.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::cache) async fn take_fetched(
         &self,
         read: &mut PartialRead,

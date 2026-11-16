@@ -50,7 +50,7 @@ impl BlockTable {
     }
 
     /// Every entry, in order.
-    #[cfg(any(test, feature = "__fuzz"))]
+    #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
     pub(in crate::cache) fn entries(&self) -> Vec<(BlockKey, Location)> {
         let mut entries = Vec::new();
         self.blocks.scan::<u64, ()>(.., |key, location| {

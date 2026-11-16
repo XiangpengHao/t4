@@ -40,6 +40,7 @@ enum PlacementSource {
 /// chunks, the cache files, how they are read and take room on their
 /// drives, and the placement policy.
 pub(in crate::cache) struct TierSettings {
+    clock: crate::io::time::Clock,
     memory_chunks: NonZeroU32,
     disk_files: Vec<DiskFile>,
     queue_depth: NonZeroU32,
@@ -49,6 +50,10 @@ pub(in crate::cache) struct TierSettings {
 }
 
 impl TierSettings {
+    pub(in crate::cache) fn set_clock(&mut self, clock: crate::io::time::Clock) {
+        self.clock = clock;
+    }
+
     pub(in crate::cache) fn new(
         memory_chunks: NonZeroU32,
         disk_files: Vec<DiskFile>,
@@ -58,6 +63,7 @@ impl TierSettings {
         placement: Option<PlacementMaker>,
     ) -> Self {
         Self {
+            clock: Default::default(),
             memory_chunks,
             disk_files,
             queue_depth,
@@ -118,7 +124,8 @@ impl InProcessCacheStore {
         let disk_chunks = NonZeroU32::new(disk.chunks().chunk_count())
             .expect("a disk file holds a chunk at least");
         let placement = tiers.placement(disk_chunks)?;
-        let cache = ObjectCache::new(tiers.memory_chunks, disk, placement)?;
+        let cache =
+            ObjectCache::new(tiers.memory_chunks, disk, placement)?.with_clock(tiers.clock.clone());
         Ok(Self {
             cache: Arc::new(cache),
         })
@@ -166,7 +173,7 @@ impl CacheStore for InProcessCacheStore {
         Ok(self.cache.shut_down()?)
     }
 
-    #[cfg(any(all(test, not(feature = "shuttle")), feature = "__fuzz"))]
+    #[cfg(any(test, feature = "__fuzz"))]
     fn owned(&self) -> Option<&ObjectCache> {
         Some(&self.cache)
     }

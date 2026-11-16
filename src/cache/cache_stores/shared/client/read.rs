@@ -1,9 +1,10 @@
 //! [`ClientRead`]: a client's read through its owner, and [`ReadNumber`],
 //! the read's number on the connection, which its fetches hold too.
 
+use crate::io::sync::Mutex;
 use std::io;
 use std::ops::Range;
-use std::sync::{Mutex, PoisonError};
+use std::sync::PoisonError;
 
 use bytes::Bytes;
 use futures_util::future::BoxFuture;

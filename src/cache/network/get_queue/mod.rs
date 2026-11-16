@@ -207,13 +207,13 @@ impl GetQueue {
     }
 
     /// Bytes in flight now.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(super) fn in_flight(&self) -> u64 {
         self.state().in_flight
     }
 
     /// GETs waiting now.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(super) fn waiting(&self) -> usize {
         self.state().waiting.len()
     }
@@ -550,7 +550,7 @@ impl Handoff {
     }
 }
 
-#[cfg(all(test, not(feature = "shuttle")))]
+#[cfg(all(test, feature = "shuttle"))]
 mod tests;
 
 #[cfg(all(test, feature = "shuttle"))]

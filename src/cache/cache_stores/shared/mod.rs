@@ -11,15 +11,16 @@
 //! - `protocol`: what the two speak: the frames, the socket they cross, the
 //!   owner's address, the handshake, and the client's region.
 
+use crate::io::sync::{Mutex, RwLock};
 use std::ops::Range;
-use std::sync::{Mutex, OnceLock, PoisonError, RwLock, TryLockError};
-use std::time::{Duration, Instant};
+use std::sync::{OnceLock, PoisonError, TryLockError};
+use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 
 use super::{CacheStore, CacheStoreRead, InProcessCacheStore, TierSettings};
 use crate::cache::policy::{ReadIntent, ReadPolicy};
-#[cfg(any(all(test, not(feature = "shuttle")), feature = "__fuzz"))]
+#[cfg(any(test, feature = "__fuzz"))]
 use crate::cache::storage::ObjectCache;
 use crate::io::error::{Error, Result};
 use crate::io::sync::Arc;
@@ -36,6 +37,9 @@ use owner::OwnerListener;
 /// files' lock, served to its clients; until then its owner's, through a
 /// connection to it, or to the next owner once that one goes.
 pub(in crate::cache) struct SharedCacheStore {
+    #[cfg(all(test, feature = "shuttle"))]
+    transport: protocol::Transport,
+    clock: crate::io::time::Clock,
     /// Set once this process takes the lock: it owns the cache from then
     /// on, for good, as an owner never goes back to being a client.
     owned: OnceLock<OwnedCache>,
@@ -64,7 +68,7 @@ struct HandOff {
     tiers: TierSettings,
     reads: Arc<dyn ReadPolicy>,
     /// When the next try is due.
-    next_try: Instant,
+    next_try: Duration,
     /// The connections tried so far: the next one's number, which tells
     /// the version ids its owner gives apart from the last owner's.
     connections: u64,
@@ -100,25 +104,30 @@ impl SharedCacheStore {
         tiers: TierSettings,
         reads: Arc<dyn ReadPolicy>,
         wait: Duration,
+        clock: crate::io::time::Clock,
+        #[cfg(all(test, feature = "shuttle"))] transport: protocol::Transport,
     ) -> Result<Self> {
         let store = Self {
+            #[cfg(all(test, feature = "shuttle"))]
+            transport,
+            clock: clock.clone(),
             owned: OnceLock::new(),
             client: RwLock::new(None),
             hand_off: Mutex::new(HandOff {
                 tiers,
                 reads,
-                next_try: Instant::now(),
+                next_try: clock.now(),
                 connections: 0,
                 shut_down: false,
             }),
         };
-        let deadline = Instant::now() + wait;
+        let deadline = store.clock.now() + wait;
         let mut hand_off = store.hand_off();
         while !store.try_once(&mut hand_off)? {
-            if Instant::now() >= deadline {
+            if store.clock.now() >= deadline {
                 return Err(Error::Busy);
             }
-            std::thread::sleep(Self::RETRY);
+            store.clock.wait(Self::RETRY);
         }
         drop(hand_off);
         Ok(store)
@@ -167,7 +176,7 @@ impl SharedCacheStore {
             Server::Owner(owner) if std::sync::Arc::ptr_eq(&owner, &gone) => {}
             server => return server,
         }
-        let now = Instant::now();
+        let now = self.clock.now();
         if now < hand_off.next_try {
             return Server::Owner(gone);
         }
@@ -197,7 +206,14 @@ impl SharedCacheStore {
         hand_off.connections += 1;
         let first_file = hand_off.tiers.first_file();
         let reads = Arc::clone(&hand_off.reads);
-        let Some(owner) = OwnerConnection::connect(first_file, reads, hand_off.connections)? else {
+        let Some(owner) = OwnerConnection::connect(
+            first_file,
+            reads,
+            hand_off.connections,
+            #[cfg(all(test, feature = "shuttle"))]
+            &self.transport,
+        )?
+        else {
             return Ok(false);
         };
         *self.client.write().unwrap_or_else(PoisonError::into_inner) =
@@ -213,9 +229,15 @@ impl SharedCacheStore {
         // held by another process: one of another user, as any may hold an
         // abstract name on Linux, or an owner of a deleted cache file whose
         // inode this one's took (decision 6).
-        let listener = cache
-            .first_file()
-            .and_then(|first_file| OwnerListener::listen(Arc::clone(cache), first_file).ok());
+        let listener = cache.first_file().and_then(|first_file| {
+            OwnerListener::listen(
+                Arc::clone(cache),
+                first_file,
+                #[cfg(all(test, feature = "shuttle"))]
+                &self.transport,
+            )
+            .ok()
+        });
         let owned = OwnedCache {
             _listener: listener,
             store,
@@ -226,7 +248,7 @@ impl SharedCacheStore {
         *self.client.write().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
-    fn hand_off(&self) -> std::sync::MutexGuard<'_, HandOff> {
+    fn hand_off(&self) -> crate::io::sync::MutexGuard<'_, HandOff> {
         self.hand_off.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -275,17 +297,21 @@ impl CacheStore for SharedCacheStore {
         }
     }
 
-    #[cfg(any(all(test, not(feature = "shuttle")), feature = "__fuzz"))]
+    #[cfg(any(test, feature = "__fuzz"))]
     fn owned(&self) -> Option<&ObjectCache> {
         self.owned.get().map(|owned| &**owned.store.cache())
     }
 
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(test)]
     fn owner_connection(&self) -> Option<std::sync::Arc<OwnerConnection>> {
         let client = self.client.read().unwrap_or_else(PoisonError::into_inner);
         client.as_ref().map(std::sync::Arc::clone)
     }
 }
 
-#[cfg(all(test, not(feature = "shuttle")))]
+#[cfg(test)]
+#[allow(dead_code, unused_imports)] // Platform tests use only the handshake fixtures.
 mod tests;
+
+#[cfg(all(test, feature = "shuttle"))]
+pub(in crate::cache) use protocol::Transport as TestTransport;

@@ -9,16 +9,23 @@
 //! - **macOS:** a POSIX shared memory object, unlinked once made: XNU sizes
 //!   one once, and refuses every `ftruncate` after, from any descriptor.
 
+use crate::io::sync::{Mutex, MutexGuard};
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::io;
 use std::ops::Range;
+#[cfg(not(all(test, feature = "shuttle")))]
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::ptr::NonNull;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, PoisonError};
 
 use bytes::Bytes;
 use rustix::mm::{MapFlags, ProtFlags};
+
+#[cfg(all(test, feature = "shuttle"))]
+pub(in crate::cache::cache_stores::shared) type RegionDescriptor = Arc<SharedMapping>;
+#[cfg(not(all(test, feature = "shuttle")))]
+pub(in crate::cache::cache_stores::shared) type RegionDescriptor = OwnedFd;
 
 use crate::PAGE_SIZE_U64;
 use crate::cache::read_output::ReadOutput;
@@ -47,7 +54,7 @@ impl SpanName {
 
 /// A shared mapping of a region, read and written by both processes:
 /// unmapped once dropped.
-struct SharedMapping {
+pub(in crate::cache::cache_stores::shared) struct SharedMapping {
     ptr: NonNull<u8>,
     len: usize,
 }
@@ -59,6 +66,7 @@ unsafe impl Sync for SharedMapping {}
 
 impl SharedMapping {
     /// The first `len` bytes of `memory`, mapped shared, to read and write.
+    #[cfg(not(all(test, feature = "shuttle")))]
     fn map(memory: BorrowedFd<'_>, len: usize) -> io::Result<Self> {
         // SAFETY: a fresh mapping, at an address the kernel picks, aliases
         // no memory of this process's.
@@ -74,6 +82,23 @@ impl SharedMapping {
         };
         let ptr = NonNull::new(ptr.cast()).ok_or(io::ErrorKind::OutOfMemory)?;
         Ok(Self { ptr, len })
+    }
+
+    #[cfg(all(test, feature = "shuttle"))]
+    fn allocate(len: usize) -> io::Result<Self> {
+        // SAFETY: a fresh private mapping owned until the final region drops.
+        let ptr = unsafe {
+            rustix::mm::mmap_anonymous(
+                std::ptr::null_mut(),
+                len,
+                ProtFlags::READ | ProtFlags::WRITE,
+                MapFlags::PRIVATE,
+            )?
+        };
+        Ok(Self {
+            ptr: NonNull::new(ptr.cast()).ok_or(io::ErrorKind::OutOfMemory)?,
+            len,
+        })
     }
 
     /// The address of byte `offset` of `span`, if the mapping holds the
@@ -102,8 +127,9 @@ impl Drop for SharedMapping {
 /// not taken. Spans hold it, so it lives as long as the last of them, the
 /// caller's bytes of a read included.
 pub(in crate::cache::cache_stores::shared) struct ClientRegion {
+    #[cfg(not(all(test, feature = "shuttle")))]
     memory: OwnedFd,
-    mapping: SharedMapping,
+    mapping: Arc<SharedMapping>,
     free: Mutex<FreeSpans>,
 }
 
@@ -112,12 +138,12 @@ impl ClientRegion {
     pub(in crate::cache::cache_stores::shared) const BYTES: u64 = 1 << 30;
 
     /// A span this long or longer, given back, gives its memory back too.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(all(test, feature = "shuttle"))))]
     const PUNCHED_FROM: u64 = 2 << 20;
 
     /// How many names a POSIX shared memory object is tried under before
     /// a region is given up.
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(not(target_os = "linux"), not(all(test, feature = "shuttle"))))]
     const NAME_TRIES: u32 = 16;
 
     /// A region, its memory made and mapped, every page free.
@@ -126,18 +152,23 @@ impl ClientRegion {
     ///
     /// If the memory can't be made, sized, sealed or mapped.
     pub(in crate::cache::cache_stores::shared) fn make() -> io::Result<Arc<Self>> {
+        #[cfg(not(all(test, feature = "shuttle")))]
         let memory = Self::shared_memory()?;
+        #[cfg(not(all(test, feature = "shuttle")))]
         let mapping = SharedMapping::map(memory.as_fd(), Self::BYTES as usize)?;
+        #[cfg(all(test, feature = "shuttle"))]
+        let mapping = SharedMapping::allocate(Self::BYTES as usize)?;
         Ok(Arc::new(Self {
+            #[cfg(not(all(test, feature = "shuttle")))]
             memory,
-            mapping,
+            mapping: Arc::new(mapping),
             free: Mutex::new(FreeSpans::new(Self::BYTES / PAGE_SIZE_U64)),
         }))
     }
 
     /// A memfd of [`Self::BYTES`], sealed so that it can neither shrink nor
     /// grow, nor take a seal more.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(all(test, feature = "shuttle"))))]
     fn shared_memory() -> io::Result<OwnedFd> {
         use rustix::fs::{MemfdFlags, SealFlags};
         let flags = MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING;
@@ -151,7 +182,7 @@ impl ClientRegion {
     /// A POSIX shared memory object of [`Self::BYTES`], under a name of
     /// this process's, unlinked once open: no other process opens it by
     /// name. Sized once, it takes no `ftruncate` after.
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(not(target_os = "linux"), not(all(test, feature = "shuttle"))))]
     fn shared_memory() -> io::Result<OwnedFd> {
         use rustix::fs::Mode;
         use rustix::shm::{self, OFlags};
@@ -177,8 +208,14 @@ impl ClientRegion {
     }
 
     /// The region's memory, to send its owner.
+    #[cfg(not(all(test, feature = "shuttle")))]
     pub(in crate::cache::cache_stores::shared) fn descriptor(&self) -> BorrowedFd<'_> {
         self.memory.as_fd()
+    }
+
+    #[cfg(all(test, feature = "shuttle"))]
+    pub(in crate::cache::cache_stores::shared) fn descriptor(&self) -> RegionDescriptor {
+        Arc::clone(&self.mapping)
     }
 
     /// A span of `len` bytes, whole pages, a page at least; `None` if no
@@ -199,7 +236,7 @@ impl ClientRegion {
     /// Gives `pages` from `first_page` back, a span done with: its memory
     /// first, if it is long, on Linux, before another span may take them.
     fn give_back(&self, first_page: u64, pages: u64) {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", not(all(test, feature = "shuttle"))))]
         if pages * PAGE_SIZE_U64 >= Self::PUNCHED_FROM {
             use rustix::fs::FallocateFlags;
             // A hole that can't be punched leaves the memory taken, and
@@ -215,20 +252,20 @@ impl ClientRegion {
     }
 
     /// How many of the region's pages are free: for tests.
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(test)]
     pub(in crate::cache::cache_stores::shared) fn free_pages(&self) -> u64 {
         self.free().runs.values().sum()
     }
 
     /// Whether `bytes` lie in the region: for tests.
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::cache::cache_stores::shared) fn holds(&self, bytes: &[u8]) -> bool {
         let start = self.mapping.ptr.as_ptr() as usize;
         let at = bytes.as_ptr() as usize;
         start <= at && at + bytes.len() <= start + self.mapping.len
     }
 
-    fn free(&self) -> std::sync::MutexGuard<'_, FreeSpans> {
+    fn free(&self) -> MutexGuard<'_, FreeSpans> {
         self.free.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -324,11 +361,12 @@ impl AsRef<[u8]> for ServedSpan {
 /// only to copy its bytes: a client that changes them meanwhile garbles
 /// its own bytes, nothing of the owner's (decision 8).
 pub(in crate::cache::cache_stores::shared) struct OwnerRegion {
-    mapping: SharedMapping,
+    mapping: Arc<SharedMapping>,
 }
 
 impl OwnerRegion {
     /// The most bytes of a region an owner maps: a client's is 1 GiB.
+    #[cfg(not(all(test, feature = "shuttle")))]
     const MOST_BYTES: u64 = 16 << 30;
 
     /// The region of `memory`, mapped, if it can't shrink under the owner
@@ -338,6 +376,7 @@ impl OwnerRegion {
     ///
     /// If it could shrink, is empty, not whole pages or too large, or can't
     /// be mapped.
+    #[cfg(not(all(test, feature = "shuttle")))]
     pub(in crate::cache::cache_stores::shared) fn accept(memory: OwnedFd) -> Result<Self> {
         let bytes = u64::try_from(rustix::fs::fstat(&memory).map_err(io::Error::from)?.st_size)
             .map_err(|_| Self::refused("of a negative size"))?;
@@ -346,11 +385,20 @@ impl OwnerRegion {
         }
         Self::cannot_shrink(&memory, bytes)?;
         let mapping = SharedMapping::map(memory.as_fd(), bytes as usize)?;
+        Ok(Self {
+            mapping: Arc::new(mapping),
+        })
+    }
+
+    #[cfg(all(test, feature = "shuttle"))]
+    pub(in crate::cache::cache_stores::shared) fn accept(
+        mapping: RegionDescriptor,
+    ) -> Result<Self> {
         Ok(Self { mapping })
     }
 
     /// Whether `memory` is a memfd sealed against shrinking.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(all(test, feature = "shuttle"))))]
     fn cannot_shrink(memory: &OwnedFd, _bytes: u64) -> Result<()> {
         use rustix::fs::SealFlags;
         let seals = rustix::fs::fcntl_get_seals(memory)
@@ -364,7 +412,7 @@ impl OwnerRegion {
     /// Whether `memory`, of `bytes`, is a POSIX shared memory object sized
     /// already: it refuses an `ftruncate`, to its own size too, which a
     /// regular file takes, and which changes nothing either way.
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(not(target_os = "linux"), not(all(test, feature = "shuttle"))))]
     fn cannot_shrink(memory: &OwnedFd, bytes: u64) -> Result<()> {
         match rustix::fs::ftruncate(memory, bytes) {
             Err(rustix::io::Errno::INVAL) => Ok(()),
