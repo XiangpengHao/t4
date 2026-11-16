@@ -159,7 +159,7 @@ without elapsed-time assertions or delays:
 `shared/protocol/region/tests.rs` remains outside shuttle too: its four tests
 (five on Linux) are single-threaded checks of actual mappings, span allocation,
 and refusal of shrinkable/unsealed memory. Pure frame-format tests and the
-synchronous log/file-allocation checks also stay ordinary unit tests.
+synchronous log checks also stay ordinary unit tests.
 No original concurrent scenario was removed: the remaining shared/client,
 restart, network, claim and policy scenarios moved to the modeled suite.
 

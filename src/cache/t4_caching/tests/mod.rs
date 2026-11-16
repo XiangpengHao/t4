@@ -356,34 +356,6 @@ fn a_builder_needs_a_memory_capacity_and_a_disk_file() {
     });
 }
 
-#[cfg(feature = "shuttle")]
-#[test]
-fn a_cache_file_takes_its_room_at_build_unless_allocated_on_demand() {
-    crate::io::test_schedule::TestSchedule::check(|| {
-        use std::os::unix::fs::MetadataExt;
-        let inner = Arc::new(CountingStore::default());
-        for on_demand in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let cache = match on_demand {
-                true => builder(&inner, &dir).with_on_demand_disk_allocation(),
-                false => builder(&inner, &dir),
-            }
-            .build()
-            .unwrap();
-            let file = std::fs::metadata(dir.path().join("cache")).unwrap();
-            assert_eq!(file.len(), 8 * MIB);
-            // `st_blocks` counts 512-byte units.
-            let allocated = file.blocks() * 512;
-            assert_eq!(
-                allocated >= 8 * MIB,
-                !on_demand,
-                "{allocated} bytes allocated"
-            );
-            drop(cache);
-        }
-    });
-}
-
 /// By any path that reaches the file, a symlink too.
 #[cfg(feature = "shuttle")]
 #[test]
@@ -1197,6 +1169,26 @@ fn a_late_race_waits_for_its_timer() {
                 "no late racer"
             );
         }
+    });
+}
+
+/// The late request may answer while the first waits for memory to land a piece.
+#[cfg(feature = "shuttle")]
+#[test]
+fn a_late_race_won_mid_landing_loses_no_bytes() {
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let reads = late_racing();
+        let inner = Arc::new(CountingStore::default());
+        let at_once = |_| std::future::ready(()).boxed();
+        let (_dir, store, data) = raced_late_by(&inner, &reads, Some(Box::new(at_once)));
+        let filler = file_bytes(4 * MIB, 9);
+        put(inner.as_ref(), &Path::from("b"), &filler);
+        assert_eq!(get_range(&store, &Path::from("b"), 0..4 * MIB), filler);
+        // Memory is full: landing a block first writes another to disk.
+        assert_eq!(
+            get_range(&store, &Path::from("a"), 0..MIB),
+            data.slice(0..MIB as usize)
+        );
     });
 }
 

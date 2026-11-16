@@ -5,9 +5,9 @@
 #
 #   nix develop -c bench/disk_restart/run.sh <results dir>
 #
-#   desktop              20 GiB in 64 MiB files, one on-demand cache file
+#   desktop              20 GiB in 64 MiB files, one cache file
 #   desktop-small-files  20 GiB in 1 MiB files: a path and e_tag a block, the log's worst
-#   server               256 GiB in 64 MiB files, an eager cache file on each of three SSDs
+#   server               256 GiB in 64 MiB files, a cache file on each of three SSDs
 #
 # Each again under strace, timing only the syscalls that make the log durable, so the time
 # splits into waiting on the drives and the rest. Writes <run>.csv, <run>.log, drives.txt,
@@ -48,7 +48,7 @@ traced() {
         "$BIN" --label "$name" --out "$OUT/$name.csv" --restarts 2 "$@" 2> "$OUT/$name.log"
 }
 
-DESKTOP=(--dir /mnt/t4/0 --blocks 20480 --on-demand)
+DESKTOP=(--dir /mnt/t4/0 --blocks 20480)
 SERVER=(--dir /mnt/t4/0 --dir /mnt/t4/1 --dir /mnt/t4/2 --blocks 262144)
 
 run desktop "${DESKTOP[@]}" --file-blocks 64

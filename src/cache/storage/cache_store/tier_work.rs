@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::future::Future;
 use std::num::NonZeroU8;
 use std::ops::Range;
@@ -47,8 +46,9 @@ pub(in crate::cache) struct TierWork<'c> {
     file: CacheableFile<'c>,
     range: Range<u64>,
     intent: Option<ReadIntent>,
-    /// Each located once the GETs of the one before claim the blocks they widen to.
-    unlocated: VecDeque<Vec<PlannedBlock>>,
+    /// In order, with gaps where an earlier round served the read: one run, so no GET of one
+    /// run widens to blocks another has claimed.
+    unlocated: Vec<PlannedBlock>,
     page_reads: Vec<(DiskChunkReader<'c>, BoxFuture<'c, Result<()>>)>,
     promotions: Vec<(DiskChunkReader<'c>, PlannedBlock)>,
     waits: Vec<(PlannedBlock, Arc<BlockFetch>)>,
@@ -62,7 +62,7 @@ impl<'c> TierWork<'c> {
         file: CacheableFile<'c>,
         range: Range<u64>,
         intent: Option<ReadIntent>,
-        unlocated: VecDeque<Vec<PlannedBlock>>,
+        unlocated: Vec<PlannedBlock>,
     ) -> Self {
         Self {
             cache,
@@ -86,50 +86,54 @@ impl<'c> TierWork<'c> {
             self.held.is_none(),
             "a run's GETs are taken before the next run is located"
         );
+        let blocks = std::mem::take(&mut self.unlocated);
+        let (Some(first), Some(last)) = (blocks.first(), blocks.last()) else {
+            return Ok(None);
+        };
+        let first = first.key().index();
+        let span = (last.key().index() - first + 1) as usize;
+        // A gap is a memory hit to the policy: the read holds its bytes already.
+        let mut sources = vec![BlockSource::Memory; span];
+        let mut remote: Vec<_> = std::iter::repeat_with(|| None).take(span).collect();
         let cache = self.cache;
-        while let Some(blocks) = self.unlocated.pop_front() {
-            let mut sources = Vec::with_capacity(blocks.len());
-            let mut remote = Vec::with_capacity(blocks.len());
-            for block in &blocks {
-                let context = self.context(block.key(), true);
-                let (source, fetch) = match cache.locate(block, &context) {
-                    Located::Memory(reader) => {
-                        self.take_memory_hit(read, block, &reader);
-                        (BlockSource::Memory, None)
-                    }
-                    Located::Disk(reader) => {
-                        self.take_disk_hit(read, block, reader)?;
-                        (BlockSource::Disk, None)
-                    }
-                    Located::InFlight(fetch) => (
-                        BlockSource::InFlight {
-                            requests: fetch.requests(),
-                        },
-                        Some(RemoteBlock::InFlight(fetch)),
-                    ),
-                    Located::Remote { admit, claim } => (
-                        BlockSource::Remote,
-                        Some(RemoteBlock::Fetched { admit, claim }),
-                    ),
-                };
-                sources.push(source);
-                remote.push(fetch);
-            }
-            if remote.iter().any(Option::is_some) {
-                let located = LocatedRun {
-                    first: blocks[0].key().index(),
-                    asked: Self::asked_within(read.bytes(), &blocks),
-                    sources,
-                };
-                self.held = Some(HeldRun {
-                    located: located.clone(),
-                    blocks,
-                    remote,
-                });
-                return Ok(Some(located));
-            }
+        for block in &blocks {
+            let context = self.context(block.key(), true);
+            let at = (block.key().index() - first) as usize;
+            (sources[at], remote[at]) = match cache.locate(block, &context) {
+                Located::Memory(reader) => {
+                    self.take_memory_hit(read, block, &reader);
+                    (BlockSource::Memory, None)
+                }
+                Located::Disk(reader) => {
+                    self.take_disk_hit(read, block, reader)?;
+                    (BlockSource::Disk, None)
+                }
+                Located::InFlight(fetch) => (
+                    BlockSource::InFlight {
+                        requests: fetch.requests(),
+                    },
+                    Some(RemoteBlock::InFlight(fetch)),
+                ),
+                Located::Remote { admit, claim } => (
+                    BlockSource::Remote,
+                    Some(RemoteBlock::Fetched { admit, claim }),
+                ),
+            };
         }
-        Ok(None)
+        if remote.iter().all(Option::is_none) {
+            return Ok(None);
+        }
+        let located = LocatedRun {
+            first,
+            asked: Self::asked_within(read.bytes(), &blocks),
+            sources,
+        };
+        self.held = Some(HeldRun {
+            located: located.clone(),
+            blocks,
+            remote,
+        });
+        Ok(Some(located))
     }
 
     /// Falls back to the default's GETs: a policy's mistake, wherever it ran, costs a read nothing.
@@ -170,8 +174,9 @@ impl<'c> TierWork<'c> {
             read.fetches
                 .push(PlannedFetch::new(&read.version, get, fetched));
         }
-        for (block, fetch) in blocks.iter().zip(remote) {
-            if let Some(RemoteBlock::InFlight(fetch)) = fetch {
+        for block in &blocks {
+            let at = (block.key().index() - first) as usize;
+            if let Some(RemoteBlock::InFlight(fetch)) = remote[at].take() {
                 self.waits.push((*block, fetch));
             }
         }

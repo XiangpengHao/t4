@@ -38,9 +38,6 @@ struct Args {
     /// Each file's blocks. The log keeps a file version's path and e_tag once for all of them.
     #[arg(long, default_value_t = 64)]
     file_blocks: u64,
-    /// Cache files that grow as blocks are written, as on a desktop's shared drive.
-    #[arg(long)]
-    on_demand: bool,
     /// Restarts timed.
     #[arg(long, default_value_t = 5)]
     restarts: u64,
@@ -58,7 +55,6 @@ struct Args {
 struct RestartBench {
     cache_files: Vec<PathBuf>,
     file_capacity: u64,
-    on_demand: bool,
     blocks: u64,
     file_blocks: u64,
     paths: Arc<Vec<Path>>,
@@ -94,7 +90,6 @@ impl RestartBench {
         Self {
             cache_files: cache_files.collect(),
             file_capacity: tier_blocks.div_ceil(args.dir.len() as u64) * Self::BLOCK,
-            on_demand: args.on_demand,
             blocks: args.blocks,
             file_blocks: args.file_blocks,
             paths: Arc::new(paths),
@@ -128,9 +123,6 @@ impl RestartBench {
             .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk));
         for path in &self.cache_files {
             builder = builder.with_disk_file(path, self.file_capacity);
-        }
-        if self.on_demand {
-            builder = builder.with_on_demand_disk_allocation();
         }
         Ok(builder.build()?)
     }
@@ -207,7 +199,7 @@ struct RestartRow {
 }
 
 impl RestartRow {
-    const CSV_COLUMNS: &str = "label,restart,blocks,file_blocks,cache_files,on_demand,\
+    const CSV_COLUMNS: &str = "label,restart,blocks,file_blocks,cache_files,\
                                log_bytes,shut_down_ms,drop_ms,build_ms,gets_after_build";
 
     fn csv(&self, label: &str, bench: &RestartBench) -> String {
@@ -217,12 +209,11 @@ impl RestartRow {
             })
         };
         format!(
-            "{label},{},{},{},{},{},{},{},{},{},{}",
+            "{label},{},{},{},{},{},{},{},{},{}",
             self.restart,
             bench.blocks,
             bench.file_blocks,
             bench.cache_files.len(),
-            bench.on_demand,
             self.log_bytes,
             millis(self.shut_down),
             millis(self.drop),

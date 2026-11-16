@@ -1,4 +1,4 @@
-use crate::io::sync::Arc;
+use crate::io::sync::{Arc, Mutex};
 
 use shuttle::future::block_on;
 use tempfile::TempDir;
@@ -10,8 +10,8 @@ use crate::cache::policy::{
     Admit, BlockSource, DiskHit, FetchRuns, IoEvent, LocatedRead, PlannedGet, ReadPlan, Tier,
     VictimAction,
 };
+use crate::cache::storage::DiskFile;
 use crate::cache::storage::index::Location;
-use crate::cache::storage::{DiskFile, FileAllocation};
 use crate::cache::{BLOCK_SIZE_U64, BlockKey, ChunkId};
 use std::num::NonZeroU8;
 
@@ -20,13 +20,7 @@ const MIB: u64 = BLOCK_SIZE_U64;
 fn cache(memory_chunks: u32, disk_chunks: u32) -> (TempDir, ObjectCache, Arc<TestPolicy>) {
     let dir = tempfile::tempdir().unwrap();
     let file = DiskFile::new(dir.path().join("cache"), u64::from(disk_chunks) * MIB);
-    let disk = CacheFiles::open(
-        &[file],
-        NonZeroU32::new(8).unwrap(),
-        true,
-        FileAllocation::Eager,
-    )
-    .unwrap();
+    let disk = CacheFiles::open(&[file], NonZeroU32::new(8).unwrap(), true).unwrap();
     let policy = Arc::new(TestPolicy::new());
     let memory = NonZeroU32::new(memory_chunks).unwrap();
     let cache = ObjectCache::new(
@@ -91,13 +85,7 @@ fn the_default_policy_streams_blocks_through_both_tiers() {
             .iter()
             .map(|name| DiskFile::new(dir.path().join(name), MIB))
             .collect();
-        let disk = CacheFiles::open(
-            &files,
-            NonZeroU32::new(8).unwrap(),
-            true,
-            FileAllocation::Eager,
-        )
-        .unwrap();
+        let disk = CacheFiles::open(&files, NonZeroU32::new(8).unwrap(), true).unwrap();
         let (memory, disk_chunks) = (NonZeroU32::new(2).unwrap(), NonZeroU32::new(3).unwrap());
         let policy = Arc::new(crate::cache::policy::ClockPolicy::new(memory, disk_chunks));
         let cache = ObjectCache::new(memory, disk, policy).unwrap();
@@ -707,6 +695,59 @@ fn a_read_waiting_for_a_fetch_given_up_on_fetches_the_block_itself() {
     });
 }
 
+/// A plan asked of the policy: the blocks it saw and each one's source.
+type HeardPlan = (Range<u32>, Vec<Option<BlockSource>>);
+
+#[derive(Default)]
+struct HeardPlans(Mutex<Vec<HeardPlan>>);
+
+impl ReadPolicy for HeardPlans {
+    fn plan(&self, read: &LocatedRead<'_>) -> ReadPlan {
+        let sources = read.blocks().map(|block| read.source(block)).collect();
+        self.0.lock().unwrap().push((read.blocks(), sources));
+        FetchRuns::default().plan(read)
+    }
+
+    fn on_io(&self, _event: &IoEvent<'_>) {}
+}
+
+#[test]
+fn a_retry_of_blocks_apart_is_planned_once() {
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let (_dir, cache, _policy) = cache(4, 1);
+        let reads = FetchRuns::default();
+        let data = file_bytes(3 * MIB);
+        let file = cache.resolve(b"a", Some("v1"), 3 * MIB).unwrap();
+        read_through(&cache, &file, &data, MIB..2 * MIB);
+        let given_up = block_on(cache.read(&file, 0..3 * MIB, None, &reads)).unwrap();
+        let (mut waiting, work) = cache
+            .start_planned_read(&file, 0..3 * MIB, None, &reads)
+            .unwrap();
+        drop(given_up);
+
+        let retry = block_on(work.finish(&mut waiting)).unwrap();
+        assert_eq!(retry.len(), 2, "blocks 0 and 2");
+        let heard = HeardPlans::default();
+        let work = cache
+            .retry_planned(&mut waiting, &file, 0..3 * MIB, None, retry, &heard)
+            .unwrap();
+        let (memory, remote) = (Some(BlockSource::Memory), Some(BlockSource::Remote));
+        assert_eq!(
+            *heard.0.lock().unwrap(),
+            [(0..3, vec![remote, memory, remote])]
+        );
+        assert_eq!(waiting.fetches(), [0..MIB, 2 * MIB..3 * MIB]);
+        for fetch in [0..MIB, 2 * MIB..3 * MIB] {
+            let fetched = &data[fetch.start as usize..fetch.end as usize];
+            block_on(cache.take_fetched(&mut waiting, fetch, fetched)).unwrap();
+        }
+        let left = block_on(work.finish(&mut waiting)).unwrap();
+        assert!(left.is_empty(), "{left:?}");
+        assert_eq!(waiting.into_bytes().unwrap(), data);
+        cache.check_at_rest().unwrap();
+    });
+}
+
 struct RacesInFlight;
 
 impl ReadPolicy for RacesInFlight {
@@ -775,14 +816,15 @@ fn a_plan_taken_that_the_cache_cant_carry_out_fetches_as_the_default() {
     });
 }
 
-fn on_demand_cache(
+fn disk_admitting_cache(
     dir: &TempDir,
     disk_chunks: u32,
     keep_free: u64,
 ) -> (ObjectCache, Arc<TestPolicy>) {
     let file = DiskFile::new(dir.path().join("cache"), u64::from(disk_chunks) * MIB);
-    let on_demand = FileAllocation::OnDemand { keep_free };
-    let disk = CacheFiles::open(&[file], NonZeroU32::new(8).unwrap(), true, on_demand).unwrap();
+    let disk = CacheFiles::open(&[file], NonZeroU32::new(8).unwrap(), true)
+        .unwrap()
+        .keeping_free(keep_free);
     let policy = Arc::new(TestPolicy::new());
     policy.set_admit(Admit::Disk);
     let placement = Arc::clone(&policy) as Arc<dyn PlacementPolicy>;
@@ -797,10 +839,10 @@ fn allocated(path: &std::path::Path) -> u64 {
 }
 
 #[test]
-fn an_on_demand_cache_file_takes_room_as_blocks_are_written() {
+fn a_cache_file_takes_room_as_blocks_are_written() {
     crate::io::test_schedule::TestSchedule::check(|| {
         let dir = tempfile::tempdir().unwrap();
-        let (cache, _policy) = on_demand_cache(&dir, 8, 0);
+        let (cache, _policy) = disk_admitting_cache(&dir, 8, 0);
         let path = dir.path().join("cache");
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 8 * MIB, "sized");
         assert!(
@@ -827,12 +869,12 @@ fn a_drive_short_of_room_takes_no_block_and_evicts_none() {
         let a = file_bytes(4 * MIB);
         {
             // A cache with room fills the tier, and keeps it as it drops.
-            let (cache, _policy) = on_demand_cache(&dir, 4, 0);
+            let (cache, _policy) = disk_admitting_cache(&dir, 4, 0);
             let file = cache.resolve(b"a", Some("v1"), 4 * MIB).unwrap();
             read_through(&cache, &file, &a, 0..4 * MIB);
             assert_eq!(cache.tiers.disk.chunks().free_count(), 0);
         }
-        let (cache, policy) = on_demand_cache(&dir, 4, u64::MAX);
+        let (cache, policy) = disk_admitting_cache(&dir, 4, u64::MAX);
         let kept = policy.queued(Tier::Disk);
         assert_eq!(kept.len(), 4, "taken back");
 

@@ -4,8 +4,8 @@ use std::num::NonZeroU32;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use super::allocation::{DriveHeadroom, FileAllocation};
 use super::disk_chunks::{DiskChunkReader, DiskChunks};
+use super::headroom::DriveHeadroom;
 use crate::cache::BLOCK_SIZE_U64;
 use crate::cache::storage::persistence::PersistenceLog;
 use crate::io::aligned_buf::AlignedBuf;
@@ -74,7 +74,6 @@ impl CacheFiles {
         files: &[DiskFile],
         queue_depth: NonZeroU32,
         direct_io: bool,
-        allocation: FileAllocation,
     ) -> Result<Self> {
         let count = u32::try_from(files.len())
             .ok()
@@ -85,22 +84,33 @@ impl CacheFiles {
         let smallest = files.iter().map(|file| file.capacity).min().unwrap_or(0);
         let chunks_per_file =
             (smallest / BLOCK_SIZE_U64).clamp(1, u64::from(u32::MAX / count)) as u32;
+        let len = u64::from(chunks_per_file) * BLOCK_SIZE_U64;
         let opened = files
             .iter()
             .map(|file| {
                 let opened = Self::open_file(&file.path, direct_io)?;
-                allocation.size(&opened, u64::from(chunks_per_file) * BLOCK_SIZE_U64)?;
+                if opened.metadata()?.len() < len {
+                    opened.set_len(len)?;
+                }
                 Ok(opened)
             })
             .collect::<Result<Vec<_>>>()?;
         let first_file = FileIdentity::of(&opened[0])?;
         let log = PersistenceLog::beside(&files[0].path, &opened, chunks_per_file)?;
-        let headroom = allocation.headroom(&opened)?;
+        let headroom = DriveHeadroom::of(&opened)?;
         let mut files = Self::on(IoWorker::new(queue_depth, opened)?, count, chunks_per_file)?;
         files.first_file = Some(first_file);
         files.log = log;
-        files.headroom = headroom;
+        files.headroom = Some(headroom);
         Ok(files)
+    }
+
+    #[cfg(test)]
+    pub(in crate::cache) fn keeping_free(mut self, keep_free: u64) -> Self {
+        if let Some(headroom) = &mut self.headroom {
+            headroom.set_keep_free(keep_free);
+        }
+        self
     }
 
     pub(in crate::cache) fn on(

@@ -52,7 +52,6 @@ struct CacheSettings {
     queue_depth: u32,
     policy: PolicyChoice,
     reads: ReadsChoice,
-    on_demand: bool,
 }
 
 impl Scenario {
@@ -75,7 +74,6 @@ impl<'a> Arbitrary<'a> for Scenario {
         } else {
             ReadsChoice::Scripted(u.arbitrary()?)
         };
-        let on_demand = u.arbitrary()?;
         let mut operations = Vec::new();
         while !u.is_empty() && operations.len() < Self::MAX_OPERATIONS {
             operations.push(u.arbitrary()?);
@@ -88,7 +86,6 @@ impl<'a> Arbitrary<'a> for Scenario {
                 queue_depth,
                 policy,
                 reads,
-                on_demand,
             },
             operations,
         })
@@ -423,10 +420,6 @@ impl Harness {
             ReadsChoice::Scripted(script) => builder.with_read_policy(ScriptedReads {
                 script: Script::new(script.clone()),
             }),
-        };
-        let builder = match settings.on_demand {
-            true => builder.with_on_demand_disk_allocation(),
-            false => builder,
         };
         let (builder, pickable) = match &settings.policy {
             PolicyChoice::Clock => (builder, None),

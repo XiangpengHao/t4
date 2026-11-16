@@ -130,14 +130,7 @@ impl ObjectCache {
     ) -> Result<(PartialRead, TierWork<'c>)> {
         let plan = self.tiers.blocks.plan_read(file.version, range.clone());
         let read = PartialRead::new(file.version, output(plan.bytes())?);
-        let work = TierWork::new(
-            self,
-            reads,
-            *file,
-            range,
-            intent,
-            [plan.into_blocks()].into(),
-        );
+        let work = TierWork::new(self, reads, *file, range, intent, plan.into_blocks());
         Ok((read, work))
     }
 
@@ -149,16 +142,12 @@ impl ObjectCache {
         blocks: BlocksToFetch,
         reads: &'c dyn ReadPolicy,
     ) -> TierWork<'c> {
-        let relocated: Vec<PlannedBlock> = blocks
+        let relocated = blocks
             .0
             .iter()
             .map(|block| block.relocated(self.tiers.blocks.get(block.key())))
             .collect();
-        let runs = relocated
-            .chunk_by(|a, b| a.key().index() + 1 == b.key().index())
-            .map(<[PlannedBlock]>::to_vec)
-            .collect();
-        TierWork::new(self, reads, *file, range, intent, runs)
+        TierWork::new(self, reads, *file, range, intent, relocated)
     }
 
     #[cfg(all(test, feature = "shuttle"))]

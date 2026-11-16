@@ -57,12 +57,12 @@ chunk table the frame table.
    A 1 MB I/O already reaches the drive's bandwidth, so contiguity past a
    chunk buys nothing. Free chunks are a bitmap: any free chunk serves any
    block, so nothing fragments and nothing merges. The memory pool is taken
-   once, at startup, and never given back; the cache files are
-   allocated eagerly, to the disk budget at startup, or on demand, sized
-   and filled as blocks are written (`10-spiral-integration.md`,
-   decision 9), the chunks striped over them (`04-multi-device.md`). The block is the smallest unit: an object's last
-   block, and an object smaller than a block, still take a whole chunk,
-   and a block moves to disk as its whole chunk.
+   once, at startup, and never given back; the cache files are sized to
+   the disk budget at startup and allocated on demand, as blocks are
+   written (`10-spiral-integration.md`, decision 9), the chunks striped
+   over them (`04-multi-device.md`). The block is the smallest unit: an
+   object's last block, and an object smaller than a block, still take a
+   whole chunk, and a block moves to disk as its whole chunk.
 3. **Reads can be partial.** A read inside a block takes only the 4 KB
    pages it needs: a copy from a memory chunk, an `O_DIRECT` read from a
    disk chunk.

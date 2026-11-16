@@ -31,6 +31,9 @@ pub(super) struct ScenarioRun<'s> {
     /// Steps that may make a block fetched again: an owner gone takes its tiers, a client gone
     /// or a read given up abandons its claims.
     disruptions: Vec<usize>,
+    /// Chunks the reads given up may hold: a read's writes go on after it, each holding its
+    /// chunk till done, and a tier with no other room caches nothing meanwhile.
+    given_up_chunks: u64,
     shut_down: bool,
     ticker: Ticker,
 }
@@ -82,6 +85,7 @@ impl<'s> ScenarioRun<'s> {
             slots,
             spawned: Vec::new(),
             disruptions: Vec::new(),
+            given_up_chunks: 0,
             shut_down: false,
         };
         for slot in 0..run.slots.len() {
@@ -187,7 +191,7 @@ impl<'s> ScenarioRun<'s> {
                     return;
                 };
                 self.give_up(&process.cache, read, polls, process.built, step);
-                self.disruptions.push(step);
+                self.note_given_up(read, step);
             }
             SharedOperation::WriteBehind { file, size } => {
                 let file = file % Model::FILES;
@@ -215,7 +219,7 @@ impl<'s> ScenarioRun<'s> {
                 };
                 self.give_up(&process.cache, read, polls, process.built, step);
                 drop(process);
-                self.disruptions.push(step);
+                self.note_given_up(read, step);
             }
             SharedOperation::Restart { process } => {
                 self.drop_process(process, step);
@@ -258,6 +262,12 @@ impl<'s> ScenarioRun<'s> {
                 return;
             }
         }
+    }
+
+    /// A read given up abandons its claims, and leaves its writes in flight.
+    fn note_given_up(&mut self, read: &ScenarioRead, step: usize) {
+        self.disruptions.push(step);
+        self.given_up_chunks += self.model.most_blocks(read.file());
     }
 
     /// A read the script waits on must not wait on a GET it holds.
@@ -348,11 +358,12 @@ impl<'s> ScenarioRun<'s> {
     }
 
     /// A block of a file written once is fetched once, and once more for each step since that
-    /// could drop it or abandon its fetch; unless more blocks were fetched than the tier holds,
-    /// when eviction explains any count.
+    /// could drop it or abandon its fetch; unless more blocks were fetched than the tier holds
+    /// beside the chunks reads given up may still write, when eviction or want of room explains
+    /// any count.
     fn check_fetches(&self, step: usize, after: &SharedOperation) {
         let fetched = self.remote.fetched();
-        let evicted = fetched.len() as u64 > self.settings.tier_blocks();
+        let evicted = fetched.len() as u64 + self.given_up_chunks > self.settings.tier_blocks();
         // A shut-down cache writes no more to disk.
         if evicted || (self.settings.on_disk && self.shut_down) {
             return;
