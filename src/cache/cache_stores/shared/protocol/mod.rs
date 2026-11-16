@@ -1,6 +1,6 @@
-#[cfg(not(all(test, feature = "shuttle")))]
+#[cfg(not(all(any(test, fuzzing), feature = "shuttle")))]
 mod address;
-#[cfg(all(test, feature = "shuttle"))]
+#[cfg(all(any(test, fuzzing), feature = "shuttle"))]
 #[path = "simulated_address.rs"]
 mod address;
 mod frame_socket;
@@ -12,9 +12,9 @@ mod region;
 pub use frames::FuzzedFrame;
 
 pub(super) use address::OwnerAddress;
-#[cfg(all(test, feature = "shuttle"))]
+#[cfg(all(any(test, fuzzing), feature = "shuttle"))]
 pub(in crate::cache) use frame_socket::Transport;
-#[cfg(all(test, feature = "shuttle"))]
+#[cfg(all(any(test, fuzzing), feature = "shuttle"))]
 pub(super) use frame_socket::simulated::Listener;
 pub(super) use frame_socket::{FrameReceiver, FrameSender, FrameSocket};
 pub(super) use frames::{

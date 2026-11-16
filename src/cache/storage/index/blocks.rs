@@ -35,7 +35,7 @@ impl BlockTable {
         self.blocks.insert(key.packed(), location).or_abort()
     }
 
-    #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
+    #[cfg(any(all(any(test, fuzzing), feature = "shuttle"), feature = "__fuzz"))]
     pub(in crate::cache) fn entries(&self) -> Vec<(BlockKey, Location)> {
         let mut entries = Vec::new();
         self.blocks.scan::<u64, ()>(.., |key, location| {

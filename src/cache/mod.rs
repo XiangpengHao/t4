@@ -7,6 +7,8 @@ mod storage;
 mod t4_caching;
 
 pub use t4_caching::{FileHandle, T4Caching, T4CachingBuilder};
+#[cfg(all(fuzzing, feature = "shuttle", feature = "__fuzz"))]
+pub use t4_caching::{ScenarioRead, SharedOperation, SharedScenario, SharedSettings};
 #[cfg(feature = "__fuzz")]
 pub use {
     cache_stores::FuzzedFrame,

@@ -50,7 +50,7 @@ pub struct T4Caching {
 /// ```
 pub struct T4CachingBuilder {
     clock: crate::io::time::Clock,
-    #[cfg(all(test, feature = "shuttle"))]
+    #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
     transport: crate::cache::cache_stores::TestTransport,
     inner: Arc<dyn ObjectStore>,
     memory_capacity: Option<u64>,
@@ -73,7 +73,7 @@ impl T4CachingBuilder {
         self
     }
 
-    #[cfg(all(test, feature = "shuttle"))]
+    #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
     pub(in crate::cache) fn with_test_transport(
         mut self,
         transport: crate::cache::cache_stores::TestTransport,
@@ -204,7 +204,7 @@ impl T4CachingBuilder {
                 reads,
                 Self::OWNER_WAIT,
                 self.clock.clone(),
-                #[cfg(all(test, feature = "shuttle"))]
+                #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
                 self.transport,
             )?)
         } else {
@@ -253,7 +253,7 @@ impl T4Caching {
     pub fn builder(inner: Arc<dyn ObjectStore>) -> T4CachingBuilder {
         T4CachingBuilder {
             clock: Default::default(),
-            #[cfg(all(test, feature = "shuttle"))]
+            #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
             transport: Default::default(),
             inner,
             memory_capacity: None,
@@ -449,8 +449,12 @@ impl fmt::Debug for KnownFiles {
 
 mod file_handle;
 mod object_store_integration;
+#[cfg(all(feature = "shuttle", any(test, all(fuzzing, feature = "__fuzz"))))]
+mod shared_scenario;
 
 pub use file_handle::FileHandle;
+#[cfg(all(fuzzing, feature = "shuttle", feature = "__fuzz"))]
+pub use shared_scenario::{ScenarioRead, SharedOperation, SharedScenario, SharedSettings};
 
 #[cfg(test)]
 #[allow(dead_code, unused_imports)] // OS process tests use a subset of these fixtures.

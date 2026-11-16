@@ -24,7 +24,7 @@ pub(super) use client::OwnerConnection;
 use owner::OwnerListener;
 
 pub(in crate::cache) struct SharedCacheStore {
-    #[cfg(all(test, feature = "shuttle"))]
+    #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
     transport: protocol::Transport,
     clock: crate::io::time::Clock,
     owned: OnceLock<OwnedCache>,
@@ -61,10 +61,10 @@ impl SharedCacheStore {
         reads: Arc<dyn ReadPolicy>,
         wait: Duration,
         clock: crate::io::time::Clock,
-        #[cfg(all(test, feature = "shuttle"))] transport: protocol::Transport,
+        #[cfg(all(any(test, fuzzing), feature = "shuttle"))] transport: protocol::Transport,
     ) -> Result<Self> {
         let store = Self {
-            #[cfg(all(test, feature = "shuttle"))]
+            #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
             transport,
             clock: clock.clone(),
             owned: OnceLock::new(),
@@ -152,7 +152,7 @@ impl SharedCacheStore {
             first_file,
             reads,
             hand_off.connections,
-            #[cfg(all(test, feature = "shuttle"))]
+            #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
             &self.transport,
         )?
         else {
@@ -171,7 +171,7 @@ impl SharedCacheStore {
             OwnerListener::listen(
                 Arc::clone(cache),
                 first_file,
-                #[cfg(all(test, feature = "shuttle"))]
+                #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
                 &self.transport,
             )
             .ok()
@@ -233,10 +233,21 @@ impl CacheStore for SharedCacheStore {
         self.owned.get().map(|owned| &**owned.store.cache())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, all(fuzzing, feature = "shuttle")))]
     fn owner_connection(&self) -> Option<std::sync::Arc<OwnerConnection>> {
         let client = self.client.read().unwrap_or_else(PoisonError::into_inner);
         client.as_ref().map(std::sync::Arc::clone)
+    }
+
+    #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
+    fn sessions_serving(&self) -> Option<usize> {
+        let owned = self.owned.get()?;
+        Some(
+            owned
+                ._listener
+                .as_ref()
+                .map_or(0, OwnerListener::sessions_serving),
+        )
     }
 }
 
@@ -244,5 +255,5 @@ impl CacheStore for SharedCacheStore {
 #[allow(dead_code, unused_imports)] // Platform tests use only the handshake fixtures.
 mod tests;
 
-#[cfg(all(test, feature = "shuttle"))]
+#[cfg(all(any(test, fuzzing), feature = "shuttle"))]
 pub(in crate::cache) use protocol::Transport as TestTransport;

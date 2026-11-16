@@ -19,7 +19,7 @@ mod shared;
 pub use shared::FuzzedFrame;
 
 pub(super) use in_process::{InProcessCacheStore, PlacementMaker, TierSettings};
-#[cfg(test)]
+#[cfg(any(test, all(fuzzing, feature = "shuttle")))]
 use shared::OwnerConnection;
 pub(super) use shared::SharedCacheStore;
 
@@ -43,8 +43,14 @@ pub(super) trait CacheStore: Send + Sync {
         None
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, all(fuzzing, feature = "shuttle")))]
     fn owner_connection(&self) -> Option<std::sync::Arc<OwnerConnection>> {
+        None
+    }
+
+    /// Sessions the owner's listener still runs, if this process owns a shared cache.
+    #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
+    fn sessions_serving(&self) -> Option<usize> {
         None
     }
 }
@@ -101,5 +107,5 @@ pub(super) enum VersionIdSource {
     },
 }
 
-#[cfg(all(test, feature = "shuttle"))]
+#[cfg(all(any(test, fuzzing), feature = "shuttle"))]
 pub(in crate::cache) use shared::TestTransport;

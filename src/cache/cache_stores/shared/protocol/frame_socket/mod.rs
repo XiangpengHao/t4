@@ -9,15 +9,15 @@ use std::io;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
-#[cfg(all(test, feature = "shuttle"))]
+#[cfg(all(any(test, fuzzing), feature = "shuttle"))]
 pub(super) mod simulated;
-#[cfg(not(all(test, feature = "shuttle")))]
+#[cfg(not(all(any(test, fuzzing), feature = "shuttle")))]
 mod unix;
-#[cfg(all(test, feature = "shuttle"))]
+#[cfg(all(any(test, fuzzing), feature = "shuttle"))]
 pub(in crate::cache::cache_stores::shared) use simulated::FrameSocket;
-#[cfg(all(test, feature = "shuttle"))]
+#[cfg(all(any(test, fuzzing), feature = "shuttle"))]
 pub(crate) use simulated::Transport;
-#[cfg(not(all(test, feature = "shuttle")))]
+#[cfg(not(all(any(test, fuzzing), feature = "shuttle")))]
 pub(in crate::cache::cache_stores::shared) use unix::FrameSocket;
 
 pub(in crate::cache::cache_stores::shared) struct FrameReceiver {
@@ -129,7 +129,7 @@ impl FrameSender {
         })
     }
 
-    #[cfg(all(test, feature = "shuttle", target_os = "linux"))]
+    #[cfg(all(any(test, fuzzing), feature = "shuttle", target_os = "linux"))]
     pub(in crate::cache::cache_stores::shared) fn has_pending_frames(&self) -> bool {
         let state = self.queue.state();
         state.writing || !state.frames.is_empty()

@@ -1,9 +1,9 @@
-#[cfg(all(test, feature = "shuttle"))]
+#[cfg(all(any(test, fuzzing), feature = "shuttle"))]
 use super::protocol::{Listener as UnixListener, Transport};
 use crate::io::sync::Mutex;
 use crate::io::sync::atomic::{AtomicBool, Ordering};
 use crate::io::sync::thread::{self, JoinHandle};
-#[cfg(not(all(test, feature = "shuttle")))]
+#[cfg(not(all(any(test, fuzzing), feature = "shuttle")))]
 use std::os::unix::net::UnixListener;
 use std::sync::PoisonError;
 use std::task::{Context, Waker};
@@ -17,9 +17,9 @@ use crate::io::error::Result;
 use crate::io::sync::Arc;
 
 mod client_reads;
-#[cfg(not(all(test, feature = "shuttle")))]
+#[cfg(not(all(any(test, fuzzing), feature = "shuttle")))]
 mod session_waker;
-#[cfg(all(test, feature = "shuttle"))]
+#[cfg(all(any(test, fuzzing), feature = "shuttle"))]
 #[path = "simulated_waker.rs"]
 mod session_waker;
 
@@ -39,11 +39,11 @@ impl OwnerListener {
     pub(super) fn listen(
         cache: Arc<ObjectCache>,
         first_file: FileIdentity,
-        #[cfg(all(test, feature = "shuttle"))] transport: &Transport,
+        #[cfg(all(any(test, fuzzing), feature = "shuttle"))] transport: &Transport,
     ) -> Result<Self> {
         let address = OwnerAddress::of(
             first_file,
-            #[cfg(all(test, feature = "shuttle"))]
+            #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
             transport,
         )?;
         let acceptor = Acceptor {
@@ -66,6 +66,18 @@ impl OwnerListener {
             sessions,
             accepting: Some(accepting),
         })
+    }
+}
+
+impl OwnerListener {
+    /// A session holds its socket until it ends.
+    #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
+    pub(super) fn sessions_serving(&self) -> usize {
+        let sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
+        sessions
+            .iter()
+            .filter(|session| session.socket.strong_count() > 0)
+            .count()
     }
 }
 
@@ -129,7 +141,7 @@ impl Acceptor {
                 continue;
             };
             let mut sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
-            #[cfg(not(all(test, feature = "shuttle")))]
+            #[cfg(not(all(any(test, fuzzing), feature = "shuttle")))]
             sessions.retain(|session| !session.thread.is_finished());
             sessions.push(Session {
                 socket: shut,
