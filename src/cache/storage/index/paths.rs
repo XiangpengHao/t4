@@ -1,6 +1,3 @@
-//! `paths`: each object's path, to the version of it the cache holds blocks
-//! of (`doc/03-cache.md`, decisions 4 and 5).
-
 use std::ops::{ControlFlow, Range};
 
 use bbtree::BBTreeMap;
@@ -9,24 +6,16 @@ use crate::cache::InsertOrAbort;
 use crate::cache::{BLOCK_SIZE_U64, BlockKey, FileVersionId};
 use crate::io::sync::atomic::{AtomicU64, Ordering};
 
-/// A version of an object the cache can hold: the id it gave the version,
-/// and the object's size, which a read of it is clamped to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::cache) struct FileVersion {
     id: FileVersionId,
-    /// At most [`Self::MAX_SIZE`].
     size: u64,
 }
 
 impl FileVersion {
-    /// The largest object the cache holds, 16 TiB less a block: its block
-    /// numbers stay below the last a [`BlockKey`] holds, so the number one
-    /// past its last block is a block number too.
+    /// Less a block, so the number one past an object's last block is a block number too.
     const MAX_SIZE: u64 = (BlockKey::INDEX_LIMIT - 1) as u64 * BLOCK_SIZE_U64;
 
-    /// The version `id` of a file of `size` bytes, as an owner named it to
-    /// its client (`doc/11-shared-mode.md`); `None` if the cache can't hold
-    /// a file that large.
     pub(in crate::cache) fn named(id: FileVersionId, size: u64) -> Option<Self> {
         (size <= Self::MAX_SIZE).then_some(Self { id, size })
     }
@@ -39,8 +28,6 @@ impl FileVersion {
         self.size
     }
 
-    /// Block `index`'s bytes in the file: `BLOCK_SIZE` of them, fewer in
-    /// its last block.
     pub(in crate::cache) fn block_range(self, index: u32) -> Range<u64> {
         let start = u64::from(index) * BLOCK_SIZE_U64;
         assert!(start < self.size, "block {index} is past the file's end");
@@ -48,21 +35,14 @@ impl FileVersion {
     }
 }
 
-/// Why the cache can't hold an object: reads of it go to the object store
-/// alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::cache) enum UncacheableObject {
-    /// Its path is longer than [`PathTable::MAX_PATH_LEN`].
     PathTooLong,
-    /// It has no e_tag, so nothing tells a new version of it from the one
-    /// cached, and the cache would return the old version's bytes.
+    /// Nothing would tell a new version from the cached one.
     NoETag,
-    /// It is larger than the 16 TiB a block number reaches.
     TooLarge,
 }
 
-/// A path's entry: the version of its object the cache holds blocks of,
-/// under the id the cache gave it.
 struct FileEntry {
     id: FileVersionId,
     e_tag: Box<str>,
@@ -70,28 +50,20 @@ struct FileEntry {
 }
 
 impl FileEntry {
-    /// Whether this is the version with `e_tag` and `size`. The size is
-    /// part of it too: an object store that kept an e_tag across a change of
-    /// size would have the cache return the wrong bytes.
+    /// Size too: a store that kept an e_tag across a size change would serve wrong bytes.
     fn is_version(&self, e_tag: &str, size: u64) -> bool {
         &*self.e_tag == e_tag && self.size == size
     }
 }
 
-/// Each path's file version, and the ids that new versions get.
-///
-/// Keys are boxed byte strings, as `Index`'s are: bbtree's default strategy
-/// keeps their bytes outside its nodes, so a long path changes no node size
-/// (decision 4), and gives them inline keys for lookups by `&[u8]`.
+/// Boxed keys: bbtree keeps their bytes out of its nodes, so long paths change no node size.
 pub(in crate::cache) struct PathTable {
     paths: BBTreeMap<Box<[u8]>, FileEntry>,
-    /// The id the next new file version gets. It only grows, so no id is handed out
-    /// twice (decision 5).
     next_id: AtomicU64,
 }
 
 impl PathTable {
-    /// The longest path the cache holds: object stores' limit (decision 4).
+    /// Object stores' limit.
     pub(in crate::cache) const MAX_PATH_LEN: usize = 1024;
 
     pub(in crate::cache) fn new() -> Self {
@@ -101,14 +73,7 @@ impl PathTable {
         }
     }
 
-    /// The version of the file at `path` with `e_tag` and
-    /// `size`: the id the path's entry has for it, or, for a new path or a
-    /// new version, a fresh id that takes the path's entry (decision 5). The
-    /// version it replaces leaves its blocks behind, for eviction to reclaim.
-    ///
-    /// Each resolution is one step to the others: two of the same version get
-    /// the same id, unless a resolution of another version took the path
-    /// between them.
+    /// A replaced version leaves its blocks behind, for eviction to reclaim.
     pub(in crate::cache) fn resolve(
         &self,
         path: &[u8],
@@ -125,8 +90,7 @@ impl PathTable {
         if let Some(id) = held {
             return Ok(FileVersion { id, size });
         }
-        // A resolution of the same version that raced this one may put it in
-        // first: its id stands, and this fresh one is never handed out.
+        // A racing resolution of this version may win: its id stands, and this one is wasted.
         let fresh = FileEntry {
             id: self.take_fresh_id(),
             e_tag: e_tag.into(),
@@ -146,12 +110,10 @@ impl PathTable {
         Ok(FileVersion { id, size })
     }
 
-    /// The size of the version the path's entry names, if it has one.
     pub(in crate::cache) fn known_size(&self, path: &[u8]) -> Option<u64> {
         self.paths.read(path, |_, entry| entry.size)
     }
 
-    /// Each path's entry, in path order: its path, e_tag and version.
     pub(in crate::cache) fn scan(&self, mut found: impl FnMut(&[u8], &str, FileVersion)) {
         self.paths.scan::<[u8], ()>(.., |path, entry| {
             let version = FileVersion {
@@ -163,14 +125,11 @@ impl PathTable {
         });
     }
 
-    /// The id the next new file version gets.
     pub(in crate::cache) fn next_id(&self) -> u64 {
         self.next_id.load(Ordering::Relaxed)
     }
 
-    /// Puts back the entry a snapshot kept of `path`, its `version` with
-    /// `e_tag`, as the cache opens, before any read resolves a path. A
-    /// snapshot names each path once.
+    /// Only as the cache opens, before any read resolves a path.
     pub(in crate::cache) fn restore(&self, path: &[u8], e_tag: &str, version: FileVersion) {
         let entry = FileEntry {
             id: version.id,
@@ -181,16 +140,12 @@ impl PathTable {
         assert!(held.is_none(), "a snapshot names a path once");
     }
 
-    /// Gives new versions ids from `next_id` on, as the snapshot the cache
-    /// opened from said: above every id it named, and every id the cache
-    /// that kept it gave (decision 5).
     pub(in crate::cache) fn resume_ids_at(&self, next_id: u64) {
         assert!(self.next_id() <= next_id, "ids only grow");
         self.next_id.store(next_id, Ordering::Relaxed);
     }
 
-    /// An id no file version had. Every change to `next_id` is a read-modify-write,
-    /// and those are ordered on it alone: `Relaxed` hands out each id once.
+    /// `Relaxed` hands out each id once: every change to `next_id` is a read-modify-write.
     fn take_fresh_id(&self) -> FileVersionId {
         let mut id = self.next_id.load(Ordering::Relaxed);
         loop {
@@ -209,7 +164,6 @@ impl PathTable {
         }
     }
 
-    /// The e_tag of the object at `path`, if the cache can hold the object.
     fn check_cacheable<'e>(
         path: &[u8],
         e_tag: Option<&'e str>,
@@ -288,7 +242,6 @@ mod tests {
             let v1_again = id_of(&table, "p", "v1", 100);
             assert_ne!(v1_again, v1);
             assert_ne!(v1_again, v2);
-            // A different size under the same e_tag is another version too.
             assert_ne!(id_of(&table, "p", "v1", 101), v1_again);
         });
     }

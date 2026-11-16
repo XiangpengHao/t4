@@ -1,13 +1,4 @@
-//! The region (`doc/11-shared-mode.md`, decision 5): shared memory a client
-//! makes and sends its owner in the handshake, which both map. The client
-//! hands it out in spans ([`RegionSpan`]): a read's output, a fetch's
-//! staged bytes, each lent to the owner by naming it in a frame
-//! ([`SpanName`]). The owner maps it ([`OwnerRegion`]) only if it can't
-//! shrink: a client that shrank it would crash the owner with `SIGBUS`.
-//!
-//! - **Linux:** a memfd, sealed against shrinking and growing.
-//! - **macOS:** a POSIX shared memory object, unlinked once made: XNU sizes
-//!   one once, and refuses every `ftruncate` after, from any descriptor.
+//! An owner maps a region only if it can't shrink: shrunk, it would crash the owner with `SIGBUS`.
 
 use crate::io::sync::{Mutex, MutexGuard};
 use std::any::Any;
@@ -31,7 +22,6 @@ use crate::PAGE_SIZE_U64;
 use crate::cache::read_output::ReadOutput;
 use crate::io::error::{Error, Result};
 
-/// A span of a region as a frame names it: `len` bytes from byte `offset`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::cache::cache_stores::shared) struct SpanName {
     offset: u64,
@@ -52,24 +42,19 @@ impl SpanName {
     }
 }
 
-/// A shared mapping of a region, read and written by both processes:
-/// unmapped once dropped.
 pub(in crate::cache::cache_stores::shared) struct SharedMapping {
     ptr: NonNull<u8>,
     len: usize,
 }
 
-// SAFETY: the mapping is plain memory, valid until it drops; who writes
-// which bytes of it when is its holders' to order, through raw pointers.
+// SAFETY: plain memory, valid until dropped; its holders order who writes which bytes when.
 unsafe impl Send for SharedMapping {}
 unsafe impl Sync for SharedMapping {}
 
 impl SharedMapping {
-    /// The first `len` bytes of `memory`, mapped shared, to read and write.
     #[cfg(not(all(test, feature = "shuttle")))]
     fn map(memory: BorrowedFd<'_>, len: usize) -> io::Result<Self> {
-        // SAFETY: a fresh mapping, at an address the kernel picks, aliases
-        // no memory of this process's.
+        // SAFETY: a fresh mapping, at an address the kernel picks, aliases no memory of ours.
         let ptr = unsafe {
             rustix::mm::mmap(
                 std::ptr::null_mut(),
@@ -101,8 +86,6 @@ impl SharedMapping {
         })
     }
 
-    /// The address of byte `offset` of `span`, if the mapping holds the
-    /// whole span.
     fn at(&self, span: SpanName) -> Option<NonNull<u8>> {
         let end = span.offset.checked_add(span.len)?;
         if end > self.len as u64 {
@@ -115,17 +98,13 @@ impl SharedMapping {
 
 impl Drop for SharedMapping {
     fn drop(&mut self) {
-        // SAFETY: mapped by `map`, with this length, and unmapped once,
-        // here; every holder of a pointer into it holds the mapping.
+        // SAFETY: mapped by `map` with this length; every pointer into it holds the mapping.
         unsafe {
             let _ = rustix::mm::munmap(self.ptr.as_ptr().cast(), self.len);
         }
     }
 }
 
-/// A client's region: its shared memory, its mapping of it, and its spans
-/// not taken. Spans hold it, so it lives as long as the last of them, the
-/// caller's bytes of a read included.
 pub(in crate::cache::cache_stores::shared) struct ClientRegion {
     #[cfg(not(all(test, feature = "shuttle")))]
     memory: OwnedFd,
@@ -134,23 +113,15 @@ pub(in crate::cache::cache_stores::shared) struct ClientRegion {
 }
 
 impl ClientRegion {
-    /// A region's bytes: pages take memory only once touched.
+    /// Pages take memory only once touched.
     pub(in crate::cache::cache_stores::shared) const BYTES: u64 = 1 << 30;
 
-    /// A span this long or longer, given back, gives its memory back too.
     #[cfg(all(target_os = "linux", not(all(test, feature = "shuttle"))))]
     const PUNCHED_FROM: u64 = 2 << 20;
 
-    /// How many names a POSIX shared memory object is tried under before
-    /// a region is given up.
     #[cfg(all(not(target_os = "linux"), not(all(test, feature = "shuttle"))))]
     const NAME_TRIES: u32 = 16;
 
-    /// A region, its memory made and mapped, every page free.
-    ///
-    /// # Errors
-    ///
-    /// If the memory can't be made, sized, sealed or mapped.
     pub(in crate::cache::cache_stores::shared) fn make() -> io::Result<Arc<Self>> {
         #[cfg(not(all(test, feature = "shuttle")))]
         let memory = Self::shared_memory()?;
@@ -166,8 +137,6 @@ impl ClientRegion {
         }))
     }
 
-    /// A memfd of [`Self::BYTES`], sealed so that it can neither shrink nor
-    /// grow, nor take a seal more.
     #[cfg(all(target_os = "linux", not(all(test, feature = "shuttle"))))]
     fn shared_memory() -> io::Result<OwnedFd> {
         use rustix::fs::{MemfdFlags, SealFlags};
@@ -179,9 +148,7 @@ impl ClientRegion {
         Ok(memory)
     }
 
-    /// A POSIX shared memory object of [`Self::BYTES`], under a name of
-    /// this process's, unlinked once open: no other process opens it by
-    /// name. Sized once, it takes no `ftruncate` after.
+    /// Unlinked once open, so no other process opens it by name.
     #[cfg(all(not(target_os = "linux"), not(all(test, feature = "shuttle"))))]
     fn shared_memory() -> io::Result<OwnedFd> {
         use rustix::fs::Mode;
@@ -207,7 +174,6 @@ impl ClientRegion {
         Err(io::ErrorKind::AlreadyExists.into())
     }
 
-    /// The region's memory, to send its owner.
     #[cfg(not(all(test, feature = "shuttle")))]
     pub(in crate::cache::cache_stores::shared) fn descriptor(&self) -> BorrowedFd<'_> {
         self.memory.as_fd()
@@ -218,8 +184,6 @@ impl ClientRegion {
         Arc::clone(&self.mapping)
     }
 
-    /// A span of `len` bytes, whole pages, a page at least; `None` if no
-    /// run of free pages is that long.
     pub(in crate::cache::cache_stores::shared) fn span(
         self: &Arc<Self>,
         len: u64,
@@ -233,14 +197,12 @@ impl ClientRegion {
         })
     }
 
-    /// Gives `pages` from `first_page` back, a span done with: its memory
-    /// first, if it is long, on Linux, before another span may take them.
+    /// Punches the memory first, before another span may take the pages.
     fn give_back(&self, first_page: u64, pages: u64) {
         #[cfg(all(target_os = "linux", not(all(test, feature = "shuttle"))))]
         if pages * PAGE_SIZE_U64 >= Self::PUNCHED_FROM {
             use rustix::fs::FallocateFlags;
-            // A hole that can't be punched leaves the memory taken, and
-            // the bytes as they are: the next span overwrites them.
+            // Unpunched, the memory stays taken; the next span overwrites the bytes.
             let _ = rustix::fs::fallocate(
                 &self.memory,
                 FallocateFlags::PUNCH_HOLE | FallocateFlags::KEEP_SIZE,
@@ -251,13 +213,11 @@ impl ClientRegion {
         self.free().give_back(first_page, pages);
     }
 
-    /// How many of the region's pages are free: for tests.
     #[cfg(test)]
     pub(in crate::cache::cache_stores::shared) fn free_pages(&self) -> u64 {
         self.free().runs.values().sum()
     }
 
-    /// Whether `bytes` lie in the region: for tests.
     #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::cache::cache_stores::shared) fn holds(&self, bytes: &[u8]) -> bool {
         let start = self.mapping.ptr.as_ptr() as usize;
@@ -270,9 +230,7 @@ impl ClientRegion {
     }
 }
 
-/// A span of a client's region, its pages its own until it drops, which
-/// gives them back. Lent to the owner, it is kept until the owner says it
-/// is done with it (decision 5).
+/// Lent to the owner, it must be kept until the owner says it's done with it.
 pub(in crate::cache::cache_stores::shared) struct RegionSpan {
     region: Arc<ClientRegion>,
     first_page: u64,
@@ -280,16 +238,10 @@ pub(in crate::cache::cache_stores::shared) struct RegionSpan {
 }
 
 impl RegionSpan {
-    /// The span, as a frame names it.
     pub(in crate::cache::cache_stores::shared) fn name(&self) -> SpanName {
         SpanName::new(self.first_page * PAGE_SIZE_U64, self.pages * PAGE_SIZE_U64)
     }
 
-    /// Copies `bytes` into the span from its byte `at`.
-    ///
-    /// # Panics
-    ///
-    /// If they run past the span.
     pub(in crate::cache::cache_stores::shared) fn copy_in(&mut self, at: usize, bytes: &[u8]) {
         let name = self.name();
         assert!(
@@ -302,8 +254,7 @@ impl RegionSpan {
             .mapping
             .at(name)
             .expect("a span lies within its region");
-        // SAFETY: the bytes lie within the span, the span's alone, and the
-        // client lends it to the owner only once it is written.
+        // SAFETY: within this span, this one's alone; it's lent to the owner only once written.
         unsafe {
             start
                 .add(at)
@@ -314,12 +265,6 @@ impl RegionSpan {
 }
 
 impl RegionSpan {
-    /// The span's bytes `within` it, as `Bytes` that hold the span until
-    /// the last of them drops: a read's, served in it.
-    ///
-    /// # Panics
-    ///
-    /// If `within` runs past the span.
     pub(in crate::cache::cache_stores::shared) fn into_bytes(self, within: Range<usize>) -> Bytes {
         assert!(
             within.end <= self.name().len() as usize,
@@ -335,8 +280,6 @@ impl Drop for RegionSpan {
     }
 }
 
-/// A span its owner has served a read in, done with it: its client's
-/// caller's bytes.
 struct ServedSpan(RegionSpan);
 
 impl AsRef<[u8]> for ServedSpan {
@@ -348,34 +291,19 @@ impl AsRef<[u8]> for ServedSpan {
             .mapping
             .at(name)
             .expect("a span lies within its region");
-        // SAFETY: the span lies within the mapping, which it holds. Its
-        // owner served the read, and writes it no more; its client never
-        // does: an owner that broke the protocol would garble the bytes,
-        // not more (decision 8).
+        // SAFETY: in the held mapping; no one writes it now, and a rogue owner only garbles it.
         unsafe { std::slice::from_raw_parts(start.as_ptr(), name.len() as usize) }
     }
 }
 
-/// A client's region, as its owner maps it: memory another process writes
-/// too. The owner reads a span of it only where a frame names it, and
-/// only to copy its bytes: a client that changes them meanwhile garbles
-/// its own bytes, nothing of the owner's (decision 8).
 pub(in crate::cache::cache_stores::shared) struct OwnerRegion {
     mapping: Arc<SharedMapping>,
 }
 
 impl OwnerRegion {
-    /// The most bytes of a region an owner maps: a client's is 1 GiB.
     #[cfg(not(all(test, feature = "shuttle")))]
     const MOST_BYTES: u64 = 16 << 30;
 
-    /// The region of `memory`, mapped, if it can't shrink under the owner
-    /// and is no larger than an owner maps.
-    ///
-    /// # Errors
-    ///
-    /// If it could shrink, is empty, not whole pages or too large, or can't
-    /// be mapped.
     #[cfg(not(all(test, feature = "shuttle")))]
     pub(in crate::cache::cache_stores::shared) fn accept(memory: OwnedFd) -> Result<Self> {
         let bytes = u64::try_from(rustix::fs::fstat(&memory).map_err(io::Error::from)?.st_size)
@@ -397,7 +325,6 @@ impl OwnerRegion {
         Ok(Self { mapping })
     }
 
-    /// Whether `memory` is a memfd sealed against shrinking.
     #[cfg(all(target_os = "linux", not(all(test, feature = "shuttle"))))]
     fn cannot_shrink(memory: &OwnedFd, _bytes: u64) -> Result<()> {
         use rustix::fs::SealFlags;
@@ -409,9 +336,8 @@ impl OwnerRegion {
         Ok(())
     }
 
-    /// Whether `memory`, of `bytes`, is a POSIX shared memory object sized
-    /// already: it refuses an `ftruncate`, to its own size too, which a
-    /// regular file takes, and which changes nothing either way.
+    /// A sized POSIX shared memory object refuses any `ftruncate`, even to its own size,
+    /// which a regular file takes; to its own size it changes nothing either way.
     #[cfg(all(not(target_os = "linux"), not(all(test, feature = "shuttle"))))]
     fn cannot_shrink(memory: &OwnedFd, bytes: u64) -> Result<()> {
         match rustix::fs::ftruncate(memory, bytes) {
@@ -421,36 +347,17 @@ impl OwnerRegion {
         }
     }
 
-    /// The bytes of `span`, where the region holds them, if it holds the
-    /// whole span: a fetch's, staged, for the owner to copy where they go
-    /// (decision 5), and to let go of once copied.
-    ///
-    /// # Errors
-    ///
-    /// If the span runs past the region.
     pub(in crate::cache::cache_stores::shared) fn staged(&self, span: SpanName) -> Result<&[u8]> {
         let start = self
             .mapping
             .at(span)
             .ok_or_else(|| Self::refused("span: past its end"))?;
-        // SAFETY: the span lies within the mapping, which the borrow of the
-        // region keeps. The client wrote the bytes before it named them, and
-        // writes them no more until the owner has ended the read; a client
-        // that does breaks its own protocol: the owner only copies them, so
-        // they garble that client's read and block alone (decision 8).
+        // SAFETY: the borrow keeps the mapping; a client rewriting it garbles only its own read.
         Ok(unsafe { std::slice::from_raw_parts(start.as_ptr(), span.len as usize) })
     }
 
-    /// A read's output for the file's bytes `asked`, over `span` of the
-    /// region, which the region's mapping and `keeper` are kept for until
-    /// the output and every buffer it lends have dropped: the owner tells
-    /// its client it is done with the span then.
-    ///
-    /// # Errors
-    ///
-    /// If the span runs past the region, is too short for the output, or
-    /// starts off a page boundary: the output lends its pages to reads from
-    /// disk, which land past the page cache in page-aligned memory alone.
+    /// `keeper` is held till the output and every buffer it lends drop: the span is done then.
+    /// Page-aligned only: the output lends its pages to reads from disk, past the page cache.
     pub(in crate::cache::cache_stores::shared) fn output(
         self: &Arc<Self>,
         span: SpanName,
@@ -465,16 +372,10 @@ impl OwnerRegion {
             .at(span)
             .ok_or_else(|| Self::refused("span: past its end"))?;
         let kept = Box::new((Arc::clone(self), keeper));
-        // SAFETY: the span lies within the mapping, page-aligned as the
-        // mapping and every span are, and the keeper holds the mapping.
-        // Nothing of the owner's but the output touches the span: its client
-        // lent it for this read alone. The client may write it meanwhile,
-        // breaking its own protocol: the owner only writes the output, so
-        // that garbles the client's bytes alone (decision 8).
+        // SAFETY: page-aligned, in the mapping `kept` holds, lent for this read alone (decision 8).
         unsafe { ReadOutput::over(asked, memory, span.len() as usize, kept) }
     }
 
-    /// The error of a region refused, or a span of one, `why`.
     fn refused(why: &str) -> Error {
         Error::Io(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -483,22 +384,17 @@ impl OwnerRegion {
     }
 }
 
-/// A region's free pages, as runs by their first page: spans are taken
-/// first fit, and given back merged with the runs beside them.
 struct FreeSpans {
     runs: BTreeMap<u64, u64>,
 }
 
 impl FreeSpans {
-    /// A region of `pages`, all free.
     fn new(pages: u64) -> Self {
         Self {
             runs: BTreeMap::from([(0, pages)]),
         }
     }
 
-    /// The first page of a run of `pages` taken from the first free run
-    /// that long; `None` if none is.
     fn take(&mut self, pages: u64) -> Option<u64> {
         let (&first, &run) = self.runs.iter().find(|&(_, &run)| run >= pages)?;
         self.runs.remove(&first);
@@ -508,8 +404,6 @@ impl FreeSpans {
         Some(first)
     }
 
-    /// Gives `pages` from `first` back, merged with the free runs that end
-    /// where they start, and start where they end.
     fn give_back(&mut self, mut first: u64, mut pages: u64) {
         if let Some((&before, &run)) = self.runs.range(..first).next_back() {
             debug_assert!(before + run <= first, "pages given back twice");

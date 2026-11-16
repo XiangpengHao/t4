@@ -1,19 +1,3 @@
-//! [`TimedReads`]: a read policy over another that times every I/O t4
-//! makes, as t4 reports it (`doc/06-read-modes.md`, decision 9), in
-//! [`IoLatencies`]: a GET's first byte and its last, a disk read's end.
-//! A benchmark takes them once a query is done.
-//!
-//! The times are t4's: a GET's last byte is when its body has landed in the
-//! read's output and in the chunks its blocks go to, the evictions it made
-//! for room included (a block bound for disk is written after); a disk
-//! read's end is when its bytes are in the read's output, or in memory for a
-//! block it moves there.
-//!
-//! Kept if asked ([`IoLatencies::keeping_gets`]), each GET's phases too, as
-//! t4 reports them once its blocks are cached: its first byte, its body in,
-//! the part of that spent landing its pieces, and its blocks cached, under
-//! the benchmark step it served.
-
 use std::fmt;
 use std::io::{self, Write};
 use std::ops::Range;
@@ -25,8 +9,6 @@ use t4::policy::{Io, IoEvent, IoPhase, LocatedRead, ReadPlan, ReadPolicy};
 
 use crate::replay::LatencySummary;
 
-/// A read policy that plans as `plans` does, and times every I/O in
-/// [`IoLatencies`].
 #[derive(Debug)]
 pub struct TimedReads<P> {
     plans: P,
@@ -50,21 +32,17 @@ impl<P: ReadPolicy> ReadPolicy for TimedReads<P> {
     }
 }
 
-/// How long the I/Os t4 made took, since they were last taken.
 #[derive(Debug, Default)]
 pub struct IoLatencies {
     get_first_byte: LatencyHistogram,
     get_done: LatencyHistogram,
     disk_read_done: LatencyHistogram,
-    /// Given up on before they ended, as a race's losers are.
     cancelled: AtomicU64,
     failed: AtomicU64,
-    /// Each GET's phases, if kept.
     gets: Option<GetPhases>,
 }
 
 impl IoLatencies {
-    /// Latencies that keep each GET's phases as well.
     pub fn keeping_gets() -> Self {
         Self {
             gets: Some(GetPhases {
@@ -75,18 +53,12 @@ impl IoLatencies {
         }
     }
 
-    /// Keeps the GETs from now on under `step`, if they are kept.
     pub fn begin_step(&self, step: &str) {
         if let Some(gets) = &self.gets {
             *gets.step.lock().unwrap_or_else(PoisonError::into_inner) = step.into();
         }
     }
 
-    /// Writes the GETs kept as CSV, a header row first, times in ms.
-    ///
-    /// # Errors
-    ///
-    /// If `out` fails.
     pub fn write_gets_csv(&self, out: impl Write) -> io::Result<()> {
         match &self.gets {
             Some(gets) => gets.write_csv(out),
@@ -94,7 +66,6 @@ impl IoLatencies {
         }
     }
 
-    /// The latencies since they were last taken, and every count back to 0.
     pub fn take(&self) -> TakenIoLatencies {
         TakenIoLatencies {
             get_first_byte: self.get_first_byte.take(),
@@ -135,8 +106,6 @@ impl IoLatencies {
     }
 }
 
-/// Every GET t4 made and landed, its phases as t4 reported them, under the
-/// step it served.
 #[derive(Debug)]
 struct GetPhases {
     step: Mutex<String>,
@@ -147,8 +116,6 @@ impl GetPhases {
     const CSV_COLUMNS: &str =
         "step,path,start,end,racer,answered_ms,received_ms,landing_ms,landed_ms,waited_ms";
 
-    /// Keeps the GET of `bytes` of `path`, racer `racer`, as its `landed`
-    /// phase tells: a CSV row.
     fn keep(&self, path: &[u8], bytes: &Range<u64>, racer: u8, landed: IoPhase) {
         let IoPhase::Landed {
             answered,
@@ -197,8 +164,6 @@ impl GetPhases {
     }
 }
 
-/// The I/O latencies of a stretch of time, as [`IoLatencies::take`] took
-/// them.
 #[derive(Clone, Copy, Debug)]
 pub struct TakenIoLatencies {
     get_first_byte: TakenLatencies,
@@ -209,17 +174,12 @@ pub struct TakenIoLatencies {
 }
 
 impl TakenIoLatencies {
-    /// The CSV columns [`Self::csv_fields`] fills: for a GET's first byte,
-    /// its last, and a disk read's end, how many and their p50, p99 and
-    /// largest, in ms; and the I/Os given up on and failed.
     pub const CSV_COLUMNS: &str = "get_first_byte_count,get_first_byte_p50_ms,\
                                    get_first_byte_p99_ms,get_first_byte_max_ms,\
                                    get_count,get_p50_ms,get_p99_ms,get_max_ms,\
                                    disk_read_count,disk_read_p50_ms,disk_read_p99_ms,\
                                    disk_read_max_ms,io_cancelled,io_failed";
 
-    /// `taken` as the fields of [`Self::CSV_COLUMNS`], empty where nothing
-    /// was taken, as when t4 isn't read through.
     pub fn csv_fields(taken: Option<&Self>) -> String {
         taken.map_or_else(
             || ",".repeat(13),
@@ -247,7 +207,6 @@ impl fmt::Display for TakenIoLatencies {
     }
 }
 
-/// The latencies one histogram took: how many, and their summary if any.
 #[derive(Clone, Copy, Debug)]
 struct TakenLatencies {
     count: u64,
@@ -279,20 +238,15 @@ impl fmt::Display for TakenLatencies {
     }
 }
 
-/// Latencies, counted in buckets a sixteenth of a power of two wide, so a
-/// percentile read from them is within 3% of the latency it stands for; the
-/// largest kept exactly. Many threads record at once, without a lock: the
-/// read path it times pays an atomic add or two.
+/// Lock-free: the read path it times pays only an atomic add or two.
 #[derive(Debug)]
 struct LatencyHistogram {
-    /// How many latencies fell in each bucket, in microseconds: one a value
-    /// below [`Self::SUB`], then [`Self::SUB`] a power of two.
+    /// One bucket per µs below [`Self::SUB`], then [`Self::SUB`] per power of two.
     buckets: Box<[AtomicU64]>,
     max_micros: AtomicU64,
 }
 
 impl LatencyHistogram {
-    /// A power of two splits into 2^`SUB_BITS` buckets.
     const SUB_BITS: u32 = 4;
     const SUB: u64 = 1 << Self::SUB_BITS;
     /// The longest latency told apart, in microseconds: 2^41 - 1, 25 days.
@@ -305,8 +259,6 @@ impl LatencyHistogram {
         self.max_micros.fetch_max(micros, Ordering::Relaxed);
     }
 
-    /// The latencies recorded since the last take, and the histogram
-    /// emptied.
     fn take(&self) -> TakenLatencies {
         let counts: Vec<u64> = self
             .buckets
@@ -334,7 +286,6 @@ impl LatencyHistogram {
         TakenLatencies { count, summary }
     }
 
-    /// The bucket that counts a latency of `micros`.
     fn bucket(micros: u64) -> usize {
         if micros < Self::SUB {
             return micros as usize;
@@ -345,7 +296,6 @@ impl LatencyHistogram {
         (Self::SUB * u64::from(log - Self::SUB_BITS + 1) + within) as usize
     }
 
-    /// The middle of the latencies `bucket` counts, in microseconds.
     fn middle(bucket: usize) -> u64 {
         let bucket = bucket as u64;
         if bucket < Self::SUB {

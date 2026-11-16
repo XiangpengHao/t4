@@ -5,7 +5,6 @@ use super::*;
 
 const MIB: u64 = 1 << 20;
 
-/// The cache files `names` in `dir`, opened, each made if missing.
 fn opened(dir: &Path, names: &[&str]) -> Vec<File> {
     names
         .iter()
@@ -21,8 +20,6 @@ fn opened(dir: &Path, names: &[&str]) -> Vec<File> {
         .collect()
 }
 
-/// Version `id` of the file at `path`, of `size` bytes, with `blocks` on
-/// disk.
 fn on_disk(path: &[u8], id: u64, size: u64, blocks: &[(u32, u32)]) -> VersionOnDisk {
     VersionOnDisk::new(
         path.into(),
@@ -35,7 +32,6 @@ fn on_disk(path: &[u8], id: u64, size: u64, blocks: &[(u32, u32)]) -> VersionOnD
     )
 }
 
-/// Two versions: one with both its blocks on disk, the other its last.
 fn snapshot() -> DiskSnapshot {
     DiskSnapshot::new(
         9,
@@ -59,8 +55,6 @@ fn a_kept_snapshot_is_taken_back_once() {
     assert_eq!(place.take().unwrap(), None);
 }
 
-/// A snapshot of other cache files, or of these in another layout, is
-/// removed, and not taken for theirs.
 #[test]
 fn a_snapshot_of_other_cache_files_is_removed_not_taken() {
     let dir = tempfile::tempdir().unwrap();
@@ -93,8 +87,6 @@ fn a_snapshot_of_other_cache_files_is_removed_not_taken() {
     assert!(!other.path().exists());
 }
 
-/// Bytes that are no whole snapshot, or a snapshot no cache could have
-/// kept, are no snapshot: the cache starts cold.
 #[test]
 fn bytes_no_cache_could_have_kept_are_no_snapshot() {
     let dir = tempfile::tempdir().unwrap();

@@ -24,18 +24,17 @@ jobs:
         uses: DeterminateSystems/magic-nix-cache-action@v14
 
       - name: Check formatting
-        run: nix develop -c cargo fmt --all -- --check
+        run: nix build -L .#fmt
 
       - name: Run Clippy
-        run: nix develop -c cargo clippy --all-targets --all-features -- -D warnings
+        run: nix build -L .#clippy
 
       - name: Run tests
-        timeout-minutes: 5
-        run: nix develop -c cargo test
+        timeout-minutes: 15
+        run: nix build -L .#tests
 
       - name: Run proof check
-        run: nix develop -c cargo verus focus
-
+        run: nix build -L .#proofs
 
   macos:
     runs-on: macos-latest
@@ -50,14 +49,14 @@ jobs:
         uses: DeterminateSystems/magic-nix-cache-action@v14
 
       - name: Run Clippy
-        run: nix develop -c cargo clippy --all-targets --all-features -- -D warnings
+        run: nix build -L .#clippy
 
       - name: Run tests
-        timeout-minutes: 5
-        run: nix develop -c cargo test
+        timeout-minutes: 15
+        run: nix build -L .#tests
 
       - name: Run proof check
-        run: nix develop -c cargo verus focus
+        run: nix build -L .#proofs
 
   shuttle:
     # Independent of lint/proof jobs: a failure there must not hide a schedule failure.
@@ -74,5 +73,5 @@ jobs:
       - name: Configure Nix cache
         uses: DeterminateSystems/magic-nix-cache-action@v14
       - name: Run every shuttle test
-        timeout-minutes: 5
-        run: nix develop -c cargo test --locked --features shuttle
+        timeout-minutes: 15
+        run: nix build -L .#shuttle

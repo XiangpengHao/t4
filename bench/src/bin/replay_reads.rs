@@ -1,16 +1,3 @@
-//! Replays the calls a trace recorded (`run_queries --trace`) against a
-//! table's store, with nothing between them: no decoding, the reads alone,
-//! each query's tasks at once as DataFusion ran them. Writes each query's
-//! time, bytes and call latencies as CSV, and prints each pass's latencies
-//! by call size.
-//!
-//! A run makes `--passes` passes over the queries in one process, after the
-//! trace's setup: t4's cache lives as long as the process, so the first
-//! pass runs cold and the rest warm. `--copies` runs each query's tasks
-//! that many times at once, for more reads in flight than DataFusion made.
-//! `TOOL=replay bench/clickbench/run.sh` replays ClickBench every way the
-//! benchmark compares.
-//!
 //! ```text
 //! cargo run --release -p t4-bench --bin replay_reads -- \
 //!     --trace trace.csv \
@@ -34,9 +21,6 @@ use t4_bench::replay::{CallSize, LatencySummary, QueryReplay, ReplayPlan, Replay
 use t4_bench::request_trace::RecordedRequest;
 use t4_bench::table_store::{CacheOptions, HttpOptions, TableLocation};
 
-/// The allocator: mimalloc unless built `--no-default-features`, as the
-/// `mimalloc` feature in `bench/Cargo.toml` explains. A static, as Rust takes
-/// a global allocator only so.
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -46,19 +30,14 @@ struct Args {
     /// The trace to replay, as `run_queries --trace` wrote it.
     #[arg(long)]
     trace: PathBuf,
-    /// The table to read: a Parquet file, or a directory of them, at a local
-    /// path or a `gs://bucket/path` or `s3://bucket/path` URL, a
-    /// directory's ending in `/`. The trace's files are read here: a file
-    /// stands for the trace's one file, a directory holds files of the same
-    /// names.
+    /// The table: a file, or a directory ending in `/` holding the trace's files by name.
     #[arg(long, value_parser = TableLocation::parse)]
     location: TableLocation,
     #[command(flatten)]
     http: HttpOptions,
     #[command(flatten)]
     cache: CacheOptions,
-    /// Passes over the queries, in one process: the first cold, the rest
-    /// warm.
+    /// Passes over the queries in one process: the first cold, the rest warm.
     #[arg(long, default_value_t = 1)]
     passes: usize,
     /// Each query's tasks run this many times at once.
@@ -67,8 +46,7 @@ struct Args {
     /// Only these queries; all unless given.
     #[arg(long = "query")]
     only: Vec<usize>,
-    /// Count the bytes read and written on the drive that holds this
-    /// directory, summed over every one given (Linux only).
+    /// Count the bytes moved by the drives holding these directories (Linux only).
     #[arg(long = "drive-dir")]
     drive_dirs: Vec<PathBuf>,
     /// Where each query's time, bytes and latencies go, as CSV.
@@ -76,8 +54,6 @@ struct Args {
     out: PathBuf,
 }
 
-/// One query replayed in one pass, and what the drive and the network
-/// moved meanwhile, and the cgroup's memory after.
 struct QueryResult {
     pass: usize,
     query: usize,
@@ -138,7 +114,6 @@ impl QueryResult {
     }
 }
 
-/// A pass's queries summed up: time, bytes, and latencies by call size.
 struct PassSummary<'a> {
     pass: usize,
     results: &'a [QueryResult],

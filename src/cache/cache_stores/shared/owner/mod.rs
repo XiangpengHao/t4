@@ -1,11 +1,3 @@
-//! [`OwnerListener`]: an owner serving its cache to its clients
-//! (`doc/11-shared-mode.md`, decisions 1 and 5): a thread that accepts
-//! their connections, and a thread for each connection, its session.
-//!
-//! - `client_reads`: a client's reads, as its owner serves them.
-//! - `session_waker`: what wakes a session's thread, waiting on its
-//!   client's socket and its reads at once.
-
 #[cfg(all(test, feature = "shuttle"))]
 use super::protocol::{Listener as UnixListener, Transport};
 use crate::io::sync::Mutex;
@@ -34,26 +26,16 @@ mod session_waker;
 use client_reads::ClientReads;
 use session_waker::SessionWaker;
 
-/// An owner listening for its clients, as long as it lives. Dropped, it
-/// stops: it takes no more connections, closes every session's, and waits
-/// for their threads, which hold the cache, to end; so the cache files'
-/// lock goes with the owner's last handle on its cache.
+/// Dropped, it waits for its sessions, which hold the cache, so the lock goes with the owner's
+/// last handle on it.
 pub(super) struct OwnerListener {
     address: OwnerAddress,
-    /// Set once the listener is dropped: the accept thread stops at the
-    /// next connection, which the drop makes.
     stopping: std::sync::Arc<AtomicBool>,
     sessions: std::sync::Arc<Mutex<Vec<Session>>>,
     accepting: Option<JoinHandle<()>>,
 }
 
 impl OwnerListener {
-    /// Listens for the clients of `cache`, whose first cache file is
-    /// `first_file`, at its address.
-    ///
-    /// # Errors
-    ///
-    /// If the address can't be bound, or the accept thread started.
     pub(super) fn listen(
         cache: Arc<ObjectCache>,
         first_file: FileIdentity,
@@ -109,18 +91,11 @@ impl Drop for OwnerListener {
     }
 }
 
-/// A client's session, as its listener holds it: its socket, which the
-/// listener shuts as it stops, if the session still has it; and the thread
-/// serving it. The listener's hold on the socket doesn't keep it open: a
-/// session that ends closes its connection, whatever its shutdown did
-/// (`FrameSocket::RECHECK`).
 struct Session {
     socket: std::sync::Weak<FrameSocket>,
     thread: JoinHandle<()>,
 }
 
-/// The listener's thread: it takes each connection, and starts a session
-/// for it, until the listener stops.
 struct Acceptor {
     listener: UnixListener,
     stopping: std::sync::Arc<AtomicBool>,
@@ -135,8 +110,7 @@ impl Acceptor {
             if self.stopping.load(Ordering::Acquire) {
                 return;
             }
-            // A connection that fails before its session starts is gone:
-            // its client reads from the remote, or tries again.
+            // A connection that fails here is gone: its client reads from the remote, or retries.
             let Ok(socket) = stream.and_then(FrameSocket::new) else {
                 continue;
             };
@@ -165,13 +139,8 @@ impl Acceptor {
     }
 }
 
-/// One client's connection, served on a thread of its own: the handshake,
-/// then the client's reads, until either side closes it. A thread of the
-/// session's takes the client's frames as they come; the session's own
-/// runs the reads, each a task ([`ClientReads`]), and sends their answers.
 struct ClientSession {
     socket: std::sync::Arc<FrameSocket>,
-    /// The listener's: set before it shuts any session's socket.
     stopping: std::sync::Arc<AtomicBool>,
     cache: Arc<ObjectCache>,
     first_file: FileIdentity,
@@ -179,27 +148,17 @@ struct ClientSession {
 
 impl ClientSession {
     fn run(self) {
-        // Whatever ends the session closes its connection, which the
-        // listener's handle on the socket would keep open: its client's
-        // reads go to the remote (decision 7).
+        // Shut it however the session ended: the listener's handle would keep it open.
         let _ = self.serve();
         self.socket.shut_down();
     }
 
-    /// Admits the client, maps its region if it sent one that can't
-    /// shrink, then serves its reads until it closes the connection.
-    ///
-    /// # Errors
-    ///
-    /// If the socket fails, the client isn't admitted, or sends a frame
-    /// the protocol doesn't allow where it comes.
     fn serve(&self) -> Result<()> {
         self.socket.set_read_timeout(Some(Hello::WAIT))?;
         let hello = Hello::receive(&self.socket)?;
         if hello.version() != PROTOCOL_VERSION {
-            // Told this version, a client of another gives up at once,
-            // rather than try an owner that won't admit it till its wait
-            // runs out (decision 6).
+            // Told this version, a client of another gives up at once rather than retry till its
+            // wait runs out (`doc/11-shared-mode.md`, decision 6).
             let (version, region) = (PROTOCOL_VERSION, false);
             self.socket
                 .send(&OwnerFrame::Welcome { version, region }.encode())?;
@@ -220,18 +179,7 @@ impl ClientSession {
         self.serve_reads(&mut frames, region)
     }
 
-    /// Serves the client's reads, taking their frames from `frames` as they
-    /// come, their outputs in spans of `region` if the client named them:
-    /// runs each read as far as it goes, sends what the reads answer, and
-    /// sleeps until a frame comes or a read can go on. The thread takes the
-    /// frames itself, as it would wait to be woken by a thread that did
-    /// (`SessionWaker`). Every read is dropped as it ends, with all it
-    /// holds.
-    ///
-    /// # Errors
-    ///
-    /// If the socket fails, or the client sends a frame the protocol
-    /// doesn't allow where it comes.
+    /// The thread takes the frames itself, as it would wait to be woken by a thread that did.
     fn serve_reads(
         &self,
         frames: &mut FrameReceiver,
@@ -243,8 +191,7 @@ impl ClientSession {
         let mut context = Context::from_waker(&task_waker);
         loop {
             if waker.wait_for(&self.socket)? {
-                // What has come, and every frame it completes: a frame half
-                // come waits for its rest, not the session.
+                // A frame half come waits for its rest, not the session.
                 if !frames.fill()? {
                     return Ok(());
                 }
@@ -253,14 +200,8 @@ impl ClientSession {
                 }
             }
             reads.run(&mut context);
-            // The owner going, its sessions end one by one. A session that
-            // ends hands its client's claims to the reads that wait on
-            // them, in other sessions; answered, their clients would fetch
-            // blocks an owner that's going can't take, then fetch them
-            // again from the remote. The flag is set before any socket is
-            // shut, so a session woken by another's end finds it, and ends
-            // with nothing sent: its client's reads go to the remote at once
-            // (decision 7).
+            // Answered, a going owner's clients would fetch blocks it can't take, then refetch;
+            // the flag is set before any socket shuts, so a woken session sees it (decision 7).
             if self.stopping.load(Ordering::Acquire) {
                 return Ok(());
             }

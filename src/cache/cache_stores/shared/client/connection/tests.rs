@@ -1,8 +1,5 @@
 use super::*;
 
-/// A call given up leaves the table; its answer, if the owner still sends
-/// it, is dropped: no protocol error. An answer to a call never made is
-/// one.
 #[test]
 fn an_answer_to_a_call_given_up_is_dropped() {
     crate::io::test_schedule::TestSchedule::once(|| {
@@ -20,8 +17,6 @@ fn an_answer_to_a_call_given_up_is_dropped() {
     });
 }
 
-/// A read's spans are kept until the owner ends the read, or goes; and
-/// once it has gone, spans lent are freed at once.
 #[test]
 fn spans_lent_come_back_once_the_owner_ends_their_read_or_goes() {
     crate::io::test_schedule::TestSchedule::once(|| {

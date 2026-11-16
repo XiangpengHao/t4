@@ -8,11 +8,7 @@ use std::task::Wake;
 use super::SessionWaker;
 use crate::cache::cache_stores::shared::protocol::{ClientFrame, FrameSocket};
 
-/// A session waits for its client's socket or a wake, whichever comes
-/// first: a wake that came before the wait ends it at once, as does one
-/// from another thread while it waits; many wakes before a wait end one
-/// wait, not the next; and a frame, or the client's close, ends a wait
-/// with the socket ready.
+/// Many wakes before a wait end that wait, not the next.
 #[test]
 fn a_session_waits_for_its_socket_or_a_wake() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -48,8 +44,6 @@ fn a_session_waits_for_its_socket_or_a_wake() {
     });
 }
 
-/// A frame queued for the client wakes the session from another thread,
-/// and not from its own, which sends what is queued before it waits.
 #[test]
 fn a_frame_queued_wakes_the_session_from_another_thread_only() {
     crate::io::test_schedule::TestSchedule::check(|| {

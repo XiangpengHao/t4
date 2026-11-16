@@ -1,15 +1,4 @@
-//! [`HostProbe`]: the bytes a drive and the network moved, read from
-//! Linux's `/proc`, so that a run can be set against either's bandwidth,
-//! and the CPU time spent moving them, the process's and the machine's (the
-//! kernel takes in packets wherever their interrupts land, not always on
-//! the process's time); and the memory of the process's cgroup, so that a
-//! run held to a memory budget can show what it cached.
-//!
-//! [`NicProbe`]: what the network interfaces' drivers count past bytes, as
-//! `ethtool -S` prints it: on AWS's ENA, the packets the instance's limits
-//! held back, and each receive queue's bytes, so that a run shows whether
-//! AWS shaped its traffic and whether its connections spread over the
-//! queues.
+//! Machine CPU is counted too: the kernel takes in packets wherever their interrupts land.
 
 use std::fmt;
 use std::fs;
@@ -18,22 +7,12 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Reads the [`HostCounters`] of drives, the block devices under some
-/// directories, summed, and of every network interface but loopback. Where
-/// `/proc` has no such counters (not Linux), it reads none.
 pub struct HostProbe {
-    /// The drives' major and minor device numbers, each once.
     drives: Vec<(u64, u64)>,
-    /// The `memory.stat` of the cgroup v2 this process runs in, if any.
     memory_stat: Option<PathBuf>,
 }
 
 impl HostProbe {
-    /// A probe of the drives that hold `dirs`, and of the network.
-    ///
-    /// # Errors
-    ///
-    /// If a directory can't be read.
     pub fn new(dirs: &[PathBuf]) -> io::Result<Self> {
         let mut drives = dirs
             .iter()
@@ -47,8 +26,6 @@ impl HostProbe {
         })
     }
 
-    /// The memory of this process's cgroup now, or `None` outside a cgroup
-    /// v2 with the memory controller.
     pub fn cgroup_memory(&self) -> Option<CgroupMemory> {
         let stat = fs::read_to_string(self.memory_stat.as_ref()?).ok()?;
         let field = |name: &str| {
@@ -61,8 +38,7 @@ impl HostProbe {
         })
     }
 
-    /// Where this process's cgroup keeps its `memory.stat`: cgroup v2 names
-    /// the cgroup in `/proc/self/cgroup` as `0::/path`.
+    /// cgroup v2 names the cgroup in `/proc/self/cgroup` as `0::/path`.
     fn memory_stat() -> Option<PathBuf> {
         let cgroup = fs::read_to_string("/proc/self/cgroup").ok()?;
         let path = cgroup.lines().find_map(|line| line.strip_prefix("0::"))?;
@@ -72,7 +48,6 @@ impl HostProbe {
         stat.exists().then_some(stat)
     }
 
-    /// The counters now, or `None` where `/proc` has none.
     pub fn sample(&self) -> Option<HostCounters> {
         let network_received = Self::network_received()?;
         let process = Self::process_stat()?;
@@ -95,17 +70,14 @@ impl HostProbe {
         })
     }
 
-    /// Linux's major and minor numbers of the device `dev` names, as glibc's
-    /// `major` and `minor` take them apart.
+    /// As glibc's `major` and `minor` take `dev` apart.
     fn device_numbers(dev: u64) -> (u64, u64) {
         let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff);
         let minor = (dev & 0xff) | ((dev >> 12) & !0xff);
         (major, minor)
     }
 
-    /// The bytes read and written on the device `(major, minor)` since boot,
-    /// from `/proc/diskstats`: sectors read is its 6th field, sectors
-    /// written its 10th, each sector 512 bytes.
+    /// Sectors read and written are `/proc/diskstats`' 6th and 10th fields, 512 bytes each.
     fn drive_bytes((major, minor): (u64, u64)) -> Option<(u64, u64)> {
         let stats = fs::read_to_string("/proc/diskstats").ok()?;
         stats.lines().find_map(|line| {
@@ -118,13 +90,7 @@ impl HostProbe {
         })
     }
 
-    /// This process's page faults and CPU time since it started, from
-    /// `/proc/self/stat`, whose fields after the command's name (which ends
-    /// in the last `)`) start with the 3rd: `minflt`, the 10th, counts the
-    /// faults that found the page in memory or made it there, each a fresh
-    /// page faulted in; `utime` and `stime`, the 14th and 15th, the CPU time
-    /// in user space and in the kernel, in clock ticks, which Linux fixes at
-    /// 100 a second for `/proc`.
+    /// The command name may hold `)`; the fields after its last one are numbered from 3.
     fn process_stat() -> Option<ProcessStat> {
         let stat = fs::read_to_string("/proc/self/stat").ok()?;
         let (_, after_name) = stat.rsplit_once(')')?;
@@ -137,9 +103,6 @@ impl HostProbe {
         })
     }
 
-    /// Every CPU's time since boot, summed, from `/proc/stat`'s first line,
-    /// `cpu user nice system idle iowait irq softirq steal ...` in clock
-    /// ticks: busy is all but idle and iowait.
     fn machine_cpu() -> Option<MachineCpu> {
         let stat = fs::read_to_string("/proc/stat").ok()?;
         let ticks: Vec<u64> = stat
@@ -158,8 +121,6 @@ impl HostProbe {
         })
     }
 
-    /// The bytes every interface but loopback received since boot, from
-    /// `/proc/net/dev`: the first field after an interface's name.
     fn network_received() -> Option<u64> {
         let stats = fs::read_to_string("/proc/net/dev").ok()?;
         let received = stats
@@ -172,26 +133,20 @@ impl HostProbe {
     }
 }
 
-/// Linux's clock ticks in `/proc`, fixed at 100 a second, in milliseconds.
+/// `/proc` counts clock ticks, fixed at 100 a second.
 const MS_PER_TICK: u64 = 10;
 
-/// What [`HostProbe::machine_cpu`] reads of every CPU.
 struct MachineCpu {
     busy_ms: u64,
     softirq_ms: u64,
 }
 
-/// What [`HostProbe::process_stat`] reads of this process.
 struct ProcessStat {
     minor_faults: u64,
     user_cpu_ms: u64,
     system_cpu_ms: u64,
 }
 
-/// Bytes moved: by the probed drive, read and written, and received by the
-/// network; the page faults the process took, and its CPU time, in user
-/// space and in the kernel; and every CPU's busy time, in all and in
-/// softirqs, where the kernel takes in packets.
 #[derive(Clone, Copy, Debug)]
 pub struct HostCounters {
     drive_read: u64,
@@ -205,13 +160,10 @@ pub struct HostCounters {
 }
 
 impl HostCounters {
-    /// The CSV columns [`Self::csv_fields`] fills.
     pub const CSV_COLUMNS: &str = "drive_read_bytes,drive_written_bytes,network_received_bytes,\
                                    minor_faults,user_cpu_ms,system_cpu_ms,\
                                    machine_busy_ms,machine_softirq_ms";
 
-    /// `counters` as the fields of [`Self::CSV_COLUMNS`], empty where none
-    /// were counted.
     pub fn csv_fields(counters: Option<&Self>) -> String {
         counters.map_or_else(
             || ",,,,,,,".to_owned(),
@@ -231,7 +183,6 @@ impl HostCounters {
         )
     }
 
-    /// What moved between `earlier` and `self`.
     pub fn since(&self, earlier: &Self) -> Self {
         Self {
             drive_read: self.drive_read.saturating_sub(earlier.drive_read),
@@ -265,24 +216,18 @@ impl HostCounters {
         self.minor_faults
     }
 
-    /// The CPU time the process spent in user space, in milliseconds.
     pub fn user_cpu_ms(&self) -> u64 {
         self.user_cpu_ms
     }
 
-    /// The CPU time the process spent in the kernel, in milliseconds.
     pub fn system_cpu_ms(&self) -> u64 {
         self.system_cpu_ms
     }
 
-    /// Every CPU's busy time, summed, in milliseconds: the process's, the
-    /// kernel's for it wherever it ran, and anything else running.
     pub fn machine_busy_ms(&self) -> u64 {
         self.machine_busy_ms
     }
 
-    /// Every CPU's time in softirqs, summed, in milliseconds: where the
-    /// kernel takes in packets.
     pub fn machine_softirq_ms(&self) -> u64 {
         self.machine_softirq_ms
     }
@@ -305,8 +250,6 @@ impl fmt::Display for HostCounters {
     }
 }
 
-/// A cgroup's memory at a moment: its page cache, and its anonymous memory,
-/// the process's own (t4's memory tier included).
 #[derive(Clone, Copy, Debug)]
 pub struct CgroupMemory {
     page_cache: u64,
@@ -314,11 +257,8 @@ pub struct CgroupMemory {
 }
 
 impl CgroupMemory {
-    /// The CSV columns [`Self::csv_fields`] fills.
     pub const CSV_COLUMNS: &str = "page_cache_bytes,anon_bytes";
 
-    /// `memory` as the fields of [`Self::CSV_COLUMNS`], empty where it
-    /// wasn't read.
     pub fn csv_fields(memory: Option<&Self>) -> String {
         memory.map_or_else(
             || ",".to_owned(),
@@ -347,16 +287,11 @@ impl fmt::Display for CgroupMemory {
     }
 }
 
-/// Reads the [`NicCounters`] of every network interface but loopback, by
-/// running `ethtool -S` on each: its CPU time falls in the machine's, so
-/// it is sampled outside the window the CPU counters cover.
 pub struct NicProbe {
     interfaces: Vec<String>,
 }
 
 impl NicProbe {
-    /// A probe of the interfaces `/proc/net/dev` names, but loopback; none
-    /// where there is no such file.
     pub fn new() -> Self {
         let interfaces = fs::read_to_string("/proc/net/dev")
             .map(|stats| {
@@ -370,8 +305,6 @@ impl NicProbe {
         Self { interfaces }
     }
 
-    /// The counters now, over every interface; `None` if there is none,
-    /// ethtool fails on one, or one counts no allowances (not an ENA).
     pub fn sample(&self) -> Option<NicCounters> {
         if self.interfaces.is_empty() {
             return None;
@@ -400,10 +333,6 @@ impl Default for NicProbe {
     }
 }
 
-/// What ENA counts past bytes: the packets held back, queued or dropped,
-/// for passing the instance's limits, inbound bandwidth, outbound, packets
-/// a second, tracked connections and link-local traffic (DNS, the metadata
-/// service, time); and each receive queue's bytes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NicCounters {
     bw_in_allowance_exceeded: u64,
@@ -411,20 +340,15 @@ pub struct NicCounters {
     pps_allowance_exceeded: u64,
     conntrack_allowance_exceeded: u64,
     linklocal_allowance_exceeded: u64,
-    /// Each receive queue's bytes, interface after interface.
     rx_queue_bytes: Vec<u64>,
 }
 
 impl NicCounters {
-    /// The CSV columns [`Self::csv_fields`] fills: the allowances, the
-    /// receive queues that took bytes, and the busiest one's share of them.
     pub const CSV_COLUMNS: &str = "bw_in_allowance_exceeded,bw_out_allowance_exceeded,\
                                    pps_allowance_exceeded,conntrack_allowance_exceeded,\
                                    linklocal_allowance_exceeded,rx_queues_used,\
                                    rx_busiest_queue_share";
 
-    /// `counters` as the fields of [`Self::CSV_COLUMNS`], empty where none
-    /// were counted, and the share where no queue took bytes.
     pub fn csv_fields(counters: Option<&Self>) -> String {
         let Some(counted) = counters else {
             return ",,,,,,".to_owned();
@@ -450,7 +374,6 @@ impl NicCounters {
         )
     }
 
-    /// What was counted between `earlier` and `self`.
     pub fn since(&self, earlier: &Self) -> Self {
         Self {
             bw_in_allowance_exceeded: self
@@ -477,9 +400,6 @@ impl NicCounters {
         }
     }
 
-    /// One interface's counters, from what `ethtool -S` printed for it:
-    /// `name: value` a line, its queues' as `queue_<n>_rx_bytes`. `None`
-    /// if it counts no allowances.
     fn parse(printed: &str) -> Option<Self> {
         let mut counters = Self::default();
         let mut allowances = false;
@@ -513,7 +433,6 @@ impl NicCounters {
         allowances.then_some(counters)
     }
 
-    /// Adds another interface's counters.
     fn add(&mut self, other: &Self) {
         self.bw_in_allowance_exceeded += other.bw_in_allowance_exceeded;
         self.bw_out_allowance_exceeded += other.bw_out_allowance_exceeded;
@@ -528,8 +447,6 @@ impl NicCounters {
 mod tests {
     use super::*;
 
-    /// ENA's counters as `ethtool -S` prints them, the allowances and each
-    /// queue's bytes among the rest.
     const PRINTED: &str = "NIC statistics:
      tx_timeout: 0
      bw_in_allowance_exceeded: 12

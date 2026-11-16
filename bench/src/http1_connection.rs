@@ -1,14 +1,5 @@
-//! [`Http1Connection`]: one HTTP/1.1 connection's exchanges, a request and
-//! its response at a time, over any byte stream; as much of HTTP/1.1 as an
-//! object store's answers need.
-//!
-//! A response's body is read whole into one buffer, sized from its
-//! `Content-Length`, which the stream fills in place: over kTLS
-//! (`ktls_transport`), the kernel decrypts straight into it, and the body
-//! reaches object_store as the one piece it is, which its `bytes()` takes
-//! without a copy. A response read whole is what object_store's `bytes()`
-//! would hold anyway; a body framed by `Transfer-Encoding: chunked`, as
-//! listings can be, is gathered from its chunks.
+//! Bodies are read whole into one buffer sized by `Content-Length`: kTLS decrypts straight
+//! into it, and object_store's `bytes()` takes it without a copy.
 
 use std::fmt::Write as _;
 use std::io;
@@ -20,14 +11,10 @@ use http_body_util::BodyExt;
 use object_store::client::{HttpError, HttpErrorKind, HttpRequest, HttpResponse, HttpResponseBody};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// The response headers one read takes, before more are read.
 const HEAD_READ: usize = 16 << 10;
-/// The longest line of a chunked body's framing.
 const MAX_LINE: usize = 4 << 10;
-/// The most headers a response may have.
 const MAX_HEADERS: usize = 64;
 
-/// A request as its bytes go out, and what its answer needs known of it.
 pub(crate) struct OutgoingRequest {
     host: String,
     port: u16,
@@ -37,9 +24,7 @@ pub(crate) struct OutgoingRequest {
 }
 
 impl OutgoingRequest {
-    /// `request` as HTTP/1.1 puts it on the wire, with `Host` and, where
-    /// the request has a body or a method that may carry one,
-    /// `Content-Length`. Only `https` URLs: the transports here speak TLS.
+    /// Only `https` URLs: the transports here speak TLS.
     pub(crate) async fn encode(request: HttpRequest) -> Result<Self, HttpError> {
         let (parts, body) = request.into_parts();
         let body = match body.as_bytes() {
@@ -94,13 +79,10 @@ impl OutgoingRequest {
         self.port
     }
 
-    /// The host and port connections to it are kept by.
     pub(crate) fn authority(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
 
-    /// Whether sending it twice does what sending it once does, so that it
-    /// may go again on another connection.
     pub(crate) fn idempotent(&self) -> bool {
         self.idempotent
     }
@@ -113,9 +95,7 @@ impl OutgoingRequest {
     }
 }
 
-/// An exchange that failed: before any byte of the answer came back, so
-/// that the request may go again on another connection, as when a kept
-/// connection was closed by the server meanwhile; or after.
+/// `Unanswered` may go again on another connection, as when the server closed a kept one.
 pub(crate) enum ExchangeError {
     Unanswered(io::Error),
     Failed(HttpError),
@@ -130,7 +110,6 @@ impl From<ExchangeError> for HttpError {
     }
 }
 
-/// A response read whole, and whether its connection may carry another.
 pub(crate) struct Answer {
     response: HttpResponse,
     reusable: bool,
@@ -146,11 +125,8 @@ impl Answer {
     }
 }
 
-/// An HTTP/1.1 connection over `S`, carrying one exchange at a time.
 pub(crate) struct Http1Connection<S> {
     stream: S,
-    /// Bytes read past the end of what a read wanted: the start of what
-    /// comes next.
     unread: BytesMut,
 }
 
@@ -162,7 +138,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Http1Connection<S> {
         }
     }
 
-    /// Sends `request` and reads its response, body and all.
     pub(crate) async fn exchange(
         &mut self,
         request: &OutgoingRequest,
@@ -183,7 +158,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Http1Connection<S> {
         })
     }
 
-    /// The response's status line and headers, read until they end.
     async fn read_head(&mut self) -> Result<ResponseHead, ExchangeError> {
         loop {
             let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
@@ -248,8 +222,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Http1Connection<S> {
         }
     }
 
-    /// A body framed in chunks, each a line of its size in hex, its bytes,
-    /// and a line's end; a chunk of size 0, then trailers, end it.
     async fn read_chunked(&mut self) -> io::Result<Bytes> {
         let mut body = BytesMut::new();
         loop {
@@ -269,9 +241,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Http1Connection<S> {
         }
     }
 
-    /// Appends the next `count` bytes to `body`: what was read already
-    /// first, then the rest straight from the stream into `body`'s spare
-    /// capacity.
     async fn read_into(&mut self, body: &mut BytesMut, count: usize) -> io::Result<()> {
         let early = self.unread.len().min(count);
         body.extend_from_slice(&self.unread.split_to(early));
@@ -289,7 +258,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Http1Connection<S> {
         Ok(())
     }
 
-    /// The next line, without its `\r\n`.
     async fn read_line(&mut self) -> io::Result<String> {
         loop {
             if let Some(end) = self.unread.windows(2).position(|pair| pair == b"\r\n") {
@@ -306,8 +274,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Http1Connection<S> {
         }
     }
 
-    /// Reads what the stream has, up to `at_most` bytes, after what was
-    /// read already; 0 at the stream's end.
     async fn read_more(&mut self, at_most: usize) -> io::Result<usize> {
         self.unread.reserve(at_most);
         self.stream
@@ -320,7 +286,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Http1Connection<S> {
     }
 }
 
-/// How a response's body ends.
 #[derive(Debug, PartialEq)]
 enum BodyFraming {
     Empty,
@@ -329,7 +294,6 @@ enum BodyFraming {
     UntilClose,
 }
 
-/// A response's status line and headers.
 struct ResponseHead {
     status: StatusCode,
     headers: HeaderMap,
@@ -352,8 +316,6 @@ impl ResponseHead {
         Ok(Self { status, headers })
     }
 
-    /// How the body ends: none after `HEAD`, 1xx, 204 and 304; else by
-    /// chunks, by `Content-Length`, or by the connection's end.
     fn framing(&self, head_only: bool) -> Result<BodyFraming, ExchangeError> {
         if head_only
             || self.status.is_informational()
@@ -378,9 +340,6 @@ impl ResponseHead {
         }
     }
 
-    /// Whether the connection may carry another exchange once the body is
-    /// read: HTTP/1.1 keeps it, unless the response says `close` or ends
-    /// its body by closing.
     fn keeps_connection(&self, framing: &BodyFraming) -> bool {
         *framing != BodyFraming::UntilClose && !self.has_token(&CONNECTION, "close")
     }
@@ -427,7 +386,6 @@ mod tests {
             .unwrap()
     }
 
-    /// A connection whose server has already answered with `answers`.
     async fn answered(answers: &[u8]) -> (Http1Connection<DuplexStream>, DuplexStream) {
         let (client, mut server) = duplex(1 << 20);
         server.write_all(answers).await.unwrap();

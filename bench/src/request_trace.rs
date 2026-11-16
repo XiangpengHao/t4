@@ -1,13 +1,4 @@
-//! [`TracedStore`]: an object store over another that records every read
-//! made of it in a [`RequestTrace`], as t4 would see it.
-//!
-//! t4 answers `get_ranges` as `ObjectStore`'s default does: ranges less
-//! than [`OBJECT_STORE_COALESCE_DEFAULT`] apart merge into one GET, and up
-//! to ten GETs run at once. So does this store, and its trace holds both:
-//! each range the reader asked for (a `range` row) and each GET made for
-//! them (a `get` row), tied by their batch. HEADs and lists are recorded
-//! too, so a trace names every call a reader makes. [`RecordedRequest`]
-//! reads a trace back.
+//! `get_ranges` merges ranges as `ObjectStore`'s default and t4 do, so the GETs traced are t4's.
 
 use std::fmt;
 use std::io::{self, BufRead, Write};
@@ -27,33 +18,25 @@ use object_store::{
     PutPayload, PutResult, coalesce_ranges,
 };
 
-/// The reads made of a [`TracedStore`], each under the query that was
-/// running, timed from the trace's start.
 pub struct RequestTrace {
     started: Instant,
     query: Mutex<Arc<str>>,
-    /// GETs and HEADs issued and not yet answered.
     in_flight: AtomicU64,
     next_batch: AtomicU64,
     requests: Mutex<Vec<TracedRequest>>,
 }
 
-/// What a row of a trace records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestKind {
-    /// A GET: one range of an object, or all of it.
     Get,
     Head,
-    /// A range a `get_ranges` call asked for; its batch's GETs fetched it.
     Range,
-    /// A listing of the objects under a prefix.
     List,
 }
 
 impl RequestKind {
     const ALL: [Self; 4] = [Self::Get, Self::Head, Self::Range, Self::List];
 
-    /// The kind's name in a trace.
     fn name(self) -> &'static str {
         match self {
             Self::Get => "get",
@@ -68,30 +51,22 @@ impl RequestKind {
     }
 }
 
-/// One row of a [`RequestTrace`].
 struct TracedRequest {
     query: Arc<str>,
     kind: RequestKind,
-    /// The `get_ranges` call a range or a GET belongs to, if any.
     batch: Option<u64>,
-    /// The tokio task that asked, if a task did: in DataFusion, a
-    /// partition's stream, whose reads wait on each other and its decoding.
+    /// In DataFusion, a partition's stream: its reads wait on each other and its decoding.
     task: Option<tokio::task::Id>,
-    /// The object; for a list, the prefix.
     path: Path,
-    /// The object's size; for a list, how many objects and prefixes it
-    /// named.
+    /// For a list, how many objects and prefixes it named.
     object_size: u64,
     range: Range<u64>,
     issued: Duration,
     done: Duration,
-    /// GETs and HEADs in flight as this one was issued, itself included; 0
-    /// for a range.
     in_flight: u64,
 }
 
 impl RequestTrace {
-    /// An empty trace, its clock started, its query `setup`.
     pub fn new() -> Self {
         Self {
             started: Instant::now(),
@@ -102,26 +77,18 @@ impl RequestTrace {
         }
     }
 
-    /// Records the requests from now on under `query`.
     pub fn begin_query(&self, query: &str) {
         *Self::locked(&self.query) = query.into();
     }
 
-    /// How many requests the trace holds.
     pub fn len(&self) -> usize {
         Self::locked(&self.requests).len()
     }
 
-    /// Whether the trace holds no request.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Writes the trace as CSV, a header row first, times in nanoseconds.
-    ///
-    /// # Errors
-    ///
-    /// If `out` fails.
     pub fn write_csv(&self, mut out: impl Write) -> io::Result<()> {
         writeln!(
             out,
@@ -180,8 +147,6 @@ impl TracedRequest {
     }
 }
 
-/// A row of a trace, read back from the CSV [`RequestTrace::write_csv`]
-/// wrote.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordedRequest {
     query: String,
@@ -194,11 +159,6 @@ pub struct RecordedRequest {
 }
 
 impl RecordedRequest {
-    /// Every row of a trace, in the order written.
-    ///
-    /// # Errors
-    ///
-    /// If `input` fails, or a row isn't one `write_csv` writes.
     pub fn read_csv(input: impl BufRead) -> io::Result<Vec<Self>> {
         input
             .lines()
@@ -216,8 +176,6 @@ impl RecordedRequest {
             .collect()
     }
 
-    /// A row: `query,kind,batch,task,"path",object_size,start,end,issued_ns,
-    /// done_ns,in_flight`, the path quoted, its quotes doubled.
     fn parse(line: &str) -> Option<Self> {
         let mut fields = line.splitn(5, ',');
         let query = fields.next()?.to_owned();
@@ -260,7 +218,6 @@ impl RecordedRequest {
         })
     }
 
-    /// The query running when it was made: `setup`, or `p{pass}q{query}`.
     pub fn query(&self) -> &str {
         &self.query
     }
@@ -269,17 +226,14 @@ impl RecordedRequest {
         self.kind
     }
 
-    /// The `get_ranges` call it belongs to, if any.
     pub fn batch(&self) -> Option<u64> {
         self.batch
     }
 
-    /// The tokio task that made it, if a task did.
     pub fn task(&self) -> Option<u64> {
         self.task
     }
 
-    /// The object; for a list, the prefix.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -288,16 +242,13 @@ impl RecordedRequest {
         self.range.clone()
     }
 
-    /// When it was issued, from the trace's start.
     pub fn issued(&self) -> Duration {
         self.issued
     }
 }
 
-/// Counts a GET or HEAD in flight until it drops, answered or not.
 struct InFlight<'a> {
     count: &'a AtomicU64,
-    /// The count once this one was added.
     at_issue: u64,
 }
 
@@ -314,8 +265,6 @@ impl Drop for InFlight<'_> {
     }
 }
 
-/// A list in flight, recorded once its listing ends, with how many objects
-/// and prefixes it named.
 struct Listing {
     trace: Arc<RequestTrace>,
     query: Arc<str>,
@@ -335,8 +284,6 @@ impl Listing {
         }
     }
 
-    /// `listed`, recorded once it ends: when its reader has taken every
-    /// object from it.
     fn traced(
         self,
         listed: BoxStream<'static, object_store::Result<ObjectMeta>>,
@@ -374,8 +321,6 @@ impl Listing {
     }
 }
 
-/// An object store over `inner` that records its reads and lists in a
-/// [`RequestTrace`]. Writes, copies and deletes pass through unrecorded.
 pub struct TracedStore {
     inner: Arc<dyn ObjectStore>,
     trace: Arc<RequestTrace>,
@@ -386,9 +331,7 @@ impl TracedStore {
         Self { inner, trace }
     }
 
-    /// Answers a GET or HEAD from the inner store, whole, and records it
-    /// under `batch`. Its bytes are read before it is recorded done, so its
-    /// time includes the transfer.
+    /// Reads the body before recording it done, so its time includes the transfer.
     async fn get_traced(
         &self,
         location: &Path,
@@ -564,7 +507,6 @@ mod tests {
 
     use super::*;
 
-    /// A store over one object of `size` bytes at `data`, and its trace.
     async fn traced_object(size: usize) -> (TracedStore, Arc<RequestTrace>, Path) {
         let inner = InMemory::new();
         let path = Path::from("data");
@@ -585,8 +527,7 @@ mod tests {
             .collect()
     }
 
-    /// Ranges a megabyte or more apart are two GETs, closer ones one; the
-    /// trace names every range asked for and every GET, in one batch.
+    /// Ranges a MiB or more apart are two GETs, closer ones one.
     #[tokio::test]
     async fn get_ranges_records_ranges_and_the_gets_made_for_them() {
         let (store, trace, path) = traced_object(4 << 20).await;
@@ -628,8 +569,6 @@ mod tests {
         );
     }
 
-    /// A HEAD is recorded with no bytes; a plain GET outside a batch with
-    /// no batch.
     #[tokio::test]
     async fn heads_and_gets_outside_a_batch() {
         let (store, trace, path) = traced_object(100).await;
@@ -644,8 +583,6 @@ mod tests {
         assert!(rows[1].ends_with(",1"));
     }
 
-    /// A list is recorded once its listing ends, with its prefix and how
-    /// many objects it named.
     #[tokio::test]
     async fn lists_and_what_they_named() {
         let (store, trace, path) = traced_object(100).await;
@@ -666,8 +603,6 @@ mod tests {
         assert!(rows[1].contains(",\"dir\",1,0,0,"));
     }
 
-    /// A trace reads back as written: every kind, batches, a path with a
-    /// comma and a quote in it.
     #[tokio::test]
     async fn a_trace_reads_back() {
         let (store, trace, path) = traced_object(4 << 20).await;

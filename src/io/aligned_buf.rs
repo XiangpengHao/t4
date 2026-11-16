@@ -7,30 +7,21 @@ use std::sync::Arc;
 use crate::PAGE_SIZE;
 use crate::io::error::{Error, Result};
 
-/// A page-aligned buffer: what direct I/O reads into and writes from.
 #[derive(Debug)]
 pub struct AlignedBuf {
     ptr: NonNull<u8>,
     len_u32: NonZeroU32,
     memory: BufMemory,
-    /// What the buffer keeps alive besides its bytes, until it drops: what
-    /// the I/O it goes to holds ([`Self::holding`]).
     held: Option<Arc<dyn Any + Send + Sync>>,
 }
 
-/// Where an [`AlignedBuf`]'s bytes live.
 #[derive(Debug)]
 enum BufMemory {
-    /// Allocated by the buffer with this layout, and freed when it drops.
     Owned(Layout),
-    /// Lent by a mapping the guard keeps mapped until the buffer drops: a
-    /// chunk of the cache's memory pool.
     Lent { _guard: Arc<dyn Any + Send + Sync> },
 }
 
-// An owned buffer is mutated only through `&mut self`, so moving it across
-// threads preserves Rust's aliasing guarantees. A lent one adds a guard that
-// is itself `Send`.
+// SAFETY: the bytes are mutated only through `&mut self`, and a lent buffer's guard is `Send`.
 unsafe impl Send for AlignedBuf {}
 
 impl AlignedBuf {
@@ -53,17 +44,8 @@ impl AlignedBuf {
         })
     }
 
-    /// A buffer over `len_u32` bytes at `ptr`, lent by a mapping `guard`
-    /// keeps mapped.
-    ///
-    /// # Safety
-    ///
-    /// `ptr` is page-aligned, and valid for reads and writes of `len_u32`
-    /// bytes for as long as `guard` lives. While the buffer lives, nothing
-    /// but the I/O it goes to writes those bytes, and nothing reads them
-    /// while that I/O writes them. Others may read them while an I/O reads
-    /// them too, so the buffer is for direct I/O, through raw pointers, and
-    /// never for [`Self::as_slice`] or [`Self::as_mut_slice`].
+    /// Safety: `ptr` is page-aligned and valid for `len_u32` bytes while `guard` lives; only the
+    /// buffer's I/O writes them, but others may read them alongside its reads, so never slice it.
     pub(crate) unsafe fn lent(
         ptr: NonNull<u8>,
         len_u32: NonZeroU32,
@@ -113,13 +95,6 @@ impl AlignedBuf {
         unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), self.len()) }
     }
 
-    /// Copies `bytes` into the buffer from its byte `at`, through raw
-    /// pointers, as the I/O a lent buffer goes to writes it: what the buffer
-    /// held before need not be initialized, and nothing of it is read.
-    ///
-    /// # Panics
-    ///
-    /// If `bytes` run past the buffer's end.
     pub(crate) fn copy_in(&mut self, at: usize, bytes: &[u8]) {
         assert!(
             at.checked_add(bytes.len())
@@ -128,9 +103,7 @@ impl AlignedBuf {
             bytes.len(),
             self.len()
         );
-        // SAFETY: the bytes lie within the buffer, as asserted, and `&mut
-        // self` makes this the buffer's one writer; a lent buffer's lender
-        // promises no one else writes them meanwhile ([`Self::lent`]).
+        // SAFETY: in bounds as asserted; `&mut self` and the lender's promise make this the one writer.
         unsafe {
             self.as_mut_ptr()
                 .add(at)
@@ -138,8 +111,7 @@ impl AlignedBuf {
         }
     }
 
-    /// The buffer, keeping `held` alive too until it drops: so an I/O it
-    /// goes to holds what the I/O needs, after the caller gave up on it.
+    /// Keeps `held` alive until the buffer drops: its I/O may outlive a caller who gave up on it.
     pub(crate) fn holding(mut self, held: Arc<dyn Any + Send + Sync>) -> Self {
         assert!(self.held.is_none(), "a buffer holds one thing");
         self.held = Some(held);
@@ -154,7 +126,6 @@ impl AlignedBuf {
 
 impl Drop for AlignedBuf {
     fn drop(&mut self) {
-        // A lent buffer's guard drops with it.
         if let BufMemory::Owned(layout) = self.memory {
             unsafe { dealloc(self.ptr.as_ptr(), layout) };
         }

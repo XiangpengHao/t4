@@ -1,10 +1,3 @@
-//! [`CountedStore`]: an object store over another that counts the requests
-//! made of it as an object store bills them, GETs, HEADs and LIST pages, in
-//! a [`RequestCounter`]; and [`RequestPrices`], what they cost.
-//!
-//! Put under t4, it counts what t4 sends the origin: the requests a read
-//! policy decides. Under nothing else, what the reader sends it.
-
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,19 +10,15 @@ use object_store::{
     PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 
-/// The requests counted so far, shared by a [`CountedStore`] and whoever
-/// reads the counts.
 #[derive(Debug, Default)]
 pub struct RequestCounter {
     gets: AtomicU64,
     heads: AtomicU64,
     list_pages: AtomicU64,
-    /// The bytes the GETs answered with.
     get_bytes: AtomicU64,
 }
 
 impl RequestCounter {
-    /// The counts so far.
     pub fn counts(&self) -> RequestCounts {
         RequestCounts {
             gets: self.gets.load(Ordering::Relaxed),
@@ -40,8 +29,7 @@ impl RequestCounter {
     }
 }
 
-/// Requests counted: as billed, a request issued counts, whatever its
-/// answer.
+/// As billed: a request counts once issued, whatever its answer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RequestCounts {
     gets: u64,
@@ -51,10 +39,8 @@ pub struct RequestCounts {
 }
 
 impl RequestCounts {
-    /// The CSV columns [`Self::csv_fields`] fills.
     pub const CSV_COLUMNS: &str = "gets,heads,list_pages,get_bytes,request_dollars";
 
-    /// The counts between `earlier` and `self`.
     pub fn since(&self, earlier: &Self) -> Self {
         Self {
             gets: self.gets - earlier.gets,
@@ -64,14 +50,12 @@ impl RequestCounts {
         }
     }
 
-    /// What the requests cost at `prices`, in dollars.
     pub fn dollars(&self, prices: &RequestPrices) -> f64 {
         let per_request = |count: u64, per_thousand: f64| count as f64 * per_thousand / 1e3;
         per_request(self.gets + self.heads, prices.get_per_thousand)
             + per_request(self.list_pages, prices.list_per_thousand)
     }
 
-    /// The fields of [`Self::CSV_COLUMNS`], priced at `prices`.
     pub fn csv_fields(&self, prices: &RequestPrices) -> String {
         format!(
             "{},{},{},{},{:.9}",
@@ -106,47 +90,38 @@ impl fmt::Display for RequestCounts {
     }
 }
 
-/// What an object store charges a request, in dollars a thousand. Traffic
-/// within a region is free.
+/// No price per byte: traffic within a region is free.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RequestPrices {
-    /// A GET or a HEAD.
     get_per_thousand: f64,
-    /// A page of a list.
     list_per_thousand: f64,
 }
 
 impl RequestPrices {
-    /// S3 Standard's and GCS Standard's, alike (October 2026): $0.0004 a
-    /// thousand GETs or HEADs, $0.005 a thousand lists.
+    /// S3 Standard's and GCS Standard's, alike (October 2026).
     pub const STANDARD: Self = Self {
         get_per_thousand: 0.0004,
         list_per_thousand: 0.005,
     };
 }
 
-/// An object store over `inner` that counts the reads made of it in a
-/// [`RequestCounter`]. Writes, copies and deletes pass through uncounted.
 pub struct CountedStore {
     inner: Arc<dyn ObjectStore>,
     counter: Arc<RequestCounter>,
 }
 
 impl CountedStore {
-    /// A list's page holds this many objects or prefixes at most, S3's and
-    /// GCS's alike.
+    /// S3's and GCS's list page size, alike.
     const LIST_PAGE: u64 = 1_000;
 
     pub fn new(inner: Arc<dyn ObjectStore>, counter: Arc<RequestCounter>) -> Self {
         Self { inner, counter }
     }
 
-    /// The pages a list of `named` objects and prefixes takes: one at least.
     fn list_pages(named: u64) -> u64 {
         named.div_ceil(Self::LIST_PAGE).max(1)
     }
 
-    /// `listed`, its pages counted once it ends or is dropped.
     fn counted_listing(
         &self,
         listed: BoxStream<'static, object_store::Result<ObjectMeta>>,
@@ -159,15 +134,13 @@ impl CountedStore {
     }
 }
 
-/// A list in flight, its pages counted when it drops: once its reader has
-/// taken every object, or given up on it.
+/// Counts its pages on drop, so a list given up on midway still counts.
 struct Listing {
     counter: Arc<RequestCounter>,
     named: u64,
 }
 
 impl Listing {
-    /// The list named one more object or prefix.
     fn named_one(&mut self) {
         self.named += 1;
     }
@@ -283,8 +256,6 @@ mod tests {
 
     use super::*;
 
-    /// A store over `objects` objects of 4 KiB under `data/`, and its
-    /// counter.
     async fn counted(objects: usize) -> (CountedStore, Arc<RequestCounter>) {
         let inner = InMemory::new();
         for object in 0..objects {
@@ -298,8 +269,7 @@ mod tests {
         )
     }
 
-    /// `get_ranges` reaches the store as the GETs object_store's default
-    /// makes of it: ranges under a MiB apart merge into one.
+    /// object_store's default `get_ranges` merges ranges under a MiB apart into one GET.
     #[tokio::test]
     async fn counts_each_get_and_head_and_the_bytes_answered() {
         let (store, counter) = counted(1).await;

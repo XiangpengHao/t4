@@ -1,7 +1,3 @@
-//! [`TestPolicy`]: a policy the cache's tests steer. It decides what the
-//! test set, picks victims oldest admitted first, and records every hook
-//! the cache calls.
-
 use std::collections::VecDeque;
 
 use crate::cache::policy::{
@@ -10,7 +6,6 @@ use crate::cache::policy::{
 use crate::cache::{BlockKey, ChunkId};
 use crate::io::sync::Mutex;
 
-/// A hook the cache called.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Heard {
     MemoryHit(ChunkId),
@@ -23,14 +18,12 @@ pub(super) struct TestPolicy {
     admit: Mutex<Admit>,
     disk_hit: Mutex<DiskHit>,
     victim_action: Mutex<VictimAction>,
-    /// Each tier's admitted chunks, oldest first: its victims, in order.
     memory: Mutex<VecDeque<ChunkId>>,
     disk: Mutex<VecDeque<ChunkId>>,
     heard: Mutex<Vec<Heard>>,
 }
 
 impl TestPolicy {
-    /// Remote reads go to memory, disk hits stay, memory victims go to disk.
     pub(super) fn new() -> Self {
         Self {
             admit: Mutex::new(Admit::Memory),
@@ -54,12 +47,10 @@ impl TestPolicy {
         *self.victim_action.lock().unwrap() = action;
     }
 
-    /// Every hook the cache called, in order.
     pub(super) fn heard(&self) -> Vec<Heard> {
         self.heard.lock().unwrap().clone()
     }
 
-    /// The chunks of `tier` it would pick, oldest first.
     pub(super) fn queued(&self, tier: Tier) -> Vec<ChunkId> {
         self.queue(tier).lock().unwrap().iter().copied().collect()
     }

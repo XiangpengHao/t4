@@ -1,10 +1,3 @@
-//! [`ClientReads`]: a client's reads, as its owner serves them
-//! (`doc/11-shared-mode.md`, decision 5). Each read is a task on the
-//! client's session thread that takes the read's frames in the order they
-//! came and runs its storage half, as `T4Caching::read_through` runs an
-//! owner's own: the client plans the GETs of each run the task locates, and
-//! lands their bytes, which the task lands as an owner's fetches land.
-
 use crate::io::sync::Mutex;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -29,24 +22,15 @@ use crate::cache::storage::FileVersion;
 use crate::cache::storage::{FetchedBlocks, ObjectCache, PartialRead, TierWork};
 use crate::io::error::Result;
 
-/// The reads of one client in flight, each a task, by the number the
-/// client gave it; and the frames they send it, queued.
 pub(super) struct ClientReads<'c> {
     cache: &'c ObjectCache,
-    /// The client's region, if the owner mapped it: its reads' outputs are
-    /// spans of it.
     region: Option<std::sync::Arc<OwnerRegion>>,
     outbox: Outbox,
-    /// Each read the client started and hasn't ended. A read's task may
-    /// have ended before: the frames the client sent it since are dropped.
     reads: BTreeMap<u64, ReadInbox>,
     tasks: FuturesUnordered<Abortable<LocalBoxFuture<'c, ()>>>,
 }
 
 impl<'c> ClientReads<'c> {
-    /// No reads yet, of a client whose region, if any, is `region`; a
-    /// read's end wakes the session's thread by `session`, from whatever
-    /// thread it comes.
     pub(super) fn new(
         cache: &'c ObjectCache,
         region: Option<std::sync::Arc<OwnerRegion>>,
@@ -61,15 +45,6 @@ impl<'c> ClientReads<'c> {
         }
     }
 
-    /// Takes `frame`, the client's next: starts a read, hands a frame to
-    /// its read, or ends a read, its task dropped with all it holds: its
-    /// claims end, and the reads waiting on them fetch for themselves.
-    ///
-    /// # Errors
-    ///
-    /// If the protocol doesn't allow the frame: a hello once admitted, a
-    /// read's number started twice, or a frame of a read not started or
-    /// ended already.
     pub(super) fn take(&mut self, frame: ClientFrame) -> Result<()> {
         match frame {
             ClientFrame::Hello { .. } => Err(FrameReader::malformed("hello: once admitted")),
@@ -131,8 +106,7 @@ impl<'c> ClientReads<'c> {
                 Ok(())
             }
             ClientFrame::EndRead { read } => {
-                // The read's end goes with the last of its inbox, its task
-                // and the buffers over its spans.
+                // Ended goes with the last of its inbox, its task and the buffers over its spans.
                 let ended = self.reads.remove(&read).ok_or_else(Self::no_read)?;
                 ended.abort.abort();
                 Ok(())
@@ -152,17 +126,10 @@ impl<'c> ClientReads<'c> {
         }
     }
 
-    /// Runs the reads until none can go on: the waker in `cx` is woken once
-    /// one can.
     pub(super) fn run(&mut self, cx: &mut Context<'_>) {
         while let Poll::Ready(Some(_)) = self.tasks.poll_next_unpin(cx) {}
     }
 
-    /// The frames the reads queued for the client since last taken.
-    ///
-    /// # Errors
-    ///
-    /// If a read took a frame the protocol doesn't allow where it came.
     pub(super) fn take_outgoing(&self) -> Result<Vec<OwnerFrame>> {
         self.outbox.take()
     }
@@ -172,9 +139,6 @@ impl<'c> ClientReads<'c> {
     }
 }
 
-/// Where the frames of one of the client's reads wait for its task, and
-/// what ends the task; and a hold on the read's end, until the client ends
-/// it.
 struct ReadInbox {
     frames: Rc<RefCell<ReadFrames>>,
     abort: AbortHandle,
@@ -182,8 +146,7 @@ struct ReadInbox {
 }
 
 impl ReadInbox {
-    /// Hands `frame` to the read's task; drops it if the task has ended,
-    /// the read served or failed before the client knew.
+    /// Drops `frame` if the task ended, the read served or failed before the client knew.
     fn deliver(&self, frame: ClientFrame) {
         // The task holds the other handle on its frames as long as it runs.
         if Rc::strong_count(&self.frames) == 1 {
@@ -197,18 +160,13 @@ impl ReadInbox {
     }
 }
 
-/// A read's frames not taken yet, and the waker of its task waiting for
-/// the next.
 #[derive(Default)]
 struct ReadFrames {
     queued: VecDeque<ClientFrame>,
     waker: Option<Waker>,
 }
 
-/// The end of one of the client's reads: once the client has ended it, its
-/// task has dropped, and so has every buffer over its spans, which the last
-/// I/O into them may drop on another thread, the owner tells the client so
-/// ([`OwnerFrame::Ended`]), which then takes the spans back.
+/// Its last holder may be a buffer over the read's spans, dropped by I/O on another thread.
 struct ReadEnd {
     read: u64,
     outbox: Outbox,
@@ -221,11 +179,7 @@ impl Drop for ReadEnd {
     }
 }
 
-/// The frames a session sends its client, queued as its reads make them:
-/// answers, and news of the reads from disk made for them, which the read
-/// policy of a read hears deep in a poll; and whether a read found the
-/// client breaking the protocol. The session's thread sends them; a frame
-/// queued from another thread wakes it.
+/// Queued, as a read's policy hears its reads from disk deep in a poll.
 #[derive(Clone)]
 struct Outbox {
     frames: std::sync::Arc<Mutex<OutboxFrames>>,
@@ -235,7 +189,6 @@ struct Outbox {
 #[derive(Default)]
 struct OutboxFrames {
     frames: Vec<OwnerFrame>,
-    /// The frame a read was sent where the protocol doesn't allow it.
     broken: Option<&'static str>,
 }
 
@@ -251,14 +204,11 @@ impl Outbox {
         self.frames().frames.push(frame);
     }
 
-    /// Sends `frame` from any thread: the session's wakes to send it.
     fn send_waking(&self, frame: OwnerFrame) {
         self.send(frame);
         self.session.wake_to_send();
     }
 
-    /// Notes the client sent `frame`, a frame the protocol doesn't allow
-    /// where it came: the session closes the connection.
     fn break_protocol(&self, frame: &'static str) {
         self.frames().broken.get_or_insert(frame);
     }
@@ -276,8 +226,6 @@ impl Outbox {
     }
 }
 
-/// The read policy of a client's read in its owner: it tells the client of
-/// each read from disk the read makes, for the client's own read policy.
 /// It plans nothing: the storage half never asks it, as the client plans.
 struct ForwardedDiskReads {
     outbox: Outbox,
@@ -299,8 +247,6 @@ impl ReadPolicy for ForwardedDiskReads {
     }
 }
 
-/// What a client's read starts as: [`ClientFrame::StartRead`]'s fields,
-/// its output's span with the region it is of.
 struct ReadStart {
     call: u64,
     path: Bytes,
@@ -311,8 +257,6 @@ struct ReadStart {
     output: Option<(std::sync::Arc<OwnerRegion>, SpanName)>,
 }
 
-/// The call a read's next step answers: its start, its GETs taken, or its
-/// finish, with blocks left to fetch.
 #[derive(Clone, Copy)]
 enum StepAnswer {
     Started { call: u64, version: FileVersion },
@@ -340,9 +284,6 @@ impl StepAnswer {
     }
 }
 
-/// One of the client's reads, served: its task, which holds the read's end
-/// until it drops; and the client's region, if the owner mapped it, where
-/// the read's fetches may stage their bytes.
 struct ServedRead<'c> {
     cache: &'c ObjectCache,
     region: Option<std::sync::Arc<OwnerRegion>>,
@@ -352,12 +293,6 @@ struct ServedRead<'c> {
 }
 
 impl<'c> ServedRead<'c> {
-    /// Serves the read `start` asks for, as `T4Caching::read_through`
-    /// serves an owner's, its GETs the client's: each run located is
-    /// planned by the client, its GETs' bytes landed as they come, and,
-    /// once the read's work on the tiers is done, the read served, or its
-    /// blocks no fetch cached fetched again. A read the cache fails is
-    /// answered `Failed`, and ends.
     async fn serve(self, start: ReadStart) {
         let ReadStart {
             call,
@@ -385,8 +320,7 @@ impl<'c> ServedRead<'c> {
             .start_read_into(&file, range.clone(), intent, &reads, make_output);
         let (mut read, mut work) = match started {
             Ok(started) => started,
-            // A span past the client's region, or too short for the read,
-            // is the client's mistake: it breaks the protocol.
+            // A span that can't hold the read is the client's mistake: it breaks the protocol.
             Err(_) if in_span => {
                 self.outbox
                     .break_protocol("output: a span that can't hold it");
@@ -402,8 +336,7 @@ impl<'c> ServedRead<'c> {
             version: file.version(),
         };
         loop {
-            // The round's finish: the client may send it with the round's
-            // start, before its runs are planned.
+            // The client may send the round's finish with its start, before its runs are planned.
             let mut finish = None;
             let Some(fetches) = self.plan(&mut read, &mut work, answer, &mut finish).await else {
                 return;
@@ -440,13 +373,6 @@ impl<'c> ServedRead<'c> {
         }
     }
 
-    /// Locates `work`'s runs one at a time, each sent to the client, the
-    /// first in `answer`, and the GETs it plans for each taken; then takes
-    /// the read's fetches, sent in the answer to the last call. The round's
-    /// finish, if the client sends it meanwhile, is held in `finish`. `None`
-    /// if the read ends: the cache failed it, which fails the finish held
-    /// too, or the client sent a frame other than a run's GETs or the
-    /// round's one finish.
     async fn plan(
         &self,
         read: &mut PartialRead,
@@ -485,10 +411,6 @@ impl<'c> ServedRead<'c> {
         Some(fetches)
     }
 
-    /// The GETs the client planned for the run located last: the call
-    /// that sent them, and the plan. The round's finish, if it comes first,
-    /// is held in `finish`. `None` if the client sent another frame, or a
-    /// second finish: it broke the protocol.
     async fn run_gets(&self, finish: &mut Option<u64>) -> Option<(u64, ReadPlan)> {
         loop {
             match self.next_frame().await {
@@ -502,21 +424,12 @@ impl<'c> ServedRead<'c> {
         }
     }
 
-    /// Answers `answer`'s call, and the round's `finish` if the client sent
-    /// it already, `Failed`: the cache failed the read, which ends.
     fn fail(&self, answer: StepAnswer, finish: Option<u64>) {
         for call in std::iter::once(answer.call()).chain(finish) {
             self.outbox.send(OwnerFrame::Failed { call });
         }
     }
 
-    /// Takes the read's frames as the client lands `fetches`, by their
-    /// place in the list: each one's bytes landed in order, from the frame
-    /// or from where the client staged them in its region, committed, or
-    /// abandoned; until the client has asked to finish, in `finish` already
-    /// or in a frame now, and every fetch is committed or abandoned. Returns
-    /// the finish's call; `None` if the client sent a frame the protocol
-    /// doesn't allow.
     async fn land(&self, fetches: Vec<FetchedBlocks<'c>>, mut finish: Option<u64>) -> Option<u64> {
         let mut fetches: Vec<_> = fetches.into_iter().map(LandingFetch::Landing).collect();
         while finish.is_none() || fetches.iter().any(LandingFetch::is_open) {
@@ -528,7 +441,6 @@ impl<'c> ServedRead<'c> {
                 },
                 ClientFrame::LandStaged { fetch, staged, .. } => {
                     match (fetches.get_mut(fetch as usize), &self.region) {
-                        // Copied where they go as they land, and let go of.
                         (Some(landing), Some(region)) => match region.staged(staged) {
                             Ok(bytes) => landing.land(bytes).await,
                             Err(_) => Err("staged bytes: past the region"),
@@ -570,8 +482,7 @@ impl<'c> ServedRead<'c> {
         finish
     }
 
-    /// The read's next frame from the client, once it comes. The read's
-    /// task is dropped if the client ends the read first.
+    /// The read's task is dropped if the client ends the read first.
     async fn next_frame(&self) -> ClientFrame {
         poll_fn(|cx| {
             let mut frames = self.frames.borrow_mut();
@@ -587,27 +498,17 @@ impl<'c> ServedRead<'c> {
     }
 }
 
-/// One of a read's fetches, as the client lands it.
 enum LandingFetch<'c> {
     Landing(FetchedBlocks<'c>),
-    /// It brought more bytes than it holds: its blocks go uncached, and its
-    /// commit fails.
     Overflowed,
-    /// Committed or abandoned.
     Settled,
 }
 
 impl LandingFetch<'_> {
-    /// Whether the client hasn't committed or abandoned it yet.
     fn is_open(&self) -> bool {
         !matches!(self, Self::Settled)
     }
 
-    /// Lands `bytes`, the fetch's next.
-    ///
-    /// # Errors
-    ///
-    /// The misuse, if the fetch is settled.
     async fn land(&mut self, bytes: &[u8]) -> std::result::Result<(), &'static str> {
         match self {
             Self::Landing(blocks) => {
@@ -621,12 +522,6 @@ impl LandingFetch<'_> {
         }
     }
 
-    /// Commits the fetch: caches its blocks, if it brought all its bytes
-    /// and no more. Whether it did.
-    ///
-    /// # Errors
-    ///
-    /// The misuse, if the fetch is settled.
     async fn commit(&mut self) -> std::result::Result<bool, &'static str> {
         match std::mem::replace(self, Self::Settled) {
             Self::Landing(blocks) => Ok(blocks.finish().await.is_ok()),
@@ -635,12 +530,6 @@ impl LandingFetch<'_> {
         }
     }
 
-    /// Abandons the fetch: its blocks go uncached, and the reads waiting on
-    /// them fetch for themselves.
-    ///
-    /// # Errors
-    ///
-    /// The misuse, if the fetch is settled.
     fn abandon(&mut self) -> std::result::Result<(), &'static str> {
         match std::mem::replace(self, Self::Settled) {
             Self::Landing(_) | Self::Overflowed => Ok(()),

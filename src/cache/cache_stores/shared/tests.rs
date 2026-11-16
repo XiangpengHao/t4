@@ -38,8 +38,6 @@ use crate::io::sync::Arc;
 
 const MIB: u64 = 1 << 20;
 
-/// A builder of a cache built for sharing, of 4 MiB of memory and 8 on
-/// disk over `inner`, its one cache file in `dir`.
 fn shared(inner: &Arc<InMemory>, dir: &TestDirectory) -> T4CachingBuilder {
     let builder = T4Caching::builder(Arc::clone(inner) as Arc<dyn ObjectStore>)
         .with_memory_capacity(4 * MIB)
@@ -50,14 +48,13 @@ fn shared(inner: &Arc<InMemory>, dir: &TestDirectory) -> T4CachingBuilder {
     builder
 }
 
-/// Wait for the peer to acknowledge a state; shuttle bounds a stalled schedule.
+/// No deadline: shuttle fails a schedule that stalls here.
 fn wait_until(done: impl Fn() -> bool) {
     while !done() {
         crate::io::sync::thread::yield_now();
     }
 }
 
-/// Whether the owner of `store`, a client, has gone.
 fn owner_gone(store: &T4Caching) -> bool {
     store
         .cache_store()
@@ -66,9 +63,7 @@ fn owner_gone(store: &T4Caching) -> bool {
         .owner_gone()
 }
 
-/// Frames go whole, in the order sent, those sent in one write too, a
-/// frame longer than the receiver reads ahead among them; the peer's close
-/// between frames ends them, and anything else is an error.
+/// Among them a frame longer than the receiver reads ahead.
 #[test]
 fn frames_cross_a_socket_whole() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -102,7 +97,6 @@ fn frames_cross_a_socket_whole() {
         drop(sending.join().unwrap());
         assert!(other.receive(FrameSocket::MOST_BYTES).unwrap().is_none());
 
-        // A frame longer than the receiver takes, or cut short by a close.
         let (mut one, other) = UnixStream::pair().unwrap();
         let mut other = FrameReceiver::new(FrameSocket::new(other).unwrap());
         one.write_all(&ClientFrame::EndRead { read: 1 }.encode())
@@ -117,9 +111,6 @@ fn frames_cross_a_socket_whole() {
     });
 }
 
-/// Frames sent in one write are taken from one read, which the receiver
-/// hands out one at a time with no read more, each the read's own bytes,
-/// not a copy of them.
 #[cfg(feature = "shuttle")]
 #[test]
 fn frames_sent_together_are_taken_from_one_read() {
@@ -152,9 +143,6 @@ fn frames_sent_together_are_taken_from_one_read() {
     });
 }
 
-/// A frame half come is held, and taken once the rest comes: a read of
-/// the socket takes what has come, and waits for no more, so that a
-/// session that takes its client's frames never waits mid-frame.
 #[cfg(feature = "shuttle")]
 #[test]
 fn a_frame_half_come_is_held_till_the_rest_comes() {
@@ -190,10 +178,6 @@ fn a_frame_half_come_is_held_till_the_rest_comes() {
     });
 }
 
-/// A sender's frames go in order, whether its caller writes them, while
-/// the socket takes them at once, or its writer thread does, once the
-/// socket would block a caller; no caller waits on the socket. Once the
-/// peer has gone, frames are dropped.
 #[cfg(feature = "shuttle")]
 #[test]
 fn a_senders_frames_go_in_order_whoever_writes_them() {
@@ -202,8 +186,7 @@ fn a_senders_frames_go_in_order_whoever_writes_them() {
         let sender =
             FrameSender::start(FrameSocket::new(one).unwrap(), Duration::from_micros(200)).unwrap();
         let mut other = FrameReceiver::new(FrameSocket::new(other).unwrap());
-        // 8 MiB, far more than the socket holds unread: most wait for the
-        // writer.
+        // 8 MiB, far more than the socket holds unread: most wait for the writer.
         let frames: Vec<ClientFrame> = (0..2048)
             .map(|read| ClientFrame::Land {
                 read,
@@ -213,7 +196,6 @@ fn a_senders_frames_go_in_order_whoever_writes_them() {
             .collect();
         let encoded: Vec<Vec<u8>> = frames.iter().map(ClientFrame::encode).collect();
         let sender = {
-            // One, two, then three at a time, cut anywhere by a full socket.
             let mut rest = &encoded[..];
             for together in [1, 2, 3].into_iter().cycle() {
                 if rest.is_empty() {
@@ -241,8 +223,6 @@ fn a_senders_frames_go_in_order_whoever_writes_them() {
     });
 }
 
-/// A caller waiting for room on the socket holds up no other caller: the
-/// other's frame waits behind the first's, and goes after it.
 #[cfg(feature = "shuttle")]
 #[test]
 fn a_caller_waiting_for_room_holds_up_no_other() {
@@ -273,8 +253,6 @@ fn a_caller_waiting_for_room_holds_up_no_other() {
     });
 }
 
-/// On Linux, a caller never waits for room: the socket takes what fits at
-/// once, and the writer the rest.
 #[cfg(target_os = "linux")]
 #[cfg(feature = "shuttle")]
 #[test]
@@ -296,8 +274,6 @@ fn a_callers_send_waits_for_no_room_on_linux() {
     });
 }
 
-/// More frames than one write takes go too, in order: a batch is as long
-/// as the reads in flight make it.
 #[test]
 fn a_batch_longer_than_a_write_takes_goes_whole() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -321,9 +297,6 @@ fn a_batch_longer_than_a_write_takes_goes_whole() {
     });
 }
 
-/// A cache built for sharing on files another owns is its client: it
-/// connects, and reads the store's bytes. One not built for sharing is
-/// `Busy`.
 #[cfg(feature = "shuttle")]
 #[test]
 fn a_cache_built_for_sharing_on_owned_files_is_their_owners_client() {
@@ -359,9 +332,6 @@ fn a_cache_built_for_sharing_on_owned_files_is_their_owners_client() {
     });
 }
 
-/// The owner dropped, its client sees it gone, the files' lock is free, and
-/// a new cache built for sharing owns them and serves them at the same
-/// address.
 #[cfg(feature = "shuttle")]
 #[test]
 fn an_owner_dropped_hands_its_files_to_the_next_cache() {
@@ -385,8 +355,6 @@ fn an_owner_dropped_hands_its_files_to_the_next_cache() {
     });
 }
 
-/// How the owner answers `hello`, sent on a connection of its own: its
-/// welcome, or `None` if it closed the connection.
 fn answer_to(address: &OwnerAddress, hello: impl FnOnce(&FrameSocket)) -> Option<OwnerFrame> {
     let socket = FrameSocket::new(address.connect(geteuid()).unwrap()).unwrap();
     hello(&socket);
@@ -407,9 +375,6 @@ fn answer_to(address: &OwnerAddress, hello: impl FnOnce(&FrameSocket)) -> Option
     }
 }
 
-/// The owner admits a client by a hello of its protocol's version, with a
-/// descriptor of its first cache file open for writing it; it closes any
-/// other connection, whatever it sent first.
 #[cfg(feature = "shuttle")]
 #[test]
 fn the_owner_admits_only_a_writer_of_its_first_cache_file() {
@@ -467,9 +432,6 @@ fn the_owner_admits_only_a_writer_of_its_first_cache_file() {
     });
 }
 
-/// A client trusts only an owner of its own user (decision 8): one
-/// listening at the address as another user, as a process of another
-/// could on Linux, it finds `Busy`, and sends it nothing.
 #[cfg(not(feature = "shuttle"))]
 #[test]
 fn a_client_connects_only_to_an_owner_of_its_user() {
@@ -490,9 +452,7 @@ fn a_client_connects_only_to_an_owner_of_its_user() {
     assert!(matches!(refused, crate::Error::Busy), "{refused}");
 }
 
-/// An owner whose address another process holds, as a process of another
-/// user may on Linux, still owns its cache, unshared: no other user keeps
-/// a user from caching. On macOS the owner replaces the socket file.
+/// No other user keeps a user from caching.
 #[cfg(not(feature = "shuttle"))]
 #[test]
 fn an_owner_whose_address_is_held_still_owns_its_cache() {
@@ -520,9 +480,6 @@ fn an_owner_whose_address_is_held_still_owns_its_cache() {
     assert_eq!(read, data.slice(..MIB as usize));
 }
 
-/// The descriptors a hello brings close on `exec`, on macOS too, where the
-/// receive can't ask for it: a process the owner starts inherits neither
-/// its client's cache file nor its region.
 #[cfg(not(feature = "shuttle"))]
 #[test]
 fn a_hellos_descriptors_close_on_exec() {
@@ -545,9 +502,6 @@ fn a_hellos_descriptors_close_on_exec() {
     assert!(flags.contains(rustix::io::FdFlags::CLOEXEC), "{flags:?}");
 }
 
-/// The owner refuses a client of another protocol version, but tells it
-/// its own version first, so that the client gives up at once
-/// (decision 6); then it closes the connection.
 #[cfg(feature = "shuttle")]
 #[test]
 fn the_owner_tells_a_client_of_another_version_its_own() {
@@ -583,9 +537,6 @@ fn the_owner_tells_a_client_of_another_version_its_own() {
     });
 }
 
-/// A cache built for sharing whose files' owner speaks another protocol
-/// version is `Busy` at once: told the owner's version, it doesn't try
-/// that owner till `OWNER_WAIT` runs out.
 #[cfg(feature = "shuttle")]
 #[test]
 fn a_cache_whose_owner_speaks_another_version_is_busy_at_once() {
@@ -624,10 +575,8 @@ fn a_cache_whose_owner_speaks_another_version_is_busy_at_once() {
     });
 }
 
-/// The owner maps a client's region that can't shrink, and welcomes the
-/// client with it; it welcomes a client whose region could shrink without
-/// it, its reads' bytes in the frames. A hello that says it sent a region
-/// and sent none closes the connection.
+/// A region that could shrink (a file) is welcomed without it; a hello that claims a region
+/// and sends none is closed.
 #[cfg(not(feature = "shuttle"))]
 #[test]
 fn the_owner_maps_a_clients_region_that_cannot_shrink() {
@@ -680,23 +629,17 @@ fn the_owner_maps_a_clients_region_that_cannot_shrink() {
     assert_eq!(claimed, None);
 }
 
-/// A client of an owner's that speaks frames itself, as a test drives it:
-/// admitted, then each frame sent and each answer taken by hand.
 struct RawClient {
     socket: FrameSocket,
     frames: FrameReceiver,
-    /// The news of disk reads taken so far, between answers.
     news: Vec<OwnerFrame>,
 }
 
 impl RawClient {
-    /// A client of the owner of the cache file in `dir`, admitted.
     fn admitted(dir: &TestDirectory) -> Self {
         Self::admitted_with(dir, None)
     }
 
-    /// A client of the owner of the cache file in `dir`, admitted with a
-    /// region of its own, which the owner mapped.
     fn admitted_with_region(dir: &TestDirectory) -> (Self, std::sync::Arc<ClientRegion>) {
         let region = ClientRegion::make().unwrap();
         (Self::admitted_with(dir, Some(&region)), region)
@@ -748,7 +691,6 @@ impl RawClient {
         self.socket.send(&frame.encode()).unwrap();
     }
 
-    /// The owner's next answer, the news before it kept.
     fn answer(&mut self) -> OwnerFrame {
         loop {
             let body = self.frames.receive(FrameSocket::MOST_BYTES).unwrap();
@@ -760,7 +702,6 @@ impl RawClient {
         }
     }
 
-    /// Whether the owner closes the connection, whatever it sends before.
     fn closed(&mut self) -> bool {
         loop {
             match self.frames.receive(FrameSocket::MOST_BYTES) {
@@ -775,16 +716,12 @@ impl RawClient {
     }
 }
 
-/// A file of `size` bytes at `path` in `inner`, each byte a function of
-/// its offset: its bytes, and what the store says of it.
 fn put_file(inner: &InMemory, path: &Path, size: u64) -> (Bytes, ObjectMeta) {
     let data = Bytes::from((0..size).map(|at| (at % 251) as u8).collect::<Vec<_>>());
     block_on(inner.put(path, data.clone().into())).unwrap();
     (data, block_on(inner.head(path)).unwrap())
 }
 
-/// A client's start of a read, numbered `read`, of `range` of the file
-/// `meta` names; its call numbered `read` times 100.
 fn start_read(read: u64, meta: &ObjectMeta, range: Range<u64>) -> ClientFrame {
     ClientFrame::StartRead {
         call: read * 100,
@@ -798,7 +735,6 @@ fn start_read(read: u64, meta: &ObjectMeta, range: Range<u64>) -> ClientFrame {
     }
 }
 
-/// The same start of a read, its output the span `output`.
 fn start_read_into(
     read: u64,
     meta: &ObjectMeta,
@@ -830,10 +766,6 @@ fn start_read_into(
     }
 }
 
-/// A client's read served into the span it named for its output: the
-/// bytes in the span, where an output of the read has them, and none in
-/// the frame. The owner ends the read, and says so, only once the client
-/// ends it. A span too short for its read breaks the protocol.
 #[cfg(feature = "shuttle")]
 #[test]
 fn the_owner_serves_a_read_into_its_clients_span() {
@@ -883,9 +815,6 @@ fn the_owner_serves_a_read_into_its_clients_span() {
     });
 }
 
-/// An output span off a page boundary breaks the protocol: the owner's
-/// reads from disk land in an output a page at a time, past the page
-/// cache, from page-aligned memory only.
 #[cfg(feature = "shuttle")]
 #[test]
 fn an_output_span_off_a_page_boundary_closes_the_connection() {
@@ -907,8 +836,6 @@ fn an_output_span_off_a_page_boundary_closes_the_connection() {
     });
 }
 
-/// `range` of the file `meta` names, read through `store`'s cache, opened
-/// as listed: no HEAD.
 fn read_listed(
     store: &T4Caching,
     meta: &ObjectMeta,
@@ -917,10 +844,6 @@ fn read_listed(
     block_on(store.open_listed(meta.clone()).read(range, None))
 }
 
-/// A client's cold read, call by call: the owner locates its run, takes
-/// the client's GETs, lands their bytes as they come, caches them and
-/// serves the read. The owner holds the blocks then: its own read of them,
-/// the file gone from the store, is a hit.
 #[cfg(feature = "shuttle")]
 #[test]
 fn the_owner_serves_and_caches_a_clients_cold_read() {
@@ -981,9 +904,6 @@ fn the_owner_serves_and_caches_a_clients_cold_read() {
     });
 }
 
-/// A client's fetch staged in its region: each `LandStaged` names the next
-/// bytes in the span, which the owner lands from its mapping as its own
-/// fetches' bytes, and caches. A span past the region breaks the protocol.
 #[cfg(feature = "shuttle")]
 #[test]
 fn the_owner_lands_a_fetch_staged_in_its_clients_region() {
@@ -1048,8 +968,6 @@ fn the_owner_lands_a_fetch_staged_in_its_clients_region() {
     });
 }
 
-/// The bytes `cache`'s connection to its owner has sent and taken so far,
-/// `cache` a client.
 fn socket_bytes(cache: &T4Caching) -> (u64, u64) {
     cache
         .cache_store()
@@ -1058,10 +976,6 @@ fn socket_bytes(cache: &T4Caching) -> (u64, u64) {
         .socket_bytes()
 }
 
-/// A client's cold read moves only control over its socket: its GET's
-/// bytes are staged in its region, and the read's bytes served in it; the
-/// owner caches the blocks. With no span free, a read's bytes, fetched
-/// and served, go in the frames.
 #[cfg(feature = "shuttle")]
 #[test]
 fn a_clients_cold_read_moves_only_control_over_its_socket() {
@@ -1097,9 +1011,6 @@ fn a_clients_cold_read_moves_only_control_over_its_socket() {
     });
 }
 
-/// A client's read of blocks the owner holds is served with nothing to
-/// fetch; and a read of blocks on disk tells the client of each read from
-/// disk made for it, for its read policy.
 #[cfg(feature = "shuttle")]
 #[test]
 fn the_owner_serves_a_clients_hits_and_tells_it_of_its_disk_reads() {
@@ -1128,7 +1039,6 @@ fn the_owner_serves_a_clients_hits_and_tells_it_of_its_disk_reads() {
         assert_eq!(client.answer(), OwnerFrame::Served { call: 1, bytes });
         client.send(&ClientFrame::EndRead { read: 1 });
 
-        // Each block's pages read from drive 0: started, then finished.
         let phases: Vec<_> = client
             .news
             .iter()
@@ -1147,9 +1057,6 @@ fn the_owner_serves_a_clients_hits_and_tells_it_of_its_disk_reads() {
     });
 }
 
-/// A client sends a read's finish with its start, before any answer: the
-/// owner holds it, and a read of hits is one round trip, answered
-/// `Started`, then served, in the frame or, with a region, in the span.
 #[cfg(feature = "shuttle")]
 #[test]
 fn the_owner_answers_a_hot_read_started_and_finished_at_once() {
@@ -1187,8 +1094,6 @@ fn the_owner_answers_a_hot_read_started_and_finished_at_once() {
     });
 }
 
-/// A finish sent while the owner plans a read is held for the round, not
-/// a frame out of place: the read is planned, fetched and served.
 #[cfg(feature = "shuttle")]
 #[test]
 fn the_owner_holds_a_finish_sent_while_it_plans() {
@@ -1239,7 +1144,6 @@ fn the_owner_holds_a_finish_sent_while_it_plans() {
     });
 }
 
-/// A round of a read finishes once: a second finish breaks the protocol.
 #[cfg(feature = "shuttle")]
 #[test]
 fn a_second_finish_in_a_round_closes_the_connection() {
@@ -1257,10 +1161,7 @@ fn a_second_finish_in_a_round_closes_the_connection() {
     });
 }
 
-/// A client's read sends its finish right after its start, before any
-/// answer: a read of hits takes one round trip. A stand-in owner listens
-/// at the files' address, a cache not built for sharing holding them, and
-/// answers the client's frames by hand once it has seen what came first.
+/// A cache not built for sharing holds the files, so a stand-in owner answers by hand.
 #[cfg(feature = "shuttle")]
 #[test]
 fn a_clients_read_sends_its_finish_with_its_start() {
@@ -1339,8 +1240,6 @@ fn a_clients_read_sends_its_finish_with_its_start() {
     });
 }
 
-/// A client gone mid-read, holding the claims of its GETs, gives them up:
-/// a read of the owner's that waited for them fetches the blocks itself.
 #[cfg(feature = "shuttle")]
 #[test]
 fn a_client_gone_mid_read_hands_its_claims_to_their_waiters() {
@@ -1375,8 +1274,6 @@ fn a_client_gone_mid_read_hands_its_claims_to_their_waiters() {
     });
 }
 
-/// A frame the protocol doesn't allow where it comes closes the client's
-/// connection, and nothing else: the owner serves its next client.
 #[cfg(feature = "shuttle")]
 #[test]
 fn a_clients_misuse_closes_its_connection() {
@@ -1397,8 +1294,6 @@ fn a_clients_misuse_closes_its_connection() {
             read: 1,
             plan: plan(),
         };
-        // Each misuse: the frames that set it up, each answered, then the one
-        // that breaks the protocol.
         let misuses: Vec<(&str, Vec<ClientFrame>, ClientFrame)> = vec![
             ("GETs of no read", vec![], take_gets()),
             ("bytes of no read", vec![], land()),

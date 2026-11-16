@@ -18,9 +18,6 @@ use std::num::NonZeroU8;
 
 const MIB: u64 = BLOCK_SIZE_U64;
 
-/// A cache of `memory_chunks` chunks of memory and `disk_chunks` on disk,
-/// run by a [`TestPolicy`], in a directory of its own that lives as long as
-/// the cache.
 fn cache(memory_chunks: u32, disk_chunks: u32) -> (TempDir, ObjectCache, Arc<TestPolicy>) {
     let dir = tempfile::tempdir().unwrap();
     let file = DiskFile::new(dir.path().join("cache"), u64::from(disk_chunks) * MIB);
@@ -42,14 +39,10 @@ fn cache(memory_chunks: u32, disk_chunks: u32) -> (TempDir, ObjectCache, Arc<Tes
     (dir, cache, policy)
 }
 
-/// A file's bytes: each byte a function of its offset.
 fn file_bytes(size: u64) -> Vec<u8> {
     (0..size).map(|offset| (offset % 251) as u8).collect()
 }
 
-/// Reads `range`, its GETs planned by the default read policy, then fetches
-/// what the read names from `data` and caches it, as the front end will;
-/// returns what the caller got, and the fetches the read named.
 fn read_through(
     cache: &ObjectCache,
     file: &CacheableFile<'_>,
@@ -87,9 +80,6 @@ fn key(file: &CacheableFile<'_>, index: u32) -> BlockKey {
     BlockKey::new(file.version().id(), index)
 }
 
-/// The default policy, end to end: a stream of blocks through both full
-/// tiers, the disk striped over three files, every read right, each tier
-/// full, the newest blocks in memory.
 #[test]
 fn the_default_policy_streams_blocks_through_both_tiers() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -174,7 +164,6 @@ fn a_read_fetches_only_the_blocks_memory_lacks() {
             let fetched = &data[fetch.start as usize..fetch.end as usize];
             block_on(cache.take_fetched(&mut read, fetch, fetched)).unwrap();
         }
-        // The cached blocks came from memory, the remote ones from the fetches.
         assert_eq!(read.into_bytes().unwrap(), data[10..4 * MIB as usize - 10]);
     });
 }
@@ -203,9 +192,6 @@ fn the_policy_hears_each_block_where_it_is() {
     });
 }
 
-/// Reads of one remote block at once fetch it once: one claims it and
-/// fetches, the others wait for that fetch and take the block from where it
-/// lands.
 #[test]
 fn concurrent_reads_of_one_block_fetch_it_once() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -246,8 +232,7 @@ fn a_stale_entry_reads_as_remote() {
         let (_, fetches) = read_through(&cache, &old, &data, 0..MIB);
         assert_eq!(fetches, [0..MIB]);
 
-        // Dropped, and the chunk reused for another file's block while a read
-        // still holds the old entry.
+        // The chunk reused for another file's block, a read still holding the old entry.
         assert!(
             cache
                 .blocks
@@ -306,8 +291,6 @@ fn blocks_moved_to_disk_read_back_from_disk() {
         assert_eq!(cache.memory.free_count(), 4);
         assert_eq!(cache.disk.chunks().free_count(), 1);
 
-        // Whole, within a page, across pages and blocks, and the short last
-        // block: every read from disk, none fetched.
         for range in [0..size, 5000..5001, 4095..MIB + 4097, 2 * MIB + 10..size] {
             let (out, fetches) = read_through(&cache, &file, &data, range.clone());
             assert!(fetches.is_empty(), "{range:?}");
@@ -325,7 +308,6 @@ fn a_full_memory_moves_its_victims_to_disk() {
         let file = cache.resolve(b"a", Some("v1"), 2 * MIB).unwrap();
         read_through(&cache, &file, &data, 0..MIB);
         read_through(&cache, &file, &data, MIB..2 * MIB);
-        // Block 0 made room for block 1, moving to disk.
         let on_disk = disk_chunk(&cache, &file, 0);
         memory_chunk(&cache, &file, 1);
         assert!(
@@ -364,8 +346,6 @@ fn a_full_disk_drops_its_victims_to_take_memorys() {
             let start = u64::from(index) * MIB;
             read_through(&cache, &file, &data, start..start + MIB);
         }
-        // Block 1 pushed block 0 to disk; block 2 pushed block 1 there, which
-        // dropped block 0.
         assert_eq!(location(&cache, &file, 0), None);
         disk_chunk(&cache, &file, 1);
         memory_chunk(&cache, &file, 2);
@@ -485,7 +465,6 @@ fn a_victim_kept_for_want_of_disk_goes_back_to_the_policy() {
         read_through(&cache, &file, &data, MIB..2 * MIB);
         let in_memory = memory_chunk(&cache, &file, 1);
 
-        // Block 2 finds memory full; its victim, block 1, finds the disk full.
         let (out, fetches) = read_through(&cache, &file, &data, 2 * MIB..3 * MIB);
         assert_eq!(fetches, [2 * MIB..3 * MIB]);
         assert_eq!(out, data[2 * MIB as usize..]);
@@ -570,15 +549,12 @@ fn the_check_at_rest_finds_held_free_and_unnamed_chunks() {
         );
         assert_eq!(cache.check_at_rest(), Ok(vec![]));
 
-        // Published, with no entry naming it.
         drop(cache.memory.allocate().unwrap().publish(key(&file, 0)));
         let unnamed = cache.check_at_rest().unwrap_err();
         assert!(unnamed.contains("which no entry names"), "{unnamed}");
     });
 }
 
-/// However the answer is cut, each byte lands where it goes: the read's
-/// part of it in the output, each block whole in the cache.
 #[test]
 fn fetched_bytes_land_in_pieces_of_any_size() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -615,8 +591,6 @@ fn a_fetch_bringing_more_than_it_holds_is_refused() {
     });
 }
 
-/// Neither a fetch that ends short nor one given up on halfway caches its
-/// block, and both give back the chunk it took.
 #[test]
 fn a_fetch_cut_short_caches_nothing() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -640,8 +614,6 @@ fn a_fetch_cut_short_caches_nothing() {
     });
 }
 
-/// A read that needs a block another read is fetching waits for that
-/// fetch, and takes the block from where it lands: one fetch for both.
 #[test]
 fn a_read_waits_for_a_block_another_is_fetching() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -665,8 +637,6 @@ fn a_read_waits_for_a_block_another_is_fetching() {
     });
 }
 
-/// A read given up on before its fetch lands hands its block to the reads
-/// waiting for it: they fetch it themselves.
 #[test]
 fn a_read_waiting_for_a_fetch_given_up_on_fetches_the_block_itself() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -694,9 +664,6 @@ fn a_read_waiting_for_a_fetch_given_up_on_fetches_the_block_itself() {
     });
 }
 
-/// Fetches each run of remote blocks once, as the default does, and races
-/// each block another read is fetching with a request more than it has in
-/// flight.
 struct RacesInFlight;
 
 impl ReadPolicy for RacesInFlight {
@@ -717,9 +684,6 @@ impl ReadPolicy for RacesInFlight {
     fn on_io(&self, _event: &IoEvent<'_>) {}
 }
 
-/// A racing read fetches a block another read is fetching, with more
-/// requests than it has in flight: the first to land caches it, for the
-/// reads waiting, and the other's copy goes back.
 #[test]
 fn a_racing_read_joins_a_fetch_in_flight() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -746,9 +710,6 @@ fn a_racing_read_joins_a_fetch_in_flight() {
     });
 }
 
-/// The storage half checks the plan it takes, wherever it was made (a
-/// client's arrives over the socket, `doc/11-shared-mode.md`): one that
-/// leaves a remote block out is carried out as the default's.
 #[test]
 fn a_plan_taken_that_the_cache_cant_carry_out_fetches_as_the_default() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -771,9 +732,6 @@ fn a_plan_taken_that_the_cache_cant_carry_out_fetches_as_the_default() {
     });
 }
 
-/// A cache over a file of `disk_chunks` chunks in `dir` allocated on
-/// demand, each write leaving its drive `keep_free` bytes, and a chunk of
-/// memory; run by a [`TestPolicy`] that admits each fetched block to disk.
 fn on_demand_cache(
     dir: &TempDir,
     disk_chunks: u32,
@@ -789,16 +747,12 @@ fn on_demand_cache(
     (cache, policy)
 }
 
-/// The bytes the file at `path` takes on its drive.
 fn allocated(path: &std::path::Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
     // `st_blocks` counts 512-byte units, whatever the file system's blocks.
     std::fs::metadata(path).unwrap().blocks() * 512
 }
 
-/// A cache file allocated on demand is sized as the cache is built, but
-/// takes room on its drive only as blocks are written to it
-/// (`doc/10-spiral-integration.md`, decision 9).
 #[test]
 fn an_on_demand_cache_file_takes_room_as_blocks_are_written() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -823,9 +777,6 @@ fn an_on_demand_cache_file_takes_room_as_blocks_are_written() {
     });
 }
 
-/// A drive short of room takes no block, and its full tier evicts none for
-/// one: a freed chunk would give the drive no room back. What it holds
-/// still serves.
 #[test]
 fn a_drive_short_of_room_takes_no_block_and_evicts_none() {
     crate::io::test_schedule::TestSchedule::check(|| {

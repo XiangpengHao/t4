@@ -15,23 +15,15 @@ use crate::io::new_backend;
 #[cfg(all(feature = "shuttle", test))]
 use crate::io::simulated::{self, SimDisk};
 
-/// Handle to the I/O worker thread, which reads and writes a list of files
-/// (`doc/04-multi-device.md`, decision 4): an I/O names its file by its
-/// place in the list ([`FilePosition`]).
-///
-/// Cloning shares the same underlying worker. Dropping the last clone
-/// disconnects the worker's channel and waits for the thread to exit, so
-/// the files it owns are closed by the time the drop returns.
+/// The last clone's drop joins the thread, so its files are closed once the drop returns.
 #[derive(Clone)]
 pub struct IoWorker {
-    // Declared before `_thread`, so it drops first: the worker sees its
-    // channel disconnect before the last handle joins it.
+    // Before `_thread`, so it drops first: the worker sees its channel close before the join.
     tx: mpsc::Sender<WorkerRequest>,
     _thread: Arc<WorkerThread>,
 }
 
-/// The worker thread, joined when the last [`IoWorker`] drops. The thread
-/// holds no `IoWorker` itself, so the join never waits on itself.
+/// The thread holds no `IoWorker` itself, so the join never waits on itself.
 struct WorkerThread(Option<JoinHandle<()>>);
 
 impl Drop for WorkerThread {
@@ -57,14 +49,11 @@ impl IoWorker {
         Self::start(move |rx| new_backend(files, queue_depth.get(), rx))
     }
 
-    /// A worker on simulated disks, one a file, for shuttle tests.
     #[cfg(all(feature = "shuttle", test))]
     pub(crate) fn simulated(queue_depth: NonZeroU32, disks: Vec<SimDisk>) -> Result<Self> {
         Self::start(move |rx| Ok(simulated::new_backend_on(disks, queue_depth.get(), rx)))
     }
 
-    /// Spawns the worker thread, which builds its backend with `backend`
-    /// and runs it.
     fn start<D: IoDriver>(
         backend: impl FnOnce(mpsc::Receiver<WorkerRequest>) -> Result<BackendLoop<D>> + Send + 'static,
     ) -> Result<Self> {
@@ -134,7 +123,6 @@ mod test {
 
     use super::IoWorker;
 
-    /// A page whose first bytes are `text`.
     fn page_of(text: &str) -> AlignedBuf {
         let mut buf = AlignedBuf::new_zeroed(PAGE_SIZE_NZ_U32).unwrap();
         buf.as_mut_slice()[..text.len()].copy_from_slice(text.as_bytes());
@@ -165,8 +153,6 @@ mod test {
         });
     }
 
-    /// One worker over two files: an I/O goes to the file it names, so the
-    /// same offset in each holds its own bytes; a file past the list fails.
     #[test]
     fn one_worker_reads_and_writes_several_files() {
         crate::io::test_schedule::TestSchedule::check(|| {
@@ -242,9 +228,6 @@ mod test {
         });
     }
 
-    /// Dropping the last handle with reads in flight waits for them: each
-    /// completes with its bytes, and the worker's files are closed by the
-    /// time the drop returns, so a lock on one is free at once.
     #[cfg(feature = "shuttle")]
     #[test]
     fn dropping_the_worker_finishes_its_reads_and_closes_its_files() {

@@ -1,7 +1,3 @@
-//! Where a cache's owner listens for its clients (`doc/11-shared-mode.md`,
-//! decision 6): an address named by the first cache file's identity, so
-//! that every path to the file names the same one.
-
 use std::io;
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(not(target_os = "linux"))]
@@ -12,10 +8,8 @@ use rustix::fs::Uid;
 use crate::cache::storage::FileIdentity;
 use crate::io::error::{Error, Result};
 
-/// The address of the owner of the cache whose first cache file is one
-/// file: on Linux an abstract socket's name, which no file holds and which
-/// is gone with the owner's socket, however the owner exits; elsewhere a
-/// socket file's path, in the user's temporary directory.
+/// On Linux an abstract socket's name: no file holds it, and it goes with the owner's
+/// socket however the owner exits.
 pub(in crate::cache::cache_stores::shared) struct OwnerAddress {
     #[cfg(target_os = "linux")]
     name: String,
@@ -24,12 +18,6 @@ pub(in crate::cache::cache_stores::shared) struct OwnerAddress {
 }
 
 impl OwnerAddress {
-    /// The address of the owner of the cache whose first cache file is
-    /// `file`.
-    ///
-    /// # Errors
-    ///
-    /// If the system doesn't name the user's temporary directory.
     pub(in crate::cache::cache_stores::shared) fn of(file: FileIdentity) -> io::Result<Self> {
         let (device, inode) = (file.device(), file.inode());
         Ok(Self {
@@ -40,17 +28,13 @@ impl OwnerAddress {
         })
     }
 
-    /// The user's temporary directory, as the system names it, whatever
-    /// the process's environment says: shells set `TMPDIR` apart (a nix
-    /// shell, `sudo`), and an owner and its client that read it would look
-    /// in different places. Only the user may write in it, so no other
-    /// user can listen at the user's owners' addresses.
+    /// Not `TMPDIR`, which shells set apart (a nix shell, `sudo`): owner and client would
+    /// disagree. Only the user may write in it, so no other user can listen there.
     #[cfg(target_os = "macos")]
     fn user_temp_dir() -> io::Result<PathBuf> {
         use std::os::unix::ffi::OsStringExt;
         let mut path = vec![0_u8; libc::PATH_MAX as usize];
-        // SAFETY: `path` has room for the `path.len()` bytes `confstr`
-        // writes at most.
+        // SAFETY: `path` has room for the `path.len()` bytes `confstr` writes at most.
         let len = unsafe {
             libc::confstr(
                 libc::_CS_DARWIN_USER_TEMP_DIR,
@@ -76,9 +60,7 @@ impl OwnerAddress {
         Ok(std::env::temp_dir())
     }
 
-    /// Listens at the address, for the owner. It holds the cache files'
-    /// lock, so no other process binds the address meanwhile: a socket file
-    /// there is one an owner left as it died, and goes first.
+    /// The owner holds the files' lock, so a socket file here is one a dead owner left.
     pub(in crate::cache::cache_stores::shared) fn listen(&self) -> io::Result<UnixListener> {
         #[cfg(target_os = "linux")]
         {
@@ -94,15 +76,8 @@ impl OwnerAddress {
         }
     }
 
-    /// A connection to the owner listening at the address, which runs as
-    /// `user`. A client trusts no other user's (decision 8): on Linux any
-    /// process may listen at an abstract name, first, and would be sent
-    /// the client's descriptor of the cache file, and serve it any bytes.
-    ///
-    /// # Errors
-    ///
-    /// If the socket fails; [`Error::Busy`] if the process listening runs
-    /// as another user.
+    /// On Linux any process may listen at an abstract name first, and would be sent the
+    /// client's cache file descriptor: trust only `user` (`doc/11-shared-mode.md`, decision 8).
     pub(in crate::cache::cache_stores::shared) fn connect(&self, user: Uid) -> Result<UnixStream> {
         let stream = self.stream()?;
         if Self::peer_user(&stream)? != user {
@@ -111,8 +86,6 @@ impl OwnerAddress {
         Ok(stream)
     }
 
-    /// Connects to the address and goes: wakes the owner's thread that
-    /// accepts its clients.
     pub(in crate::cache::cache_stores::shared) fn wake(&self) {
         let _ = self.stream();
     }
@@ -128,15 +101,12 @@ impl OwnerAddress {
         }
     }
 
-    /// The owner's listener gone, its socket file goes too, while the owner
-    /// still holds the lock; an abstract name went with its socket.
+    /// Called while the owner still holds the lock; an abstract name went with its socket.
     pub(in crate::cache::cache_stores::shared) fn remove(&self) {
         #[cfg(not(target_os = "linux"))]
         let _ = std::fs::remove_file(&self.path);
     }
 
-    /// The user the process at the other end of `stream` ran as when it
-    /// connected or listened.
     #[cfg(target_os = "linux")]
     fn peer_user(stream: &UnixStream) -> io::Result<Uid> {
         Ok(rustix::net::sockopt::socket_peercred(stream)?.uid)
@@ -146,8 +116,7 @@ impl OwnerAddress {
     fn peer_user(stream: &UnixStream) -> io::Result<Uid> {
         use std::os::fd::AsRawFd;
         let (mut user, mut group) = (0, 0);
-        // SAFETY: the descriptor is `stream`'s, open while it lives; the
-        // call writes only `user` and `group`.
+        // SAFETY: `stream`'s descriptor is open; the call writes only `user` and `group`.
         if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut user, &mut group) } == -1 {
             return Err(io::Error::last_os_error());
         }

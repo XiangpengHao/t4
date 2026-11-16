@@ -6,7 +6,6 @@ pub(crate) use std::thread::JoinHandle;
 #[cfg(all(test, feature = "shuttle"))]
 pub(crate) use shuttle::thread::spawn;
 
-/// A scheduling point under shuttle; nothing otherwise.
 #[cfg(all(test, feature = "shuttle"))]
 #[inline]
 pub(crate) fn cooperative_yield() {

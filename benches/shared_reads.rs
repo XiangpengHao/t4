@@ -1,13 +1,5 @@
-//! A hot read's time through a shared cache (`doc/11-shared-mode.md`,
-//! Cost): the owner's own read of bytes its memory holds, against its
-//! client's read of the same bytes, which takes round trips over the
-//! socket. Both caches are in this process, as the second one built for
-//! sharing on the owner's files is its client: the socket, its threads and
-//! the region are a client's in another process.
-//!
-//! The file leaves the store once the owner holds it: a read the cache
-//! didn't serve fails, rather than time the store. Each read's bytes drop
-//! within its time: a client's read ends then, with a frame to its owner.
+//! Both caches live in this process: the second one built on the owner's file is its client.
+//! The file leaves the store, so a read the cache didn't serve fails rather than times the store.
 
 use std::path::Path as FsPath;
 use std::sync::Arc;
@@ -24,15 +16,11 @@ fn main() {
     divan::main();
 }
 
-/// The bytes the file holds: within memory's chunks, so every block of it
-/// stays there.
+/// Within memory's chunks, so every block of the file stays there.
 const FILE_BYTES: u64 = 4 << 20;
 
-/// The read sizes timed: a small read, and a block's.
 const READ_BYTES: [u64; 2] = [4 << 10, 1 << 20];
 
-/// An owner and its client, the file's every block in the owner's memory,
-/// the file gone from the store.
 struct SharedHotFile {
     _dir: tempfile::TempDir,
     _owner: T4Caching,
@@ -64,8 +52,6 @@ impl SharedHotFile {
         }
     }
 
-    /// A cache built for sharing on the cache file in `dir`: its owner if
-    /// it is the first, else the first's client.
     fn shared_cache(store: &Arc<InMemory>, dir: &FsPath) -> T4Caching {
         T4Caching::builder(Arc::clone(store) as Arc<dyn ObjectStore>)
             .with_memory_capacity(64 << 20)
@@ -75,7 +61,7 @@ impl SharedHotFile {
             .unwrap()
     }
 
-    /// Reads the file's first `len` bytes through `file`, and drops them.
+    /// Drops the bytes inside the timed call: a client's read ends then, with a frame to its owner.
     fn read(file: &FileHandle, len: u64) {
         let bytes: Bytes = block_on(file.read(0..len, None)).unwrap();
         assert_eq!(bytes.len() as u64, len);

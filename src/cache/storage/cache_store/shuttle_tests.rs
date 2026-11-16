@@ -1,14 +1,4 @@
-//! The cache under shuttle: reads, fills, evictions, moves to disk and
-//! promotions racing on a block or two, on a simulated disk whose I/O
-//! completes in any order, and resolutions racing on one path.
-//!
-//! Shuttle switches threads only at its own primitives: here the chunk
-//! tables' state words and owners, the free bitmaps' locks, the path table's
-//! id counter, the test policy's locks, and the I/O worker's channel and
-//! completions. A bbtree operation runs as one step between them. And it
-//! runs threads one at a time, so it finds the interleavings that break the
-//! cache, not a memory ordering too weak: those rest on the `Acquire` and
-//! `Release` pairs in `chunk_table.rs`.
+//! Shuttle runs one thread at a time: it finds bad interleavings, not too-weak memory orderings.
 
 use std::num::NonZeroU32;
 
@@ -27,18 +17,13 @@ use crate::io::io_worker::IoWorker;
 use crate::io::simulated::SimDisk;
 use crate::io::sync::{Arc, thread};
 
-/// Every file is one block of this many bytes: enough to tell files apart,
-/// little to copy.
+/// Enough to tell files apart, little to copy.
 const FILE_SIZE: u64 = 64;
 
-/// Runs `test` under the schedules PCT explores.
 fn explore(test: impl Fn() + Send + Sync + 'static) {
     TestSchedule::iterations(500, test);
 }
 
-/// A cache of `memory_chunks` chunks of memory and `disk_chunks` on
-/// simulated disks, run by a [`TestPolicy`]: two disks, chunks striped over
-/// them, if `disk_chunks` is even; else one.
 fn cache(memory_chunks: u32, disk_chunks: u32) -> (Arc<ObjectCache>, Arc<TestPolicy>) {
     let files = if disk_chunks.is_multiple_of(2) { 2 } else { 1 };
     let disks = (0..files).map(|_| SimDisk::new()).collect();
@@ -55,24 +40,18 @@ fn cache(memory_chunks: u32, disk_chunks: u32) -> (Arc<ObjectCache>, Arc<TestPol
     (Arc::new(cache.unwrap()), policy)
 }
 
-/// The file at `path`, its one version.
 fn resolve(cache: &ObjectCache, path: &'static [u8]) -> CacheableFile<'static> {
     cache.resolve(path, Some("v1"), FILE_SIZE).unwrap()
 }
 
-/// The bytes of the file at `path`: its first byte throughout.
 fn contents(path: &[u8]) -> Vec<u8> {
     vec![path[0]; FILE_SIZE as usize]
 }
 
-/// Reads the file whole, its GETs planned by the default read policy, and
-/// checks the read got the file's own bytes from a tier, or nothing and a
-/// fetch of the file; then, if `fill`, caches what it fetched.
 fn read(cache: &ObjectCache, file: &CacheableFile<'static>, fill: bool) {
     read_fetching(cache, file, fill);
 }
 
-/// [`read`], and whether the read fetched the file.
 fn read_fetching(cache: &ObjectCache, file: &CacheableFile<'static>, fill: bool) -> bool {
     let mut read = block_on(cache.read(file, 0..FILE_SIZE, None, &FetchRuns::default())).unwrap();
     if read.fetches().is_empty() {
@@ -95,7 +74,6 @@ fn read_fetching(cache: &ObjectCache, file: &CacheableFile<'static>, fill: bool)
     true
 }
 
-/// Where the index says `file`'s block is.
 fn location(cache: &ObjectCache, file: &CacheableFile<'_>) -> Option<Location> {
     cache.blocks.get(BlockKey::new(file.version().id(), 0))
 }
@@ -129,9 +107,6 @@ fn join_all<T>(handles: impl IntoIterator<Item = thread::JoinHandle<T>>) -> Vec<
         .collect()
 }
 
-/// Reads of one remote block at once fetch it once: one claims and fills
-/// it, the others wait for that fetch and take the block from memory, or
-/// hit it there.
 #[test]
 fn concurrent_reads_of_one_remote_block_fetch_it_once() {
     explore(|| {
@@ -144,8 +119,6 @@ fn concurrent_reads_of_one_remote_block_fetch_it_once() {
     });
 }
 
-/// Of concurrent reads of one block the placement policy discards, those
-/// that find it in flight take its bytes from the fetch; none is cached.
 #[test]
 fn concurrent_reads_of_one_discarded_block_take_its_bytes_from_its_fetch() {
     explore(|| {
@@ -160,8 +133,6 @@ fn concurrent_reads_of_one_discarded_block_take_its_bytes_from_its_fetch() {
     });
 }
 
-/// A read given up on before it fills its fetch hands the block to the read
-/// waiting for it, which fetches it itself.
 #[test]
 fn a_read_given_up_on_hands_its_block_to_the_read_waiting() {
     explore(|| {
@@ -192,8 +163,7 @@ fn racing_fills_of_one_block_take_one_chunk() {
     });
 }
 
-/// The race the chunk table's owner check is for: a read that found the
-/// entry before eviction, its chunk then reused for another file.
+/// The race the chunk table's owner check is for.
 #[test]
 fn a_read_racing_eviction_and_reuse_reads_its_bytes_or_reads_remote() {
     explore(|| {
@@ -254,8 +224,6 @@ fn of_two_evictions_of_one_chunk_one_evicts() {
     });
 }
 
-/// Reads go on in memory while the block is written to disk, then from
-/// disk, and those that found the memory entry finish there.
 #[test]
 fn a_read_racing_a_move_to_disk_reads_its_bytes() {
     explore(|| {
@@ -292,7 +260,6 @@ fn a_move_racing_an_eviction_from_memory_keeps_the_tiers_in_step() {
         let moved = mover.join().unwrap();
         let evicted = evictor.join().unwrap();
         reader.join().unwrap();
-        // The block ends on disk only if the move won.
         assert_eq!(disk_chunk(&cache, &a).is_some(), moved == MoveToDisk::Moved);
         assert!(moved == MoveToDisk::Moved || evicted);
         cache.check_at_rest().unwrap();
@@ -321,8 +288,7 @@ fn of_two_moves_of_one_chunk_one_moves() {
     });
 }
 
-/// The owner check for disk chunks: a read that found the disk entry, the
-/// chunk then evicted and written with another file's block.
+/// The race the owner check for disk chunks is for.
 #[test]
 fn a_read_racing_eviction_from_disk_and_reuse_reads_its_bytes_or_reads_remote() {
     explore(|| {
@@ -346,10 +312,7 @@ fn a_read_racing_eviction_from_disk_and_reuse_reads_its_bytes_or_reads_remote() 
     });
 }
 
-/// A move dropped while its write is in flight: the chunks it held go free
-/// once the write lands, and not before. Were the disk chunk free sooner,
-/// another block's move could take it, and the dropped write land over that
-/// block's bytes.
+/// Freed sooner, the disk chunk could go to another move, and the dropped write land over it.
 #[test]
 fn a_dropped_move_frees_its_chunks_after_its_write() {
     explore(|| {
@@ -361,8 +324,7 @@ fn a_dropped_move_frees_its_chunks_after_its_write() {
             memory_chunk(&cache, &a).unwrap(),
             memory_chunk(&cache, &b).unwrap(),
         );
-        // One poll submits the write; dropping the future then is a caller
-        // giving up on it, unless that poll finished the move.
+        // One poll submits the write; dropping the future then is a caller giving up on it.
         let moved_a = cache.move_to_disk(chunk_a).now_or_never();
         // The disk is full while `a`'s write may still land.
         let moved_b = block_on(cache.move_to_disk(chunk_b)).unwrap();
@@ -383,10 +345,6 @@ fn a_dropped_move_frees_its_chunks_after_its_write() {
     });
 }
 
-/// A fill dropped while the move of its victim to disk is being written:
-/// the policy, which forgot the victim when it picked it, gets it back, so
-/// memory can evict it for the next block. Were it lost, it would hold its
-/// chunk for good, and memory would take no other block.
 #[test]
 fn a_dropped_eviction_gives_its_victim_back() {
     explore(|| {
@@ -397,9 +355,8 @@ fn a_dropped_eviction_gives_its_victim_back() {
             resolve(&cache, b"c"),
         );
         read(&cache, &a, true);
-        // `b`'s fill picks `a` and writes it to disk. One poll submits the
-        // write; dropping the fill then is a caller giving up on it, unless
-        // that poll finished it.
+        // `b`'s fill picks `a` and writes it to disk; one poll submits the write,
+        // and dropping the fill then is a caller giving up on it.
         let mut remote =
             block_on(cache.read(&b, 0..FILE_SIZE, None, &FetchRuns::default())).unwrap();
         let _ = cache
@@ -419,8 +376,6 @@ fn a_dropped_eviction_gives_its_victim_back() {
     });
 }
 
-/// Two insertions into a full memory, each evicting the other's block to
-/// disk, a read of one meanwhile.
 #[test]
 fn insertions_racing_for_a_full_memory_keep_the_tiers_in_step() {
     explore(|| {
@@ -443,8 +398,6 @@ fn insertions_racing_for_a_full_memory_keep_the_tiers_in_step() {
     });
 }
 
-/// A read promoting a block from disk while the disk evicts it: the read
-/// takes the block's bytes either way.
 #[test]
 fn a_promotion_racing_an_eviction_from_disk_keeps_the_tiers_in_step() {
     explore(|| {
@@ -464,7 +417,6 @@ fn a_promotion_racing_an_eviction_from_disk_keeps_the_tiers_in_step() {
     });
 }
 
-/// Two reads promoting one block: one copy wins memory, the other goes back.
 #[test]
 fn two_promotions_of_one_block_leave_one_copy() {
     explore(|| {

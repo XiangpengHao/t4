@@ -1,7 +1,3 @@
-//! A read's work on the tiers ([`TierWork`]): its blocks located run by
-//! run, its hits taken, its page reads, its promotions, and its waits for
-//! the blocks other reads fetch.
-
 use std::collections::VecDeque;
 use std::future::Future;
 use std::num::NonZeroU8;
@@ -29,9 +25,7 @@ use super::partial_read::{BlockFate, FetchBlockPlan, PartialRead, PlannedFetch};
 use super::{BlocksToFetch, CacheableFile, ObjectCache};
 
 impl ObjectCache {
-    /// Reads the pages of `block` that `read` needs from the disk chunk
-    /// `on_disk` holds, straight into the read's output. Submitted now, so
-    /// reads started together run at once; done when the future is.
+    /// Submitted now, so reads started together run at once.
     fn read_pages(
         &self,
         read: &mut PartialRead,
@@ -47,39 +41,21 @@ impl ObjectCache {
     }
 }
 
-/// A read's work on the tiers once it is started
-/// ([`ObjectCache::start_read`]): the runs of its blocks it locates, one at
-/// a time; its page reads, submitted as they are located, the blocks it
-/// moves to memory, and those it waits for another read to fetch. Its
-/// caller awaits it beside the read's GETs.
 pub(in crate::cache) struct TierWork<'c> {
     cache: &'c ObjectCache,
-    /// The caller's read policy, which hears of the read's reads from disk
-    /// as they go.
     reads: &'c dyn ReadPolicy,
-    /// The read's file, the bytes it asked for and what for: what the
-    /// placement policy hears of each block.
     file: CacheableFile<'c>,
     range: Range<u64>,
     intent: Option<ReadIntent>,
-    /// The runs of the read's adjacent blocks not located yet, in order:
-    /// each located once the GETs of the one before have claimed the
-    /// blocks they widen to.
+    /// Each located once the GETs of the one before claim the blocks they widen to.
     unlocated: VecDeque<Vec<PlannedBlock>>,
-    /// Each read of a disk chunk's pages into the read's output, the chunk
-    /// held until its bytes land.
     page_reads: Vec<(DiskChunkReader<'c>, BoxFuture<'c, Result<()>>)>,
-    /// The blocks the placement policy moves to memory.
     promotions: Vec<(DiskChunkReader<'c>, PlannedBlock)>,
-    /// The blocks another read is fetching, each with its fetch.
     waits: Vec<(PlannedBlock, Arc<BlockFetch>)>,
-    /// The run located last, held until its GETs are taken.
     held: Option<HeldRun>,
 }
 
 impl<'c> TierWork<'c> {
-    /// No work yet, for a read of `range` of `file` whose blocks are the
-    /// runs `unlocated`, its reads from disk heard by `reads`.
     pub(super) fn new(
         cache: &'c ObjectCache,
         reads: &'c dyn ReadPolicy,
@@ -102,20 +78,6 @@ impl<'c> TierWork<'c> {
         }
     }
 
-    /// Locates the read's next run of adjacent blocks: takes each a tier
-    /// holds as a hit, and returns where each of the run's blocks is, for
-    /// the caller's read policy to plan its GETs by; the work holds the
-    /// claims and fetches in flight those GETs take ([`Self::take_gets`]),
-    /// which come before the next run is located. A run the tiers hold
-    /// whole is taken and skipped. `None` once every run is located.
-    ///
-    /// # Errors
-    ///
-    /// If a read from the cache file can't be submitted.
-    ///
-    /// # Panics
-    ///
-    /// If the GETs of the run located last weren't taken.
     pub(in crate::cache) fn locate_next_run(
         &mut self,
         read: &mut PartialRead,
@@ -170,19 +132,7 @@ impl<'c> TierWork<'c> {
         Ok(None)
     }
 
-    /// Takes `gets`, the GETs planned for the run of the read
-    /// [`Self::locate_next_run`] located last; or the default's, if the
-    /// cache can't carry them out: a read policy's mistake costs a read
-    /// nothing, wherever the policy ran. Names each GET for the read, with
-    /// what becomes of each block it fetches: one of the run's it fetches,
-    /// one a tier holds merged over and dropped, and one past the run
-    /// claimed for it, or dropped if a tier holds it or another read is
-    /// fetching it. The read waits for each of the run's blocks in flight
-    /// that no GET races.
-    ///
-    /// # Panics
-    ///
-    /// If no run is located, or its GETs were taken already.
+    /// Falls back to the default's GETs: a policy's mistake, wherever it ran, costs a read nothing.
     pub(in crate::cache) fn take_gets(&mut self, read: &mut PartialRead, gets: &ReadPlan) {
         let cache = self.cache;
         let HeldRun {
@@ -220,7 +170,6 @@ impl<'c> TierWork<'c> {
             read.fetches
                 .push(PlannedFetch::new(&read.version, get, fetched));
         }
-        // The blocks in flight that no GET races: the read waits for them.
         for (block, fetch) in blocks.iter().zip(remote) {
             if let Some(RemoteBlock::InFlight(fetch)) = fetch {
                 self.waits.push((*block, fetch));
@@ -228,8 +177,6 @@ impl<'c> TierWork<'c> {
         }
     }
 
-    /// Takes `block`, a hit in the memory chunk `reader` holds: its part of
-    /// the read copied into `read`'s output.
     fn take_memory_hit(
         &self,
         read: &mut PartialRead,
@@ -241,13 +188,6 @@ impl<'c> TierWork<'c> {
         read.place_from_chunk(block, reader.bytes());
     }
 
-    /// Takes `block`, a hit in the disk chunk `reader` holds: its pages read
-    /// into `read`'s output, submitted now, or the block moved to memory
-    /// first, as the placement policy says.
-    ///
-    /// # Errors
-    ///
-    /// If the read can't be submitted.
     fn take_disk_hit(
         &mut self,
         read: &mut PartialRead,
@@ -267,8 +207,6 @@ impl<'c> TierWork<'c> {
         Ok(())
     }
 
-    /// Reports a read of `block`'s pages from the disk chunk `on_disk`
-    /// holds, started, to the read's policy.
     fn report_disk_read(
         &self,
         on_disk: &DiskChunkReader<'_>,
@@ -285,8 +223,6 @@ impl<'c> TierWork<'c> {
         )
     }
 
-    /// What the placement policy hears of the read's block `key`: whether
-    /// the read `asked` for it, or a GET fetches it past the read.
     fn context(&self, key: BlockKey, asked: bool) -> BlockRead<'c> {
         BlockRead::new(
             key,
@@ -298,24 +234,12 @@ impl<'c> TierWork<'c> {
         )
     }
 
-    /// `bytes`, a read's, within `blocks`, adjacent blocks of it.
     fn asked_within(bytes: Range<u64>, blocks: &[PlannedBlock]) -> Range<u64> {
         let start = blocks[0].object_range().start;
         let end = blocks[blocks.len() - 1].object_range().end;
         bytes.start.max(start)..bytes.end.min(end)
     }
 
-    /// Waits for the page reads and for the blocks other reads fetch, takes
-    /// each of those from where its fetch cached it, then moves each block
-    /// promoted to memory and copies its part of `read`'s output from
-    /// there; a block that finds no room in memory stays, and the read
-    /// takes its pages from disk after all. Returns the blocks waited for
-    /// that no fetch cached, or that left the cache before the read took
-    /// them: the read fetches those itself ([`ObjectCache::retry`]).
-    ///
-    /// # Errors
-    ///
-    /// If a read from the cache file fails.
     pub(in crate::cache) async fn finish(
         mut self,
         read: &mut PartialRead,
@@ -361,10 +285,7 @@ impl<'c> TierWork<'c> {
         Ok(BlocksToFetch(retry))
     }
 
-    /// Waits for `page_reads`, each chunk held until its bytes land. They
-    /// were submitted as they were planned, so they run at once, each
-    /// straight into the read's output; awaited together, each reports its
-    /// end as its bytes land, not once those before it have.
+    /// Awaited together, so each reports its end as its bytes land, not after those before it.
     async fn page_reads_done(
         page_reads: Vec<(DiskChunkReader<'c>, BoxFuture<'c, Result<()>>)>,
     ) -> Result<()> {
@@ -378,21 +299,12 @@ impl<'c> TierWork<'c> {
     }
 }
 
-/// The run a read's work located last, held until its GETs are taken
-/// ([`TierWork::take_gets`]): what its caller was told, its blocks, and the
-/// claims and fetches in flight its GETs take. Dropped untaken, its claims
-/// end, and the reads waiting on them fetch for themselves.
 struct HeldRun {
     located: LocatedRun,
-    /// The run's blocks, in order.
     blocks: Vec<PlannedBlock>,
-    /// For each block no tier holds, the read's claim on it, or the fetch
-    /// in flight it waits for unless a GET races it; `None` for a hit.
     remote: Vec<Option<RemoteBlock>>,
 }
 
-/// A block a read needs that no tier holds: one the read fetches, claimed
-/// if it is to be cached, or one another read is fetching.
 enum RemoteBlock {
     Fetched {
         admit: Admit,
@@ -402,10 +314,6 @@ enum RemoteBlock {
 }
 
 impl RemoteBlock {
-    /// What becomes of the block, a GET of the read racing `race` fetching
-    /// it: into the read's output, and the cache where it goes. The GET's
-    /// racers are the read's requests in the block's fetch: those of its
-    /// claim, or, for a block another read is fetching, a racer's joined.
     fn fetched_by(self, in_flight: &Arc<InFlight>, race: NonZeroU8) -> FetchBlockPlan {
         match self {
             Self::Fetched { admit, claim } => {

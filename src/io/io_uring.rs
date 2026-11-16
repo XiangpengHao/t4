@@ -10,14 +10,9 @@ use crate::io::sync::mpsc;
 
 pub(crate) struct UringDriver {
     ring: IoUring,
-    /// The files the worker reads and writes, by their place in the list.
     files: Box<[File]>,
-    /// Operations pushed whose completions aren't reaped yet: at most the
-    /// submission queue's size, so their completions fit the completion
-    /// queue, twice that. The kernel frees a submission slot once it takes
-    /// the entry, so free slots alone would let more go out; and completions
-    /// past the queue's room wait in the kernel for an `io_uring_enter`,
-    /// which the loop makes only to submit.
+    /// Pushed but not reaped, capped by the SQ size so completions fit the CQ: an overflow would
+    /// wait for an `io_uring_enter`, which the loop makes only to submit.
     in_flight: usize,
 }
 
@@ -30,7 +25,6 @@ impl UringDriver {
         })
     }
 
-    /// The descriptor of the file at `at`.
     fn fd(&self, at: FilePosition) -> Result<types::Fd> {
         let file = self
             .files
@@ -76,7 +70,6 @@ impl UringDriver {
 
 impl IoDriver for UringDriver {
     fn available_submission_slots(&mut self) -> usize {
-        // Pushed entries the kernel hasn't taken yet are in flight too.
         self.ring.submission().capacity() - self.in_flight
     }
 
@@ -100,8 +93,7 @@ impl IoDriver for UringDriver {
         Ok(())
     }
 
-    /// The entries in the submission queue: a failed `io_uring_enter` takes
-    /// none of those it was asked to.
+    /// A failed `io_uring_enter` takes none of the entries, so all queued ones are unsubmitted.
     fn unsubmitted(&mut self) -> usize {
         self.ring.submission().len()
     }
@@ -115,8 +107,7 @@ impl IoDriver for UringDriver {
         })
     }
 
-    /// Returns at once: the loop polls the ring again, busy-waiting while
-    /// I/O is in flight.
+    /// Busy-waits: the loop polls the ring again at once.
     fn wait_for_progress(&mut self, _request_rx: &mpsc::Receiver<WorkerRequest>) {}
 }
 
@@ -135,10 +126,6 @@ mod tests {
     use crate::PAGE_SIZE_NZ_U32;
     use crate::io::aligned_buf::AlignedBuf;
 
-    /// A slot frees once its completion is reaped, not once the kernel takes
-    /// the entry: so the operations in flight never outgrow the completion
-    /// queue, whose overflow would wait for an `io_uring_enter` that may
-    /// never come.
     #[test]
     fn a_slot_frees_once_its_completion_is_reaped() {
         let mut driver = UringDriver::new(vec![tempfile::tempfile().unwrap()], 1).unwrap();

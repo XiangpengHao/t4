@@ -11,21 +11,12 @@ use crate::io::aligned_buf::AlignedBuf;
 use crate::io::error::{Error, Result};
 use crate::io::sync::Arc;
 
-/// The memory tier (`doc/03-cache.md`, decision 2): chunks in one mapping,
-/// taken when the pool is built and given back when it drops.
-///
-/// A chunk's bytes follow its [`ChunkTable`] round: its writer alone writes
-/// them, through [`MemoryChunkWriter::bytes_mut`], until it publishes them;
-/// readers then read them, through [`MemoryChunkReader::bytes`], and the
-/// chunk goes to another writer only once the last reader drops.
 pub(in crate::cache) struct MemoryPool {
     memory: PoolMemory,
     table: ChunkTable,
 }
 
 impl MemoryPool {
-    /// A pool of `chunk_count` chunks, all free. Its memory is mapped now;
-    /// each page takes room when it is first written.
     pub(in crate::cache) fn new(chunk_count: NonZeroU32) -> Result<Self> {
         Ok(Self {
             memory: PoolMemory::map(chunk_count)?,
@@ -42,8 +33,6 @@ impl MemoryPool {
         self.table.free_count()
     }
 
-    /// The block published in each chunk, once nothing holds any
-    /// ([`ChunkTable::blocks_at_rest`]).
     #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
     pub(in crate::cache) fn blocks_at_rest(
         &self,
@@ -51,7 +40,6 @@ impl MemoryPool {
         self.table.blocks_at_rest()
     }
 
-    /// A free chunk for one writer to fill; `None` when every chunk is taken.
     pub(in crate::cache) fn allocate(&self) -> Option<MemoryChunkWriter<'_>> {
         Some(MemoryChunkWriter {
             lease: self.table.allocate()?,
@@ -59,9 +47,6 @@ impl MemoryPool {
         })
     }
 
-    /// Holds `chunk` to copy `block` from it. `None` if the chunk doesn't
-    /// hold `block`: the index entry that named it is stale, and the caller
-    /// looks again.
     pub(in crate::cache) fn read(
         &self,
         chunk: ChunkId,
@@ -73,8 +58,6 @@ impl MemoryPool {
         })
     }
 
-    /// Holds `chunk` with whatever block it holds, as eviction does. `None`
-    /// if no block is published in it.
     pub(in crate::cache) fn pin_for_eviction(
         &self,
         chunk: ChunkId,
@@ -92,29 +75,19 @@ impl ChunkTier for MemoryPool {
     }
 }
 
-/// A free chunk, its one writer's to fill until [`Self::publish`]. Dropped
-/// unpublished, it frees the chunk.
 pub(in crate::cache) struct MemoryChunkWriter<'pool> {
     lease: ChunkLease<'pool>,
     memory: &'pool PoolMemory,
 }
 
 impl<'pool> MemoryChunkWriter<'pool> {
-    /// The chunk's `BLOCK_SIZE` bytes, as its last block left them: the
-    /// writer writes what the new block needs, and readers read only within
-    /// the block's length.
     #[cfg(test)]
     pub(in crate::cache) fn bytes_mut(&mut self) -> &mut [u8] {
         let start = self.memory.chunk_start(self.lease.chunk());
-        // SAFETY: the chunk is this writer's alone. The free bitmap leased it
-        // to one writer, and no reader can pin it before `publish`, which
-        // takes the writer; its last readers dropped before it was freed.
-        // The slice borrows the writer, so it ends before `publish`.
+        // SAFETY: leased to this writer alone; the slice borrows it, so it ends before `publish`.
         unsafe { std::slice::from_raw_parts_mut(start.as_ptr(), BLOCK_SIZE) }
     }
 
-    /// Publishes the chunk as holding `block`: readers may hold it from now
-    /// on, and the writer goes on as one of them.
     #[cfg(test)]
     pub(in crate::cache) fn publish(self, block: BlockKey) -> MemoryChunkReader<'pool> {
         MemoryChunkReader {
@@ -123,11 +96,6 @@ impl<'pool> MemoryChunkWriter<'pool> {
         }
     }
 
-    /// The chunk's first `len` bytes, whole pages, as a buffer a direct I/O
-    /// reads into, and the writer as what can only publish the chunk once
-    /// that buffer comes back ([`LentMemoryChunk::publish`]). The buffer
-    /// holds the chunk until it drops, after the read, whatever becomes of
-    /// the caller. `pool` is the pool the chunk is in.
     pub(in crate::cache) fn lend_for_read(
         self,
         pool: &Arc<MemoryPool>,
@@ -140,12 +108,7 @@ impl<'pool> MemoryChunkWriter<'pool> {
         );
         let hold = self.lease.hold_owned(pool);
         let start = self.memory.chunk_start(self.lease.chunk());
-        // SAFETY: the chunk starts on a page boundary, and its first `len`
-        // bytes lie within it. It is this writer's alone: no reader pins it
-        // before it is published, and the writer's own bytes go with it into
-        // `LentMemoryChunk`, which has none to give. So only the read writes
-        // the chunk while the buffer lives. `hold` keeps the chunk from being
-        // freed, and `pool` the mapping, as long as the buffer.
+        // SAFETY: page-aligned; unpublished, so only the read writes it; `hold` keeps it alive.
         let buffer = unsafe { AlignedBuf::lent(start, len, Arc::new(hold)) };
         let lent = LentMemoryChunk {
             lease: self.lease,
@@ -155,17 +118,12 @@ impl<'pool> MemoryChunkWriter<'pool> {
     }
 }
 
-/// A free chunk lent to a direct I/O that fills it: published once the
-/// buffer the I/O filled comes back.
 pub(in crate::cache) struct LentMemoryChunk<'pool> {
     lease: ChunkLease<'pool>,
     memory: &'pool PoolMemory,
 }
 
 impl<'pool> LentMemoryChunk<'pool> {
-    /// Publishes the chunk as holding `block`: `filled` is the buffer
-    /// [`MemoryChunkWriter::lend_for_read`] lent, back from the read that
-    /// filled it, so the read is done.
     pub(in crate::cache) fn publish(
         self,
         filled: AlignedBuf,
@@ -185,8 +143,6 @@ impl<'pool> LentMemoryChunk<'pool> {
     }
 }
 
-/// A reader's hold on a published chunk: until it drops, the chunk is not
-/// freed, so its bytes stay `block`'s.
 pub(in crate::cache) struct MemoryChunkReader<'pool> {
     pin: ChunkPin<'pool>,
     memory: &'pool PoolMemory,
@@ -201,10 +157,6 @@ impl MemoryChunkReader<'_> {
         self.pin.block()
     }
 
-    /// The whole chunk, as a buffer a direct I/O writes to disk from. The
-    /// buffer holds the chunk, and `with`, until it drops, after the write
-    /// is done, whatever becomes of this reader. `pool` is the pool the chunk
-    /// is in.
     pub(in crate::cache) fn lend_for_write(
         &self,
         pool: &Arc<MemoryPool>,
@@ -212,75 +164,45 @@ impl MemoryChunkReader<'_> {
     ) -> AlignedBuf {
         let hold = self.pin.hold_owned(pool);
         let start = self.memory.chunk_start(self.pin.chunk());
-        // SAFETY: the chunk starts on a page boundary, and is `BLOCK_SIZE`
-        // bytes, whole pages. `hold` keeps it from being freed, so no writer
-        // gets it, and `pool`, so the mapping stays: both live in the guard,
-        // as long as the buffer. The I/O only reads the bytes, as readers
-        // copying from the chunk meanwhile do; nothing writes them.
+        // SAFETY: page-aligned whole pages; `hold` keeps it unfreed and mapped; nothing writes it.
         unsafe { AlignedBuf::lent(start, PoolMemory::CHUNK_LEN, Arc::new((hold, with))) }
     }
 
-    /// The chunk's `BLOCK_SIZE` bytes: `block`'s, within the block's length.
+    /// All `BLOCK_SIZE` bytes: only the block's length of them are `block`'s.
     pub(in crate::cache) fn bytes(&self) -> &[u8] {
         let start = self.memory.chunk_start(self.pin.chunk());
-        // SAFETY: the pin keeps the chunk from being freed, so no writer
-        // holds it while the slice lives, and its writer's writes came
-        // before the publish the pin saw (`ChunkTable::pin`).
+        // SAFETY: the pin keeps writers out, and saw the publish that followed their writes.
         unsafe { std::slice::from_raw_parts(start.as_ptr(), BLOCK_SIZE) }
     }
 
-    /// Unpublishes the chunk, for eviction: no new reader holds it, and it
-    /// is freed when its last reader drops, this one included. Whether this
-    /// call did it: of two evictions of one chunk, one goes on.
     pub(in crate::cache) fn unpublish(&self) -> bool {
         self.pin.unpublish()
     }
 }
 
-/// The pool's bytes: `chunk_count` chunks of `BLOCK_SIZE`, back to back.
-///
-/// One anonymous mapping, not `std::alloc`: readers and writers see a chunk
-/// as `[u8]`, so its bytes must start initialized, and `std::alloc` zeroes
-/// a page-aligned allocation by writing every byte, faulting in a pool of
-/// tens of GB at startup. A mapping's pages are zeros the kernel supplies on
-/// first touch, it is page-aligned, so every chunk is, as `O_DIRECT` needs,
-/// and it goes back to the kernel on drop, whatever the global allocator.
-///
-/// On Linux the chunks start at a huge page's boundary and ask for
-/// transparent huge pages: a first write faults in 2 MiB, two chunks, at
-/// once, where 4 KiB pages fault 512 times. A cold pool filling at the
-/// network's rate otherwise faults on every page it takes in, 17 million
-/// times in 64 GiB (`doc/05-network.md`). Where the kernel gives no huge
-/// page, or none is free, a chunk takes 4 KiB pages as before.
+/// An anonymous mapping, not `std::alloc`, whose zeroing would fault in the whole pool at once.
+/// Chunks start on a huge page: a cold pool faults 2 MiB at a time, not 4 KiB.
 struct PoolMemory {
-    /// The mapping, as the kernel placed it: a huge page larger than the
-    /// chunks, so that they can start at a huge page's boundary.
     mapping: NonNull<u8>,
-    /// The first chunk's first byte.
     start: NonNull<u8>,
     chunk_count: u32,
 }
 
-// SAFETY: the mapping is plain memory, valid until `PoolMemory` drops, and
-// only reached through raw pointers here; `MemoryPool` hands out its chunks
-// under the rules of `ChunkTable`.
+// SAFETY: plain memory, valid until drop; `MemoryPool` hands out chunks under `ChunkTable`'s rules.
 unsafe impl Send for PoolMemory {}
 unsafe impl Sync for PoolMemory {}
 
 impl PoolMemory {
-    /// A chunk's bytes, as a direct I/O's length.
     const CHUNK_LEN: NonZeroU32 = NonZeroU32::new(BLOCK_SIZE as u32).expect("a chunk has bytes");
 
-    /// A transparent huge page's bytes, x86-64's and arm64's with 4 KiB
-    /// pages.
+    /// x86-64's, and arm64's with 4 KiB pages.
     const HUGE_PAGE: usize = 2 << 20;
 
     fn map(chunk_count: NonZeroU32) -> Result<Self> {
         let mapping_len = Self::mapping_len(chunk_count.get()).ok_or(Error::InvalidArgument(
             "memory pool larger than the address space",
         ))?;
-        // SAFETY: a new private mapping, at an address the kernel picks: it
-        // aliases nothing.
+        // SAFETY: a new private mapping, at an address the kernel picks, aliases nothing.
         let mapping = unsafe {
             rustix::mm::mmap_anonymous(
                 std::ptr::null_mut(),
@@ -292,8 +214,7 @@ impl PoolMemory {
         .map_err(std::io::Error::from)?;
         let mapping = NonNull::new(mapping.cast::<u8>()).expect("a mapping is never at address 0");
         let skip = mapping.as_ptr().align_offset(Self::HUGE_PAGE);
-        // SAFETY: the mapping is a huge page longer than the chunks, and
-        // `skip` is less than one.
+        // SAFETY: the mapping is a huge page longer than the chunks, and `skip` is less than one.
         let start = unsafe { mapping.add(skip) };
         let memory = Self {
             mapping,
@@ -304,14 +225,11 @@ impl PoolMemory {
         Ok(memory)
     }
 
-    /// Asks the kernel to back the chunks with transparent huge pages, as
-    /// they fault in. Advice only: refused, as where they are switched off,
-    /// the chunks take small pages.
+    /// Advice only: if refused, the chunks take small pages.
     #[cfg(target_os = "linux")]
     fn ask_for_huge_pages(&self) {
         let len = Self::len_of(self.chunk_count).expect("`map` checked the length");
-        // SAFETY: the range is the chunks', within this mapping; the advice
-        // changes no byte, only the pages that will hold them.
+        // SAFETY: the range is the chunks', within this mapping; advice changes no byte.
         let _ = unsafe {
             rustix::mm::madvise(
                 self.start.as_ptr().cast(),
@@ -324,27 +242,21 @@ impl PoolMemory {
     #[cfg(not(target_os = "linux"))]
     fn ask_for_huge_pages(&self) {}
 
-    /// The bytes `chunk_count` chunks take; `None` if no mapping can be that
-    /// large.
     fn len_of(chunk_count: u32) -> Option<usize> {
         usize::try_from(chunk_count).ok()?.checked_mul(BLOCK_SIZE)
     }
 
-    /// The bytes mapped for `chunk_count` chunks: theirs and a huge page,
-    /// to start them at one's boundary.
+    /// A huge page more, to start the chunks at one's boundary.
     fn mapping_len(chunk_count: u32) -> Option<usize> {
         Self::len_of(chunk_count)?.checked_add(Self::HUGE_PAGE)
     }
 
-    /// Where `chunk` starts: page-aligned, `BLOCK_SIZE` bytes before the
-    /// next chunk.
     fn chunk_start(&self, chunk: ChunkId) -> NonNull<u8> {
         assert!(
             chunk.index() < self.chunk_count,
             "{chunk:?} is past the pool"
         );
-        // SAFETY: the chunk lies within the mapping, whose length `map`
-        // checked fits a `usize`.
+        // SAFETY: the chunk lies within the mapping, whose length `map` checked fits a `usize`.
         unsafe { self.start.add(chunk.index() as usize * BLOCK_SIZE) }
     }
 }
@@ -352,8 +264,7 @@ impl PoolMemory {
 impl Drop for PoolMemory {
     fn drop(&mut self) {
         let len = Self::mapping_len(self.chunk_count).expect("`map` checked the length");
-        // SAFETY: the mapping is this struct's, and nothing uses it any more:
-        // every writer and reader borrows the pool.
+        // SAFETY: the mapping is this struct's, and every writer and reader borrows the pool.
         let _ = unsafe { rustix::mm::munmap(self.mapping.as_ptr().cast(), len) };
     }
 }
@@ -372,8 +283,6 @@ mod tests {
         MemoryPool::new(NonZeroU32::new(chunk_count).unwrap()).unwrap()
     }
 
-    /// Writes `block`'s bytes into a chunk, as a fetch would: its key, then
-    /// a byte of its file version id throughout.
     fn fill(writer: &mut MemoryChunkWriter<'_>, block: BlockKey) {
         let bytes = writer.bytes_mut();
         bytes.fill(block.file_version().get() as u8);
@@ -381,8 +290,6 @@ mod tests {
         bytes[8..12].copy_from_slice(&block.index().to_le_bytes());
     }
 
-    /// Whether `reader` sees what [`fill`] wrote for its block: its key, and
-    /// the fill byte at the end of every page.
     fn holds_its_block(reader: &MemoryChunkReader<'_>) -> bool {
         let (block, bytes) = (reader.block(), reader.bytes());
         let tag = block.file_version().get() as u8;
@@ -399,8 +306,6 @@ mod tests {
         writer.publish(block).chunk()
     }
 
-    /// So that each huge page holds whole chunks, and the first holds the
-    /// first.
     #[test]
     fn the_chunks_start_at_a_huge_pages_boundary() {
         crate::io::test_schedule::TestSchedule::once(|| {
@@ -461,8 +366,7 @@ mod tests {
         });
     }
 
-    /// Threads fill, publish, read and evict chunks of a pool too small for
-    /// them all, so chunks are reused under readers holding stale entries.
+    /// A pool too small for every thread, so chunks are reused under readers with stale entries.
     #[cfg(feature = "shuttle")]
     #[test]
     fn concurrent_allocate_read_and_evict() {
@@ -470,7 +374,7 @@ mod tests {
             const THREADS: u64 = 4;
             const ROUNDS: u32 = 3;
             let pool = pool(4);
-            // What an index would hold: the published blocks, and their chunks.
+            // Stands in for the index.
             let published = Mutex::new(Vec::<(ChunkId, BlockKey)>::new());
             crate::io::sync::thread::scope(|scope| {
                 for thread in 0..THREADS {

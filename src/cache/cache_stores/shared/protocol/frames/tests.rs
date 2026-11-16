@@ -1,7 +1,6 @@
 use super::*;
 use crate::cache::BlockKey;
 
-/// One of each client frame, each field set apart from its default.
 fn client_frames() -> Vec<ClientFrame> {
     let race = NonZeroU8::new(3).unwrap();
     vec![
@@ -91,7 +90,6 @@ fn client_frames() -> Vec<ClientFrame> {
     ]
 }
 
-/// One of each owner frame, and of each next step and I/O phase.
 fn owner_frames() -> Vec<OwnerFrame> {
     let version = FileVersion::named(FileVersionId::new(41), 5 << 20).unwrap();
     let run = LocatedRun::new(
@@ -190,7 +188,6 @@ fn owner_frames() -> Vec<OwnerFrame> {
     frames
 }
 
-/// A frame's body: its bytes after its length, which must be theirs.
 fn body(frame: &[u8]) -> Bytes {
     let (length, body) = frame.split_at(8);
     assert_eq!(
@@ -210,9 +207,6 @@ fn every_frame_decodes_as_it_was_encoded() {
     }
 }
 
-/// The hello's bytes and the welcome's, which no version may change: from
-/// them a client and an owner of different versions learn each other's
-/// (`PROTOCOL_VERSION`).
 #[test]
 fn the_hello_and_the_welcome_are_every_versions() {
     let (version, region) = (0x0102_0304, true);
@@ -226,8 +220,6 @@ fn the_hello_and_the_welcome_are_every_versions() {
     assert_eq!(welcome, expected);
 }
 
-/// A frame cut anywhere short, or with a byte past its end, is malformed:
-/// a field that ends early, or a byte no field takes.
 #[test]
 fn a_frame_of_the_wrong_length_is_malformed() {
     for whole in client_frames().iter().map(|frame| body(&frame.encode())) {
@@ -246,7 +238,6 @@ fn a_frame_of_the_wrong_length_is_malformed() {
     }
 }
 
-/// `frame`'s body, its bytes from `at` replaced by `with`.
 fn patched(frame: &[u8], at: usize, with: &[u8]) -> Bytes {
     let mut body = body(frame).to_vec();
     body[at..at + with.len()].copy_from_slice(with);
@@ -280,8 +271,7 @@ fn a_value_no_field_takes_is_malformed() {
         output: None,
     }
     .encode();
-    // The tag, call and read; the path's length and its byte; the e_tag's
-    // length, then its byte.
+    // Tag, call, read; the path's length and byte; the e_tag's length.
     let e_tag = 1 + 8 + 8 + 8 + 1 + 8;
     let invalid = patched(&start, e_tag, &[0xff]);
     assert!(ClientFrame::decode(invalid).is_err(), "UTF-8");
@@ -324,8 +314,7 @@ fn a_value_no_field_takes_is_malformed() {
         next: NextStep::Plan(LocatedRun::new(0, 0..1, vec![BlockSource::Remote])),
     }
     .encode();
-    // The tag, call and step; the run's first block and its range; then
-    // its count of sources, and its one.
+    // Tag, call, step; the run's first block and range; then its sources' count and one.
     let first = 1 + 8 + 1;
     let sources = first + 4 + 16;
     let mut no_block = body(&next).to_vec();
@@ -342,7 +331,6 @@ fn a_value_no_field_takes_is_malformed() {
     );
 }
 
-/// A fetch's bytes are a slice of the frame they came in, not a copy.
 #[test]
 fn landed_bytes_are_the_frames_own() {
     let frame = body(

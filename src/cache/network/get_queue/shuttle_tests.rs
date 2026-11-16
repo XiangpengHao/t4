@@ -1,7 +1,3 @@
-//! The queue under shuttle: GETs of a file's adjacent bytes taking turns,
-//! merging and handing their bytes over, one giving up as it waits, while
-//! places are given back.
-
 use std::num::{NonZeroU8, NonZeroU64};
 
 use crate::io::test_schedule::TestSchedule;
@@ -15,21 +11,17 @@ use crate::cache::FileVersionId;
 use crate::cache::cache_stores::{FileVersionKey, VersionIdSource};
 use crate::io::sync::{Arc, thread};
 
-/// A GET's bytes: its block's number throughout.
 const BLOCK: u64 = 8;
-/// The bytes in flight at most: two GETs'.
 const MOST: u64 = 2 * BLOCK;
 
 fn explore(test: impl Fn() + Send + Sync + 'static) {
     TestSchedule::iterations(500, test);
 }
 
-/// The file every GET is of: a version of the process's own cache.
 fn file() -> FileVersionKey {
     FileVersionKey::new(VersionIdSource::OwnCache, FileVersionId::new(1))
 }
 
-/// The bytes of blocks `from..to`, each its number throughout.
 fn blocks(from: u64, to: u64) -> Bytes {
     (from..to)
         .flat_map(|block| vec![block as u8; BLOCK as usize])
@@ -37,8 +29,6 @@ fn blocks(from: u64, to: u64) -> Bytes {
         .into()
 }
 
-/// GET `block` of the file, until it has its bytes, sent or handed over;
-/// while it holds a place, the bytes in flight are within the cap.
 async fn fetch(queue: &Arc<GetQueue>, block: u64) -> Bytes {
     let own = block * BLOCK..(block + 1) * BLOCK;
     loop {
@@ -73,7 +63,6 @@ fn shuttle_gets_take_turns_merge_and_hand_their_bytes_over() {
                 })
             })
             .collect();
-        // One more GET that gives up if its turn isn't there at once.
         let quitter = {
             let queue = Arc::clone(&queue);
             thread::spawn(move || {

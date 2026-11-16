@@ -1,10 +1,4 @@
-//! Writes a Parquet table as Vortex: each Parquet file of a table on a local
-//! drive, one or a directory of them, as the Vortex file of its name,
-//! `.vortex` for `.parquet`, in `--out`. A file's rows keep their order, read
-//! and written by one partition, so its Vortex file is laid out as the
-//! Parquet one is: the same row groups' worth of rows in the same order,
-//! pruned alike. `--jobs` files are written at once. Strings Parquet keeps as
-//! binaries, as ClickBench's are, become strings.
+//! One partition per file keeps the rows' order, so the Vortex file prunes as the Parquet one.
 //!
 //! ```text
 //! cargo run --release -p t4-bench --bin to_vortex -- \
@@ -24,9 +18,6 @@ use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use vortex_datafusion::VortexFormatFactory;
 
-/// The allocator: mimalloc unless built `--no-default-features`, as the
-/// `mimalloc` feature in `bench/Cargo.toml` explains. A static, as Rust takes
-/// a global allocator only so.
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -44,15 +35,12 @@ struct Args {
     jobs: Option<NonZeroUsize>,
 }
 
-/// One Parquet file to write as Vortex.
 struct Conversion {
     parquet: PathBuf,
     vortex: PathBuf,
 }
 
 impl Conversion {
-    /// Every Parquet file of `table`, a file or a directory, each to the
-    /// Vortex file of its name in `out`.
     fn of_table(table: &Path, out: &Path) -> std::io::Result<Vec<Self>> {
         let files = if table.is_dir() {
             let mut files = Vec::new();
@@ -80,8 +68,6 @@ impl Conversion {
             .collect())
     }
 
-    /// Reads the Parquet file in one partition and writes its rows, in
-    /// order, as the Vortex file.
     async fn run(&self) -> Result<()> {
         let mut config = SessionConfig::new().with_target_partitions(1);
         config.options_mut().execution.parquet.binary_as_string = true;
@@ -108,7 +94,6 @@ impl Conversion {
         Ok(())
     }
 
-    /// `path` as a SQL string's contents: its quotes doubled.
     fn sql_path(path: &Path) -> Result<String> {
         let path = path.to_str().ok_or_else(|| {
             DataFusionError::Configuration(format!("{}: not UTF-8", path.display()))
@@ -127,8 +112,7 @@ async fn main() -> Result<()> {
         .or_else(|| std::thread::available_parallelism().ok())
         .map_or(1, NonZeroUsize::get);
     let (count, started) = (conversions.len(), Instant::now());
-    // Each file on a task of its own, so that `jobs` decode and encode on as
-    // many threads.
+    // A task per file, so `jobs` files convert on as many threads.
     stream::iter(conversions)
         .map(|conversion| {
             tokio::spawn(async move {

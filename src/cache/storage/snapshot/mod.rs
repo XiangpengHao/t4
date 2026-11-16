@@ -1,13 +1,3 @@
-//! The disk tier kept across a restart (`doc/10-spiral-integration.md`,
-//! decision 7): as the cache drops, it writes what its disk chunks hold to
-//! a file beside its first cache file; the next cache on those files reads
-//! it back as it opens, and removes it before it writes a chunk.
-//!
-//! - [`DiskSnapshot`]: the disk half of the index at one moment, and its
-//!   bytes, checked whole as they are read back.
-//! - `snapshot_file`: where a snapshot is kept, what it must match, and how
-//!   it is written and taken back ([`SnapshotFile`]).
-
 mod snapshot_file;
 
 use std::collections::HashSet;
@@ -18,19 +8,13 @@ pub(in crate::cache) use snapshot_file::SnapshotFile;
 use super::index::{FileVersion, PathTable};
 use crate::cache::{BLOCK_SIZE, BLOCK_SIZE_U64, ChunkId, FileVersionId};
 
-/// What the disk tier holds at one moment: each file version with blocks
-/// on disk, and the chunk each of those blocks is in; and the id the next
-/// new version takes, so that no id is given twice across a restart
-/// (`doc/03-cache.md`, decision 5).
+/// Keeps `next_id` so that no id is given twice across a restart.
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::cache) struct DiskSnapshot {
     next_id: u64,
     versions: Vec<VersionOnDisk>,
 }
 
-/// A file version with blocks on disk: its path and e_tag, as the path
-/// table holds them, and its blocks, each by its number, in order, with the
-/// chunk that holds it.
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::cache) struct VersionOnDisk {
     path: Box<[u8]>,
@@ -72,13 +56,9 @@ impl VersionOnDisk {
 }
 
 impl DiskSnapshot {
-    /// What a snapshot's bytes start with.
     const MAGIC: [u8; 8] = *b"t4 disk\n";
-    /// The layout of its bytes: a snapshot of another is never taken back.
     const FORMAT: u32 = 1;
 
-    /// `versions`, in path order, each with a block on disk at least, and
-    /// `next_id`, above each of their ids.
     pub(in crate::cache) fn new(next_id: u64, versions: Vec<VersionOnDisk>) -> Self {
         Self { next_id, versions }
     }
@@ -91,8 +71,6 @@ impl DiskSnapshot {
         &self.versions
     }
 
-    /// Its bytes, little-endian: a header that names `layout`, then the next
-    /// id, then each version: its id, size, path and e_tag, and its blocks.
     fn encode(&self, layout: &CacheLayout) -> Vec<u8> {
         let mut out = SnapshotWriter::default();
         out.raw(&Self::MAGIC);
@@ -115,11 +93,7 @@ impl DiskSnapshot {
         out.0
     }
 
-    /// The snapshot `bytes` hold, if they are one of a cache of `layout`,
-    /// whole, and could be: every id below the next, no path or id twice,
-    /// each block within its file and in a chunk of the tier, and no chunk
-    /// twice. `None` for anything else, whatever made it: the cache then
-    /// starts cold, which costs refills, never wrong bytes.
+    /// Rejects anything doubtful: starting cold costs refills, never wrong bytes.
     fn decode(bytes: &[u8], layout: &CacheLayout) -> Option<Self> {
         let mut input = SnapshotReader { bytes };
         let header_matches = input.take(Self::MAGIC.len())? == Self::MAGIC
@@ -169,7 +143,6 @@ impl DiskSnapshot {
     }
 }
 
-/// A snapshot's bytes being written, each field appended in order.
 #[derive(Default)]
 struct SnapshotWriter(Vec<u8>);
 
@@ -186,15 +159,12 @@ impl SnapshotWriter {
         self.raw(&value.to_le_bytes());
     }
 
-    /// `bytes`, their length first.
     fn bytes(&mut self, bytes: &[u8]) {
         self.u32(bytes.len() as u32);
         self.raw(bytes);
     }
 }
 
-/// A snapshot's bytes being read, each field in order; `None` once a field
-/// runs past their end.
 struct SnapshotReader<'b> {
     bytes: &'b [u8],
 }
@@ -214,7 +184,6 @@ impl<'b> SnapshotReader<'b> {
         Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
     }
 
-    /// Bytes, their length first.
     fn bytes(&mut self) -> Option<&'b [u8]> {
         let len = self.u32()?;
         self.take(len as usize)

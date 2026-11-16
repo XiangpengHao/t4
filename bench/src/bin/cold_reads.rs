@@ -1,15 +1,3 @@
-//! Reads 1 MiB blocks cold from one disk cache: t4, foyer (as shipped or
-//! tuned) or Kismet as spiraldb runs it, each on the same drives
-//! (`t4_bench::disk_caches`).
-//!
-//! It fills the cache with `--blocks` blocks, lets go of what memory holds,
-//! and then makes `--passes` passes, each reading every block once in a new
-//! random order, `--in-flight` reads at once, the page cache dropped before
-//! it. A pass is a CSV row: its time and throughput, the CPU the process and
-//! the machine spent, the bytes the drives read, the GETs that reached the
-//! source (none, unless the cache missed), its misses and wrong bytes, and
-//! its read latencies, slowest first.
-//!
 //! Dropping the page cache takes root:
 //!
 //! ```text
@@ -30,9 +18,6 @@ use t4_bench::disk_caches::{Blocks, DiskCache, DiskCacheKind};
 use t4_bench::host_counters::{HostCounters, HostProbe};
 use t4_bench::request_cost::{CountedStore, RequestCounter};
 
-/// The allocator: mimalloc unless built `--no-default-features`, as the
-/// `mimalloc` feature in `bench/Cargo.toml` explains. A static, as Rust takes
-/// a global allocator only so.
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -51,8 +36,7 @@ struct Args {
     /// Reads in flight at once.
     #[arg(long, default_value_t = 128)]
     in_flight: usize,
-    /// The I/Os an io_uring engine keeps in flight, t4's and tuned foyer's;
-    /// each's default (64) unless set.
+    /// The io_uring depth of t4 and tuned foyer; each's default (64) unless set.
     #[arg(long)]
     io_depth: Option<u32>,
     /// Cold passes over every block.
@@ -61,34 +45,26 @@ struct Args {
     /// Seeds each pass's read order.
     #[arg(long, default_value_t = 1)]
     seed: u64,
-    /// Leave the page cache alone between passes, for a run without root
-    /// (a smoke test): the passes are then not cold for foyer and Kismet.
+    /// Don't drop the page cache, for a smoke test without root; passes then aren't cold.
     #[arg(long)]
     keep_page_cache: bool,
     /// The CSV to write, a row a pass.
     #[arg(long)]
     out: PathBuf,
-    /// The variant's name in the CSV: the cache's, unless set (as when a run
-    /// differs by more than its flags, such as a memory cap around it).
+    /// The variant's name in the CSV; the cache's unless set.
     #[arg(long)]
     label: Option<String>,
 }
 
-/// The read requests the drives under a directory completed, from
-/// `/proc/diskstats`, summed over the drives under it (an md RAID's members,
-/// else the device itself): how many, their bytes, and their time queued, so
-/// a pass shows its mean request size and how many requests were in flight.
 struct DriveRequests {
     devices: Vec<String>,
 }
 
-/// What [`DriveRequests`] counted, so far or over a pass.
 #[derive(Clone, Copy)]
 struct DriveSample {
     requests: u64,
     bytes: u64,
-    /// Milliseconds requests spent queued or in service, summed over
-    /// requests: over a span of wall time, the mean in flight.
+    /// Summed over requests, so divided by wall time it is the mean in flight.
     queued_ms: u64,
 }
 
@@ -126,7 +102,6 @@ impl DriveRequests {
         Ok(Self { devices })
     }
 
-    /// The counts so far, or `None` without `/proc/diskstats` (not Linux).
     fn sample(&self) -> Option<DriveSample> {
         if self.devices.is_empty() {
             return None;
@@ -160,12 +135,10 @@ impl DriveSample {
     }
 }
 
-/// The page cache, emptied before each pass so that a read through it
-/// starts cold.
 struct PageCache;
 
 impl PageCache {
-    /// Writes dirty pages out, then drops every clean one. Takes root.
+    /// Syncs first: drop_caches drops only clean pages.
     fn drop_all() -> Result<(), Error> {
         std::process::Command::new("sync").status()?;
         std::fs::write("/proc/sys/vm/drop_caches", "3")
@@ -174,12 +147,10 @@ impl PageCache {
     }
 }
 
-/// The order a pass reads the blocks in: each once, shuffled.
 struct ReadOrder;
 
 impl ReadOrder {
-    /// `count` block indices in a random order fixed by `seed`: a
-    /// Fisher-Yates shuffle driven by xorshift64*.
+    /// Fisher-Yates driven by xorshift64*.
     fn shuffled(count: u64, seed: u64) -> Vec<u64> {
         let mut order: Vec<u64> = (0..count).collect();
         let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
@@ -194,18 +165,16 @@ impl ReadOrder {
     }
 }
 
-/// What one pass saw.
 struct PassReport {
     pass: u64,
     elapsed: Duration,
     bytes: u64,
     moved: Option<HostCounters>,
-    /// The drives' requests over the pass.
     requests: Option<DriveSample>,
     source_gets: u64,
     misses: u64,
     wrong: u64,
-    /// Each read's latency in microseconds, sorted.
+    /// Sorted, as `percentile` and `over` need.
     latencies_us: Vec<u64>,
 }
 
@@ -237,8 +206,6 @@ impl PassReport {
         (requests.requests > 0).then(|| requests.bytes as f64 / 1024.0 / requests.requests as f64)
     }
 
-    /// The drives' requests in flight on average over the pass, all drives
-    /// together.
     fn mean_in_flight(&self) -> Option<f64> {
         Some(self.requests?.queued_ms as f64 / (self.elapsed.as_secs_f64() * 1e3))
     }
@@ -311,7 +278,6 @@ impl PassReport {
     }
 }
 
-/// A cache filled with [`Blocks`] and read cold.
 struct ColdReads {
     cache: Arc<DiskCache>,
     blocks: Arc<Blocks>,
@@ -319,8 +285,7 @@ struct ColdReads {
 }
 
 impl ColdReads {
-    /// Puts every block in the cache: foyer one at a time, so its flushers
-    /// keep up (`FoyerBlocks::fill`), the others `in_flight` at once.
+    /// foyer fills one block at a time, so its flushers keep up.
     async fn fill(&self) -> Result<Duration, Error> {
         let at_once = if matches!(*self.cache, DiskCache::Foyer(_)) {
             1
@@ -336,10 +301,7 @@ impl ColdReads {
         Ok(start.elapsed())
     }
 
-    /// Reads every block once in `order`: each read's latency, and whether
-    /// it missed or its bytes were wrong. The bytes are checked where every
-    /// block's start, middle and end are, and in full for every 97th block,
-    /// so that checking costs little next to the read.
+    /// Spot-checks the bytes, all of every 97th block, so checking costs little next to the read.
     async fn pass(&self, order: Arc<Vec<u64>>) -> Result<(Vec<u64>, u64, u64), Error> {
         let results = self
             .each_block(order, self.in_flight, |cache, blocks, index| async move {
@@ -373,8 +335,6 @@ impl ColdReads {
             .all(|&at| bytes[at..at + 64] == expected[at..at + 64])
     }
 
-    /// Runs `visit` on every block of `order`, `at_once` at a time, and
-    /// collects what each returned.
     async fn each_block<F, Fut>(
         &self,
         order: Arc<Vec<u64>>,

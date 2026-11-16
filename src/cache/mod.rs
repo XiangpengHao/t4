@@ -1,20 +1,3 @@
-//! The object store cache (`doc/03-cache.md`): aligned blocks of objects,
-//! held in memory chunks and disk chunks, found through an index on bbtree.
-//!
-//! - `storage`: the storage half (`doc/11-shared-mode.md`, decision 2): the
-//!   memory and disk tiers, the index of which blocks are cached where, the
-//!   blocks being fetched, and reads, fills and evictions over them all.
-//! - `network`: the network half (decision 2's fetch half): the GETs of
-//!   what only the remote holds, their queue and their races, and the read
-//!   policy that plans them.
-//! - `policy`: what the cache asks of its policy, and the default one.
-//! - `read_output`: the buffer a read's bytes land in, the caller's as
-//!   `Bytes` with no copy.
-//! - `t4_caching`: the front end over another `ObjectStore`: files opened,
-//!   a read run through both halves, and an `ObjectStore` itself.
-//! - `cache_stores`: the cache store a process reads through: in-process,
-//!   or shared by several processes (`doc/11-shared-mode.md`).
-
 mod cache_stores;
 mod io_report;
 mod network;
@@ -29,17 +12,13 @@ use std::fmt;
 
 use bbtree::bbtree_map::InsertError;
 
-/// The bytes of a block, and of the chunk that holds it.
 const BLOCK_SIZE: usize = 1 << 20;
 const BLOCK_SIZE_U64: u64 = BLOCK_SIZE as u64;
 
-/// A chunk, by its number in its tier: the memory pool's chunks, or the
-/// cache file's data chunks. Which tier it is in is its holder's to say.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChunkId(u32);
 
 impl ChunkId {
-    /// Chunk `index` of its tier: below the tier's chunk count.
     pub fn new(index: u32) -> Self {
         Self(index)
     }
@@ -49,14 +28,11 @@ impl ChunkId {
     }
 }
 
-/// A file version: the id the cache gave a file's path and e_tag
-/// (`doc/03-cache.md`, decision 5). Never reused, and below 2^40, as a
-/// [`BlockKey`] keeps it in 40 bits.
+/// The id the cache gave a file's path and e_tag; never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileVersionId(u64);
 
 impl FileVersionId {
-    /// File version ids are below this: 2^40, about 1.1 trillion versions.
     const LIMIT: u64 = 1 << (u64::BITS - BlockKey::INDEX_BITS);
 
     fn new(id: u64) -> Self {
@@ -69,19 +45,13 @@ impl FileVersionId {
     }
 }
 
-/// Block `index` of a file version: its bytes `[index * BLOCK_SIZE, (index
-/// + 1) * BLOCK_SIZE)`, fewer for a file's last block.
-///
-/// One `u64`: the file version id in the high 40 bits, the block number in
-/// the low 24 (decision 4). So it orders by file version, then block, as
-/// the index keeps its keys, and a chunk's owner is one atomic word.
+/// Block `index` of a file version, packed in one `u64` so a chunk's owner
+/// is one atomic word.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockKey(u64);
 
 impl BlockKey {
-    /// The bits of the block number.
     const INDEX_BITS: u32 = 24;
-    /// Block numbers are below this: 2^24, so a file is under 16 TiB.
     const INDEX_LIMIT: u32 = 1 << Self::INDEX_BITS;
 
     fn new(version: FileVersionId, index: u32) -> Self {
@@ -89,7 +59,6 @@ impl BlockKey {
         Self((version.0 << Self::INDEX_BITS) | u64::from(index))
     }
 
-    /// The key [`Self::packed`] gave: every `u64` is one.
     fn from_packed(packed: u64) -> Self {
         Self(packed)
     }
@@ -102,9 +71,7 @@ impl BlockKey {
         FileVersionId(self.0 >> Self::INDEX_BITS)
     }
 
-    /// The block's number in its file version.
     pub fn index(self) -> u32 {
-        // The low 24 bits, which a `u32` holds.
         (self.0 & u64::from(Self::INDEX_LIMIT - 1)) as u32
     }
 }
@@ -118,10 +85,7 @@ impl fmt::Debug for BlockKey {
     }
 }
 
-/// An insert into one of the cache's maps, which ends the process if the
-/// global allocator has no page for it, as std's collections do. The maps
-/// live on the global allocator, outside the cache's budget (decision 6),
-/// like any other allocation of the process.
+/// Aborts on OOM as std's collections do: the maps are outside the cache's budget.
 trait InsertOrAbort<T> {
     fn or_abort(self) -> T;
 }

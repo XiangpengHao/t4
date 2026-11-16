@@ -1,7 +1,3 @@
-//! One GET of a read's: its turn in the queue, the identical requests that
-//! race for its bytes, a late racer for the rest, and its body landed in
-//! the cache as it comes in.
-
 use std::num::NonZeroU8;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,12 +15,9 @@ use crate::cache::cache_stores::CacheStoreFetch;
 use crate::cache::io_report::IoReport;
 use crate::cache::policy::Io;
 
-/// Where a GET's body goes: first the bytes of the waiting GETs joined to
-/// it, then the read's own blocks.
 struct BodyLanding<'c> {
     joined: JoinedParts,
     blocks: Box<dyn CacheStoreFetch<'c> + 'c>,
-    /// The body's bytes landed so far.
     received: u64,
 }
 
@@ -37,7 +30,6 @@ impl<'c> BodyLanding<'c> {
         }
     }
 
-    /// Lands `piece`, the body's next bytes.
     async fn land(&mut self, mut piece: Bytes) -> object_store::Result<()> {
         self.received += piece.len() as u64;
         self.joined.take_front(&mut piece);
@@ -49,19 +41,6 @@ impl<'c> BodyLanding<'c> {
 }
 
 impl Network {
-    /// Fetches the bytes `blocks` holds from the inner store, if the file is
-    /// still the version with `e_tag`, and hands each piece of the answer to
-    /// `blocks` as it comes in. The GET waits its turn first, if the cap on
-    /// bytes in flight is reached, and keeps its place until its body is in;
-    /// it may take, before its own, the bytes of waiting GETs joined to it,
-    /// or join one and take its bytes from it. As many identical GETs as
-    /// the plan says race for them, sent at once: the first answer takes
-    /// the bytes, and the others are dropped, their requests with them. If
-    /// the plan races it late too, and the cache has a timer, one more
-    /// request goes once the GET has been out that long, for the bytes not
-    /// in yet: the first to have them all is taken, and the other dropped.
-    /// The read policy hears the GET finished once its body is in, and
-    /// landed once its blocks are cached.
     pub(in crate::cache) async fn fetch<'c>(
         &self,
         location: &Path,
@@ -88,9 +67,6 @@ impl Network {
         let waited = sent - waiting;
         let late = body.blocks.late_race().zip(self.sleep.clone());
         let racers = body.blocks.race();
-        // The time the body's pieces took to land, apart from the time
-        // spent waiting for them; and how many bytes have come, for a late
-        // racer to ask for the rest.
         let mut landing = Duration::ZERO;
         let landed = AtomicU64::new(0);
         let first = async {
@@ -129,7 +105,6 @@ impl Network {
                     self.late_answer(location, &options, path, from..bytes.end, racer, sent)
                         .await
                 };
-                // The first request, or the late racer, with the rest.
                 let won = match select(Box::pin(first), Box::pin(rest)).await {
                     Either::Left((done, _rest)) => Either::Left(done?),
                     Either::Right((Ok(rest), _first)) => Either::Right(rest),
@@ -137,8 +112,7 @@ impl Network {
                 };
                 match won {
                     Either::Left(report) => report,
-                    // The first request given up on: the bytes not in yet
-                    // land from the late racer's.
+                    // The first request may have landed more since the late racer asked.
                     Either::Right((from, rest, report)) => {
                         let skip = usize::try_from(bytes.start + body.received - from)
                             .expect("a GET's bytes fit in memory");
@@ -150,17 +124,13 @@ impl Network {
                 }
             }
         };
-        // Its body in, the GET gives its place back.
+        // The cap is on bytes in flight: give the place back before caching the blocks.
         drop(place);
         body.blocks.finish().await.map_err(Self::cache_error)?;
         report.landed(landing, waited);
         Ok(())
     }
 
-    /// The turn of the GET of `blocks`, once it waited for it, if the cap on
-    /// bytes in flight is reached: its place, and the waiting GETs joined to
-    /// it. `None` if it joined another GET, whose bytes `blocks` took; if
-    /// that GET failed or was given up on, it waits again.
     async fn turn(
         &self,
         blocks: &mut dyn CacheStoreFetch<'_>,
@@ -185,8 +155,6 @@ impl Network {
         }
     }
 
-    /// The first answer of `racers` identical GETs, sent at once, the
-    /// others dropped before their bodies; and its report.
     async fn first_answer<'a>(
         &'a self,
         location: &Path,
@@ -221,9 +189,7 @@ impl Network {
         Ok(first)
     }
 
-    /// A late racer's GET of `rest`, the bytes of a GET not in yet, whole:
-    /// where they start, and its report, timed from `sent`, when the GET's
-    /// first request went. Never done if no bytes are left.
+    /// Never done if no bytes are left, so the first request wins.
     async fn late_answer<'a>(
         &'a self,
         location: &Path,

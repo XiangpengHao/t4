@@ -1,36 +1,4 @@
-//! Runs SQL queries in DataFusion over Parquet or Vortex tables, on a local
-//! drive, in GCS or in S3, read directly or through t4. Writes, for each
-//! query run and each session's setup, its time, the requests its stores
-//! were sent and what they cost, t4's I/O latencies, and the bytes the drive
-//! and the network moved meanwhile, as CSV.
-//!
-//! It runs one of two ways:
-//!
-//! - **Passes,** the default: one session makes `--passes` passes over the
-//!   queries. t4's cache lives as long as the session, so the first pass
-//!   runs cold and the rest warm, each query warmed by those before it too.
-//!   Its trace (`--trace`) is what `replay_reads` replays.
-//!   `bench/clickbench/run.sh` runs ClickBench every way that benchmark
-//!   compares.
-//! - **Cold runs** (`--cold-runs n`): each query in `n` sessions of its own,
-//!   one after another, each starting with t4's cache and DataFusion's
-//!   empty and running the query `--passes` times, the first cold. So each
-//!   query's cold time, its spread over the runs, and its cold time less its
-//!   warm, what it waits on the remote at most, are measured alike.
-//!   With `--footer-race` given more than once, the sessions take its
-//!   values in turn, so that the runs of each are interleaved.
-//!   `bench/end_to_end/run.sh` runs these.
-//!
-//! Either way, `--trace` records every call made of the tables' stores,
-//! under the step it served: `setup` and `p{pass}q{query}` for passes,
-//! `r{run}q{query}setup` and `r{run}p{pass}q{query}` for cold runs; and
-//! `--get-phases` each GET t4 makes, in phases, under the same steps.
-//!
-//! A session's setup registers the tables: DataFusion lists their files and
-//! reads their footers, which it keeps for the session, so a query's cold
-//! run reads the remote for data alone. The requests are counted as the
-//! tables' stores are sent them: under t4, when it is read through, so they
-//! are the GETs its read policy plans, and their cost is t4's.
+//! DataFusion keeps the footers that setup reads, so a cold query run reads only data.
 //!
 //! ```text
 //! cargo run --release -p t4-bench --bin run_queries -- \
@@ -64,18 +32,13 @@ use vortex::VortexSessionDefault;
 use vortex::session::VortexSession;
 use vortex_datafusion::VortexFormat;
 
-/// The allocator: mimalloc unless built `--no-default-features`, as the
-/// `mimalloc` feature in `bench/Cargo.toml` explains. A static, as Rust takes
-/// a global allocator only so.
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Parser)]
 struct Args {
-    /// A table, `name=location`: a file, or a directory of them, at a local
-    /// path or a `gs://bucket/path` or `s3://bucket/path` URL, a
-    /// directory's ending in `/`.
+    /// A table, `name=location`: a file, or a directory ending in `/`; a path or a URL.
     #[arg(long = "table", value_parser = TableArg::parse, required = true)]
     tables: Vec<TableArg>,
     /// The tables' file format.
@@ -89,12 +52,10 @@ struct Args {
     /// Only these queries; all unless given.
     #[arg(long = "query")]
     only: Vec<usize>,
-    /// Passes over the queries in a session; with `--cold-runs`, runs of a
-    /// query in each of its sessions. The first cold, the rest warm.
+    /// Passes over the queries in a session, or runs of a query with `--cold-runs`; first cold.
     #[arg(long, default_value_t = 1)]
     passes: usize,
-    /// Each query in this many sessions of its own, each starting cold;
-    /// unless given, one session for every query.
+    /// Each query in this many sessions of its own, each starting cold.
     #[arg(long)]
     cold_runs: Option<NonZeroUsize>,
     /// Evaluate filters while decoding, DataFusion's late materialization.
@@ -105,20 +66,16 @@ struct Args {
     partitions: Option<usize>,
     #[command(flatten)]
     cache: CacheOptions,
-    /// What the machine costs an hour, in dollars: each step's time priced
-    /// at it, beside its requests.
+    /// The machine's price per hour, in dollars, to price each step's time.
     #[arg(long)]
     dollars_per_hour: Option<f64>,
-    /// Count the bytes read and written on the drive that holds this
-    /// directory, summed over every one given (Linux only).
+    /// Count the bytes moved by the drives holding these directories (Linux only).
     #[arg(long = "drive-dir")]
     drive_dirs: Vec<PathBuf>,
     /// Record every call made of the tables' stores, as CSV, here.
     #[arg(long)]
     trace: Option<PathBuf>,
-    /// Record each GET t4 makes in phases, as CSV, here: its first byte, its
-    /// body in, the part of that spent landing its pieces, and its blocks
-    /// cached.
+    /// Record each GET t4 makes, in phases, as CSV, here.
     #[arg(long)]
     get_phases: Option<PathBuf>,
     /// Where each step's time, requests and bytes go, as CSV.
@@ -126,7 +83,6 @@ struct Args {
     out: PathBuf,
 }
 
-/// A table: its name, and where its files are.
 #[derive(Clone)]
 struct TableArg {
     name: String,
@@ -145,7 +101,6 @@ impl TableArg {
     }
 }
 
-/// How a table's files are written.
 #[derive(Clone, Copy, Default, ValueEnum)]
 enum TableFormat {
     #[default]
@@ -153,17 +108,12 @@ enum TableFormat {
     Vortex,
 }
 
-/// A DataFusion session whose tables are read through each one's store: its
-/// origin, counted, then t4 if asked, then a trace if asked. Each session
-/// has a t4 cache of its own, which starts cold, and HTTP connections of its
-/// own.
 struct QuerySession {
     context: SessionContext,
     vortex: VortexSession,
 }
 
 impl QuerySession {
-    /// Session `number`, from 0.
     fn new(
         number: usize,
         args: &Args,
@@ -182,8 +132,6 @@ impl QuerySession {
         }
         let context = SessionContext::new_with_config(config);
 
-        // One store for each bucket, or the local file system, that the
-        // tables are in.
         let mut stores = BTreeMap::new();
         for table in &args.tables {
             stores
@@ -215,7 +163,6 @@ impl QuerySession {
         })
     }
 
-    /// Registers every table, as `format` writes them.
     async fn register_tables(&self, tables: &[TableArg], format: TableFormat) -> Result<()> {
         for table in tables {
             let url = table.location.url().as_str();
@@ -237,29 +184,23 @@ impl QuerySession {
         Ok(())
     }
 
-    /// Runs `sql`, returning the rows it answered with.
     async fn run(&self, sql: &str) -> Result<usize> {
         let batches = self.context.sql(sql).await?.collect().await?;
         Ok(batches.iter().map(|batch| batch.num_rows()).sum())
     }
 }
 
-/// What the benchmark measures each step by, shared by its sessions: the
-/// host's counters, the requests the stores are sent, and t4's I/O.
 struct Meters {
     probe: HostProbe,
     nic: NicProbe,
     requests: Arc<RequestCounter>,
     latencies: Arc<IoLatencies>,
-    /// Whether t4 is read through, so that its I/O is timed.
     cached: bool,
 }
 
 impl Meters {
-    /// Measures `step` as it runs.
     async fn measure<T>(&self, step: impl Future<Output = Result<T>>) -> Result<(T, Measured)> {
-        // ethtool runs before the CPU counters are read, and after: its own
-        // CPU time stays out of the step's.
+        // ethtool runs outside the CPU counters' window, so its CPU time stays out of the step's.
         let nic_before = self.nic.sample();
         let before = (self.probe.sample(), self.requests.counts());
         self.latencies.take();
@@ -288,9 +229,6 @@ impl Meters {
     }
 }
 
-/// A step's time, the bytes the drive and the network moved meanwhile, the
-/// cgroup's memory after, where they are counted, the requests the stores
-/// were sent, and t4's I/O latencies, if it is read through.
 struct Measured {
     elapsed: Duration,
     moved: Option<HostCounters>,
@@ -300,21 +238,14 @@ struct Measured {
     io: Option<TakenIoLatencies>,
 }
 
-/// What a step of a session is.
 #[derive(Clone, Copy)]
 enum Step {
-    /// The tables registered.
     Setup,
-    /// Query `query`'s run in pass `pass`.
     Query { pass: usize, query: usize },
 }
 
-/// One step of a session's, measured: a row of the CSV.
 struct StepRow {
-    /// The session's number: with `--cold-runs`, the run of its query.
     run: usize,
-    /// How many requests raced for a footer in the session, if
-    /// `--footer-race` said.
     footer_race: Option<NonZeroU8>,
     step: Step,
     rows: Option<usize>,
@@ -388,8 +319,6 @@ impl StepRow {
     }
 }
 
-/// The benchmark: its arguments, the HTTP its stores share, the queries,
-/// its meters, and the CSV.
 struct Benchmark {
     args: Args,
     http: StoreHttp,
@@ -425,15 +354,12 @@ impl Benchmark {
         })
     }
 
-    /// The numbers of the queries to run.
     fn chosen(&self) -> Vec<usize> {
         (0..self.queries.len())
             .filter(|query| self.args.only.is_empty() || self.args.only.contains(query))
             .collect()
     }
 
-    /// One session, `--passes` passes over the chosen queries; every call
-    /// made of the tables' stores recorded, if `--trace` asks.
     async fn run_passes(&mut self) -> Result<()> {
         let trace = self.new_trace();
         let session = self.start_session(0, trace.as_ref()).await?;
@@ -446,9 +372,6 @@ impl Benchmark {
         self.write_records(trace.as_deref())
     }
 
-    /// Each chosen query in `runs` sessions of its own, `--passes` runs of
-    /// it in each; and its cold and warm times summed up. Every call made
-    /// of the tables' stores recorded, if `--trace` asks.
     async fn run_cold(&mut self, runs: NonZeroUsize) -> Result<()> {
         let trace = self.new_trace();
         for query in self.chosen() {
@@ -468,7 +391,6 @@ impl Benchmark {
         self.write_records(trace.as_deref())
     }
 
-    /// A trace to record the stores' calls in, if `--trace` asks for one.
     fn new_trace(&self) -> Option<Arc<RequestTrace>> {
         self.args
             .trace
@@ -476,8 +398,6 @@ impl Benchmark {
             .map(|_| Arc::new(RequestTrace::new()))
     }
 
-    /// Records what follows under `step`: the calls in `trace`, and t4's
-    /// GETs, if kept.
     fn begin_step(&self, trace: Option<&RequestTrace>, step: &str) {
         if let Some(trace) = trace {
             trace.begin_query(step);
@@ -485,8 +405,6 @@ impl Benchmark {
         self.meters.latencies.begin_step(step);
     }
 
-    /// Writes `trace` where `--trace` says, and t4's GETs where
-    /// `--get-phases` says.
     fn write_records(&self, trace: Option<&RequestTrace>) -> Result<()> {
         if let (Some(trace), Some(path)) = (trace, &self.args.trace) {
             trace.write_csv(BufWriter::new(File::create(path)?))?;
@@ -501,8 +419,6 @@ impl Benchmark {
         Ok(())
     }
 
-    /// A new session, its tables registered: its setup measured, as run
-    /// `run`'s.
     async fn start_session(
         &mut self,
         run: usize,
@@ -530,8 +446,6 @@ impl Benchmark {
         Ok(session)
     }
 
-    /// Runs `query` in `session`, as pass `pass` of run `run`; returns its
-    /// time.
     async fn run_query(
         &mut self,
         session: &QuerySession,
@@ -560,7 +474,6 @@ impl Benchmark {
         Ok(())
     }
 
-    /// Prints query `query`'s cold times over its runs, and its warm ones.
     fn print_spread(query: usize, cold: &[Duration], warm: &[Duration]) {
         let ms = |latency: Duration| latency.as_secs_f64() * 1e3;
         let Some(cold_summary) = LatencySummary::of(cold.iter().copied()) else {

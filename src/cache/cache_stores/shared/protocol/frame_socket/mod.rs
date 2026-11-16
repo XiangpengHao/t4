@@ -20,24 +20,14 @@ pub(crate) use simulated::Transport;
 #[cfg(not(all(test, feature = "shuttle")))]
 pub(in crate::cache::cache_stores::shared) use unix::FrameSocket;
 
-/// Takes the frames a [`FrameSocket`]'s peer sends: each read takes all
-/// that has come, up to [`Self::READ_AHEAD`] bytes, or the rest of a frame
-/// longer, and the frames it holds go out one at a time, with no read
-/// more, so that a batch of frames costs one syscall
-/// (`FrameSocket::send_all`). A frame goes out as the read's own bytes, not
-/// a copy of them.
 pub(in crate::cache::cache_stores::shared) struct FrameReceiver {
     socket: FrameSocket,
-    /// The bytes read and not yet handed out.
     read: BytesMut,
 }
 
 impl FrameReceiver {
-    /// The most bytes a read takes ahead of the frame it needs: many
-    /// control frames.
     const READ_AHEAD: usize = 64 << 10;
 
-    /// The bytes of a frame's length, which comes first.
     const LENGTH: usize = size_of::<u64>();
 
     pub(in crate::cache::cache_stores::shared) fn new(socket: FrameSocket) -> Self {
@@ -47,13 +37,6 @@ impl FrameReceiver {
         }
     }
 
-    /// The body of the next frame, `most` bytes at most, once it comes;
-    /// `None` if the peer closed the socket between frames.
-    ///
-    /// # Errors
-    ///
-    /// If the socket fails, its peer closes it within a frame, or the frame
-    /// is longer than `most`.
     pub(in crate::cache::cache_stores::shared) fn receive(
         &mut self,
         most: u64,
@@ -71,13 +54,6 @@ impl FrameReceiver {
         }
     }
 
-    /// The body of the next frame, `most` bytes at most, if it has come
-    /// whole; no read of the socket. One that has come in part makes room
-    /// for the rest.
-    ///
-    /// # Errors
-    ///
-    /// If the frame is longer than `most`.
     pub(in crate::cache::cache_stores::shared) fn next_frame(
         &mut self,
         most: u64,
@@ -101,16 +77,8 @@ impl FrameReceiver {
         Ok(Some(self.read.split_to(length).freeze()))
     }
 
-    /// Reads what has come, waiting only if nothing has: one read of the
-    /// socket, which never waits for the rest of a frame. `false` if the
-    /// peer has closed the socket.
-    ///
-    /// # Errors
-    ///
-    /// If the socket fails.
     pub(in crate::cache::cache_stores::shared) fn fill(&mut self) -> io::Result<bool> {
-        // Room for a read ahead, past the rest of a frame half come; the
-        // buffer is taken back once the frames handed out from it drop.
+        // The buffer is taken back once the frames handed out from it drop.
         self.read.reserve(Self::READ_AHEAD);
         loop {
             match self.socket.read_into(&mut self.read) {
@@ -121,39 +89,23 @@ impl FrameReceiver {
         }
     }
 
-    /// Shuts the socket both ways, as [`FrameSocket::shut_down`] does.
     pub(in crate::cache::cache_stores::shared) fn shut_down(&self) {
         self.socket.shut_down();
     }
 }
 
-/// Sends frames on a [`FrameSocket`] for many callers, none of which waits
-/// on it, or on another: a caller writes its frames itself while the
-/// socket has room for them and no other is writing, which saves waking a
-/// thread; what doesn't fit, and every frame sent meanwhile or after, till
-/// they have gone, waits for the sender's writer thread, so that frames go
-/// in the order sent. Dropped, it shuts the socket down and stops its
-/// writer: frames still waiting go nowhere.
+/// A caller writes its frames itself while the socket has room and no other is writing, which
+/// saves waking the writer thread. Dropped, it drops the frames still waiting.
 pub(in crate::cache::cache_stores::shared) struct FrameSender {
     queue: Arc<SenderQueue>,
     writer: Option<JoinHandle<()>>,
 }
 
 impl FrameSender {
-    /// On macOS, the most a caller's send waits for room on the socket
-    /// before it leaves its frames to the writer: a frame takes a few µs to
-    /// send; an owner that doesn't read for this long is busy, or stuck.
+    /// A frame takes a few µs to send: an owner not reading for this long is busy, or stuck.
     pub(in crate::cache::cache_stores::shared) const SEND_WAIT: Duration =
         Duration::from_micros(200);
 
-    /// A sender on `socket`, its writer thread started. On macOS, a send on
-    /// any clone of the socket waits `wait` at most for room after; on
-    /// Linux, a caller's send takes what fits at once, and the writer's
-    /// waits as long as it takes.
-    ///
-    /// # Errors
-    ///
-    /// If the socket fails, or the thread can't be started.
     pub(in crate::cache::cache_stores::shared) fn start(
         socket: FrameSocket,
         wait: Duration,
@@ -183,9 +135,6 @@ impl FrameSender {
         state.writing || !state.frames.is_empty()
     }
 
-    /// Sends `frames`, in order, after every frame sent before them, in one
-    /// write if the socket has room and no other caller or the writer is
-    /// writing; drops them once the peer has gone.
     pub(in crate::cache::cache_stores::shared) fn send(&self, frames: Vec<Vec<u8>>) {
         let mut frames = VecDeque::from(frames);
         {
@@ -198,8 +147,7 @@ impl FrameSender {
                 self.queue.waiting.notify_one();
                 return;
             }
-            // The socket is this caller's till it has sent: the others
-            // queue behind it meanwhile, unheld.
+            // The socket is this caller's till it has sent: others queue meanwhile, unheld.
             state.writing = true;
         }
         let sent = self.queue.socket.send_some(frames.make_contiguous());
@@ -246,29 +194,20 @@ impl Drop for FrameSender {
     }
 }
 
-/// What a [`FrameSender`]'s callers and writer share.
 struct SenderQueue {
     socket: FrameSocket,
     state: Mutex<SenderState>,
-    /// Wakes the writer: a frame waits, or the sender stops.
     waiting: Condvar,
 }
 
 #[derive(Default)]
 struct SenderState {
-    /// The frames the writer sends next, in order.
     frames: VecDeque<Vec<u8>>,
-    /// Whether a caller, or the writer, is sending: every other's frames
-    /// wait behind its.
     writing: bool,
-    /// Whether the peer has gone, or the sender stopped: frames are
-    /// dropped.
     closed: bool,
 }
 
 impl SenderQueue {
-    /// The writer's work: sends the frames that wait, all that wait in one
-    /// write, until the peer goes or the sender stops.
     fn write_waiting(&self) {
         let mut state = self.state();
         loop {

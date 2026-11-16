@@ -1,31 +1,18 @@
-//! A cache built again on the files of one dropped
-//! (`doc/10-spiral-integration.md`, decision 7): what the dropped cache held
-//! on disk, kept in a snapshot beside its files and taken back; memory's
-//! blocks, gone with it.
-
 use super::*;
 use crate::cache::policy::FixedPlacementPolicy;
 
-/// A cache over `inner`, its files in `dir`, whose fetched blocks go to
-/// disk, and stay there.
 fn on_disk(inner: &Arc<CountingStore>, dir: &TempDir) -> T4CachingBuilder {
     builder(inner, dir).with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
 }
 
-/// Where the snapshot of the cache files in `dir` is kept.
 fn snapshot_at(dir: &TempDir) -> std::path::PathBuf {
     dir.path().join("cache.snapshot")
 }
 
-/// All of the file `meta` names, read through `cache`, opened as listed:
-/// no HEAD.
 fn read_whole(cache: &T4Caching, meta: &ObjectMeta) -> Bytes {
     block_on(cache.open_listed(meta.clone()).read(0..meta.size, None)).unwrap()
 }
 
-/// A cache built again on a dropped one's files serves what that one held
-/// on disk, asking its store nothing, and knows the file's size, so that a
-/// caller opens it as listed with no HEAD; and keeps it again as it drops.
 #[test]
 fn a_cache_built_again_serves_the_disk_tier_its_files_held() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -60,8 +47,6 @@ fn a_cache_built_again_serves_the_disk_tier_its_files_held() {
     });
 }
 
-/// Memory's blocks go with the cache: one built again fetches them, and
-/// knows nothing of their file.
 #[test]
 fn memorys_blocks_go_with_the_cache() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -83,8 +68,7 @@ fn memorys_blocks_go_with_the_cache() {
     });
 }
 
-/// A cache built again on its files with another capacity starts cold:
-/// its chunks are other chunks. The snapshot is removed all the same.
+/// Its chunks are other chunks, so the snapshot can't be taken back.
 #[test]
 fn a_cache_of_another_capacity_starts_cold() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -112,9 +96,7 @@ fn a_cache_of_another_capacity_starts_cold() {
     });
 }
 
-/// A file written over between two caches: the second fetches the version
-/// the store holds now, and never serves the old one's blocks. Until a read
-/// names the new version, the size it knows is the old one's.
+/// Until a read names the new version, the size the cache knows is the old one's.
 #[test]
 fn a_file_written_over_between_caches_is_fetched_again() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -138,10 +120,6 @@ fn a_file_written_over_between_caches_is_fetched_again() {
     });
 }
 
-/// A cache shut down keeps its disk tier at once, as an app's exit hook
-/// asks before the process ends around a cache it never drops; it goes on
-/// serving reads, what it holds from disk, but writes no block to disk
-/// again. The next cache on its files takes back what it held.
 #[test]
 fn a_cache_shut_down_keeps_its_disk_tier_and_writes_no_more() {
     crate::io::test_schedule::TestSchedule::check(|| {

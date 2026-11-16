@@ -1,7 +1,4 @@
-//! A cache shared by an owner and its client (`doc/11-shared-mode.md`),
-//! both in this process, as the lock conflicts within a process too: each
-//! over a store of its own, which holds the same file under the same e_tag,
-//! as two processes' stores reach one bucket.
+//! Owner and client in one process: the lock conflicts within a process too.
 
 use crate::io::sync::mpsc;
 use std::time::Duration;
@@ -9,9 +6,6 @@ use std::time::Duration;
 use super::*;
 use crate::cache::policy::FixedPlacementPolicy;
 
-/// A process's cache, built by `build` over a store of its own that holds
-/// `data` at `path`; the store, and what it says of the file, asked of it
-/// directly.
 fn process(
     path: &Path,
     data: &Bytes,
@@ -24,21 +18,16 @@ fn process(
     (cache, inner, meta)
 }
 
-/// What `store` says of the file at `path`, asked of it directly.
 fn listed(store: &CountingStore, path: &Path) -> ObjectMeta {
     let meta = block_on(store.head(path)).unwrap();
     store.take_asked();
     meta
 }
 
-/// `range` of the file `meta` names, read through `cache`, opened as
-/// listed: no HEAD.
 fn read_listed(cache: &T4Caching, meta: &ObjectMeta, range: Range<u64>) -> Bytes {
     block_on(cache.open_listed(meta.clone()).read(range, None)).unwrap()
 }
 
-/// A client's cold read fetches through its own store, and the owner caches
-/// what it fetched: the owner's read of it asks its store nothing.
 #[test]
 fn a_clients_cold_read_is_cached_for_its_owner() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -67,9 +56,6 @@ fn a_clients_cold_read_is_cached_for_its_owner() {
     });
 }
 
-/// A block the owner holds is served to its client, whose store is asked
-/// nothing; the bytes keep the alignment an owner's read has, their
-/// address agreeing with their file offset mod 4 KiB.
 #[test]
 fn a_block_the_owner_holds_is_served_to_its_client() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -90,9 +76,6 @@ fn a_block_the_owner_holds_is_served_to_its_client() {
     });
 }
 
-/// Reads of one block in the owner and its client, at once, fetch it once:
-/// the owner's waits for the client's GET, and takes the block from where
-/// it landed.
 #[test]
 fn reads_of_one_block_across_owner_and_client_fetch_it_once() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -134,8 +117,6 @@ fn reads_of_one_block_across_owner_and_client_fetch_it_once() {
     });
 }
 
-/// A client's read policy hears its own GETs, and each read from disk its
-/// owner makes for it.
 #[test]
 fn a_clients_read_policy_hears_its_gets_and_its_owners_disk_reads() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -178,8 +159,6 @@ fn a_clients_read_policy_hears_its_gets_and_its_owners_disk_reads() {
     });
 }
 
-/// A client whose owner went reads from its store, the right bytes: the
-/// cache may lose anything, and its callers see none of it.
 #[test]
 fn a_client_whose_owner_went_reads_from_its_store() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -200,8 +179,6 @@ fn a_client_whose_owner_went_reads_from_its_store() {
     });
 }
 
-/// `range` of the file `meta` names, read through `cache` on a thread of
-/// its own: its bytes, once read, come through the receiver returned.
 fn read_on_thread(cache: T4Caching, meta: ObjectMeta, range: Range<u64>) -> mpsc::Receiver<Bytes> {
     let (done, read) = mpsc::channel();
     crate::io::sync::thread::spawn(move || {
@@ -210,9 +187,7 @@ fn read_on_thread(cache: T4Caching, meta: ObjectMeta, range: Range<u64>) -> mpsc
     read
 }
 
-/// The owner gone while its client's GET is out: the client's read still
-/// returns the right bytes, from its store, as the bytes its GET brought
-/// had nowhere to go but the owner.
+/// Its GET's bytes had nowhere to go but the owner, so it reads again from its store.
 #[test]
 fn a_clients_read_whose_owner_goes_mid_get_reads_from_its_store() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -238,9 +213,6 @@ fn a_clients_read_whose_owner_goes_mid_get_reads_from_its_store() {
     });
 }
 
-/// The owner gone while its client waits for a block another client is
-/// fetching: the waiting read's call fails, and it reads from its store at
-/// once; the fetching read, once its GET is in, from its own.
 #[test]
 fn a_clients_read_waiting_on_another_when_the_owner_goes_reads_from_its_store() {
     crate::io::test_schedule::TestSchedule::iterations(16, || {
@@ -274,19 +246,14 @@ fn a_clients_read_waiting_on_another_when_the_owner_goes_reads_from_its_store() 
     });
 }
 
-/// Whether `cache` owns its files now.
 fn owns(cache: &T4Caching) -> bool {
     cache.cache_store().owned().is_some()
 }
 
-/// Whether `cache` reads through an owner that is still there.
 fn reads_through_an_owner(cache: &T4Caching) -> bool {
     (cache.cache_store().owner_connection()).is_some_and(|owner| !owner.owner_gone())
 }
 
-/// A client whose owner went comes to own the cache at a read: from then
-/// on it caches what it reads, and a cache built for sharing on its files
-/// is its client.
 #[test]
 fn a_client_whose_owner_went_comes_to_own_the_cache() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -321,8 +288,6 @@ fn a_client_whose_owner_went_comes_to_own_the_cache() {
     });
 }
 
-/// Two clients whose owner went: one comes to own the cache, and the other
-/// reads through it.
 #[test]
 fn two_clients_whose_owner_went_one_owns_and_the_other_reads_through_it() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -367,10 +332,7 @@ fn two_clients_whose_owner_went_one_owns_and_the_other_reads_through_it() {
     });
 }
 
-/// A client's GET waiting for room as its owner goes merges with no GET of
-/// the cache it reads through next, whose ids name other files: here the
-/// client's own, which names `c` with the id the owner gave `b`. Each read
-/// takes its own file's bytes.
+/// The client's own cache names `c` with the id the owner gave `b`, so a merge would mix files.
 #[test]
 fn a_get_waiting_as_its_owner_goes_merges_with_none_of_the_next_cache() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -386,8 +348,7 @@ fn a_get_waiting_as_its_owner_goes_merges_with_none_of_the_next_cache() {
         let (owner, _, _) = process(&b, &b_data, shared);
         let (client, clients, b_meta) = process(&b, &b_data, shared);
         put(clients.as_ref(), &c, &c_data);
-        // A path too long to cache: a read of it hands the cache over, and
-        // names no version.
+        // Too long to cache: a read of it hands the cache over and names no version.
         let long = Path::from("l".repeat(1025));
         let long_data = file_bytes(10, 15);
         put(clients.as_ref(), &long, &long_data);
@@ -427,10 +388,6 @@ fn a_get_waiting_as_its_owner_goes_merges_with_none_of_the_next_cache() {
     });
 }
 
-/// A client that comes to own the cache once its owner went takes the disk
-/// tier the owner kept as it dropped (`doc/10-spiral-integration.md`,
-/// decision 7): its reads of what the owner held on disk ask its store
-/// nothing.
 #[test]
 fn a_client_that_comes_to_own_the_cache_takes_its_owners_disk_tier() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -444,8 +401,7 @@ fn a_client_that_comes_to_own_the_cache_takes_its_owners_disk_tier() {
         };
         let (owner, _, owners_meta) = process(&path, &data, on_disk);
         let (client, clients, clients_meta) = process(&path, &data, on_disk);
-        // A path too long to cache: a read of it hands the cache over, and
-        // caches nothing.
+        // Too long to cache: a read of it hands the cache over and caches nothing.
         let long = Path::from("l".repeat(1025));
         let long_data = file_bytes(10, 17);
         put(clients.as_ref(), &long, &long_data);
@@ -471,8 +427,6 @@ fn a_client_that_comes_to_own_the_cache_takes_its_owners_disk_tier() {
     });
 }
 
-/// A client asks its owner the size it knows of a file: none before a read
-/// through either names the file, and its size after.
 #[test]
 fn a_client_asks_its_owner_the_size_it_knows() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -495,9 +449,6 @@ fn a_client_asks_its_owner_the_size_it_knows() {
     });
 }
 
-/// A client shut down leaves its owner be: the owner still caches what
-/// either reads. And once its owner goes, the client takes over nothing: it
-/// is exiting, and reads from its store.
 #[test]
 fn a_client_shut_down_leaves_its_owner_be_and_takes_over_nothing() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -526,9 +477,7 @@ fn a_client_shut_down_leaves_its_owner_be_and_takes_over_nothing() {
     });
 }
 
-/// A client whose files a cache not built for sharing took once its owner
-/// went: it can neither own them nor reach an owner, and reads from its
-/// store, no read waiting long for an owner.
+/// A cache not built for sharing takes the files once the owner goes.
 #[test]
 fn a_client_that_finds_no_owner_reads_from_its_store_without_waiting() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -540,9 +489,7 @@ fn a_client_that_finds_no_owner_reads_from_its_store_without_waiting() {
         let (owner, _, _) = process(&path, &data, shared);
         let (client, clients, clients_meta) = process(&path, &data, shared);
         drop(owner);
-        // A child process another test starts meanwhile holds the dropped
-        // owner's descriptors, and so its lock, until its own program starts:
-        // the files come free within moments.
+        // Another test's child process may hold the dropped owner's lock until it execs.
         let others = Arc::new(CountingStore::default());
         let mut _unshared = None;
         wait_until(
@@ -561,8 +508,6 @@ fn a_client_that_finds_no_owner_reads_from_its_store_without_waiting() {
     });
 }
 
-/// The pages of `cache`'s region free, `cache` a client whose owner mapped
-/// its region.
 fn region_free_pages(cache: &T4Caching) -> u64 {
     cache
         .cache_store()
@@ -572,7 +517,6 @@ fn region_free_pages(cache: &T4Caching) -> u64 {
         .expect("a region mapped")
 }
 
-/// Whether `bytes` lie in `cache`'s region, `cache` a client.
 fn in_region(cache: &T4Caching, bytes: &Bytes) -> bool {
     cache
         .cache_store()
@@ -581,10 +525,6 @@ fn in_region(cache: &T4Caching, bytes: &Bytes) -> bool {
         .region_holds(bytes)
 }
 
-/// A client's reads are served in its region: their bytes are in spans of
-/// it, where an output has them (their address agrees with their file
-/// offset mod 4 KiB), and right; a span is the caller's while it holds the
-/// bytes, and every span is free once the reads are dropped.
 #[test]
 fn a_clients_reads_are_served_in_its_region() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -618,8 +558,6 @@ fn a_clients_reads_are_served_in_its_region() {
     });
 }
 
-/// A client's read in flight when its owner goes: the read goes to its
-/// store, and its spans come back with the owner gone.
 #[test]
 fn a_clients_spans_come_back_once_its_owner_goes() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -643,10 +581,8 @@ fn a_clients_spans_come_back_once_its_owner_goes() {
     });
 }
 
-/// A fetch dropped after its read still gives its span back, and keeps
-/// the connection: the read ends in the owner only once its last fetch has
-/// dropped, so a fetch neither abandons a read the owner has ended, which
-/// breaks the protocol, nor keeps a span for one.
+/// The owner ends a read only once its last fetch drops: abandoning a read the owner ended
+/// breaks the protocol.
 #[test]
 fn a_fetch_dropped_after_its_read_gives_its_span_back() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -680,7 +616,6 @@ fn a_fetch_dropped_after_its_read_gives_its_span_back() {
     });
 }
 
-/// The calls `cache`, a client, waits on its owner for, by number.
 fn calls_waiting(cache: &T4Caching) -> Vec<u64> {
     cache
         .cache_store()
@@ -689,9 +624,6 @@ fn calls_waiting(cache: &T4Caching) -> Vec<u64> {
         .calls_waiting()
 }
 
-/// A client's read that waited for the owner's fetch of a block, which
-/// failed: the round ends `Retry`, the next round's finish goes at once,
-/// and the client fetches the block itself.
 #[test]
 fn a_clients_read_whose_wait_ends_uncached_fetches_in_a_second_round() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -715,8 +647,7 @@ fn a_clients_read_whose_wait_ends_uncached_fetches_in_a_second_round() {
             || calls_waiting(&client) == [1],
             "the client's finish waits",
         );
-        // The owner's GET finds the file gone: its fetch ends with no block
-        // cached, and the client's read fetches it in a round of its own.
+        // The owner's GET finds the file gone, so its fetch caches nothing.
         block_on(owners.delete(&path)).unwrap();
         drop(open);
         assert_eq!(owners_read.recv(), Ok(true));
@@ -728,16 +659,11 @@ fn a_clients_read_whose_wait_ends_uncached_fetches_in_a_second_round() {
             "fetched once, itself"
         );
         assert!(reads_through_an_owner(&client));
-        // Through its owner, not the store: the owner holds the block, which
-        // only the client's fetch could have brought, the file gone from the
-        // owner's store.
+        // The owner's store lost the file, so only the client's fetch could have cached this.
         assert_eq!(read_listed(&owner, &owners_meta, 0..MIB), data);
     });
 }
 
-/// A client's read given up while it waits for its owner, its `Finish`
-/// unanswered: the call leaves the client's table with the read, and the
-/// connection serves the client's next read.
 #[test]
 fn a_clients_read_given_up_leaves_no_call_waiting() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -755,8 +681,7 @@ fn a_clients_read_given_up_leaves_no_call_waiting() {
         let file = client.open_listed(clients_meta.clone());
         let mut read = Box::pin(file.read(0..MIB, None));
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-        // Its start (call 0) and its GETs (2) answered, its `Finish` (1), sent
-        // with its start, waits on the owner's GET.
+        // Its `Finish` is call 1, sent with its start; it waits on the owner's GET.
         wait_until(
             || {
                 assert!(read.as_mut().poll(&mut context).is_pending());
@@ -779,10 +704,6 @@ fn a_clients_read_given_up_leaves_no_call_waiting() {
     });
 }
 
-/// A client's read given up while its GET is out, part of its body landed:
-/// its claim ends with it, so the owner's read of the block fetches it
-/// itself rather than wait; no call is left waiting, and the connection
-/// stays whole.
 #[test]
 fn a_clients_read_given_up_mid_get_abandons_its_claim() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -822,9 +743,6 @@ fn a_clients_read_given_up_mid_get_abandons_its_claim() {
     });
 }
 
-/// A client's GET that fails, the file changed since the client opened it:
-/// its fetch is abandoned, so the owner's work for the read ends, and the
-/// read ends, in bounded time, with the store's answer.
 #[test]
 fn a_clients_failed_get_abandons_its_fetch() {
     crate::io::test_schedule::TestSchedule::check(|| {
