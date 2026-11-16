@@ -285,12 +285,19 @@ fn builder(inner: &Arc<CountingStore>, dir: impl AsRef<std::path::Path>) -> T4Ca
         .with_disk_file(dir.as_ref().join("cache"), 8 * MIB)
 }
 
-fn wait_until(mut done: impl FnMut() -> bool, what: &str) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+/// Unbounded: the CI step bounds a hung test. `_what` names the state for the reader.
+fn wait_until(mut done: impl FnMut() -> bool, _what: &str) {
     while !done() {
-        assert!(std::time::Instant::now() < deadline, "{what}");
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::yield_now();
     }
+}
+
+fn fetch_waiters_registered(cache: &T4Caching) -> usize {
+    cache
+        .cache_store()
+        .owned()
+        .expect("an owner")
+        .fetch_waiters_registered()
 }
 
 fn t4_caching() -> (TempDir, T4Caching, Arc<CountingStore>) {

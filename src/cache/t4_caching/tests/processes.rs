@@ -1,28 +1,32 @@
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
 
 use super::*;
 
-const PATIENCE: Duration = Duration::from_secs(10);
+struct ChildProcess {
+    child: Child,
+    stdin: Option<ChildStdin>,
+}
 
-/// The parent may have died: no test leaves a process behind for long.
-const CHILD_PATIENCE: Duration = Duration::from_secs(30);
-
-struct ChildProcess(Child);
+impl From<Child> for ChildProcess {
+    fn from(mut child: Child) -> Self {
+        let stdin = Some(child.stdin.take().expect("a child with piped stdin"));
+        Self { child, stdin }
+    }
+}
 
 impl ChildProcess {
     const ROLE: &str = "T4_SHARED_TEST_ROLE";
     const DIR: &str = "T4_SHARED_TEST_DIR";
 
     fn spawn(role: &str, dir: &std::path::Path) -> Self {
-        Self(Self::command(role, dir).spawn().unwrap())
+        Self::from(Self::command(role, dir).spawn().unwrap())
     }
 
     fn spawn_with_temp_dir(role: &str, dir: &std::path::Path, temp_dir: &std::path::Path) -> Self {
         let mut command = Self::command(role, dir);
-        Self(command.env("TMPDIR", temp_dir).spawn().unwrap())
+        Self::from(command.env("TMPDIR", temp_dir).spawn().unwrap())
     }
 
     fn command(role: &str, dir: &std::path::Path) -> Command {
@@ -33,31 +37,30 @@ impl ChildProcess {
             .args([test.as_str(), "--exact", "--nocapture", "--test-threads=1"])
             .env(Self::ROLE, role)
             .env(Self::DIR, dir)
+            .stdin(Stdio::piped())
             .stdout(Stdio::null());
         command
     }
 
     fn kill(&mut self) {
-        self.0.kill().unwrap();
-        self.0.wait().unwrap();
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+    }
+
+    /// EOF releases the child's stdin read, as the parent's death does without destructors.
+    fn close_stdin(&mut self) {
+        drop(self.stdin.take());
     }
 
     fn exited_ok(&mut self) -> bool {
-        let deadline = Instant::now() + PATIENCE;
-        loop {
-            if let Some(status) = self.0.try_wait().unwrap() {
-                return status.success();
-            }
-            assert!(Instant::now() < deadline, "a child process exits");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        self.child.wait().unwrap().success()
     }
 }
 
 impl Drop for ChildProcess {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -79,22 +82,13 @@ impl Markers {
         std::fs::rename(aside, self.dir.join(name)).unwrap();
     }
 
-    fn wait_for(&self, name: &str, patience: Duration) -> Option<String> {
-        let deadline = Instant::now() + patience;
+    fn said(&self, name: &str) -> String {
         loop {
             if let Ok(what) = std::fs::read_to_string(self.dir.join(name)) {
-                return Some(what);
+                return what;
             }
-            if Instant::now() >= deadline {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(2));
+            std::thread::yield_now();
         }
-    }
-
-    fn said(&self, name: &str) -> String {
-        self.wait_for(name, PATIENCE)
-            .unwrap_or_else(|| panic!("marker {name} is set"))
     }
 }
 
@@ -213,7 +207,8 @@ fn a_child_process_plays_its_role() {
             markers.set(&format!("fetched-{index}"), &fetched);
         }
     }
-    markers.wait_for("done", CHILD_PATIENCE);
+    // EOF means the parent finished, or died without running destructors.
+    std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink()).unwrap();
     drop(held);
 }
 
@@ -234,7 +229,7 @@ fn an_owner_killed_mid_read_leaves_its_client_the_cache() {
 
     owner.kill();
     drop(open);
-    assert_eq!(read.recv_timeout(PATIENCE).unwrap(), SharedProcess::data());
+    assert_eq!(read.recv().unwrap(), SharedProcess::data());
     wait_until(
         || {
             assert_eq!(client.read(0..SharedProcess::SIZE), SharedProcess::data());
@@ -289,14 +284,13 @@ fn a_client_killed_holding_a_claim_hands_it_to_its_waiter() {
     markers.said("get-out");
 
     let read = owner.read_on_thread(0..MIB);
-    let early = read.recv_timeout(Duration::from_millis(200));
-    assert!(
-        early.is_err(),
-        "the owner's read waits on the client's claim"
+    wait_until(
+        || fetch_waiters_registered(&owner.cache) == 1,
+        "the owner's read waits on the client's claim",
     );
     client.kill();
     assert_eq!(
-        read.recv_timeout(PATIENCE).unwrap(),
+        read.recv().unwrap(),
         SharedProcess::data().slice(..MIB as usize)
     );
     assert_eq!(owner.fetched_bytes(), MIB, "the owner's own GET");
@@ -321,7 +315,9 @@ fn eight_processes_starting_at_once_fetch_each_block_once() {
                 .unwrap()
         })
         .sum();
-    markers.set("done", "");
+    for reader in &mut readers {
+        reader.close_stdin();
+    }
 
     for reader in &mut readers {
         assert!(reader.exited_ok(), "each read its bytes right");

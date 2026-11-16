@@ -4,7 +4,7 @@ use std::num::NonZeroU8;
 use std::ops::Range;
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use object_store::ObjectMeta;
@@ -40,23 +40,11 @@ fn shared(inner: &Arc<InMemory>, dir: &TempDir) -> T4CachingBuilder {
         .with_multiprocess_sharing()
 }
 
-fn within_5s<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
-    let (done, finished) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = done.send(work());
-    });
-    finished.recv_timeout(Duration::from_secs(5)).ok()
-}
-
-fn eventually(done: impl Fn() -> bool) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(5);
+/// Unbounded: the CI step bounds a hung test.
+fn wait_until(done: impl Fn() -> bool) {
     while !done() {
-        if Instant::now() > deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::yield_now();
     }
-    true
 }
 
 fn owner_gone(store: &T4Caching) -> bool {
@@ -154,12 +142,8 @@ fn a_frame_half_come_is_held_till_the_rest_comes() {
     let encoded = frame.encode();
     one.write_all(&encoded[..5]).unwrap();
 
-    let mut other = within_5s(move || {
-        assert!(other.fill().unwrap());
-        assert!(other.next_frame(FrameSocket::MOST_BYTES).unwrap().is_none());
-        other
-    })
-    .expect("a read waits for no more than has come");
+    assert!(other.fill().unwrap());
+    assert!(other.next_frame(FrameSocket::MOST_BYTES).unwrap().is_none());
     let sending = std::thread::spawn(move || {
         one.write_all(&encoded[5..]).unwrap();
         one
@@ -190,39 +174,31 @@ fn a_senders_frames_go_in_order_whoever_writes_them() {
         })
         .collect();
     let encoded: Vec<Vec<u8>> = frames.iter().map(ClientFrame::encode).collect();
-    let sender = within_5s(move || {
-        let mut rest = &encoded[..];
-        for together in [1, 2, 3].into_iter().cycle() {
-            if rest.is_empty() {
-                break;
-            }
-            let (now, later) = rest.split_at(together.min(rest.len()));
-            sender.send(now.to_vec());
-            rest = later;
+    let mut rest = &encoded[..];
+    for together in [1, 2, 3].into_iter().cycle() {
+        if rest.is_empty() {
+            break;
         }
-        sender
-    })
-    .expect("no send waits on the socket");
+        let (now, later) = rest.split_at(together.min(rest.len()));
+        sender.send(now.to_vec());
+        rest = later;
+    }
     for frame in frames {
         let body = other.receive(FrameSocket::MOST_BYTES).unwrap().unwrap();
         assert_eq!(ClientFrame::decode(body).unwrap(), frame);
     }
 
     drop(other);
-    let sender = within_5s(move || {
-        for read in 0..64 {
-            sender.send(vec![ClientFrame::EndRead { read }.encode()]);
-        }
-        sender
-    })
-    .expect("a send to a peer gone is dropped");
+    for read in 0..64 {
+        sender.send(vec![ClientFrame::EndRead { read }.encode()]);
+    }
     drop(sender);
 }
 
 #[test]
 fn a_caller_waiting_for_room_holds_up_no_other() {
     let (one, other) = UnixStream::pair().unwrap();
-    let wait = Duration::from_secs(1);
+    let wait = FrameSender::SEND_WAIT;
     let sender =
         std::sync::Arc::new(FrameSender::start(FrameSocket::new(one).unwrap(), wait).unwrap());
     let mut other = FrameReceiver::new(FrameSocket::new(other).unwrap());
@@ -236,11 +212,11 @@ fn a_caller_waiting_for_room_holds_up_no_other() {
 
     let waiting = std::sync::Arc::clone(&sender);
     let encoded = first.encode();
+    let (entered, resume) = sender.pause_next_caller();
     let first_sent = std::thread::spawn(move || waiting.send(vec![encoded]));
-    std::thread::sleep(Duration::from_millis(50));
-    let sent = Instant::now();
+    entered.recv().unwrap();
     sender.send(vec![then.encode()]);
-    assert!(sent.elapsed() < wait / 2, "{:?}", sent.elapsed());
+    resume.send(()).unwrap();
     first_sent.join().unwrap();
 
     for frame in [first, then] {
@@ -249,20 +225,21 @@ fn a_caller_waiting_for_room_holds_up_no_other() {
     }
 }
 
-#[cfg(target_os = "linux")]
 #[test]
-fn a_callers_send_waits_for_no_room_on_linux() {
+fn a_callers_send_leaves_what_does_not_fit_to_its_writer() {
     let (one, _other) = UnixStream::pair().unwrap();
-    let wait = Duration::from_secs(1);
+    let wait = FrameSender::SEND_WAIT;
     let sender = FrameSender::start(FrameSocket::new(one).unwrap(), wait).unwrap();
     let frame = ClientFrame::Land {
         read: 1,
         fetch: 0,
         bytes: Bytes::from(vec![7; 4 << 20]),
     };
-    let sent = Instant::now();
     sender.send(vec![frame.encode()]);
-    assert!(sent.elapsed() < wait / 2, "{:?}", sent.elapsed());
+    assert!(
+        sender.has_pending_frames(),
+        "the writer holds what did not fit"
+    );
 }
 
 #[test]
@@ -320,45 +297,27 @@ fn a_cache_built_for_sharing_on_owned_files_is_their_owners_client() {
 
 #[test]
 fn an_owner_dropped_hands_its_files_to_the_next_cache() {
-    let dir = Arc::new(tempfile::tempdir().unwrap());
+    let dir = tempfile::tempdir().unwrap();
     let inner = Arc::new(InMemory::new());
     let owner = shared(&inner, &dir).build().unwrap();
     let client = shared(&inner, &dir).build().unwrap();
 
-    within_5s(move || drop(owner)).expect("the owner's drop ends");
-    assert!(eventually(|| owner_gone(&client)));
-    let kept = Arc::clone(&dir);
-    let (next_owner, next_client) = within_5s(move || {
-        let next_owner = shared(&inner, &dir).build().unwrap();
-        let next_client = shared(&inner, &dir).build().unwrap();
-        (next_owner, next_client)
-    })
-    .expect("the next owner and its client are built");
+    drop(owner);
+    wait_until(|| owner_gone(&client));
+    let next_owner = shared(&inner, &dir).build().unwrap();
+    let next_client = shared(&inner, &dir).build().unwrap();
     assert!(next_owner.cache_store().owned().is_some());
     assert!(!owner_gone(&next_client));
-    drop((next_client, next_owner, kept));
+    drop((next_client, next_owner));
 }
 
 fn answer_to(address: &OwnerAddress, hello: impl FnOnce(&FrameSocket)) -> Option<OwnerFrame> {
     let socket = FrameSocket::new(address.connect(geteuid()).unwrap()).unwrap();
-    socket
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
     hello(&socket);
     match FrameReceiver::new(socket.try_clone().unwrap()).receive(64) {
         Ok(Some(answer)) => Some(OwnerFrame::decode(answer).unwrap()),
         Ok(None) => None,
-        Err(error) => {
-            let kind = error.kind();
-            assert!(
-                !matches!(
-                    kind,
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ),
-                "the owner neither answered nor closed: {error}"
-            );
-            None
-        }
+        Err(_) => None,
     }
 }
 
@@ -480,9 +439,6 @@ fn the_owner_tells_a_client_of_another_version_its_own() {
         .unwrap();
     let address = OwnerAddress::of(FileIdentity::of(&cache_file).unwrap()).unwrap();
     let socket = FrameSocket::new(address.connect(geteuid()).unwrap()).unwrap();
-    socket
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
 
     Hello::new(PROTOCOL_VERSION + 1, cache_file)
         .send(&socket)
@@ -520,16 +476,19 @@ fn a_cache_whose_owner_speaks_another_version_is_busy_at_once() {
         socket
             .send(&OwnerFrame::Welcome { version, region }.encode())
             .unwrap();
+        listener
     });
 
-    let started = Instant::now();
     let refused = shared(&inner, &dir).build().unwrap_err();
     assert!(matches!(refused, crate::Error::Busy), "{refused}");
-    assert!(
-        started.elapsed() < T4CachingBuilder::OWNER_WAIT / 2,
-        "at once"
+    let listener = other_owner.join().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let retry = listener.accept().unwrap_err();
+    assert_eq!(
+        retry.kind(),
+        std::io::ErrorKind::WouldBlock,
+        "no retry connection"
     );
-    other_owner.join().unwrap();
     address.remove();
 }
 
@@ -605,9 +564,6 @@ impl RawClient {
             .unwrap();
         let address = OwnerAddress::of(FileIdentity::of(&cache_file).unwrap()).unwrap();
         let socket = FrameSocket::new(address.connect(geteuid()).unwrap()).unwrap();
-        socket
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
         let mut hello = Hello::new(PROTOCOL_VERSION, cache_file);
         if let Some(region) = region {
             hello = hello.with_region(region.descriptor().try_clone_to_owned().unwrap());
@@ -622,21 +578,6 @@ impl RawClient {
         let region = region.is_some();
         assert_eq!(client.answer(), OwnerFrame::Welcome { version, region });
         client
-    }
-
-    fn quiet(&mut self) -> bool {
-        let short = Some(Duration::from_millis(100));
-        self.socket.set_read_timeout(short).unwrap();
-        let quiet = match self.frames.receive(FrameSocket::MOST_BYTES) {
-            Err(error) => matches!(
-                error.kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-            ),
-            Ok(_) => false,
-        };
-        let usual = Some(Duration::from_secs(5));
-        self.socket.set_read_timeout(usual).unwrap();
-        quiet
     }
 
     fn send(&self, frame: &ClientFrame) {
@@ -755,7 +696,18 @@ fn the_owner_serves_a_read_into_its_clients_span() {
     let within = 100..100 + (range.end - range.start) as usize;
     assert_eq!(span.into_bytes(within), data.slice(100..MIB as usize + 50));
 
-    assert!(client.quiet(), "no end before the client's");
+    // A barrier after the read's frames: no `Ended` may come before the client's `EndRead`.
+    client.send(&ClientFrame::KnownSize {
+        call: 5,
+        path: Bytes::copy_from_slice(meta.location.as_ref().as_bytes()),
+    });
+    assert_eq!(
+        client.answer(),
+        OwnerFrame::KnownSize {
+            call: 5,
+            size: Some(meta.size)
+        }
+    );
     client.send(&ClientFrame::EndRead { read: 1 });
     assert_eq!(client.answer(), OwnerFrame::Ended { read: 1 });
 
@@ -1098,10 +1050,10 @@ fn a_clients_read_sends_its_finish_with_its_start() {
     let address = OwnerAddress::of(first_file).unwrap();
     let listener = address.listen().unwrap();
     let served = data.clone();
+    let (start_seen, started) = mpsc::channel();
+    let (proceed, finish_queued) = mpsc::channel();
     let stand_in = std::thread::spawn(move || {
         let socket = FrameSocket::new(listener.accept().unwrap().0).unwrap();
-        let waiting = |wait| socket.set_read_timeout(Some(wait)).unwrap();
-        waiting(Duration::from_secs(5));
         Hello::receive(&socket).unwrap().admit(first_file).unwrap();
         let welcome = OwnerFrame::Welcome {
             version: PROTOCOL_VERSION,
@@ -1119,9 +1071,10 @@ fn a_clients_read_sends_its_finish_with_its_start() {
         else {
             panic!("a read's start");
         };
-        waiting(Duration::from_secs(1));
+        start_seen.send(()).unwrap();
+        finish_queued.recv().unwrap();
+        // Block on the finish before answering the start.
         let before_any_answer = frame();
-        waiting(Duration::from_secs(5));
         let version = FileVersion::named(FileVersionId::new(0), size).unwrap();
         let next = NextStep::Fetch(Vec::new());
         socket
@@ -1134,8 +1087,7 @@ fn a_clients_read_sends_its_finish_with_its_start() {
                 .encode(),
             )
             .unwrap();
-        let Some(ClientFrame::Finish { call, .. }) = before_any_answer.clone().or_else(&mut frame)
-        else {
+        let Some(ClientFrame::Finish { call, .. }) = before_any_answer.clone() else {
             panic!("the read's finish");
         };
         let bytes = Some(served);
@@ -1145,8 +1097,17 @@ fn a_clients_read_sends_its_finish_with_its_start() {
         (read, before_any_answer)
     });
     let client = shared(&inner, &dir).build().unwrap();
-    let bytes = within_5s(move || read_listed(&client, &meta, 0..MIB).unwrap());
-    assert_eq!(bytes, Some(data), "served by the stand-in");
+    let reading = client.clone();
+    let read = std::thread::spawn(move || read_listed(&reading, &meta, 0..MIB).unwrap());
+    started.recv().unwrap();
+    let connection = client.cache_store().owner_connection().unwrap();
+    assert_eq!(
+        connection.calls_waiting(),
+        [0, 1],
+        "start and finish queued before any answer"
+    );
+    proceed.send(()).unwrap();
+    assert_eq!(read.join().unwrap(), data, "served by the stand-in");
     let (read, before_any_answer) = stand_in.join().unwrap();
     address.remove();
     assert!(
@@ -1178,13 +1139,16 @@ fn a_client_gone_mid_read_hands_its_claims_to_their_waiters() {
     std::thread::spawn(move || {
         let _ = done.send(read_listed(&waiting, &meta, 0..MIB));
     });
-    let waited = finished.recv_timeout(Duration::from_millis(200));
-    assert!(
-        waited.is_err(),
-        "the owner's read waits for the client's claim"
-    );
+    wait_until(|| {
+        owner
+            .cache_store()
+            .owned()
+            .unwrap()
+            .fetch_waiters_registered()
+            == 1
+    });
     drop(client);
-    let read = finished.recv_timeout(Duration::from_secs(5));
+    let read = finished.recv();
     assert_eq!(read.expect("the waiter fetches").unwrap(), data);
 }
 

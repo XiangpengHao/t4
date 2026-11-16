@@ -237,6 +237,22 @@ pub(in crate::cache::cache_stores::shared) struct FrameSender {
 }
 
 impl FrameSender {
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(in crate::cache::cache_stores::shared) fn pause_next_caller(
+        &self,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (entered, observed) = std::sync::mpsc::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        *self.queue.caller_pause.lock().unwrap() = Some(CallerPause { entered, resume });
+        (observed, release)
+    }
+
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(in crate::cache::cache_stores::shared) fn has_pending_frames(&self) -> bool {
+        let state = self.queue.state();
+        state.writing || !state.frames.is_empty()
+    }
+
     /// A frame takes a few µs to send: an owner not reading for this long is busy, or stuck.
     pub(in crate::cache::cache_stores::shared) const SEND_WAIT: Duration =
         Duration::from_micros(200);
@@ -253,6 +269,8 @@ impl FrameSender {
             socket,
             state: Mutex::default(),
             waiting: Condvar::new(),
+            #[cfg(all(test, not(feature = "shuttle")))]
+            caller_pause: Mutex::default(),
         });
         let writing = std::sync::Arc::clone(&queue);
         let writer = thread::Builder::new()
@@ -278,6 +296,14 @@ impl FrameSender {
             }
             // The socket is this caller's till it has sent: others queue meanwhile, unheld.
             state.writing = true;
+        }
+        #[cfg(all(test, not(feature = "shuttle")))]
+        {
+            let pause = self.queue.caller_pause.lock().unwrap().take();
+            if let Some(pause) = pause {
+                pause.entered.send(()).unwrap();
+                pause.resume.recv().unwrap();
+            }
         }
         let sent = self.queue.socket.send_some(frames.make_contiguous());
         let mut state = self.queue.state();
@@ -323,10 +349,18 @@ impl Drop for FrameSender {
     }
 }
 
+#[cfg(all(test, not(feature = "shuttle")))]
+struct CallerPause {
+    entered: std::sync::mpsc::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
 struct SenderQueue {
     socket: FrameSocket,
     state: Mutex<SenderState>,
     waiting: Condvar,
+    #[cfg(all(test, not(feature = "shuttle")))]
+    caller_pause: Mutex<Option<CallerPause>>,
 }
 
 #[derive(Default)]

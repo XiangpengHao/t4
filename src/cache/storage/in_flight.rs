@@ -51,6 +51,15 @@ impl InFlight {
         self.fetches().is_empty()
     }
 
+    /// A read given up leaves its waker here until the fetch ends: not a live read count.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(in crate::cache::storage) fn fetch_waiters_registered(&self) -> usize {
+        self.fetches()
+            .values()
+            .map(|fetch| fetch.state().waiters.len())
+            .sum()
+    }
+
     /// An ended fetch stays until its thread removes it; a read must not wait on it.
     fn live(fetches: &HashMap<u64, Arc<BlockFetch>>, key: BlockKey) -> Option<&Arc<BlockFetch>> {
         fetches

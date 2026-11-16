@@ -109,7 +109,6 @@ impl IoWorker {
 mod test {
     use std::fs::File;
     use std::num::NonZero;
-    use std::time::Duration;
 
     use pollster::block_on;
     use tempfile::tempfile;
@@ -247,17 +246,9 @@ mod test {
         reopened
             .try_lock()
             .expect("the worker's file is closed once it drops");
-        // Bounded, so a read the worker dropped unanswered fails rather than hangs.
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            for read in reads {
-                let (buf, read_len) = block_on(read).unwrap();
-                assert_eq!(read_len, buf.len());
-            }
-            done_tx.send(()).unwrap();
-        });
-        done_rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("every read in flight completes");
+        for read in reads {
+            let (buf, read_len) = block_on(read).unwrap();
+            assert_eq!(read_len, buf.len());
+        }
     }
 }

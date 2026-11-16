@@ -37,6 +37,11 @@ pub(in crate::cache) struct ObjectCache {
 }
 
 impl ObjectCache {
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(in crate::cache) fn fetch_waiters_registered(&self) -> usize {
+        self.in_flight.fetch_waiters_registered()
+    }
+
     pub(in crate::cache) fn new(
         memory_chunks: NonZeroU32,
         disk: CacheFiles,
