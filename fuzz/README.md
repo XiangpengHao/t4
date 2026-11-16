@@ -184,11 +184,12 @@ RUSTFLAGS="--cfg t4_simulated" cargo fuzz run shared_mode -- -timeout=10 -len_co
 `-len_control=0` lets libFuzzer try long scripts from the start; it would
 otherwise begin under 20 bytes, a seed and little more.
 
-AddressSanitizer's own memory grows with every cache an input builds,
-about 100 KB a scenario of `cache_equivalence` on macOS, and reaches
-libFuzzer's 2 GB limit within minutes; without it (`-s none`) memory stays
-flat. For a long run, fuzz half a minute at a time, as the Monday run does, or
-pass `-s none`.
+On macOS, AddressSanitizer's own memory grows with every scenario, past
+libFuzzer's 2 GB limit within half a minute for `snapshot` and in about half
+an hour for `cache_equivalence`; without it (`-s none`) memory levels off
+below 100 MB. For a long run there, pass `-s none`. On Linux it grows far
+slower: in an hour, `snapshot` reached 1.2 GB and `cache_equivalence` 500 MB,
+while `frames` levelled off at 690 MB; the Monday run allows each 8 GB.
 
 ```bash
 TMPDIR=/dev/shm cargo fuzz run cache_equivalence -- -timeout=10 -jobs=8 -workers=8
