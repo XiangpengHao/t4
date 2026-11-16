@@ -5,9 +5,9 @@
 use std::ops::Range;
 
 use super::blocks::Location;
+use super::page_window::{PageWindow, RangeRequestU32};
 use super::paths::FileVersion;
 use crate::cache::{BLOCK_SIZE_U64, BlockKey};
-use crate::range::{PageWindow, RangeRequestU32};
 
 /// How to read a byte range of an object: the blocks it covers, in order,
 /// each where it was when planned, with the part of it the read needs.

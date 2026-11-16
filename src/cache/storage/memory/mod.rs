@@ -6,8 +6,8 @@ use rustix::mm::{MapFlags, ProtFlags};
 
 use super::chunks::{ChunkLease, ChunkPin, ChunkTable, ChunkTier};
 use crate::PAGE_SIZE;
-use crate::buffer::AlignedBuf;
 use crate::cache::{BLOCK_SIZE, BlockKey, ChunkId};
+use crate::io::aligned_buf::AlignedBuf;
 use crate::io::error::{Error, Result};
 use crate::io::sync::Arc;
 

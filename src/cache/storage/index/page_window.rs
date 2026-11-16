@@ -1,21 +1,21 @@
 use vstd::prelude::*;
 
 use crate::PAGE_SIZE_U64;
-use crate::buffer::{align_down_u64, align_up_u64};
+use crate::io::aligned_buf::{align_down_u64, align_up_u64};
 use crate::io::error::{Error, Result};
 
 verus! {
 
 /// A byte range, `start` and `len`, whose `end` fits a `u32`.
 #[derive(Clone, Copy)]
-pub struct RangeRequestU32 {
-    pub start: u32,
-    pub len: u32,
-    pub end: u32,
+pub(super) struct RangeRequestU32 {
+    pub(super) start: u32,
+    pub(super) len: u32,
+    pub(super) end: u32,
 }
 
 impl RangeRequestU32 {
-    pub fn from_u32(start: u32, len: u32) -> (result: Option<Self>)
+    pub(super) fn from_u32(start: u32, len: u32) -> (result: Option<Self>)
         ensures
             result.is_some() ==> result.unwrap().start == start,
             result.is_some() ==> result.unwrap().len == len,
@@ -26,7 +26,7 @@ impl RangeRequestU32 {
         Some(Self { start, len, end })
     }
 
-    pub fn checked_against(self, upper_bound: u32) -> (result: Option<CheckedRangeU32>)
+    pub(super) fn checked_against(self, upper_bound: u32) -> (result: Option<CheckedRangeU32>)
         ensures
             result.is_some() ==> result.unwrap().start == self.start,
             result.is_some() ==> result.unwrap().len == self.len,
@@ -42,35 +42,35 @@ impl RangeRequestU32 {
 }
 
 #[derive(Clone, Copy)]
-pub struct CheckedRangeU32 {
-    pub start: u32,
-    pub len: u32,
-    pub end: u32,
+pub(super) struct CheckedRangeU32 {
+    pub(super) start: u32,
+    pub(super) len: u32,
+    pub(super) end: u32,
 }
 
 impl CheckedRangeU32 {
-    pub fn start(self) -> (result: u32)
+    fn start(self) -> (result: u32)
         ensures
             result == self.start,
     {
         self.start
     }
 
-    pub fn len(self) -> (result: u32)
+    fn len(self) -> (result: u32)
         ensures
             result == self.len,
     {
         self.len
     }
 
-    pub fn end(self) -> (result: u32)
+    fn end(self) -> (result: u32)
         ensures
             result == self.end,
     {
         self.end
     }
 
-    pub fn is_empty(self) -> (result: bool)
+    fn is_empty(self) -> (result: bool)
         ensures
             result <==> self.len == 0,
     {
@@ -84,7 +84,7 @@ impl CheckedRangeU32 {
 /// extent (a chunk), lie inside a page-aligned window of it, read whole into
 /// a buffer of exactly the window's size, as direct I/O needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PageWindow {
+pub(super) struct PageWindow {
     /// Where the window starts in the extent: a page boundary.
     first_byte: u32,
     /// The window's size, in whole pages; 0 when nothing is asked for.
@@ -96,7 +96,7 @@ pub(crate) struct PageWindow {
 
 impl PageWindow {
     /// The window for `range` of an extent.
-    pub(crate) fn of(range: CheckedRangeU32) -> Result<Self> {
+    pub(super) fn of(range: CheckedRangeU32) -> Result<Self> {
         if range.is_empty() {
             return Ok(Self {
                 first_byte: 0,
@@ -121,22 +121,22 @@ impl PageWindow {
     }
 
     /// Where the window starts in the extent: a page boundary.
-    pub(crate) fn first_byte(&self) -> u32 {
+    pub(super) fn first_byte(&self) -> u32 {
         self.first_byte
     }
 
-    pub(crate) fn buffer_len(&self) -> u32 {
+    pub(super) fn buffer_len(&self) -> u32 {
         self.buffer_len
     }
 
     /// Where the bytes asked for start in the window: for the read plan's
     /// tests, which `shuttle` builds leave out.
     #[cfg(all(test, not(feature = "shuttle")))]
-    pub(crate) fn start(&self) -> u32 {
+    pub(super) fn start(&self) -> u32 {
         self.start
     }
 
-    pub(crate) fn len(&self) -> u32 {
+    pub(super) fn len(&self) -> u32 {
         self.len
     }
 }

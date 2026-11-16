@@ -6,13 +6,11 @@
 //! what it keeps: the [`policy::PlacementPolicy`] trait, and its default, a
 //! lock-free CLOCK.
 
-mod buffer;
 // The object store cache (`doc/03-cache.md`). Linux and macOS: its memory
 // pool is an anonymous mapping.
 #[cfg(unix)]
 mod cache;
 mod io;
-mod range;
 
 use std::num::NonZeroU32;
 
@@ -25,7 +23,7 @@ pub use io::error::{Error, Result};
 #[cfg(feature = "__bench")]
 #[doc(hidden)]
 pub mod __bench {
-    pub use crate::buffer::AlignedBuf;
+    pub use crate::io::aligned_buf::AlignedBuf;
     pub use crate::io::io_task::{FilePosition, PageWrite};
     pub use crate::io::io_worker::IoWorker;
 }
