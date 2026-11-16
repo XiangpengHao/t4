@@ -4,11 +4,11 @@
 
 use std::num::{NonZeroU8, NonZeroU64};
 
+use crate::io::test_schedule::TestSchedule;
 use bytes::Bytes;
 use futures_util::FutureExt;
 use futures_util::future::{Either, ready, select};
 use shuttle::future::block_on;
-use shuttle::scheduler::PctScheduler;
 
 use super::{GetQueue, GetTurn};
 use crate::cache::FileVersionId;
@@ -21,7 +21,7 @@ const BLOCK: u64 = 8;
 const MOST: u64 = 2 * BLOCK;
 
 fn explore(test: impl Fn() + Send + Sync + 'static) {
-    shuttle::Runner::new(PctScheduler::new(3, 1000), shuttle::Config::new()).run(test);
+    TestSchedule::iterations(64, test);
 }
 
 /// The file every GET is of: a version of the process's own cache.

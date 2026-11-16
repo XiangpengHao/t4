@@ -20,3 +20,6 @@ cfg_if::cfg_if! {
         pub(crate) use generic::new_backend;
     }
 }
+
+#[cfg(test)]
+pub(crate) mod test_schedule;

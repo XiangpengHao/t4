@@ -12,9 +12,9 @@
 
 use std::num::NonZeroU32;
 
+use crate::io::test_schedule::TestSchedule;
 use futures_util::FutureExt;
 use shuttle::future::block_on;
-use shuttle::scheduler::PctScheduler;
 
 use super::eviction::MoveToDisk;
 use super::test_policy::TestPolicy;
@@ -33,11 +33,7 @@ const FILE_SIZE: u64 = 64;
 
 /// Runs `test` under the schedules PCT explores.
 fn explore(test: impl Fn() + Send + Sync + 'static) {
-    let mut config = shuttle::Config::new();
-    // The default 60 KiB stack is too small for bbtree's descent in a debug
-    // build.
-    config.stack_size = 256 * 1024;
-    shuttle::Runner::new(PctScheduler::new(3, 1000), config).run(test);
+    TestSchedule::iterations(64, test);
 }
 
 /// A cache of `memory_chunks` chunks of memory and `disk_chunks` on
