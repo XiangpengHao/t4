@@ -86,7 +86,7 @@ cargo fuzz run frames -- -timeout=10 -max_total_time=600
 AddressSanitizer's own memory grows with every cache an input builds,
 about 100 KB a scenario of `cache_equivalence` on macOS, and reaches
 libFuzzer's 2 GB limit within minutes; without it (`-s none`) memory stays
-flat. For a long run, fuzz a minute at a time, as the Monday run does, or
+flat. For a long run, fuzz half a minute at a time, as the Monday run does, or
 pass `-s none`.
 
 ```bash

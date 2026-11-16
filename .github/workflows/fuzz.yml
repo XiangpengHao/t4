@@ -32,7 +32,7 @@ jobs:
         run: nix develop -c cargo fuzz build ${{ matrix.target }}
 
       # AddressSanitizer's memory grows with every cache an input builds, past
-      # libFuzzer's limit in minutes: each minute is a fresh process.
+      # libFuzzer's limit in minutes: each half minute is a fresh process.
       - name: Fuzz for an hour
         env:
           TMPDIR: /dev/shm
@@ -41,7 +41,7 @@ jobs:
           nix develop -c bash -c '
             end=$((SECONDS + 3600))
             while [ "$SECONDS" -lt "$end" ]; do
-              cargo fuzz run "$TARGET" -- -max_total_time=60 -timeout=10 -rss_limit_mb=8192 || exit 1
+              cargo fuzz run "$TARGET" -- -max_total_time=30 -timeout=10 -rss_limit_mb=8192 || exit 1
             done'
 
       - name: Keep the failing input
