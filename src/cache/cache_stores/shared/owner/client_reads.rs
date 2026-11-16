@@ -14,7 +14,8 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use super::session_waker::SessionWaker;
 use crate::cache::cache_stores::shared::protocol::{
-    ClientFrame, FetchSpec, FrameReader, NextStep, OwnerFrame, OwnerRegion, SpanName,
+    ClientFrame, FetchSpec, FrameReader, MOST_READ_BYTES, NextStep, OwnerFrame, OwnerRegion,
+    SpanName,
 };
 use crate::cache::policy::{FetchRuns, Io, IoEvent, LocatedRead, ReadIntent, ReadPlan, ReadPolicy};
 use crate::cache::read_output::ReadOutput;
@@ -307,10 +308,22 @@ impl<'c> ServedRead<'c> {
             self.outbox.send(OwnerFrame::Uncacheable { call });
             return;
         };
+        // Of a version of any size the client names: planned, its blocks alone would take the
+        // owner's memory, then its output more.
+        let in_span = output.is_some();
+        let end = range.end.min(file.version().size());
+        if end - range.start.min(end) > MOST_READ_BYTES {
+            match in_span {
+                true => self
+                    .outbox
+                    .break_protocol("output: a span that can't hold it"),
+                false => self.outbox.send(OwnerFrame::Failed { call }),
+            }
+            return;
+        }
         let reads = ForwardedDiskReads {
             outbox: self.outbox.clone(),
         };
-        let in_span = output.is_some();
         let make_output = |asked: Range<u64>| match output {
             Some((region, span)) => region.output(span, asked, std::sync::Arc::clone(&self.end)),
             None => ReadOutput::new(asked),

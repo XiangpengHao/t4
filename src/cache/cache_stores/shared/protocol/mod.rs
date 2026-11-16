@@ -18,7 +18,7 @@ pub(in crate::cache) use frame_socket::Transport;
 pub(super) use frame_socket::simulated::Listener;
 pub(super) use frame_socket::{FrameReceiver, FrameSender, FrameSocket};
 pub(super) use frames::{
-    ClientFrame, FetchSpec, FrameReader, NextStep, OwnerFrame, PROTOCOL_VERSION,
+    ClientFrame, FetchSpec, FrameReader, MOST_READ_BYTES, NextStep, OwnerFrame, PROTOCOL_VERSION,
 };
 pub(super) use handshake::Hello;
 pub(super) use region::{ClientRegion, OwnerRegion, RegionSpan, SpanName};

@@ -15,6 +15,10 @@ use crate::io::error::{Error, Result};
 /// learn each other's; a version that needs more handshake adds frames after the welcome.
 pub(in crate::cache::cache_stores::shared) const PROTOCOL_VERSION: u32 = 4;
 
+/// A read's bytes come back in one frame, which holds 2 GiB, or in a span of a 1 GiB region: a
+/// client asks for no more, and its owner serves no more.
+pub(in crate::cache::cache_stores::shared) const MOST_READ_BYTES: u64 = 1 << 30;
+
 /// A frame with a `call` is answered by that number.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::cache::cache_stores::shared) enum ClientFrame {

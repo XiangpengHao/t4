@@ -206,7 +206,13 @@ decision 9).
      where it comes (GETs where none were due, a fetch or a read the
      client never started, a fetch's bytes after its commit) closes the
      connection, as a protocol error does; the owner never panics on a
-     client's frame (fuzzed: `fuzz/README.md`, `shared_owner`). Before the region (step
+     client's frame (fuzzed: `fuzz/README.md`, `shared_owner`). A read
+     comes back in one frame or one span, so a client asks for 1 GiB at
+     most (`MOST_READ_BYTES`), and reads more from the remote; the owner
+     fails a longer read at once, unplanned, as its blocks and its output
+     alone would take its memory, for a version of any size a client
+     names (fixed 16 Nov 2026,
+     `a_read_longer_than_a_client_asks_fails_at_once`). Before the region (step
      4), a fetched block's bytes cross the socket twice: to the owner,
      which lands them as its own fetches' (`FetchedBlocks`), and back in
      the read's bytes.

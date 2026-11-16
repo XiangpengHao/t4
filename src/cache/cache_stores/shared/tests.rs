@@ -23,8 +23,8 @@ use rustix::process::geteuid;
 use shuttle::future::block_on;
 
 use super::protocol::{
-    ClientFrame, ClientRegion, FetchSpec, FrameReceiver, FrameSender, FrameSocket, Hello, NextStep,
-    OwnerAddress, OwnerFrame, PROTOCOL_VERSION, SpanName,
+    ClientFrame, ClientRegion, FetchSpec, FrameReceiver, FrameSender, FrameSocket, Hello,
+    MOST_READ_BYTES, NextStep, OwnerAddress, OwnerFrame, PROTOCOL_VERSION, SpanName,
 };
 use crate::cache::policy::{
     Admit, BlockSource, FixedPlacementPolicy, IoPhase, PlannedGet, ReadPlan,
@@ -812,6 +812,44 @@ fn the_owner_serves_a_read_into_its_clients_span() {
         let short = region.span(1).unwrap();
         client.send(&start_read_into(2, &meta, 0..2 * MIB, short.name()));
         assert!(client.closed());
+    });
+}
+
+/// A client may name a version of any size: planned, a read of all of it would take the owner's
+/// memory, for bytes that come back in no frame.
+#[cfg(feature = "shuttle")]
+#[test]
+fn a_read_longer_than_a_client_asks_fails_at_once() {
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = TestDirectory::new();
+        let inner = Arc::new(InMemory::new());
+        let (_data, meta) = put_file(&inner, &Path::from("a"), MIB);
+        let _owner = shared(&inner, &dir).build().unwrap();
+        let mut client = RawClient::admitted(&dir);
+
+        let size = MOST_READ_BYTES + 1;
+        let ClientFrame::StartRead {
+            call,
+            read,
+            path,
+            e_tag,
+            ..
+        } = start_read(1, &meta, 0..size)
+        else {
+            unreachable!("a start");
+        };
+        client.send(&ClientFrame::StartRead {
+            call,
+            read,
+            path,
+            e_tag,
+            size,
+            range: 0..size,
+            intent: None,
+            output: None,
+        });
+        assert_eq!(client.answer(), OwnerFrame::Failed { call });
+        assert!(client.quiet(), "the client is still served");
     });
 }
 
