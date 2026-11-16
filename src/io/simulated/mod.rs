@@ -13,7 +13,7 @@ use crate::io::common::{BackendLoop, CompletionEvent, IoDriver, SubmissionEntry}
 use crate::io::error::{Error, Result};
 use crate::io::io_task::{FilePosition, WorkerRequest};
 use crate::io::sync::mpsc;
-use disk::{Completion, WriteId};
+use disk::Completion;
 
 const MAX_WAITS: u32 = 8;
 
@@ -36,9 +36,11 @@ enum SimOp {
         buf_len: u32,
         at: FilePosition,
     },
+    /// The writer's buffer, not a copy: a file opened for direct I/O refuses unaligned bytes.
     Write {
-        file: u32,
-        id: WriteId,
+        buf_ptr: *const u8,
+        buf_len: u32,
+        at: FilePosition,
     },
 }
 
@@ -55,7 +57,16 @@ impl SimOp {
                 let offset = at.offset();
                 (at.file(), Completion::Read { offset, buf })
             }
-            Self::Write { file, id } => (file, Completion::Write(id)),
+            Self::Write {
+                buf_ptr,
+                buf_len,
+                at,
+            } => {
+                // SAFETY: the backend loop keeps the buffer alive and unchanged until this completes.
+                let bytes = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len as usize) };
+                let offset = at.offset();
+                (at.file(), Completion::Write { offset, bytes })
+            }
         };
         disks[file as usize].complete(completion)
     }
@@ -91,13 +102,12 @@ impl IoDriver for SimulatedDriver {
                 user_data,
                 ..
             } => {
-                // SAFETY: the backend loop keeps the buffer alive and unchanged until this completes.
-                let bytes = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len as usize) };
-                let id = self.disk(at)?.submit_write(at.offset(), bytes.to_vec());
+                self.disk(at)?;
                 (
                     SimOp::Write {
-                        file: at.file(),
-                        id,
+                        buf_ptr,
+                        buf_len,
+                        at,
                     },
                     user_data,
                 )
