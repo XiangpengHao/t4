@@ -1168,6 +1168,26 @@ fn a_late_race_waits_for_its_timer() {
     });
 }
 
+/// The late request may answer while the first waits for memory to land a piece.
+#[cfg(feature = "shuttle")]
+#[test]
+fn a_late_race_won_mid_landing_loses_no_bytes() {
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let reads = late_racing();
+        let inner = Arc::new(CountingStore::default());
+        let at_once = |_| std::future::ready(()).boxed();
+        let (_dir, store, data) = raced_late_by(&inner, &reads, Some(Box::new(at_once)));
+        let filler = file_bytes(4 * MIB, 9);
+        put(inner.as_ref(), &Path::from("b"), &filler);
+        assert_eq!(get_range(&store, &Path::from("b"), 0..4 * MIB), filler);
+        // Memory is full: landing a block first writes another to disk.
+        assert_eq!(
+            get_range(&store, &Path::from("a"), 0..MIB),
+            data.slice(0..MIB as usize)
+        );
+    });
+}
+
 #[cfg(feature = "shuttle")]
 #[test]
 fn a_get_is_heard_landed_after_it_finished() {

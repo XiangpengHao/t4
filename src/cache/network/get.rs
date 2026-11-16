@@ -1,5 +1,7 @@
+use std::future::Future;
 use std::num::NonZeroU8;
 use std::ops::Range;
+use std::pin::{Pin, pin};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -14,29 +16,82 @@ use super::get_queue::{GetPlace, GetTurn, JoinedParts};
 use crate::cache::cache_stores::CacheStoreFetch;
 use crate::cache::io_report::IoReport;
 use crate::cache::policy::Io;
+use crate::io::time::Clock;
 
-struct BodyLanding<'c> {
+struct BodyLanding<'c, 'f> {
     joined: JoinedParts,
     blocks: Box<dyn CacheStoreFetch<'c> + 'c>,
-    received: u64,
+    clock: &'f Clock,
+    /// The GET's bytes landed so far, read by the late request as it asks for the rest.
+    landed: &'f AtomicU64,
+    landing: Duration,
 }
 
-impl<'c> BodyLanding<'c> {
-    fn new(joined: JoinedParts, blocks: Box<dyn CacheStoreFetch<'c> + 'c>) -> Self {
+impl<'c, 'f> BodyLanding<'c, 'f> {
+    fn new(
+        joined: JoinedParts,
+        blocks: Box<dyn CacheStoreFetch<'c> + 'c>,
+        clock: &'f Clock,
+        landed: &'f AtomicU64,
+    ) -> Self {
         Self {
             joined,
             blocks,
-            received: 0,
+            clock,
+            landed,
+            landing: Duration::ZERO,
+        }
+    }
+
+    /// Only the waits race the late request: a piece dropped half landed would leave `landed`
+    /// counting bytes the blocks never took.
+    async fn land_first<'a, Late>(
+        &mut self,
+        first: impl Future<Output = object_store::Result<(GetResult, IoReport<'a>)>>,
+        mut late: Pin<&mut impl Future<Output = Late>>,
+        len: u64,
+    ) -> object_store::Result<Either<IoReport<'a>, Late>> {
+        let (answer, mut report) = match select(pin!(first), late.as_mut()).await {
+            Either::Left((first, _)) => first?,
+            Either::Right((late, _)) => return Ok(Either::Right(late)),
+        };
+        let mut pieces = answer.into_stream();
+        let received = async {
+            loop {
+                match select(pieces.try_next(), late.as_mut()).await {
+                    Either::Left((Ok(Some(piece)), _)) => self.land(piece).await?,
+                    Either::Left((Ok(None), _)) => return Ok(None),
+                    Either::Left((Err(error), _)) => return Err(error),
+                    Either::Right((late, _)) => return Ok(Some(late)),
+                }
+            }
+        };
+        match received.await {
+            Ok(None) => {
+                report.finished(len);
+                Ok(Either::Left(report))
+            }
+            Ok(Some(late)) => Ok(Either::Right(late)),
+            Err(error) => {
+                report.failed();
+                Err(error)
+            }
         }
     }
 
     async fn land(&mut self, mut piece: Bytes) -> object_store::Result<()> {
-        self.received += piece.len() as u64;
+        let started = self.clock.now();
+        let len = piece.len() as u64;
         self.joined.take_front(&mut piece);
-        if piece.is_empty() {
-            return Ok(());
+        if !piece.is_empty() {
+            self.blocks
+                .land(&piece)
+                .await
+                .map_err(Network::cache_error)?;
         }
-        self.blocks.land(&piece).await.map_err(Network::cache_error)
+        self.landing += self.clock.now() - started;
+        self.landed.fetch_add(len, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -55,7 +110,6 @@ impl Network {
         };
         let own = blocks.range();
         let bytes = joined.start().unwrap_or(own.start)..own.end;
-        let mut body = BodyLanding::new(joined, blocks);
         let options = GetOptions {
             range: Some(GetRange::Bounded(bytes.clone())),
             if_match: Some(e_tag.to_owned()),
@@ -65,69 +119,45 @@ impl Network {
         let path = location.as_ref().as_bytes();
         let sent = self.clock.now();
         let waited = sent - waiting;
-        let late = body.blocks.late_race().zip(self.sleep.clone());
-        let racers = body.blocks.race();
-        let mut landing = Duration::ZERO;
+        let late_race = blocks.late_race().zip(self.sleep.clone());
+        let racers = blocks.race();
         let landed = AtomicU64::new(0);
-        let first = async {
-            let (answer, mut report) = self
-                .first_answer(location, &options, path, &bytes, racers)
-                .await?;
-            let received = async {
-                let mut answer = answer.into_stream();
-                while let Some(piece) = answer.try_next().await? {
-                    let started = self.clock.now();
-                    let len = piece.len() as u64;
-                    body.land(piece).await?;
-                    landing += self.clock.now() - started;
-                    landed.fetch_add(len, Ordering::Relaxed);
-                }
-                Ok::<_, object_store::Error>(())
+        let mut body = BodyLanding::new(joined, blocks, &self.clock, &landed);
+        // Never answers if there is no late request or it fails: the first goes on alone.
+        let late = async {
+            let Some((after, sleep)) = late_race else {
+                return pending().await;
             };
-            match received.await {
-                Ok(()) => {
-                    report.finished(bytes.end - bytes.start);
-                    Ok(report)
-                }
-                Err(error) => {
-                    report.failed();
-                    Err(error)
-                }
+            sleep(after).await;
+            let from = bytes.start + landed.load(Ordering::Relaxed);
+            let racer = racers.get();
+            let rest = from..bytes.end;
+            match self
+                .late_answer(location, &options, path, rest, racer, sent)
+                .await
+            {
+                Ok(answer) => answer,
+                Err(_) => pending().await,
             }
         };
-        let report = match late {
-            None => first.await?,
-            Some((after, sleep)) => {
-                let rest = async {
-                    sleep(after).await;
-                    let from = bytes.start + landed.load(Ordering::Relaxed);
-                    let racer = racers.get();
-                    self.late_answer(location, &options, path, from..bytes.end, racer, sent)
-                        .await
-                };
-                let won = match select(Box::pin(first), Box::pin(rest)).await {
-                    Either::Left((done, _rest)) => Either::Left(done?),
-                    Either::Right((Ok(rest), _first)) => Either::Right(rest),
-                    Either::Right((Err(_), first)) => Either::Left(first.await?),
-                };
-                match won {
-                    Either::Left(report) => report,
-                    // The first request may have landed more since the late racer asked.
-                    Either::Right((from, rest, report)) => {
-                        let skip = usize::try_from(bytes.start + body.received - from)
-                            .expect("a GET's bytes fit in memory");
-                        let started = self.clock.now();
-                        body.land(rest.slice(skip..)).await?;
-                        landing += self.clock.now() - started;
-                        report
-                    }
-                }
+        let first = self.first_answer(location, &options, path, &bytes, racers);
+        let report = match body
+            .land_first(first, pin!(late), bytes.end - bytes.start)
+            .await?
+        {
+            Either::Left(report) => report,
+            // The first request may have landed more since the late one asked.
+            Either::Right((from, rest, report)) => {
+                let skip = usize::try_from(bytes.start + landed.load(Ordering::Relaxed) - from)
+                    .expect("a GET's bytes fit in memory");
+                body.land(rest.slice(skip..)).await?;
+                report
             }
         };
         // The cap is on bytes in flight: give the place back before caching the blocks.
         drop(place);
         body.blocks.finish().await.map_err(Self::cache_error)?;
-        report.landed(landing, waited);
+        report.landed(body.landing, waited);
         Ok(())
     }
 
