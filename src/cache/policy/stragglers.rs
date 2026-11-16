@@ -172,7 +172,7 @@ mod tests {
     /// never.
     #[test]
     fn races_a_normal_reads_gets_at_the_start_then_the_quantile_heard() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let policy = RaceStragglers::at(0.9);
             for ms in 1..RaceStragglers::HEARD as u64 {
                 policy.on_io(&finished(ms));
@@ -194,7 +194,7 @@ mod tests {
     /// The times it learns from are the latest: older ones fall out.
     #[test]
     fn learns_from_the_latest_times() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let policy = RaceStragglers::at(0.5);
             for _ in 0..RaceStragglers::HEARD {
                 policy.on_io(&finished(1000));

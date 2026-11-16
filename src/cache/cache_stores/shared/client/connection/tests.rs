@@ -5,7 +5,7 @@ use super::*;
 /// one.
 #[test]
 fn an_answer_to_a_call_given_up_is_dropped() {
-    crate::io::test_schedule::TestSchedule::check(|| {
+    crate::io::test_schedule::TestSchedule::once(|| {
         let table = std::sync::Arc::new(CallTable::default());
         let given_up = table.wait().unwrap();
         let number = given_up.number;
@@ -24,7 +24,7 @@ fn an_answer_to_a_call_given_up_is_dropped() {
 /// once it has gone, spans lent are freed at once.
 #[test]
 fn spans_lent_come_back_once_the_owner_ends_their_read_or_goes() {
-    crate::io::test_schedule::TestSchedule::check(|| {
+    crate::io::test_schedule::TestSchedule::once(|| {
         let region = ClientRegion::make().unwrap();
         let all = region.free_pages();
         let span = || region.span(1).unwrap();

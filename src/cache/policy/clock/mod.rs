@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn a_fetched_block_goes_to_memory_and_picks_take_admitted_chunks_only() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let policy = policy(200);
             assert_eq!(policy.on_remote_read(&read()), Admit::Memory);
             admit(&policy, Tier::Memory, [3, 64, 130, 199]);
@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn a_chunk_is_picked_once_and_some_picks_find_fewer_than_asked() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let policy = policy(10);
             admit(&policy, Tier::Memory, 0..10);
             assert_eq!(pick(&policy, 4), [0, 1, 2, 3]);
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn a_victim_admitted_again_is_picked_again_unreferenced() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let policy = policy(2);
             admit(&policy, Tier::Memory, [0, 1]);
             assert_eq!(pick(&policy, 2), [0, 1]);
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn a_chunk_hit_since_the_hand_passed_survives_one_sweep() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             // One word: every pick sweeps it.
             let policy = policy(64);
             admit(&policy, Tier::Memory, 0..4);
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn a_chunk_hit_before_every_pick_goes_last() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             // Two words: a pick sweeps the other between its two passes of
             // chunk 0's word.
             let policy = policy(100);
@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn a_tier_of_a_partial_word_picks_its_chunks_only() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let policy = policy(70);
             admit(&policy, Tier::Memory, 0..70);
             assert_eq!(pick(&policy, 100), (0..70).collect::<Vec<_>>());
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn a_disk_block_moves_to_memory_on_its_second_hit() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let policy = policy(2);
             admit(&policy, Tier::Disk, [0, 1]);
             assert_eq!(disk_hit(&policy, 0), DiskHit::Stay);

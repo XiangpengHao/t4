@@ -403,7 +403,7 @@ mod tests {
     /// first.
     #[test]
     fn the_chunks_start_at_a_huge_pages_boundary() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let pool = pool(3);
             let first = pool.memory.chunk_start(ChunkId::new(0)).as_ptr() as usize;
             assert!(first.is_multiple_of(PoolMemory::HUGE_PAGE));
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn chunks_are_page_aligned_and_apart() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let pool = pool(4);
             let mut writers: Vec<_> = std::iter::from_fn(|| pool.allocate()).collect();
             assert_eq!(writers.len(), 4);
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn a_published_chunk_reads_back_its_block() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let pool = pool(2);
             let block = BlockKey::new(FileVersionId::new(7), 3);
             let chunk = publish(&pool, block);
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn an_evicted_chunk_is_freed_after_its_last_reader() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let pool = pool(1);
             let block = BlockKey::new(FileVersionId::new(1), 0);
             let chunk = publish(&pool, block);

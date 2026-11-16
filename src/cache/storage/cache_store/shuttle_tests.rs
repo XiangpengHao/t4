@@ -33,7 +33,7 @@ const FILE_SIZE: u64 = 64;
 
 /// Runs `test` under the schedules PCT explores.
 fn explore(test: impl Fn() + Send + Sync + 'static) {
-    TestSchedule::iterations(64, test);
+    TestSchedule::iterations(500, test);
 }
 
 /// A cache of `memory_chunks` chunks of memory and `disk_chunks` on

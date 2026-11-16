@@ -16,12 +16,17 @@ normal library consumers still get the real implementations.
 ## Schedules and replay
 
 `src/io/test_schedule/mod.rs` owns the corpus. Shuttle is pinned to exactly
-0.9.1, with the lockfile checked in. Every scheduler is constructed with
-`RandomScheduler::new_from_seed`, with seeds `0x57bf0283` and `0x0dc82a31`.
-Each seed runs 8 iterations for integration/state checks, 64 for the existing
-focused queue, cache-store, memory-pool and CLOCK races, and 16 for the two
-owner-shutdown regressions. Longer stress loops now repeat small cases under
-these schedules instead of relying on OS thread timing.
+0.9.1, with the lockfile checked in. Every scheduler is PCT, depth 3,
+constructed with `PctScheduler::new_from_seed`, with seeds `0x57bf0283` and
+`0x0dc82a31`: PCT finds a bug of a few ordering constraints with a known
+probability per run, where random scheduling gives no bound. Each seed runs 16
+iterations for the integration and state checks (`TestSchedule::check`), 500
+for the focused queue, cache-store, memory-pool and CLOCK races, as their PCT
+budget was before, and 16 for the two owner-shutdown regressions. A test that
+starts no thread of its own runs once, inside shuttle's runtime
+(`TestSchedule::once`): PCT refuses to repeat a run with no concurrency, and
+repeating it would explore nothing. Longer stress loops now repeat small cases
+under these schedules instead of relying on OS thread timing.
 
 A failure prints the seed, iteration budget, and shuttle's encoded schedule.
 Rerun just that test to repeat the corpus. To replay exactly the printed
@@ -33,7 +38,7 @@ T4_SHUTTLE_REPLAY='<encoded schedule>' cargo test --locked --features shuttle \
 ```
 
 Replay uses the same 512 KiB task stacks as the corpus. No entropy-seeded
-scheduler or convenience checker is used. Shared call/read tables use ordered
+scheduler, random scheduler or convenience checker is used. Shared call/read tables use ordered
 maps so destruction and wake order do not depend on hash-map entropy.
 
 ## Shared code and controlled time
@@ -119,7 +124,9 @@ Removing only the stopping check from `serve_reads` failed with seed
 `0x57bf0283`: the waiting session sent `Retry { next: Plan(Remote) }` instead of
 closing. Replaying the emitted schedule failed the same assertion. Restoring
 the check passed the full suite. The focused ordering is needed: the broader
-integration case did not expose the reverted fix in its initial seed sample.
+integration case did not expose the reverted fix, under random scheduling nor
+under PCT at up to 256 runs a seed. The race needs a preemption in a narrow
+window between two sessions' shutdowns, out of thousands of steps.
 
 ## CI and local validation
 
@@ -131,7 +138,8 @@ jobs retain real-OS coverage on both platforms, also with five-minute test-step
 limits so a missing OS acknowledgement cannot hang CI indefinitely.
 
 Locally on macOS arm64, the complete shuttle run passed 213 unit tests plus
-the compile-only doctest in 19.24 seconds, excluding compilation. Formatting,
+the compile-only doctest in 55 seconds, excluding compilation, on a machine
+busy with other builds. Formatting,
 Clippy with all targets/features and warnings denied, and the ordinary suite
 (91 unit tests plus the doctest) passed. No `verus!` body changed, so no proof
 check was required. Miri and benchmarks were not run.

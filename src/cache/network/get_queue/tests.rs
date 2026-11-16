@@ -75,7 +75,7 @@ fn concatenated(pieces: Vec<Bytes>) -> Bytes {
 
 #[test]
 fn gets_past_the_cap_wait_their_turn_first_come_first_served() {
-    crate::io::test_schedule::TestSchedule::check(|| {
+    crate::io::test_schedule::TestSchedule::once(|| {
         let queue = queue(2 * MIB, 0);
         let first = at_once(&queue, file(1), 0..MIB);
         let second = at_once(&queue, file(1), 4 * MIB..5 * MIB);
@@ -100,7 +100,7 @@ fn gets_past_the_cap_wait_their_turn_first_come_first_served() {
 /// once nothing is in flight.
 #[test]
 fn a_gets_bytes_count_once_for_each_racer() {
-    crate::io::test_schedule::TestSchedule::check(|| {
+    crate::io::test_schedule::TestSchedule::once(|| {
         let two = NonZeroU8::new(2).unwrap();
         let queue = queue(3 * MIB, 0);
         let first = sent(queue.turn(file(1), 0..MIB, two).now_or_never().unwrap());
@@ -119,7 +119,7 @@ fn a_gets_bytes_count_once_for_each_racer() {
 
 #[test]
 fn a_get_given_up_on_leaves_the_queue_or_gives_its_place_back() {
-    crate::io::test_schedule::TestSchedule::check(|| {
+    crate::io::test_schedule::TestSchedule::once(|| {
         let queue = queue(MIB, 0);
         let first = at_once(&queue, file(1), 0..MIB);
         let mut second = queue.turn(file(1), MIB..2 * MIB, ONE).boxed();
@@ -145,7 +145,7 @@ fn a_get_given_up_on_leaves_the_queue_or_gives_its_place_back() {
 /// them all.
 #[test]
 fn waiting_gets_of_adjacent_bytes_go_as_one() {
-    crate::io::test_schedule::TestSchedule::check(|| {
+    crate::io::test_schedule::TestSchedule::once(|| {
         let queue = queue(4 * MIB, 4 * MIB);
         let first = at_once(&queue, file(9), 0..4 * MIB);
         let mut middle = queue.turn(file(1), MIB..2 * MIB, ONE).boxed();
@@ -191,7 +191,7 @@ fn waiting_gets_of_adjacent_bytes_go_as_one() {
 /// only GETs of one request.
 #[test]
 fn waiting_gets_merge_up_to_a_size_and_the_room_left() {
-    crate::io::test_schedule::TestSchedule::check(|| {
+    crate::io::test_schedule::TestSchedule::once(|| {
         for (most, merged_up_to) in [(4 * MIB, 2 * MIB), (2 * MIB, 4 * MIB)] {
             let queue = queue(most, merged_up_to);
             let first = at_once(&queue, file(9), 0..most);
@@ -235,7 +235,7 @@ fn waiting_gets_merge_up_to_a_size_and_the_room_left() {
 /// took its turn, hands its joined GETs nothing: they wait again.
 #[test]
 fn a_merged_get_given_up_on_leaves_its_joined_gets_to_wait_again() {
-    crate::io::test_schedule::TestSchedule::check(|| {
+    crate::io::test_schedule::TestSchedule::once(|| {
         for taken in [true, false] {
             let queue = queue(2 * MIB, 4 * MIB);
             let first = at_once(&queue, file(9), 0..2 * MIB);
@@ -264,7 +264,7 @@ fn a_merged_get_given_up_on_leaves_its_joined_gets_to_wait_again() {
 /// room for itself alone doesn't send it.
 #[test]
 fn a_merged_get_waits_for_room_for_all_its_bytes() {
-    crate::io::test_schedule::TestSchedule::check(|| {
+    crate::io::test_schedule::TestSchedule::once(|| {
         let queue = queue(4 * MIB, 4 * MIB);
         let big = at_once(&queue, file(9), 0..3 * MIB);
         let small = at_once(&queue, file(9), 3 * MIB..4 * MIB);

@@ -1,13 +1,34 @@
 //! The checked-in schedule corpus. Never draw scheduler seeds from entropy.
 #[cfg(feature = "shuttle")]
-use shuttle::scheduler::{RandomScheduler, ReplayScheduler};
+use shuttle::scheduler::{PctScheduler, ReplayScheduler};
 
 pub(crate) struct TestSchedule;
 
 impl TestSchedule {
+    #[cfg(feature = "shuttle")]
+    const SEEDS: [u64; 2] = [0x57bf_0283, 0x0dc8_2a31];
+    /// PCT finds every bug of this many ordering constraints with a known
+    /// probability per iteration; random scheduling gives no such bound.
+    #[cfg(feature = "shuttle")]
+    const PCT_DEPTH: usize = 3;
+
     pub(crate) fn check(test: impl Fn() + Send + Sync + 'static) {
         #[cfg(feature = "shuttle")]
-        Self::iterations(8, test);
+        Self::iterations(16, test);
+        #[cfg(not(feature = "shuttle"))]
+        test();
+    }
+
+    /// A test with no thread of its own: one run, inside shuttle's runtime
+    /// because its primitives need one. PCT refuses to repeat a run with no
+    /// concurrency, and repeating it would explore nothing.
+    pub(crate) fn once(test: impl Fn() + Send + Sync + 'static) {
+        #[cfg(feature = "shuttle")]
+        shuttle::Runner::new(
+            PctScheduler::new_from_seed(Self::SEEDS[0], Self::PCT_DEPTH, 1),
+            Self::config(),
+        )
+        .run(test);
         #[cfg(not(feature = "shuttle"))]
         test();
     }
@@ -19,12 +40,14 @@ impl TestSchedule {
             return;
         }
         let test = std::sync::Arc::new(test);
-        for seed in [0x57bf_0283, 0x0dc8_2a31] {
-            eprintln!("shuttle: random seed={seed:#x}, iterations={iterations}");
-
+        for seed in Self::SEEDS {
+            eprintln!(
+                "shuttle: pct seed={seed:#x}, depth={}, iterations={iterations}",
+                Self::PCT_DEPTH
+            );
             let test = std::sync::Arc::clone(&test);
             shuttle::Runner::new(
-                RandomScheduler::new_from_seed(seed, iterations),
+                PctScheduler::new_from_seed(seed, Self::PCT_DEPTH, iterations),
                 Self::config(),
             )
             .run(move || test());

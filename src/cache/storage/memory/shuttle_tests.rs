@@ -39,7 +39,7 @@ fn read(pool: &MemoryPool, chunk: ChunkId, block: BlockKey) {
 /// for another, reads its own block's bytes or nothing.
 #[test]
 fn a_reader_racing_reuse_reads_its_block_or_nothing() {
-    crate::io::test_schedule::TestSchedule::iterations(64, || {
+    crate::io::test_schedule::TestSchedule::iterations(500, || {
         let (pool, chunk) = pool_holding(block(1));
         let reader = {
             let pool = Arc::clone(&pool);
@@ -65,7 +65,7 @@ fn a_reader_racing_reuse_reads_its_block_or_nothing() {
 /// Two readers and an evictor: whichever leaves last frees the chunk, once.
 #[test]
 fn the_last_to_leave_frees_the_chunk_once() {
-    crate::io::test_schedule::TestSchedule::iterations(64, || {
+    crate::io::test_schedule::TestSchedule::iterations(500, || {
         let (pool, chunk) = pool_holding(block(1));
         let handles: Vec<_> = (0..3)
             .map(|role| {

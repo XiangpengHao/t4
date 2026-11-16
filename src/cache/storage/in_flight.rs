@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn a_block_is_claimed_once_until_its_fetch_ends() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let in_flight = Arc::new(InFlight::default());
             let claim = in_flight.claim(key(0), Admit::Memory).unwrap();
             let fetch = in_flight.claim(key(0), Admit::Disk).unwrap_err();
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn a_waiter_waits_until_the_fetch_ends() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let in_flight = Arc::new(InFlight::default());
             let claim = in_flight.claim(key(0), Admit::Memory).unwrap();
             let fetch = in_flight.get(key(0)).unwrap();
@@ -329,7 +329,7 @@ mod tests {
     /// waiters take.
     #[test]
     fn a_discarded_blocks_fetch_passes_its_bytes_to_its_waiters() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let in_flight = Arc::new(InFlight::default());
             let claim = in_flight.claim(key(0), Admit::Discard).unwrap();
             let fetch = in_flight.get(key(0)).unwrap();
@@ -347,7 +347,7 @@ mod tests {
     /// once no racer is left: its waiters fetch the block themselves.
     #[test]
     fn the_last_request_to_end_without_the_block_abandons_the_fetch() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let in_flight = Arc::new(InFlight::default());
             let mut claim = in_flight.claim(key(0), Admit::Memory).unwrap();
             claim.fetched_by(NonZeroU8::new(2).unwrap());
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn the_first_request_to_cache_the_block_ends_the_fetch() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let in_flight = Arc::new(InFlight::default());
             let claim = in_flight.claim(key(0), Admit::Memory).unwrap();
             let fetch = in_flight.get(key(0)).unwrap();

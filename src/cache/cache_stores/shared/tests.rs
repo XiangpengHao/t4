@@ -123,7 +123,7 @@ fn frames_cross_a_socket_whole() {
 #[cfg(feature = "shuttle")]
 #[test]
 fn frames_sent_together_are_taken_from_one_read() {
-    crate::io::test_schedule::TestSchedule::check(|| {
+    crate::io::test_schedule::TestSchedule::once(|| {
         let (one, other) = UnixStream::pair().unwrap();
         let one = FrameSocket::new(one).unwrap();
         let mut other = FrameReceiver::new(FrameSocket::new(other).unwrap());

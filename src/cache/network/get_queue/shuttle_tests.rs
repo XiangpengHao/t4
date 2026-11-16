@@ -21,7 +21,7 @@ const BLOCK: u64 = 8;
 const MOST: u64 = 2 * BLOCK;
 
 fn explore(test: impl Fn() + Send + Sync + 'static) {
-    TestSchedule::iterations(64, test);
+    TestSchedule::iterations(500, test);
 }
 
 /// The file every GET is of: a version of the process's own cache.

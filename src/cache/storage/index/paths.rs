@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn blocks_are_whole_but_the_last() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let block = BLOCK_SIZE_U64;
             let version = PathTable::new()
                 .resolve(b"p", Some("v1"), 2 * block + 10)
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn the_same_version_resolves_to_the_same_id() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let table = PathTable::new();
             let file = table.resolve(b"a/b.parquet", Some("v1"), 100).unwrap();
             assert_eq!(file.size(), 100);
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn a_new_version_takes_a_fresh_id_and_the_path() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let table = PathTable::new();
             let v1 = id_of(&table, "p", "v1", 100);
             let v2 = id_of(&table, "p", "v2", 100);
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn objects_the_cache_cannot_hold_are_refused() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let table = PathTable::new();
             assert_eq!(
                 table.resolve(b"p", None, 100),
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn fresh_ids_never_repeat() {
-        crate::io::test_schedule::TestSchedule::check(|| {
+        crate::io::test_schedule::TestSchedule::once(|| {
             let table = PathTable::new();
             let mut seen = HashSet::new();
             for round in 0..50 {

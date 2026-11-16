@@ -35,7 +35,7 @@ fn pick(policy: &ClockPolicy, count: usize) -> Vec<u32> {
 /// it.
 #[test]
 fn every_admission_is_picked_once() {
-    crate::io::test_schedule::TestSchedule::iterations(64, || {
+    crate::io::test_schedule::TestSchedule::iterations(500, || {
         let policy = Arc::new(ClockPolicy::new(
             NonZeroU32::new(66).unwrap(),
             NonZeroU32::MIN,
@@ -90,7 +90,7 @@ fn every_admission_is_picked_once() {
 /// moves it to memory.
 #[test]
 fn of_two_racing_first_disk_hits_one_promotes() {
-    crate::io::test_schedule::TestSchedule::iterations(64, || {
+    crate::io::test_schedule::TestSchedule::iterations(500, || {
         let policy = Arc::new(ClockPolicy::new(NonZeroU32::MIN, NonZeroU32::MIN));
         admit(&policy, Tier::Disk, 0);
         let hits: Vec<_> = (0..2)
