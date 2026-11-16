@@ -1,6 +1,3 @@
-//! A fill: a read's fetched bytes taken as they come in, into the read's
-//! output and each block into its place in the cache ([`FetchedBlocks`]).
-
 use std::num::{NonZeroU8, NonZeroU32};
 use std::ops::Range;
 use std::time::Duration;
@@ -23,20 +20,6 @@ use super::ObjectCache;
 use super::partial_read::{BlockFate, FetchBlockPlan, PartialRead, PlannedFetch};
 
 impl ObjectCache {
-    /// Takes `fetch`, the bytes of one of `read`'s GETs, as they come in
-    /// ([`FetchedBlocks`]): each block the read asked for into its output,
-    /// over the pages of it the block covers, and each block whole into its
-    /// place in the cache, where the placement policy said it goes; the
-    /// bytes of blocks the cache holds already, or another read is fetching,
-    /// dropped. Each fetch is taken once.
-    ///
-    /// # Errors
-    ///
-    /// If the output's pages can't be lent.
-    ///
-    /// # Panics
-    ///
-    /// If `fetch` isn't the bytes of one of the read's GETs not taken yet.
     pub(in crate::cache) fn receive(
         &self,
         read: &mut PartialRead,
@@ -82,9 +65,6 @@ impl ObjectCache {
         })
     }
 
-    /// Takes `fetched`, the file's bytes of `fetch`, in one piece, as a
-    /// fetch whose answer comes in one does: for tests, which have the
-    /// bytes at hand.
     #[cfg(test)]
     pub(in crate::cache) async fn take_fetched(
         &self,
@@ -97,10 +77,6 @@ impl ObjectCache {
         blocks.finish().await
     }
 
-    /// Where `key`'s block, `len` bytes, lands as it is fetched: a chunk of
-    /// the tier `admit` names, lent to take its bytes; a buffer, for the
-    /// reads waiting on its fetch, if the policy discards it. Nowhere if a
-    /// tier holds it already, or that tier has no room even after evicting.
     async fn landing(&self, key: BlockKey, admit: Admit, len: usize) -> Landing<'_> {
         if self.blocks.get(key).is_some() {
             return Landing::Nowhere;
@@ -115,8 +91,7 @@ impl ObjectCache {
                     let (chunk, lent) = writer.lend_for_read(&self.memory, pages);
                     Landing::Memory { chunk, lent }
                 }
-                // No room, or an eviction's write failed: the block goes
-                // uncached, as one the cache fails to keep.
+                // An eviction's failed write leaves the block uncached, not the read failed.
                 Ok(None) | Err(_) => Landing::Nowhere,
             },
             Admit::Disk => {
@@ -136,15 +111,10 @@ impl ObjectCache {
         }
     }
 
-    /// Caches `key`'s block where it landed, all of it in: publishes its
-    /// memory chunk, or writes its disk chunk and then publishes that. A
-    /// block that a tier came to hold meanwhile, or whose write fails, goes
-    /// uncached.
     async fn cache_landed(&self, key: BlockKey, landing: Landing<'_>) {
         match landing {
             Landing::Memory { chunk, lent } => {
-                // Published before the index names it, so that a read that
-                // finds the entry finds the chunk open.
+                // Published before the index names it: a read that finds the entry finds it open.
                 let reader = lent.publish(chunk, key);
                 if self
                     .blocks
@@ -152,8 +122,7 @@ impl ObjectCache {
                 {
                     self.placement.on_admit(Tier::Memory, reader.chunk(), key);
                 } else {
-                    // Another fetch of the block cached it first. No entry
-                    // names this chunk: it goes back when `reader` drops.
+                    // Another fetch cached it first; the chunk goes back when `reader` drops.
                     reader.unpublish();
                 }
             }
@@ -176,34 +145,19 @@ impl ObjectCache {
     }
 }
 
-/// A fetch's bytes as they come in ([`ObjectCache::receive`]), each put
-/// where it goes: into the read's output, over the pages of it the fetch
-/// covers; and each block's into its place in the cache, which it takes as
-/// the block's first byte comes. [`Self::finish`] caches the blocks once
-/// every byte is in. Dropped before, as when the fetch fails, it caches
-/// nothing, and gives the chunks it took back.
-///
-/// Each byte is copied twice: into the output, and into the cache. The
-/// output is the caller's, never the cache's memory.
+/// Each byte is copied twice: the output is the caller's, never the cache's memory.
 pub(in crate::cache) struct FetchedBlocks<'c> {
     cache: &'c ObjectCache,
     version: FileVersion,
-    /// The file's bytes the fetch holds: whole blocks, from a block's start.
+    /// Whole blocks, from a block's start.
     range: Range<u64>,
     race: NonZeroU8,
-    /// When one more request races the fetch, if it hasn't finished.
     late: Option<Duration>,
-    /// How many of them have come in.
     received: u64,
-    /// The first block's number.
     first: u32,
-    /// Where each block's bytes go, the first block's first.
     blocks: Vec<FetchedBlock<'c>>,
 }
 
-/// Where one fetched block's bytes go: its place in the cache, and the
-/// read's output over its pages, if the read asked for it; and the requests
-/// the read holds in its fetch, if it is to be cached.
 struct FetchedBlock<'c> {
     landing: Landing<'c>,
     output: Option<FetchedOutput>,
@@ -211,31 +165,22 @@ struct FetchedBlock<'c> {
 }
 
 impl FetchedBlocks<'_> {
-    /// The file's bytes the fetch holds.
     pub(in crate::cache) fn range(&self) -> Range<u64> {
         self.range.clone()
     }
 
-    /// The version of the file they are of.
     pub(in crate::cache) fn file(&self) -> FileVersionId {
         self.version.id()
     }
 
-    /// How many identical requests race for them.
     pub(in crate::cache) fn race(&self) -> NonZeroU8 {
         self.race
     }
 
-    /// When one more request races them, if they aren't all in.
     pub(in crate::cache) fn late_race(&self) -> Option<Duration> {
         self.late
     }
 
-    /// Takes `piece`, the fetch's next bytes.
-    ///
-    /// # Errors
-    ///
-    /// If the fetch brings more bytes than it holds.
     pub(in crate::cache) async fn land(&mut self, mut piece: &[u8]) -> Result<()> {
         let len = self.range.end - self.range.start;
         if self.received + piece.len() as u64 > len {
@@ -260,12 +205,6 @@ impl FetchedBlocks<'_> {
         Ok(())
     }
 
-    /// Caches the blocks where they landed, once every byte is in, and ends
-    /// the read's requests in their fetches.
-    ///
-    /// # Errors
-    ///
-    /// If the fetch brought fewer bytes than it holds: nothing is cached.
     pub(in crate::cache) async fn finish(self) -> Result<()> {
         if self.received != self.range.end - self.range.start {
             return Err(Self::wrong_length(&self.range, "fewer"));
@@ -283,8 +222,7 @@ impl FetchedBlocks<'_> {
                 output,
                 claim,
             } = block;
-            // The read's output over the block is whole: the read may take
-            // its bytes.
+            // Released before caching: the read may take its bytes already.
             drop(output);
             let key = BlockKey::new(version.id(), index);
             let passed = match landing {
@@ -294,9 +232,7 @@ impl FetchedBlocks<'_> {
                     None
                 }
             };
-            // The fetch ends with the block where a tier holds it, whether
-            // this fetch or another put it there, or, one no tier keeps, with
-            // its bytes, for the reads waiting.
+            // Ends with wherever a tier holds the block, even if another fetch put it there.
             if let Some(claim) = claim {
                 match passed {
                     Some(bytes) => claim.passed(bytes),
@@ -308,7 +244,6 @@ impl FetchedBlocks<'_> {
         Ok(())
     }
 
-    /// Decides where block `index`, its first byte come, lands.
     async fn decide_landing(&mut self, index: usize) {
         if let Landing::Due(admit) = self.blocks[index].landing {
             let number = self.first + u32::try_from(index).expect("a fetch's blocks fit a u32");
@@ -318,8 +253,6 @@ impl FetchedBlocks<'_> {
         }
     }
 
-    /// Block `index`'s bytes: a block's, but for the file's last, which may
-    /// be shorter.
     fn block_len(&self, index: usize) -> usize {
         let start = index as u64 * BLOCK_SIZE_U64;
         PartialRead::offset((self.range.end - self.range.start - start).min(BLOCK_SIZE_U64))
@@ -333,15 +266,12 @@ impl FetchedBlocks<'_> {
     }
 }
 
-/// The pages of a read's output a fetch covers, lent to it, and the file's
-/// byte they start at.
 pub(super) struct FetchedOutput {
     pub(super) pages: AlignedBuf,
     pub(super) start: u64,
 }
 
 impl FetchedOutput {
-    /// Copies what of `bytes`, the file's from `at`, falls in these pages.
     fn copy_in(&mut self, at: u64, bytes: &[u8]) {
         let end = self.start + self.pages.len() as u64;
         let overlap = at.max(self.start)..(at + bytes.len() as u64).min(end);
@@ -357,31 +287,22 @@ impl FetchedOutput {
     }
 }
 
-/// Where one fetched block's bytes land.
 enum Landing<'c> {
-    /// Not yet decided: where the read said the block goes.
     Due(Admit),
-    /// A memory chunk, lent as a buffer until the block is in.
     Memory {
         chunk: AlignedBuf,
         lent: LentMemoryChunk<'c>,
     },
-    /// A buffer the write to a disk chunk takes once the block is in.
     Disk {
         pages: AlignedBuf,
         writer: DiskChunkWriter<'c>,
     },
-    /// A buffer the bytes of a block no tier keeps collect in, for the
-    /// reads waiting on its fetch to take theirs from; the block goes
-    /// uncached.
+    /// A discarded block's bytes, kept for the reads waiting on its fetch.
     Passing(Vec<u8>),
-    /// Nowhere: the block goes uncached.
     Nowhere,
 }
 
 impl Landing<'_> {
-    /// Copies `bytes` into the block's place from its byte `at`. A block's
-    /// bytes come in order.
     fn copy_in(&mut self, at: usize, bytes: &[u8]) {
         match self {
             Self::Memory { chunk, .. } => chunk.copy_in(at, bytes),

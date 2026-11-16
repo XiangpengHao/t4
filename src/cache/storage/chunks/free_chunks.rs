@@ -1,26 +1,18 @@
 use crate::cache::ChunkId;
 
-/// One bit per chunk of a tier, set while the chunk is taken
-/// (`doc/03-cache.md`, decision 2). Any free chunk serves any block, so an
-/// allocation is any clear bit: nothing fragments, and nothing merges.
 #[derive(Debug)]
 pub(super) struct FreeChunks {
-    /// Chunk `i`'s bit is bit `i % 64` of word `i / 64`. The bits past the
-    /// last chunk are set, so no allocation finds them.
+    /// The bits past the last chunk are set, so no allocation finds them.
     taken: Box<[u64]>,
     chunk_count: u32,
     free_count: u32,
-    /// The word the last allocation or free touched: where the next
-    /// allocation starts looking.
     cursor: usize,
-    /// Set once the tier hands out no chunk any more ([`Self::close`]).
     closed: bool,
 }
 
 impl FreeChunks {
     const WORD_BITS: usize = u64::BITS as usize;
 
-    /// `chunk_count` chunks, all free.
     pub(super) fn new(chunk_count: u32) -> Self {
         let chunks = chunk_count as usize;
         let mut taken = vec![0; chunks.div_ceil(Self::WORD_BITS)].into_boxed_slice();
@@ -37,9 +29,6 @@ impl FreeChunks {
         }
     }
 
-    /// Takes a free chunk, `None` if every chunk is taken, or the tier is
-    /// closed: the first clear bit from the cursor on, wrapping around,
-    /// skipping full words.
     pub(super) fn allocate(&mut self) -> Option<ChunkId> {
         if self.free_count == 0 || self.closed {
             return None;
@@ -56,8 +45,6 @@ impl FreeChunks {
         Some(ChunkId::new((word_index * Self::WORD_BITS) as u32 + bit))
     }
 
-    /// Hands out no chunk from now on, for good: chunks freed still come
-    /// back, but none is written again.
     pub(super) fn close(&mut self) {
         self.closed = true;
     }
@@ -66,8 +53,6 @@ impl FreeChunks {
         self.closed
     }
 
-    /// Takes free `chunk` itself: one a snapshot says holds a block, as the
-    /// cache opens.
     pub(super) fn take(&mut self, chunk: ChunkId) {
         let (word_index, mask) = self.bit_of(chunk);
         assert_eq!(self.taken[word_index] & mask, 0, "{chunk:?} taken twice");
@@ -75,9 +60,7 @@ impl FreeChunks {
         self.free_count -= 1;
     }
 
-    /// Gives `chunk` back. A chunk freed twice could go to two blocks at
-    /// once, so that panics. The next allocation starts at it: in a full
-    /// cache, frees and allocations take turns.
+    /// The next allocation starts here: in a full cache, frees and allocations take turns.
     pub(super) fn free(&mut self, chunk: ChunkId) {
         let (word_index, mask) = self.bit_of(chunk);
         assert_ne!(self.taken[word_index] & mask, 0, "{chunk:?} freed twice");
@@ -97,10 +80,8 @@ impl FreeChunks {
         self.taken[word_index] & mask == 0
     }
 
-    /// The word holding `chunk`'s bit, and the bit's mask in it.
     fn bit_of(&self, chunk: ChunkId) -> (usize, u64) {
-        // The padding bits past the last chunk are set: freeing one would
-        // hand out a chunk that doesn't exist.
+        // Padding bits are set: freeing one would hand out a chunk that doesn't exist.
         assert!(
             chunk.index() < self.chunk_count,
             "{chunk:?} is past the tier's {} chunks",
@@ -117,8 +98,7 @@ mod tests {
 
     use super::*;
 
-    /// Two whole words and part of a third: allocations cross words, and the
-    /// last word has padding.
+    /// Allocations cross words, and the last word has padding.
     const CHUNKS: u32 = 2 * 64 + 5;
 
     fn allocate_all(free: &mut FreeChunks) -> BTreeSet<u32> {
@@ -148,8 +128,6 @@ mod tests {
         assert_eq!(allocate_all(&mut free), BTreeSet::from([3, 64, CHUNKS - 1]));
     }
 
-    /// A closed tier hands out no chunk, not even one freed since; and
-    /// takes its frees back all the same.
     #[test]
     fn a_closed_tier_hands_out_no_chunk() {
         let mut free = FreeChunks::new(CHUNKS);

@@ -1,7 +1,3 @@
-//! What the cache keeps across a restart (`doc/10-spiral-integration.md`,
-//! decision 7): its disk tier, captured as the cache drops and restored as
-//! the next cache on its files opens. Memory's blocks go with the process.
-
 use super::super::index::Location;
 use super::super::snapshot::{DiskSnapshot, VersionOnDisk};
 use super::ObjectCache;
@@ -9,13 +5,7 @@ use crate::cache::BlockKey;
 use crate::cache::policy::Tier;
 
 impl ObjectCache {
-    /// What the disk tier holds now: each path's version with blocks on
-    /// disk, those blocks' chunks, and the id the next version takes.
-    ///
-    /// Each block it names was written whole before it was published, and
-    /// so before the index named its chunk; a block being written isn't
-    /// named yet. A version a newer one took the path from is left out:
-    /// no read finds it again.
+    /// Safe mid-write: the index names a chunk only once its block is written whole.
     pub(super) fn capture_snapshot(&self) -> DiskSnapshot {
         let mut held = Vec::new();
         self.paths.scan(|path, e_tag, version| {
@@ -31,11 +21,7 @@ impl ObjectCache {
         DiskSnapshot::new(self.paths.next_id(), versions)
     }
 
-    /// Puts back what `snapshot` says the disk tier held, as the cache
-    /// opens: each version's entry, each block's entry and chunk, and each
-    /// chunk told to the placement policy as admitted, as a fill tells it.
-    /// The snapshot was checked whole as it was read: each chunk in it once,
-    /// and in the tier.
+    /// The snapshot was checked as it was read: each chunk in it once, and in the tier.
     pub(super) fn restore(&self, snapshot: &DiskSnapshot) {
         self.paths.resume_ids_at(snapshot.next_id());
         for on_disk in snapshot.versions() {
@@ -51,18 +37,8 @@ impl ObjectCache {
         }
     }
 
-    /// Writes no more to disk, and keeps the disk tier for the next cache on
-    /// its files, as dropping the cache does: for a process that exits
-    /// without dropping it. Reads go on, from both tiers and the remote,
-    /// but no block is written to disk again. The tier is closed first, so
-    /// that the snapshot names only chunks no write will touch: an
-    /// allocation in flight either took its chunk before, a chunk the
-    /// snapshot can't name, as no block is published in it, or finds the
-    /// tier closed. Blocks: it flushes the cache files.
-    ///
-    /// # Errors
-    ///
-    /// If the snapshot can't be kept: the next cache starts cold.
+    /// For a process that exits without dropping the cache. The tier closes first, so
+    /// the snapshot names only chunks no write will touch.
     pub(in crate::cache) fn shut_down(&self) -> std::io::Result<()> {
         self.disk.chunks().close();
         match self.disk.snapshot() {
@@ -71,18 +47,12 @@ impl ObjectCache {
         }
     }
 
-    /// The size of the version the cache holds of the file at `path`, if it
-    /// holds one: resolved by a read since it opened, or restored.
     pub(in crate::cache) fn known_size(&self, path: &[u8]) -> Option<u64> {
         self.paths.known_size(path)
     }
 }
 
-/// The disk tier kept as the cache drops, for the next cache on its files,
-/// before the files close and their lock goes with them: the cache drops
-/// when nothing reads through it any more. A snapshot that can't be kept
-/// leaves the next cache cold. Kept again after [`ObjectCache::shut_down`]:
-/// the writes in flight then may have published blocks since.
+/// Kept again after `shut_down`: writes in flight then may have published blocks since.
 impl Drop for ObjectCache {
     fn drop(&mut self) {
         if let Some(snapshot) = self.disk.snapshot() {

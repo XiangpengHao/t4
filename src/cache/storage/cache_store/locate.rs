@@ -1,6 +1,3 @@
-//! Where a block a read needs is: held in a tier, being fetched by another
-//! read, or remote, claimed for the read's own fetch.
-
 use std::num::NonZeroU8;
 use std::ops::Range;
 
@@ -16,8 +13,6 @@ use super::partial_read::{BlockFate, FetchBlockPlan};
 use super::{CacheableFile, ObjectCache};
 
 impl ObjectCache {
-    /// Where `block` is, for a read of `context`: held in a tier, being
-    /// fetched by another read, or remote, claimed for the read's own fetch.
     pub(super) fn locate(&self, block: &PlannedBlock, context: &BlockRead<'_>) -> Located<'_> {
         let key = block.key();
         let mut location = block.location();
@@ -35,11 +30,8 @@ impl ObjectCache {
                 Ok(claim) => claim,
                 Err(fetch) => return Located::InFlight(fetch),
             };
-            // A fetch may have cached the block since the index said it was
-            // remote, where the index names it now: not the entry just found
-            // stale, a chunk an eviction closed. The claim ends with the
-            // block there, for any read that joined it meanwhile, and this
-            // read takes it from there too.
+            // A fetch may have cached the block since `hold` found it remote;
+            // the stale entry `hold` gave up on doesn't count.
             match self.blocks.get(key) {
                 Some(cached) if Some(cached) != location => {
                     claim.ended(Some(cached));
@@ -55,10 +47,6 @@ impl ObjectCache {
         }
     }
 
-    /// What becomes of block `index` of `file`, fetched by a GET racing
-    /// `race`, widened past the read of `range`: dropped if a tier holds it
-    /// or another read is fetching it, else placed as the placement policy
-    /// says, and claimed for the GET.
     pub(super) fn widened_block(
         &self,
         file: &CacheableFile<'_>,
@@ -95,14 +83,7 @@ impl ObjectCache {
         }
     }
 
-    /// Holds the chunk with `key`'s block, the index having said it is at
-    /// `location`.
-    ///
-    /// An entry may name a chunk that no longer holds the block: eviction
-    /// closed the chunk, and is about to drop the entry, or moved the block
-    /// to the other tier, or the chunk already holds another block. So the
-    /// index is read again, until it names the chunk that holds the block,
-    /// or no change.
+    /// Retries while the index changes: an entry may name a chunk eviction closed or reused.
     pub(super) fn hold(&self, key: BlockKey, mut location: Option<Location>) -> HeldBlock<'_> {
         loop {
             let held = match location {
@@ -126,22 +107,16 @@ impl ObjectCache {
     }
 }
 
-/// A block a read holds while it takes its bytes, or found remote: in
-/// neither memory nor disk.
 pub(super) enum HeldBlock<'cache> {
     Memory(MemoryChunkReader<'cache>),
     Disk(DiskChunkReader<'cache>),
     Remote,
 }
 
-/// Where a block a read needs is ([`ObjectCache::locate`]).
 pub(super) enum Located<'c> {
     Memory(MemoryChunkReader<'c>),
     Disk(DiskChunkReader<'c>),
-    /// Another read is fetching it.
     InFlight(Arc<BlockFetch>),
-    /// No tier holds it, nor is another read fetching it: the read fetches
-    /// it, claimed if it is to be cached.
     Remote {
         admit: Admit,
         claim: Option<FetchClaim>,

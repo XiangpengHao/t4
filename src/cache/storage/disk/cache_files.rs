@@ -1,7 +1,3 @@
-//! [`CacheFiles`]: the disk tier, its chunks striped over its cache files,
-//! one a drive, read and written by direct I/O through one I/O worker
-//! (`doc/03-cache.md`, decisions 2, 3 and 9; `doc/04-multi-device.md`).
-
 use std::fs::{File, OpenOptions, TryLockError};
 use std::future::Future;
 use std::num::NonZeroU32;
@@ -18,9 +14,6 @@ use crate::io::io_task::PageWrite;
 use crate::io::io_worker::IoWorker;
 use crate::io::sync::Arc;
 
-/// A file, by whatever path it is reached: its device and inode. The first
-/// cache file's names its owner's address (`doc/11-shared-mode.md`,
-/// decision 6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::cache) struct FileIdentity {
     device: u64,
@@ -28,12 +21,10 @@ pub(in crate::cache) struct FileIdentity {
 }
 
 impl FileIdentity {
-    /// The file `inode` on `device`.
     pub(in crate::cache) fn new(device: u64, inode: u64) -> Self {
         Self { device, inode }
     }
 
-    /// The identity of the file `file` is open on.
     pub(in crate::cache) fn of(file: &File) -> std::io::Result<Self> {
         let meta = file.metadata()?;
         Ok(Self {
@@ -42,18 +33,15 @@ impl FileIdentity {
         })
     }
 
-    /// The device the file is on.
     pub(in crate::cache) fn device(self) -> u64 {
         self.device
     }
 
-    /// The file's inode on its device.
     pub(in crate::cache) fn inode(self) -> u64 {
         self.inode
     }
 }
 
-/// A cache file the user gives: where it is, and the bytes it may take.
 #[derive(Clone, Debug)]
 pub(in crate::cache) struct DiskFile {
     path: PathBuf,
@@ -70,31 +58,17 @@ impl DiskFile {
     }
 }
 
-/// The disk tier: its chunks, striped over its files by number, and the
-/// one I/O worker that reads and writes them all.
 pub(in crate::cache) struct CacheFiles {
     io: IoWorker,
     chunks: Arc<DiskChunks>,
-    /// The first file's identity, which names its owner's address
-    /// (`doc/11-shared-mode.md`, decision 6); `None` for simulated files.
+    /// Names its owner's address (`doc/11-shared-mode.md`, decision 6).
     first_file: Option<FileIdentity>,
-    /// Where the disk tier is kept across a restart; `None` for simulated
-    /// files, and files that don't say when they were made.
     snapshot: Option<SnapshotFile>,
-    /// The room files allocated on demand leave their drives; `None` for
-    /// files allocated eagerly, and simulated ones.
     headroom: Option<DriveHeadroom>,
 }
 
 impl CacheFiles {
-    /// Opens `files`, each made if missing, with `queue_depth` I/Os in
-    /// flight across them. Each holds as many chunks as the smallest has
-    /// room for (`doc/04-multi-device.md`, decision 3), one at least, and
-    /// takes only those, allocated on the drive as `allocation` says. Every
-    /// chunk starts free, but those a snapshot the cache takes back names
-    /// (`SnapshotFile`). Direct I/O unless `direct_io` is off, and no
-    /// `O_DSYNC`: a snapshot flushes the files before it is kept, and
-    /// nothing else on disk has to outlast a crash.
+    /// No `O_DSYNC`: a snapshot flushes the files first, and nothing else must survive a crash.
     pub(in crate::cache) fn open(
         files: &[DiskFile],
         queue_depth: NonZeroU32,
@@ -128,8 +102,6 @@ impl CacheFiles {
         Ok(files)
     }
 
-    /// The disk tier on the `files` files `io` reads and writes, of
-    /// `chunks_per_file` chunks each.
     pub(in crate::cache) fn on(
         io: IoWorker,
         files: NonZeroU32,
@@ -148,20 +120,14 @@ impl CacheFiles {
         &self.chunks
     }
 
-    /// The identity of the first cache file; `None` if the files are
-    /// simulated.
     pub(in crate::cache) fn first_file(&self) -> Option<FileIdentity> {
         self.first_file
     }
 
-    /// Where the disk tier is kept across a restart; `None` if it isn't.
     pub(in crate::cache) fn snapshot(&self) -> Option<&SnapshotFile> {
         self.snapshot.as_ref()
     }
 
-    /// Whether a block may be written now: never once the tier is closed;
-    /// always to files allocated eagerly; to files allocated on demand,
-    /// while every drive keeps its room.
     pub(in crate::cache) fn takes_a_block(&self) -> bool {
         !self.chunks.is_closed()
             && self
@@ -170,7 +136,6 @@ impl CacheFiles {
                 .is_none_or(DriveHeadroom::allows_a_block)
     }
 
-    /// Writes `pages` at the start of the chunk `writer` holds.
     pub(in crate::cache) async fn write(
         &self,
         writer: &DiskChunkWriter<'_>,
@@ -183,8 +148,6 @@ impl CacheFiles {
         self.io.write(vec![write])?.await
     }
 
-    /// Reads the first pages of the chunk `reader` holds into `into`, as
-    /// many as it has room for, and gives it back once read.
     pub(in crate::cache) async fn read_chunk_start(
         &self,
         reader: &DiskChunkReader<'_>,
@@ -193,10 +156,7 @@ impl CacheFiles {
         self.io.read_exact_at(into, reader.position()).await
     }
 
-    /// Reads the pages of the chunk `reader` holds from `from`, an offset in
-    /// it, into `into`, as many as it has room for. The read is submitted
-    /// now, so reads started together run at once, and the future is done
-    /// when it lands.
+    /// Submits now, not when polled, so reads started together run at once.
     pub(in crate::cache) fn read_into(
         &self,
         reader: &DiskChunkReader<'_>,
@@ -217,14 +177,7 @@ impl CacheFiles {
         })
     }
 
-    /// Opens the cache file at `path` and takes it for this cache: an
-    /// exclusive `flock`, held as long as the file is open, so until the
-    /// I/O worker that owns it is dropped, and the snapshot's copy of it. A
-    /// file another cache holds, in this process or another, by whatever
-    /// path, is [`Error::Busy`]. The kernel drops the lock when its holder
-    /// exits, however it exits. A `flock`, not an `fcntl` record lock:
-    /// record locks don't conflict within a process, and closing any
-    /// descriptor of the file drops them.
+    /// `flock`, not `fcntl`: record locks don't conflict within a process and drop on any close.
     fn open_file(path: &Path, direct_io: bool) -> Result<File> {
         let mut open = OpenOptions::new();
         open.read(true).write(true).create(true).truncate(false);

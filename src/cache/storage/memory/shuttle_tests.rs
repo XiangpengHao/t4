@@ -1,6 +1,3 @@
-//! The memory pool under shuttle: readers racing the eviction and reuse of
-//! the chunk they read.
-
 use std::num::NonZeroU32;
 
 use super::MemoryPool;
@@ -11,8 +8,6 @@ fn block(file: u64) -> BlockKey {
     BlockKey::new(FileVersionId::new(file), 0)
 }
 
-/// A one-chunk pool, the chunk holding `block` published, every byte its
-/// file version id's.
 fn pool_holding(block: BlockKey) -> (Arc<MemoryPool>, ChunkId) {
     let pool = Arc::new(MemoryPool::new(NonZeroU32::MIN).unwrap());
     let chunk = publish(&pool, block).unwrap();
@@ -25,8 +20,6 @@ fn publish(pool: &MemoryPool, block: BlockKey) -> Option<ChunkId> {
     Some(writer.publish(block).chunk())
 }
 
-/// Reads `block` from `chunk`, if it still holds it, and checks the bytes
-/// are `block`'s.
 fn read(pool: &MemoryPool, chunk: ChunkId, block: BlockKey) {
     if let Some(reader) = pool.read(chunk, block) {
         let bytes = reader.bytes();
@@ -35,8 +28,6 @@ fn read(pool: &MemoryPool, chunk: ChunkId, block: BlockKey) {
     }
 }
 
-/// A reader racing the eviction of its block, and the reuse of its chunk
-/// for another, reads its own block's bytes or nothing.
 #[test]
 fn a_reader_racing_reuse_reads_its_block_or_nothing() {
     shuttle::check_pct(
@@ -66,7 +57,6 @@ fn a_reader_racing_reuse_reads_its_block_or_nothing() {
     );
 }
 
-/// Two readers and an evictor: whichever leaves last frees the chunk, once.
 #[test]
 fn the_last_to_leave_frees_the_chunk_once() {
     shuttle::check_pct(

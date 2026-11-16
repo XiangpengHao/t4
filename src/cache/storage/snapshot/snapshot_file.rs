@@ -1,8 +1,3 @@
-//! [`SnapshotFile`]: where a cache's snapshot is kept, beside its first
-//! cache file; what a snapshot must match to be taken back; and the order
-//! in which it is written, so that one taken back never names a chunk
-//! whose bytes aren't on the drive.
-
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
@@ -12,23 +7,15 @@ use std::time::{Duration, UNIX_EPOCH};
 use super::{DiskSnapshot, SnapshotReader, SnapshotWriter};
 use crate::cache::storage::FileIdentity;
 
-/// Where a cache's snapshot is kept: `<first cache file>.snapshot`, written
-/// as `<first cache file>.snapshot.tmp` and renamed over it. And what a
-/// snapshot must match to be taken back: the cache files' layout.
 pub(in crate::cache) struct SnapshotFile {
     path: PathBuf,
     layout: CacheLayout,
-    /// The cache files, opened again, flushed before a snapshot that names
-    /// their chunks is written. They share the files' lock, held until
-    /// these close too.
+    /// Clones share the files' `flock`: it is held until these close too.
     cache_files: Vec<File>,
 }
 
 impl SnapshotFile {
-    /// The snapshot of the cache whose files, the first at `first`, are
-    /// `opened`, each of `chunks_per_file` chunks. `None` if a file doesn't
-    /// say when it was made, as some file systems don't, or can't be opened
-    /// again: such a cache starts cold at each build, as before snapshots.
+    /// `None` on file systems with no creation time: such a cache starts cold.
     pub(in crate::cache) fn beside(
         first: &Path,
         opened: &[File],
@@ -51,15 +38,7 @@ impl SnapshotFile {
         })
     }
 
-    /// The snapshot the last cache on these files kept, if it matches
-    /// them; `None` if there is none, or it doesn't. Whatever is there is
-    /// removed first, and durably, before the cache writes a chunk: once it
-    /// runs, the cache reuses a chunk as soon as it frees it, and a snapshot
-    /// left would name bytes no longer there after a crash.
-    ///
-    /// # Errors
-    ///
-    /// If a snapshot is there and can't be removed.
+    /// Removed durably first: once chunks are reused, a snapshot left would name stale bytes.
     pub(in crate::cache) fn take(&self) -> io::Result<Option<DiskSnapshot>> {
         let read = std::fs::read(&self.path);
         if let Err(error) = &read
@@ -74,14 +53,7 @@ impl SnapshotFile {
             .and_then(|bytes| DiskSnapshot::decode(&bytes, &self.layout)))
     }
 
-    /// Keeps `snapshot`, whole or not at all: the cache files flushed first,
-    /// so that every chunk it names is on the drive, then the snapshot
-    /// written beside them and renamed into place, and the rename flushed.
-    ///
-    /// # Errors
-    ///
-    /// If a flush, the write or the rename fails: the next cache on these
-    /// files starts cold.
+    /// Flushes the cache files first, so every chunk the snapshot names is on the drive.
     pub(in crate::cache) fn keep(&self, snapshot: &DiskSnapshot) -> io::Result<()> {
         for file in &self.cache_files {
             file.sync_data()?;
@@ -98,15 +70,12 @@ impl SnapshotFile {
         self.sync_directory()
     }
 
-    /// Writes `bytes` to a file at `path`, made or emptied, and flushes it.
     fn write_whole(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let mut file = File::create(path)?;
         file.write_all(bytes)?;
         file.sync_data()
     }
 
-    /// Flushes the directory the snapshot is in: its removal, or its
-    /// rename.
     fn sync_directory(&self) -> io::Result<()> {
         let directory = match self.path.parent() {
             Some(parent) if !parent.as_os_str().is_empty() => parent,
@@ -115,23 +84,18 @@ impl SnapshotFile {
         File::open(directory)?.sync_all()
     }
 
-    /// The path the snapshot is kept at: for tests.
     #[cfg(all(test, not(feature = "shuttle")))]
     pub(in crate::cache) fn path(&self) -> &Path {
         &self.path
     }
 
-    /// What a snapshot must match: for tests.
     #[cfg(all(test, not(feature = "shuttle")))]
     pub(super) fn layout(&self) -> &CacheLayout {
         &self.layout
     }
 }
 
-/// What a snapshot must match to be taken back: the cache files, in order,
-/// each by its identity and when it was made, so that a snapshot of a file
-/// since made again, or of the files listed in another order, is never
-/// taken for theirs; and the chunks each holds.
+/// Creation times too: a file made again may reuse the inode.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct CacheLayout {
     chunks_per_file: u32,
@@ -139,7 +103,6 @@ pub(super) struct CacheLayout {
 }
 
 impl CacheLayout {
-    /// The disk tier's chunks; `None` past what a tier numbers.
     pub(super) fn chunk_count(&self) -> Option<u32> {
         u32::try_from(self.files.len())
             .ok()?
@@ -163,8 +126,7 @@ impl CacheLayout {
             .map(|_| {
                 let identity = FileIdentity::new(input.u64()?, input.u64()?);
                 let (seconds, nanos) = (input.u64()?, input.u32()?);
-                // A nanosecond count past a second would carry, and could
-                // overflow.
+                // A nanosecond count past a second would carry, and could overflow.
                 let created = (nanos < 1_000_000_000).then(|| Duration::new(seconds, nanos))?;
                 Some(FileStamp { identity, created })
             })
@@ -176,17 +138,13 @@ impl CacheLayout {
     }
 }
 
-/// A cache file as a snapshot names it: its identity, and when it was made.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileStamp {
     identity: FileIdentity,
-    /// Since the epoch.
     created: Duration,
 }
 
 impl FileStamp {
-    /// The stamp of the file `file` is open on; `None` if it doesn't say
-    /// when it was made.
     fn of(file: &File) -> Option<Self> {
         let meta = file.metadata().ok()?;
         let created = meta.created().ok()?.duration_since(UNIX_EPOCH).ok()?;
