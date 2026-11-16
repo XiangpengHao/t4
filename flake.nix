@@ -27,7 +27,14 @@
             overlays = [ (import rust-overlay) ];
           };
           llvmPackages = pkgs.llvmPackages_latest;
-          rustToolchain = pkgs.rust-bin.nightly.latest.default.override {
+          rustNightly = pkgs.rust-bin.nightly.latest;
+          ciRustToolchain = rustNightly.minimal.override {
+            extensions = [
+              "clippy"
+              "rustfmt"
+            ];
+          };
+          rustToolchain = rustNightly.default.override {
             extensions = [
               "rust-src"
               "rust-analyzer"
@@ -50,7 +57,7 @@
               };
             }
             .${system};
-          verusRustToolchain = pkgs.rust-bin.stable."1.97.1".default.override {
+          verusRustToolchain = pkgs.rust-bin.stable."1.97.1".minimal.override {
             extensions = [
               "rustc-dev"
               "llvm-tools"
@@ -74,7 +81,8 @@
 
             nativeBuildInputs = [
               pkgs.makeWrapper
-            ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.autoPatchelfHook ];
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.autoPatchelfHook ];
             buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               pkgs.zlib
               pkgs.stdenv.cc.cc.lib
@@ -138,6 +146,14 @@
         {
           packages.verus = verus;
           packages.verusfmt = verusfmt;
+
+          # CI checks only the root crate; benchmark and editor tools stay below.
+          devShells.ci = pkgs.mkShell {
+            packages = [
+              ciRustToolchain
+              verus
+            ];
+          };
 
           devShells.default = pkgs.mkShell {
             packages = [

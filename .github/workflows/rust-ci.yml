@@ -23,22 +23,34 @@ jobs:
       - name: Configure Nix cache
         uses: DeterminateSystems/magic-nix-cache-action@v14
 
+      - name: Prepare CI environment
+        run: nix develop .#ci -c rustc -vV
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: nix develop .#ci -c {0}
+          # Include Verus and its compiler as well as the nightly rustc identity
+          # detected by rust-cache. All checks write beneath target/.
+          key: ${{ hashFiles('flake.nix', 'flake.lock') }}
+          cache-bin: false
+
       - name: Check formatting
-        run: nix develop -c cargo fmt --all -- --check
+        run: nix develop .#ci -c cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: nix develop -c cargo clippy --all-targets --all-features -- -D warnings
+        run: nix develop .#ci -c cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run tests
         timeout-minutes: 15
-        run: nix develop -c cargo test
+        run: nix develop .#ci -c cargo test
 
       - name: Run proof check
-        run: nix develop -c cargo verus focus
+        run: nix develop .#ci -c cargo verus focus
 
       - name: Run shuttle tests
         timeout-minutes: 15
-        run: nix develop -c cargo test --features shuttle shuttle
+        run: nix develop .#ci -c cargo test --features shuttle shuttle
 
   macos:
     runs-on: macos-latest
@@ -52,12 +64,24 @@ jobs:
       - name: Configure Nix cache
         uses: DeterminateSystems/magic-nix-cache-action@v14
 
+      - name: Prepare CI environment
+        run: nix develop .#ci -c rustc -vV
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: nix develop .#ci -c {0}
+          # Include Verus and its compiler as well as the nightly rustc identity
+          # detected by rust-cache. All checks write beneath target/.
+          key: ${{ hashFiles('flake.nix', 'flake.lock') }}
+          cache-bin: false
+
       - name: Run Clippy
-        run: nix develop -c cargo clippy --all-targets --all-features -- -D warnings
+        run: nix develop .#ci -c cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run tests
         timeout-minutes: 15
-        run: nix develop -c cargo test
+        run: nix develop .#ci -c cargo test
 
       - name: Run proof check
-        run: nix develop -c cargo verus focus
+        run: nix develop .#ci -c cargo verus focus
