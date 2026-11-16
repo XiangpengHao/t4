@@ -1,22 +1,11 @@
 pub(crate) struct SimDisk {
     bytes: Vec<u8>,
     file: Option<std::fs::File>,
-    in_flight: Vec<InFlightWrite>,
-    next_write: u64,
 }
-
-struct InFlightWrite {
-    id: WriteId,
-    offset: u64,
-    bytes: Vec<u8>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct WriteId(u64);
 
 pub(super) enum Completion<'a> {
     Read { offset: u64, buf: &'a mut [u8] },
-    Write(WriteId),
+    Write { offset: u64, bytes: &'a [u8] },
 }
 
 impl SimDisk {
@@ -24,8 +13,6 @@ impl SimDisk {
         Self {
             bytes: Vec::new(),
             file: None,
-            in_flight: Vec::new(),
-            next_write: 0,
         }
     }
 
@@ -34,13 +21,6 @@ impl SimDisk {
             file: Some(file),
             ..Self::new()
         }
-    }
-
-    pub(super) fn submit_write(&mut self, offset: u64, bytes: Vec<u8>) -> WriteId {
-        let id = WriteId(self.next_write);
-        self.next_write += 1;
-        self.in_flight.push(InFlightWrite { id, offset, bytes });
-        id
     }
 
     pub(super) fn complete(&mut self, completion: Completion<'_>) -> i32 {
@@ -52,7 +32,7 @@ impl SimDisk {
                 }
                 self.read(offset, buf) as i32
             }
-            Completion::Write(id) => self.complete_write(id) as i32,
+            Completion::Write { offset, bytes } => self.write(offset, bytes) as i32,
         }
     }
 
@@ -63,24 +43,18 @@ impl SimDisk {
         len
     }
 
-    fn complete_write(&mut self, id: WriteId) -> usize {
-        let index = self
-            .in_flight
-            .iter()
-            .position(|write| write.id == id)
-            .expect("a write completes once");
-        let write = self.in_flight.remove(index);
+    fn write(&mut self, offset: u64, bytes: &[u8]) -> usize {
         if let Some(file) = &self.file {
             use std::os::unix::fs::FileExt;
-            file.write_all_at(&write.bytes, write.offset).unwrap();
-            return write.bytes.len();
+            file.write_all_at(bytes, offset).unwrap();
+            return bytes.len();
         }
-        let start = write.offset as usize;
-        let end = start + write.bytes.len();
+        let start = offset as usize;
+        let end = start + bytes.len();
         if self.bytes.len() < end {
             self.bytes.resize(end, 0);
         }
-        self.bytes[start..end].copy_from_slice(&write.bytes);
-        write.bytes.len()
+        self.bytes[start..end].copy_from_slice(bytes);
+        bytes.len()
     }
 }
