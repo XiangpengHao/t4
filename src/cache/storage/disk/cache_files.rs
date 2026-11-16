@@ -8,7 +8,7 @@ use super::allocation::{DriveHeadroom, FileAllocation};
 use super::disk_chunks::{DiskChunkReader, DiskChunks};
 use crate::cache::BLOCK_SIZE_U64;
 use crate::cache::storage::BootIdReader;
-use crate::cache::storage::snapshot::PersistenceLog;
+use crate::cache::storage::persistence::PersistenceLog;
 use crate::io::aligned_buf::AlignedBuf;
 use crate::io::error::{Error, Result};
 use crate::io::io_task::PageWrite;
@@ -69,7 +69,8 @@ pub(in crate::cache) struct CacheFiles {
 }
 
 impl CacheFiles {
-    /// No `O_DSYNC`: a snapshot flushes the files first, and nothing else must survive a crash.
+    /// No `O_DSYNC`: a clean exit flushes the files before the log's clean mark, and a kill
+    /// loses no write already done (`doc/13-persistence.md`).
     pub(in crate::cache) fn open(
         files: &[DiskFile],
         queue_depth: NonZeroU32,

@@ -3,8 +3,8 @@
 //! with the log removed is the cold baseline. A partial batch stays in memory.
 //!
 //! ```text
-//! cargo build --release -p t4-bench --bin snapshot_restart
-//! target/release/snapshot_restart --dir /mnt/t4/0 --blocks 20480 --out restart.csv
+//! cargo build --release -p t4-bench --bin disk_restart
+//! target/release/disk_restart --dir /mnt/t4/0 --blocks 20480 --out restart.csv
 //! ```
 
 use std::fs::File;
@@ -76,7 +76,7 @@ impl RestartBench {
         let files = args.blocks.div_ceil(args.file_blocks);
         // Spiral names a file by a SHA-256 in hex: paths about as long as its.
         let paths: Vec<Path> = (0..files)
-            .map(|file| Path::from(format!("snapshot_restart/{file:064x}.vortex")))
+            .map(|file| Path::from(format!("disk_restart/{file:064x}.vortex")))
             .collect();
         let sizes = (0..files).map(|file| {
             let blocks = args.file_blocks.min(args.blocks - file * args.file_blocks);
@@ -291,7 +291,7 @@ async fn main() -> Result<(), Error> {
     let (path, range) = bench.block_range(0);
     cache.get_range(&path, range).await?;
     write_row(RestartRow {
-        restart: "no-snapshot".to_owned(),
+        restart: "no-log".to_owned(),
         log_bytes: 0,
         shut_down: None,
         drop: None,

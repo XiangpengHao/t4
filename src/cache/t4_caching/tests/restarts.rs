@@ -66,7 +66,7 @@ fn memorys_blocks_go_with_the_cache() {
     });
 }
 
-/// Its chunks are other chunks, so the snapshot can't be taken back.
+/// Its chunks are other chunks, so the log can't be replayed.
 #[test]
 fn a_cache_of_another_capacity_starts_cold() {
     crate::io::test_schedule::TestSchedule::check(|| {

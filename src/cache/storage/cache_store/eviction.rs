@@ -138,7 +138,7 @@ impl ObjectCache {
                 .iter()
                 .any(|(_, block)| block.file_version() == version.id())
             {
-                versions.push(crate::cache::storage::snapshot::VersionOnDisk::new(
+                versions.push(crate::cache::storage::persistence::VersionOnDisk::new(
                     path.into(),
                     e_tag.into(),
                     version,

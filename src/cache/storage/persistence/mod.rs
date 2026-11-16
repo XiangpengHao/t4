@@ -12,7 +12,7 @@ use crate::cache::{BLOCK_SIZE, BLOCK_SIZE_U64, ChunkId, FileVersionId};
 
 /// Keeps `next_id` so that no id is given twice across a restart.
 #[derive(Debug, PartialEq, Eq)]
-pub(in crate::cache) struct DiskSnapshot {
+pub(in crate::cache) struct LogBase {
     next_id: u64,
     versions: Vec<VersionOnDisk>,
 }
@@ -57,7 +57,7 @@ impl VersionOnDisk {
     }
 }
 
-impl DiskSnapshot {
+impl LogBase {
     const MAGIC: [u8; 8] = *b"t4 disk\n";
     const FORMAT: u32 = 1;
 
@@ -74,7 +74,7 @@ impl DiskSnapshot {
     }
 
     fn encode(&self, layout: &CacheLayout) -> Vec<u8> {
-        let mut out = SnapshotWriter::default();
+        let mut out = LogWriter::default();
         Self::encode_header(layout, &mut out);
         out.u64(self.next_id);
         out.u64(self.versions.len() as u64);
@@ -92,7 +92,7 @@ impl DiskSnapshot {
         out.0
     }
 
-    fn encode_header(layout: &CacheLayout, out: &mut SnapshotWriter) {
+    fn encode_header(layout: &CacheLayout, out: &mut LogWriter) {
         out.raw(&Self::MAGIC);
         out.u32(Self::FORMAT);
         out.u32(BLOCK_SIZE as u32);
@@ -101,7 +101,7 @@ impl DiskSnapshot {
 
     /// Rejects anything doubtful: starting cold costs refills, never wrong bytes.
     fn decode(bytes: &[u8], layout: &CacheLayout) -> Option<Self> {
-        let mut input = SnapshotReader { bytes };
+        let mut input = LogReader { bytes };
         let header_matches = input.take(Self::MAGIC.len())? == Self::MAGIC
             && input.u32()? == Self::FORMAT
             && input.u32()? == BLOCK_SIZE as u32
@@ -150,33 +150,33 @@ impl DiskSnapshot {
 }
 
 #[cfg(feature = "__fuzz")]
-impl DiskSnapshot {
+impl LogBase {
     pub(in crate::cache) fn fuzzed(body: &[u8], chunks: u32) -> Option<Self> {
         let layout = CacheLayout::fuzzed(chunks);
-        let mut bytes = SnapshotWriter::default();
+        let mut bytes = LogWriter::default();
         Self::encode_header(&layout, &mut bytes);
         bytes.raw(body);
-        let snapshot = Self::decode(&bytes.0, &layout)?;
+        let base = Self::decode(&bytes.0, &layout)?;
         assert_eq!(
-            snapshot.encode(&layout),
+            base.encode(&layout),
             bytes.0,
-            "{snapshot:?} encodes to other bytes"
+            "{base:?} encodes to other bytes"
         );
-        Some(snapshot)
+        Some(base)
     }
 
     pub(in crate::cache) fn fuzzed_body(&self, chunks: u32) -> Vec<u8> {
         let layout = CacheLayout::fuzzed(chunks);
-        let mut header = SnapshotWriter::default();
+        let mut header = LogWriter::default();
         Self::encode_header(&layout, &mut header);
         self.encode(&layout).split_off(header.0.len())
     }
 }
 
 #[derive(Default)]
-struct SnapshotWriter(Vec<u8>);
+struct LogWriter(Vec<u8>);
 
-impl SnapshotWriter {
+impl LogWriter {
     fn raw(&mut self, bytes: &[u8]) {
         self.0.extend_from_slice(bytes);
     }
@@ -195,11 +195,11 @@ impl SnapshotWriter {
     }
 }
 
-struct SnapshotReader<'b> {
+struct LogReader<'b> {
     bytes: &'b [u8],
 }
 
-impl<'b> SnapshotReader<'b> {
+impl<'b> LogReader<'b> {
     fn take(&mut self, len: usize) -> Option<&'b [u8]> {
         let (taken, rest) = self.bytes.split_at_checked(len)?;
         self.bytes = rest;

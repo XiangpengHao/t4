@@ -177,7 +177,7 @@ impl PathTable {
             size: version.size,
         };
         let held = self.paths.insert(path.into(), entry).or_abort();
-        assert!(held.is_none(), "a snapshot names a path once");
+        assert!(held.is_none(), "a base names a path once");
     }
 
     pub(in crate::cache) fn resume_ids_at(&self, next_id: u64) {

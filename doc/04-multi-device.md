@@ -301,8 +301,8 @@ reading nothing off the drives differ by up to a third between runs (7,
   at fill time.
 - **A failed drive dropped alone:** its chunks forgotten, the rest of the
   tier serving on.
-- **Keeping the disk tier across a clean restart** (`03-cache.md`,
-  "Later") records the files with the snapshot.
+- **Keeping the disk tier across a restart** (`13-persistence.md`)
+  records the files in the log's header.
 
 ## Code map
 

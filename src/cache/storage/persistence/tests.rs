@@ -32,8 +32,8 @@ fn on_disk(path: &[u8], id: u64, size: u64, blocks: &[(u32, u32)]) -> VersionOnD
     )
 }
 
-fn snapshot() -> DiskSnapshot {
-    DiskSnapshot::new(
+fn sample_base() -> LogBase {
+    LogBase::new(
         9,
         vec![
             on_disk(b"digest/a.vortex", 3, 2 * MIB, &[(0, 5), (1, 0)]),
@@ -51,10 +51,10 @@ fn a_clean_log_is_replayed_and_rebased_on_each_build() {
         .unwrap();
     assert_eq!(place.path(), dir.path().join("cache0.log"));
 
-    place.seed(&snapshot()).unwrap();
-    assert_eq!(place.take().unwrap(), Some(snapshot()));
+    place.seed(&sample_base()).unwrap();
+    assert_eq!(place.take().unwrap(), Some(sample_base()));
     assert!(place.path().exists(), "replaced with an unclean base");
-    assert_eq!(place.take().unwrap(), Some(snapshot()));
+    assert_eq!(place.take().unwrap(), Some(sample_base()));
 }
 
 #[test]
@@ -66,7 +66,7 @@ fn a_log_of_other_cache_files_is_rebased_cold() {
         let place = PersistenceLog::beside(&first, files, 4, Default::default())
             .unwrap()
             .unwrap();
-        place.seed(&snapshot()).unwrap();
+        place.seed(&sample_base()).unwrap();
     };
     let reordered = opened(dir.path(), &["cache1", "cache0"]);
     let others = [
@@ -94,20 +94,20 @@ fn a_log_of_other_cache_files_is_rebased_cold() {
 }
 
 #[test]
-fn bytes_no_cache_could_have_kept_are_no_snapshot() {
+fn bytes_no_cache_could_have_kept_are_no_base() {
     let dir = tempfile::tempdir().unwrap();
     let files = opened(dir.path(), &["cache0", "cache1"]);
     let place = PersistenceLog::beside(&dir.path().join("cache0"), &files, 4, Default::default())
         .unwrap()
         .unwrap();
     let layout = place.layout();
-    let whole = snapshot().encode(layout);
-    assert_eq!(DiskSnapshot::decode(&whole, layout), Some(snapshot()));
+    let whole = sample_base().encode(layout);
+    assert_eq!(LogBase::decode(&whole, layout), Some(sample_base()));
     for cut in 0..whole.len() {
-        assert_eq!(DiskSnapshot::decode(&whole[..cut], layout), None);
+        assert_eq!(LogBase::decode(&whole[..cut], layout), None);
     }
     let longer = [&whole[..], &[0]].concat();
-    assert_eq!(DiskSnapshot::decode(&longer, layout), None);
+    assert_eq!(LogBase::decode(&longer, layout), None);
 
     let a = |id, blocks: &[(u32, u32)]| on_disk(b"a", id, 2 * MIB, blocks);
     let b = |id, blocks: &[(u32, u32)]| on_disk(b"b", id, 2 * MIB, blocks);
@@ -128,11 +128,11 @@ fn bytes_no_cache_could_have_kept_are_no_snapshot() {
         ("a version with no block", vec![a(1, &[])]),
     ];
     for (what, versions) in impossible {
-        let bytes = DiskSnapshot::new(9, versions).encode(layout);
-        assert_eq!(DiskSnapshot::decode(&bytes, layout), None, "{what}");
+        let bytes = LogBase::new(9, versions).encode(layout);
+        assert_eq!(LogBase::decode(&bytes, layout), None, "{what}");
     }
 
-    std::fs::write(place.path(), b"no snapshot").unwrap();
+    std::fs::write(place.path(), b"no log").unwrap();
     assert_eq!(place.take().unwrap(), None);
     assert!(place.path().exists());
 }
@@ -146,8 +146,8 @@ fn a_log_only_grows_until_its_next_build_rebases_it() {
     let log = PersistenceLog::beside(&dir.path().join("cache0"), &files, 4, Default::default())
         .unwrap()
         .unwrap();
-    log.seed(&snapshot()).unwrap();
-    assert_eq!(log.take().unwrap(), Some(snapshot()));
+    log.seed(&sample_base()).unwrap();
+    assert_eq!(log.take().unwrap(), Some(sample_base()));
     let base = std::fs::read(log.path()).unwrap();
     let inode = std::fs::metadata(log.path()).unwrap().ino();
     let version = FileVersion::named(FileVersionId::new(9), MIB).unwrap();

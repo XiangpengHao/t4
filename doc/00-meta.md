@@ -53,9 +53,9 @@ only the remote holds itself. The design: `03-cache.md`.
   takes the cache files' lock owns the cache and serves it; the others
   read through it over a Unix socket and shared memory, and fetch what it
   doesn't hold with their own credentials.
-- `13-persistence.md`: the disk tier across a restart: stage 1's snapshot
-  at a clean exit, measured; stage 2's log, which keeps it across a killed
-  process with no sync while the cache runs.
+- `13-persistence.md`: the disk tier across a restart: a log that keeps
+  it across a clean exit or a killed process, with no sync while the cache
+  runs; and the restart's cost, measured.
 - `98-cachefs-vs-fs.md`: how a cache's storage differs from a file
   system's.
 - `99-brainstorm.md`: open notes.
@@ -64,8 +64,8 @@ only the remote holds itself. The design: `03-cache.md`.
 
 **Linux is the platform t4 is designed and tuned for.** Design decisions
 and performance work target Linux: io_uring and `O_DIRECT`. The cache makes
-no durability guarantee: a clean restart keeps the disk tier, a crash
-starts it cold (`13-persistence.md`).
+no durability guarantee: a restart, clean or killed, keeps the disk tier;
+a machine crash starts it cold (`13-persistence.md`).
 
 **macOS runs t4 for real, untuned.** Spiral's desktop Studio ships for
 macOS, and t4 is to replace its cache there (`10-spiral-integration.md`,

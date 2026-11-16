@@ -149,7 +149,7 @@ bytes.
 ## Measured: stage 1's restart
 
 On the dev box (16 Nov 2026): a z3-highmem-22-highlssd, XFS on local SSDs
-that report no volatile write cache. `bench/src/bin/snapshot_restart.rs`
+that report no volatile write cache. `bench/src/bin/disk_restart.rs`
 fills the disk tier through `T4Caching`, then restarts it five times: shut
 down, drop, build, and read each file's first and last block back. A last
 build with the snapshot removed is the baseline.
@@ -218,7 +218,7 @@ build with the snapshot removed is the baseline.
 
 1. **The log's format:** header, base, records and their CRC, replay and
    its checks. Tests: each entry's checks, as the snapshot's
-   (`storage/snapshot/tests.rs`); a record cut short is dropped, a
+   (`storage/persistence/tests.rs`); a record cut short is dropped, a
    complete corrupted record starts cold; a log from another boot, not
    clean, starts the cache cold.
 2. **Batched disk writes off the read path** (decision 9), with no log
@@ -235,7 +235,7 @@ build with the snapshot removed is the baseline.
 
 | Where | What it is | Decisions |
 |---|---|---|
-| `src/cache/storage/snapshot/` | the checked snapshot base; `log/` frames and replays entries; `log_file.rs` appends, finishes and rebases the file | 2, 6, 7 |
+| `src/cache/storage/persistence/` | the base, `LogBase`, and its checks; `log/` frames and replays entries; `log_file.rs` appends, finishes and rebases the file | 2, 6, 7 |
 | `src/cache/storage/cache_store/restart.rs` | the disk tier closed and its log finished, and restored as the next builds | 6 |
 | `src/cache/storage/cache_store/disk_writer/`, `eviction.rs` | one writer, batches, and adds and frees ordered with chunk ownership | 3, 9 |
-| `bench/src/bin/snapshot_restart.rs`, `bench/snapshot_restart/` | the restart's cost | Measured |
+| `bench/src/bin/disk_restart.rs`, `bench/disk_restart/` | the restart's cost | Measured |

@@ -1,7 +1,7 @@
 use std::fs::File;
 
 use super::*;
-use crate::cache::storage::snapshot::PersistenceLog;
+use crate::cache::storage::persistence::PersistenceLog;
 
 struct LogFixture {
     _directory: tempfile::TempDir,
@@ -24,11 +24,11 @@ impl LogFixture {
     }
 
     fn base(&self) -> Vec<u8> {
-        DiskLog::base(&Self::snapshot(), self.file.layout(), self.boot)
+        DiskLog::base(&Self::sample_base(), self.file.layout(), self.boot)
     }
 
-    fn snapshot() -> DiskSnapshot {
-        DiskSnapshot::new(
+    fn sample_base() -> LogBase {
+        LogBase::new(
             3,
             vec![VersionOnDisk::new(
                 b"a".as_slice().into(),
@@ -56,7 +56,7 @@ impl LogFixture {
         }
     }
 
-    fn replay(&self, bytes: &[u8]) -> Option<DiskSnapshot> {
+    fn replay(&self, bytes: &[u8]) -> Option<LogBase> {
         DiskLog::replay(bytes, self.file.layout(), self.boot)
     }
 
@@ -67,7 +67,7 @@ impl LogFixture {
     }
 
     fn raw_record(body: &[u8]) -> Vec<u8> {
-        let mut out = SnapshotWriter::default();
+        let mut out = LogWriter::default();
         out.u32(body.len() as u32);
         out.u32(crc32c::crc32c(body));
         out.raw(body);
@@ -80,7 +80,7 @@ fn replay_applies_paths_adds_and_frees_in_order() {
     let fixture = LogFixture::new();
     assert_eq!(
         fixture.replay(&fixture.base()),
-        Some(LogFixture::snapshot())
+        Some(LogFixture::sample_base())
     );
     let bytes = fixture.with_entries(&[
         LogEntry::Free(0),
@@ -94,7 +94,7 @@ fn replay_applies_paths_adds_and_frees_in_order() {
     assert_eq!(replayed.versions()[1].path(), b"b");
     assert_eq!(replayed.versions()[1].blocks(), &[(0, ChunkId::new(0))]);
     assert_eq!(
-        DiskSnapshot::decode(
+        LogBase::decode(
             &replayed.encode(fixture.file.layout()),
             fixture.file.layout()
         ),
@@ -107,7 +107,7 @@ fn a_last_record_cut_short_in_its_header_or_body_replays_the_prefix() {
     let fixture = LogFixture::new();
     let prefix = fixture.with_entries(&[LogFixture::add(1, 1, 2)]);
     let expected = fixture.replay(&prefix);
-    assert_ne!(expected, Some(LogFixture::snapshot()));
+    assert_ne!(expected, Some(LogFixture::sample_base()));
     let record = DiskLog::record(&[LogEntry::Free(0), LogFixture::add(1, 0, 1)]);
     for cut in 0..record.len() {
         let bytes = [&prefix[..], &record[..cut]].concat();
@@ -138,13 +138,13 @@ fn another_boot_needs_a_final_clean_mark() {
     other_boot[12] ^= 1;
     assert_eq!(fixture.replay(&other_boot), None);
     other_boot.extend(DiskLog::record(&[LogEntry::Clean(3)]));
-    assert_eq!(fixture.replay(&other_boot), Some(LogFixture::snapshot()));
+    assert_eq!(fixture.replay(&other_boot), Some(LogFixture::sample_base()));
     let clean = other_boot.clone();
     other_boot.extend(DiskLog::record(&[LogEntry::Free(0)]));
     assert_eq!(fixture.replay(&other_boot), None);
     assert_eq!(
         fixture.replay(&[&clean[..], &[9, 0, 0]].concat()),
-        Some(LogFixture::snapshot())
+        Some(LogFixture::sample_base())
     );
 }
 
@@ -222,7 +222,7 @@ fn a_bad_header_or_base_starts_cold() {
         assert_eq!(fixture.replay(&corrupt), None, "byte {at}");
     }
     let mut wrong_layout = bytes;
-    // Keep the base CRC valid: the snapshot decoder must reject the wrong block size.
+    // Keep the base CRC valid: the base's decoder must reject the wrong block size.
     wrong_layout[40 + 12] ^= 1;
     let checksum = crc32c::crc32c(&wrong_layout[40..]);
     wrong_layout[36..40].copy_from_slice(&checksum.to_le_bytes());

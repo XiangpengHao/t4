@@ -34,8 +34,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "snapshot"
-path = "fuzz_targets/snapshot.rs"
+name = "log_base"
+path = "fuzz_targets/log_base.rs"
 test = false
 doc = false
 bench = false

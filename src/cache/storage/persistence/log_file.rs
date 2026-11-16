@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use super::log::{BootId, BootIdReader, DiskLog, LogEntry};
-use super::{DiskSnapshot, SnapshotReader, SnapshotWriter, VersionOnDisk};
+use super::{LogBase, LogReader, LogWriter, VersionOnDisk};
 use crate::cache::storage::FileIdentity;
 use crate::cache::{BlockKey, ChunkId};
 use crate::io::sync::{Mutex, MutexGuard};
@@ -57,27 +57,24 @@ impl PersistenceLog {
     }
 
     /// The old clean mark must be durably gone before a chunk can be overwritten.
-    pub(in crate::cache) fn take(&self) -> io::Result<Option<DiskSnapshot>> {
+    pub(in crate::cache) fn take(&self) -> io::Result<Option<LogBase>> {
         let bytes = match std::fs::read(&self.path) {
             Ok(bytes) => Some(bytes),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
-        let snapshot = bytes.and_then(|bytes| DiskLog::replay(&bytes, &self.layout, self.boot));
-        let empty = DiskSnapshot::new(0, Vec::new());
-        self.replace_base(snapshot.as_ref().unwrap_or(&empty))?;
-        Ok(snapshot)
+        let base = bytes.and_then(|bytes| DiskLog::replay(&bytes, &self.layout, self.boot));
+        let empty = LogBase::new(0, Vec::new());
+        self.replace_base(base.as_ref().unwrap_or(&empty))?;
+        Ok(base)
     }
 
-    fn replace_base(&self, snapshot: &DiskSnapshot) -> io::Result<()> {
+    fn replace_base(&self, base: &LogBase) -> io::Result<()> {
         let mut temporary = self.path.as_os_str().to_owned();
         temporary.push(".tmp");
         let temporary = PathBuf::from(temporary);
-        let written = Self::write_whole(
-            &temporary,
-            &DiskLog::base(snapshot, &self.layout, self.boot),
-        )
-        .and_then(|()| std::fs::rename(&temporary, &self.path));
+        let written = Self::write_whole(&temporary, &DiskLog::base(base, &self.layout, self.boot))
+            .and_then(|()| std::fs::rename(&temporary, &self.path));
         if written.is_err() {
             let _ = std::fs::remove_file(&temporary);
         }
@@ -86,7 +83,7 @@ impl PersistenceLog {
         let file = File::options().append(true).open(&self.path)?;
         *self.append.lock().unwrap() = Some(LogAppend::new(
             file,
-            snapshot,
+            base,
             self.layout.chunk_count().unwrap(),
         ));
         Ok(())
@@ -120,14 +117,14 @@ impl PersistenceLog {
     }
 
     #[cfg(all(test, not(feature = "shuttle")))]
-    pub(in crate::cache) fn inspect(&self) -> Option<DiskSnapshot> {
+    pub(in crate::cache) fn inspect(&self) -> Option<LogBase> {
         DiskLog::replay(&std::fs::read(&self.path).ok()?, &self.layout, self.boot)
     }
 
     #[cfg(all(test, not(feature = "shuttle")))]
-    pub(super) fn seed(&self, snapshot: &DiskSnapshot) -> io::Result<()> {
-        self.replace_base(snapshot)?;
-        self.finish(snapshot.next_id())
+    pub(super) fn seed(&self, base: &LogBase) -> io::Result<()> {
+        self.replace_base(base)?;
+        self.finish(base.next_id())
     }
 
     fn write_whole(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -204,7 +201,7 @@ struct LogAppend {
 }
 
 impl LogAppend {
-    fn new(file: File, snapshot: &DiskSnapshot, chunks: u32) -> Self {
+    fn new(file: File, base: &LogBase, chunks: u32) -> Self {
         let mut append = Self {
             file,
             pending: Vec::new(),
@@ -213,7 +210,7 @@ impl LogAppend {
             failed: false,
             abandoned: false,
         };
-        for version in snapshot.versions() {
+        for version in base.versions() {
             append.versions.insert(version.version().id().get());
             for &(index, chunk) in version.blocks() {
                 append.chunks[chunk.index() as usize] =
@@ -255,7 +252,7 @@ impl CacheLayout {
             .checked_mul(self.chunks_per_file)
     }
 
-    pub(super) fn encode(&self, out: &mut SnapshotWriter) {
+    pub(super) fn encode(&self, out: &mut LogWriter) {
         out.u32(self.chunks_per_file);
         out.u32(self.files.len() as u32);
         for file in &self.files {
@@ -266,7 +263,7 @@ impl CacheLayout {
         }
     }
 
-    pub(super) fn decode(input: &mut SnapshotReader<'_>) -> Option<Self> {
+    pub(super) fn decode(input: &mut LogReader<'_>) -> Option<Self> {
         let chunks_per_file = input.u32()?;
         let files = (0..input.u32()?)
             .map(|_| {
@@ -324,11 +321,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("log");
         File::create(&path).unwrap();
-        let mut append = LogAppend::new(
-            File::open(&path).unwrap(),
-            &DiskSnapshot::new(0, Vec::new()),
-            1,
-        );
+        let mut append =
+            LogAppend::new(File::open(&path).unwrap(), &LogBase::new(0, Vec::new()), 1);
         append.pending.push(LogEntry::Clean(0));
         assert!(append.write_pending().is_err());
         append.file = File::options().append(true).open(&path).unwrap();

@@ -16,7 +16,7 @@ pub use t4_caching::{ScenarioRead, SharedOperation, SharedScenario, SharedSettin
 #[cfg(feature = "__fuzz")]
 pub use {
     cache_stores::FuzzedFrame,
-    storage::{FuzzedSnapshot, FuzzedVersion},
+    storage::{FuzzedLogBase, FuzzedVersion},
 };
 
 use std::fmt;

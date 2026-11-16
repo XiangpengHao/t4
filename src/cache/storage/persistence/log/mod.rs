@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashSet};
 pub(super) use boot_id::BootId;
 pub(in crate::cache) use boot_id::BootIdReader;
 
-use super::{CacheLayout, DiskSnapshot, SnapshotReader, SnapshotWriter, VersionOnDisk};
+use super::{CacheLayout, LogBase, LogReader, LogWriter, VersionOnDisk};
 use crate::cache::storage::index::{FileVersion, PathTable};
 use crate::cache::{BLOCK_SIZE_U64, BlockKey, ChunkId, FileVersionId};
 
@@ -15,12 +15,12 @@ impl DiskLog {
     const MAGIC: [u8; 8] = *b"t4 log\n\0";
     const FORMAT: u32 = 1;
 
-    pub(super) fn base(snapshot: &DiskSnapshot, layout: &CacheLayout, boot: BootId) -> Vec<u8> {
-        let mut out = SnapshotWriter::default();
+    pub(super) fn base(log_base: &LogBase, layout: &CacheLayout, boot: BootId) -> Vec<u8> {
+        let mut out = LogWriter::default();
         out.raw(&Self::MAGIC);
         out.u32(Self::FORMAT);
         out.raw(boot.as_bytes());
-        let base = snapshot.encode(layout);
+        let base = log_base.encode(layout);
         out.u64(base.len() as u64);
         out.u32(crc32c::crc32c(&base));
         out.raw(&base);
@@ -28,19 +28,19 @@ impl DiskLog {
     }
 
     pub(super) fn record(entries: &[LogEntry]) -> Vec<u8> {
-        let mut body = SnapshotWriter::default();
+        let mut body = LogWriter::default();
         for entry in entries {
             entry.encode(&mut body);
         }
-        let mut out = SnapshotWriter::default();
+        let mut out = LogWriter::default();
         out.u32(u32::try_from(body.0.len()).expect("a log record fits in 4 GiB"));
         out.u32(crc32c::crc32c(&body.0));
         out.raw(&body.0);
         out.0
     }
 
-    pub(super) fn replay(bytes: &[u8], layout: &CacheLayout, boot: BootId) -> Option<DiskSnapshot> {
-        let mut input = SnapshotReader { bytes };
+    pub(super) fn replay(bytes: &[u8], layout: &CacheLayout, boot: BootId) -> Option<LogBase> {
+        let mut input = LogReader { bytes };
         if input.take(8)? != Self::MAGIC || input.u32()? != Self::FORMAT {
             return None;
         }
@@ -51,7 +51,7 @@ impl DiskLog {
         if crc32c::crc32c(base) != checksum {
             return None;
         }
-        let mut replay = LogReplay::new(DiskSnapshot::decode(base, layout)?, layout.chunk_count()?);
+        let mut replay = LogReplay::new(LogBase::decode(base, layout)?, layout.chunk_count()?);
         while !input.bytes.is_empty() {
             let Some((checksum, body)) = Self::take_record(&mut input) else {
                 break;
@@ -59,15 +59,15 @@ impl DiskLog {
             if crc32c::crc32c(body) != checksum {
                 return None;
             }
-            let mut record = SnapshotReader { bytes: body };
+            let mut record = LogReader { bytes: body };
             while !record.bytes.is_empty() {
                 replay.apply(LogEntry::decode(&mut record)?)?;
             }
         }
-        (same_boot || replay.clean).then(|| replay.snapshot())
+        (same_boot || replay.clean).then(|| replay.into_base())
     }
 
-    fn take_record<'b>(input: &mut SnapshotReader<'b>) -> Option<(u32, &'b [u8])> {
+    fn take_record<'b>(input: &mut LogReader<'b>) -> Option<(u32, &'b [u8])> {
         let len = input.u32()? as usize;
         let checksum = input.u32()?;
         let body = input.take(len)?;
@@ -87,7 +87,7 @@ pub(super) enum LogEntry {
 }
 
 impl LogEntry {
-    fn encode(&self, out: &mut SnapshotWriter) {
+    fn encode(&self, out: &mut LogWriter) {
         match self {
             Self::Path(version) => {
                 out.raw(&[0]);
@@ -117,7 +117,7 @@ impl LogEntry {
         }
     }
 
-    fn decode(input: &mut SnapshotReader<'_>) -> Option<Self> {
+    fn decode(input: &mut LogReader<'_>) -> Option<Self> {
         match input.take(1)?[0] {
             0 => {
                 let (id, size) = (input.u64()?, input.u64()?);
@@ -156,7 +156,7 @@ struct LogReplay {
 }
 
 impl LogReplay {
-    fn new(base: DiskSnapshot, chunks: u32) -> Self {
+    fn new(base: LogBase, chunks: u32) -> Self {
         let mut replay = Self {
             minimum_new_id: base.next_id,
             next_id: base.next_id,
@@ -225,7 +225,7 @@ impl LogReplay {
         Some(())
     }
 
-    fn snapshot(mut self) -> DiskSnapshot {
+    fn into_base(mut self) -> LogBase {
         for (chunk, key) in self.chunks.into_iter().enumerate() {
             if let Some(key) = key {
                 self.versions
@@ -244,7 +244,7 @@ impl LogReplay {
                 (!version.blocks.is_empty()).then_some(version)
             })
             .collect();
-        DiskSnapshot::new(self.next_id, versions)
+        LogBase::new(self.next_id, versions)
     }
 }
 

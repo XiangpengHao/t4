@@ -9,7 +9,7 @@ pub(in crate::cache) enum BootIdReader {
 }
 
 impl BootIdReader {
-    pub(in crate::cache::storage::snapshot) fn read(self) -> io::Result<BootId> {
+    pub(in crate::cache::storage::persistence) fn read(self) -> io::Result<BootId> {
         match self {
             Self::System => BootId::current(),
             #[cfg(all(test, feature = "shuttle"))]
@@ -19,15 +19,15 @@ impl BootIdReader {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::cache::storage::snapshot) struct BootId([u8; 16]);
+pub(in crate::cache::storage::persistence) struct BootId([u8; 16]);
 
 impl BootId {
-    pub(in crate::cache::storage::snapshot) fn current() -> io::Result<Self> {
+    pub(in crate::cache::storage::persistence) fn current() -> io::Result<Self> {
         let text = Self::read()?;
         Self::parse(text.trim()).ok_or_else(|| io::ErrorKind::InvalidData.into())
     }
 
-    pub(in crate::cache::storage::snapshot) fn as_bytes(&self) -> &[u8; 16] {
+    pub(in crate::cache::storage::persistence) fn as_bytes(&self) -> &[u8; 16] {
         &self.0
     }
 

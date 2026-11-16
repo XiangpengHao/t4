@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Runs on the dev box (bench/devbox/create.sh): times t4's clean restart, the snapshot kept at
-# shutdown and taken back at build (snapshot_restart, doc/13-persistence.md), on the box's
+# Runs on the dev box (bench/devbox/create.sh): times t4's clean restart, the log finished at
+# shutdown and replayed at build (disk_restart, doc/13-persistence.md), on the box's
 # local SSDs at /mnt/t4/<n>, OS defaults throughout.
 #
-#   nix develop -c bench/snapshot_restart/run.sh <results dir>
+#   nix develop -c bench/disk_restart/run.sh <results dir>
 #
 #   desktop              20 GiB in 64 MiB files, one on-demand cache file
-#   desktop-small-files  20 GiB in 1 MiB files: a path and e_tag a block, the snapshot's worst
+#   desktop-small-files  20 GiB in 1 MiB files: a path and e_tag a block, the log's worst
 #   server               256 GiB in 64 MiB files, an eager cache file on each of three SSDs
 #
-# Each again under strace, timing only the syscalls that make the snapshot durable, so the time
+# Each again under strace, timing only the syscalls that make the log durable, so the time
 # splits into waiting on the drives and the rest. Writes <run>.csv, <run>.log, drives.txt,
 # build.log, and done at the end, or failed if a step fails.
 set -euo pipefail
@@ -18,7 +18,7 @@ OUT=${1:?results dir}
 mkdir -p "$OUT"
 rm -f "$OUT/done" "$OUT/failed"
 trap 'echo "line $LINENO" > "$OUT/failed"' ERR
-BIN=target/release/snapshot_restart
+BIN=target/release/disk_restart
 
 {
     uname -r
@@ -32,7 +32,7 @@ BIN=target/release/snapshot_restart
     done
 } > "$OUT/drives.txt"
 
-cargo build --release -p t4-bench --bin snapshot_restart 2>&1 | tee "$OUT/build.log"
+cargo build --release -p t4-bench --bin disk_restart 2>&1 | tee "$OUT/build.log"
 
 run() {
     local name=$1

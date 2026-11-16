@@ -1,21 +1,21 @@
 use super::super::index::Location;
-use super::super::snapshot::DiskSnapshot;
+use super::super::persistence::LogBase;
 use super::ObjectCache;
 use crate::cache::BlockKey;
 use crate::cache::policy::Tier;
 
 impl ObjectCache {
-    /// The snapshot was checked as it was read: each chunk in it once, and in the tier.
-    pub(super) fn restore(&self, snapshot: &DiskSnapshot) {
-        self.paths.resume_ids_at(snapshot.next_id());
-        for on_disk in snapshot.versions() {
+    /// The base was checked as it was replayed: each chunk in it once, and in the tier.
+    pub(super) fn restore(&self, base: &LogBase) {
+        self.paths.resume_ids_at(base.next_id());
+        for on_disk in base.versions() {
             let version = on_disk.version();
             self.paths.restore(on_disk.path(), on_disk.e_tag(), version);
             for &(index, chunk) in on_disk.blocks() {
                 let key = BlockKey::new(version.id(), index);
                 self.disk.chunks().restore(chunk, key);
                 let placed = self.blocks.insert_if_absent(key, Location::Disk(chunk));
-                assert!(placed, "a snapshot names a block once");
+                assert!(placed, "a base names a block once");
                 self.placement.on_admit(Tier::Disk, chunk, key);
             }
         }
@@ -34,15 +34,17 @@ impl ObjectCache {
     }
 
     #[cfg(all(test, not(feature = "shuttle")))]
-    pub(in crate::cache) fn replay_log(
-        first: &std::path::Path,
-        chunks: u32,
-    ) -> Option<DiskSnapshot> {
+    pub(in crate::cache) fn replay_log(first: &std::path::Path, chunks: u32) -> Option<LogBase> {
         let file = std::fs::File::open(first).unwrap();
-        super::super::snapshot::PersistenceLog::beside(first, &[file], chunks, Default::default())
-            .unwrap()
-            .unwrap()
-            .inspect()
+        super::super::persistence::PersistenceLog::beside(
+            first,
+            &[file],
+            chunks,
+            Default::default(),
+        )
+        .unwrap()
+        .unwrap()
+        .inspect()
     }
 
     #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]

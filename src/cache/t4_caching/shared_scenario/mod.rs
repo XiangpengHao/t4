@@ -131,7 +131,7 @@ impl SharedScenario {
     }
 
     fn play(&self, dir: &std::path::Path) {
-        // Each schedule on fresh files: one schedule's snapshot would warm the next.
+        // Each schedule on fresh files: one schedule's log would warm the next.
         let dir = dir.join("shared");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
