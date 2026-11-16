@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 
-use super::{CacheStore, CacheStoreRead, InProcessCacheStore, TierSettings};
+use super::{CacheStore, InProcessCacheStore, ReadRound, TierSettings};
 use crate::cache::policy::{ReadIntent, ReadPolicy};
 #[cfg(any(test, feature = "__fuzz"))]
 use crate::cache::storage::ObjectCache;
@@ -205,12 +205,14 @@ impl CacheStore for SharedCacheStore {
         range: Range<u64>,
         intent: Option<ReadIntent>,
         reads: &'s dyn ReadPolicy,
-    ) -> BoxFuture<'s, Result<Option<Box<dyn CacheStoreRead<'s> + 's>>>> {
+    ) -> BoxFuture<'s, Result<Option<Box<dyn ReadRound<'s> + 's>>>> {
         match self.server() {
             Server::Owned(store) => store.start_read(path, e_tag, size, range, intent, reads),
             Server::Owner(owner) => Box::pin(async move {
-                let read = ClientRead::start(owner, path, e_tag, size, range, intent).await?;
-                Ok(read.map(|read| Box::new(read) as Box<dyn CacheStoreRead<'s> + 's>))
+                let round = ClientRead::start(owner, path, e_tag, size, range, intent, reads);
+                Ok(round
+                    .await?
+                    .map(|round| Box::new(round) as Box<dyn ReadRound<'s> + 's>))
             }),
         }
     }

@@ -52,7 +52,6 @@ pub(in crate::cache) struct TierWork<'c> {
     page_reads: Vec<(DiskChunkReader<'c>, BoxFuture<'c, Result<()>>)>,
     promotions: Vec<(DiskChunkReader<'c>, PlannedBlock)>,
     waits: Vec<(PlannedBlock, Arc<BlockFetch>)>,
-    held: Option<HeldRun>,
 }
 
 impl<'c> TierWork<'c> {
@@ -74,18 +73,12 @@ impl<'c> TierWork<'c> {
             page_reads: Vec::new(),
             promotions: Vec::new(),
             waits: Vec::new(),
-            held: None,
         }
     }
 
-    pub(in crate::cache) fn locate_next_run(
-        &mut self,
-        read: &mut PartialRead,
-    ) -> Result<Option<LocatedRun>> {
-        assert!(
-            self.held.is_none(),
-            "a run's GETs are taken before the next run is located"
-        );
+    /// Takes the round's hits; the run is `None` if it leaves nothing to fetch. Once a round:
+    /// later calls find no blocks.
+    pub(in crate::cache) fn locate(&mut self, read: &mut PartialRead) -> Result<Option<HeldRun>> {
         let blocks = std::mem::take(&mut self.unlocated);
         let (Some(first), Some(last)) = (blocks.first(), blocks.last()) else {
             return Ok(None);
@@ -128,25 +121,26 @@ impl<'c> TierWork<'c> {
             asked: Self::asked_within(read.bytes(), &blocks),
             sources,
         };
-        self.held = Some(HeldRun {
-            located: located.clone(),
+        Ok(Some(HeldRun {
+            located,
             blocks,
             remote,
-        });
-        Ok(Some(located))
+        }))
     }
 
     /// Falls back to the default's GETs: a policy's mistake, wherever it ran, costs a read nothing.
-    pub(in crate::cache) fn take_gets(&mut self, read: &mut PartialRead, gets: &ReadPlan) {
+    pub(in crate::cache) fn take_gets(
+        &mut self,
+        read: &mut PartialRead,
+        held: HeldRun,
+        gets: &ReadPlan,
+    ) {
         let cache = self.cache;
         let HeldRun {
             located: run,
             blocks,
             mut remote,
-        } = self
-            .held
-            .take()
-            .expect("GETs are taken for the run located last, once");
+        } = held;
         let first = run.first;
         let located = run.located(&self.file, self.intent);
         let default;
@@ -304,10 +298,17 @@ impl<'c> TierWork<'c> {
     }
 }
 
-struct HeldRun {
+/// A located run and the claims on its remote blocks, held until its GETs are taken.
+pub(in crate::cache) struct HeldRun {
     located: LocatedRun,
     blocks: Vec<PlannedBlock>,
     remote: Vec<Option<RemoteBlock>>,
+}
+
+impl HeldRun {
+    pub(in crate::cache) fn run(&self) -> &LocatedRun {
+        &self.located
+    }
 }
 
 enum RemoteBlock {

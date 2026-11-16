@@ -6,13 +6,13 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
 
-use super::{CacheStore, CacheStoreFetch, CacheStoreRead, FileVersionKey, VersionIdSource};
-use crate::cache::policy::{
-    ClockPolicy, PlacementPolicy, ReadIntent, ReadPlan, ReadPolicy, TierSizes,
+use super::{
+    CacheStore, CacheStoreFetch, FileVersionKey, ReadRound, RoundEnd, RoundFetches, ServedOutput,
+    VersionIdSource,
 };
+use crate::cache::policy::{ClockPolicy, PlacementPolicy, ReadIntent, ReadPolicy, TierSizes};
 use crate::cache::storage::{
-    CacheFiles, CacheableFile, DiskFile, FetchedBlocks, LocatedRun, ObjectCache, PartialRead,
-    TierWork,
+    CacheFiles, CacheableFile, DiskFile, FetchedBlocks, ObjectCache, PartialRead, TierWork,
 };
 use crate::io::error::{Error, Result};
 use crate::io::sync::Arc;
@@ -108,22 +108,22 @@ impl CacheStore for InProcessCacheStore {
         range: Range<u64>,
         intent: Option<ReadIntent>,
         reads: &'s dyn ReadPolicy,
-    ) -> BoxFuture<'s, Result<Option<Box<dyn CacheStoreRead<'s> + 's>>>> {
+    ) -> BoxFuture<'s, Result<Option<Box<dyn ReadRound<'s> + 's>>>> {
         Box::pin(async move {
             let Ok(file) = self.cache.resolve(path, Some(e_tag), size) else {
                 return Ok(None);
             };
             let (read, work) = self.cache.start_read(&file, range.clone(), intent, reads)?;
-            let read: Box<dyn CacheStoreRead<'s> + 's> = Box::new(InProcessRead {
+            let round: Box<dyn ReadRound<'s> + 's> = Box::new(InProcessRound {
                 cache: &self.cache,
                 reads,
                 file,
                 range,
                 intent,
                 read,
-                work: Some(work),
+                work,
             });
-            Ok(Some(read))
+            Ok(Some(round))
         })
     }
 
@@ -141,72 +141,68 @@ impl CacheStore for InProcessCacheStore {
     }
 }
 
-pub(in crate::cache) struct InProcessRead<'s> {
+struct InProcessRound<'s> {
     cache: &'s ObjectCache,
     reads: &'s dyn ReadPolicy,
     file: CacheableFile<'s>,
     range: Range<u64>,
     intent: Option<ReadIntent>,
     read: PartialRead,
-    work: Option<TierWork<'s>>,
+    work: TierWork<'s>,
 }
 
-impl<'s> CacheStoreRead<'s> for InProcessRead<'s> {
-    fn file(&self) -> CacheableFile<'s> {
-        self.file
-    }
-
-    fn locate_next_run(&mut self) -> Result<Option<LocatedRun>> {
-        let work = self
-            .work
-            .as_mut()
-            .expect("a read's work lives till it is finished");
-        work.locate_next_run(&mut self.read)
-    }
-
-    fn take_gets<'a>(&'a mut self, gets: &'a ReadPlan) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async move {
-            let work = self
-                .work
-                .as_mut()
-                .expect("a read's work lives till it is finished");
-            work.take_gets(&mut self.read, gets);
-            Ok(())
-        })
-    }
-
-    fn fetches(&mut self) -> Result<Vec<Box<dyn CacheStoreFetch<'s> + 's>>> {
-        let cache = self.cache;
-        let fetches = self.read.fetches();
-        fetches
-            .into_iter()
+impl<'s> InProcessRound<'s> {
+    fn take_planned_gets(self) -> Result<RoundFetches<'s>> {
+        let Self {
+            cache,
+            reads,
+            file,
+            range,
+            intent,
+            mut read,
+            mut work,
+        } = self;
+        if let Some(held) = work.locate(&mut read)? {
+            let gets = held.run().planned_by(reads, &file, intent);
+            work.take_gets(&mut read, held, &gets);
+        }
+        let fetches = (read.fetches().into_iter())
             .map(|fetch| {
                 let blocks: Box<dyn CacheStoreFetch<'s> + 's> =
-                    Box::new(cache.receive(&mut self.read, fetch)?);
+                    Box::new(cache.receive(&mut read, fetch)?);
                 Ok(blocks)
             })
-            .collect()
-    }
-
-    fn finish(&mut self) -> BoxFuture<'_, Result<bool>> {
-        Box::pin(async move {
-            let work = self
-                .work
-                .take()
-                .expect("a read's work lives till it is finished");
-            let left = work.finish(&mut self.read).await?;
+            .collect::<Result<_>>()?;
+        let ended = Box::pin(async move {
+            let left = work.finish(&mut read).await?;
             if left.is_empty() {
-                return Ok(false);
+                return Ok(RoundEnd::Served(Box::new(read)));
             }
-            let (file, range) = (&self.file, self.range.clone());
-            let work = self.cache.retry(file, range, self.intent, left, self.reads);
-            self.work = Some(work);
-            Ok(true)
-        })
+            let work = cache.retry(&file, range.clone(), intent, left, reads);
+            let next = Self {
+                cache,
+                reads,
+                file,
+                range,
+                intent,
+                read,
+                work,
+            };
+            Ok(RoundEnd::Retry(Box::new(next)))
+        });
+        Ok(RoundFetches { fetches, ended })
     }
+}
 
+impl<'s> ReadRound<'s> for InProcessRound<'s> {
+    fn plan_gets(self: Box<Self>) -> BoxFuture<'s, Result<RoundFetches<'s>>> {
+        Box::pin(std::future::ready(self.take_planned_gets()))
+    }
+}
+
+impl ServedOutput for PartialRead {
     fn into_bytes(self: Box<Self>) -> Option<Bytes> {
-        self.read.into_bytes()
+        PartialRead::into_bytes(*self)
     }
 }
 

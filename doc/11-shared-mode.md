@@ -100,13 +100,14 @@ decision 9).
 
    - **The read policy planned in the storage half:** `TierWork::plan`
      located a run's blocks, then called `ReadPolicy::plan` itself.
-     Resolved: `TierWork::locate_next_run` takes a run's hits and returns
-     a `LocatedRun`, each block's source as the read policy needs it
-     (`LocatedRead`); `T4Caching` plans it with its own read policy
-     (`LocatedRun::planned_by`), and `TierWork::take_gets` takes the
+     Resolved: `TierWork::locate` takes a round's hits and returns its
+     run, a `LocatedRun` of each block's source as the read policy needs
+     it (`LocatedRead`), with the claims on its blocks (`HeldRun`); the
+     round plans it with the read's own policy (`LocatedRun::planned_by`),
+     in the client for a client's read, and `TierWork::take_gets` takes the
      plan, claiming the blocks it widens to. Over the socket those are
      the read and claim calls: a read that widens takes two round trips.
-     `TierWork` holds the run's claims until `take_gets`, which checks
+     The `HeldRun` holds the run's claims until `take_gets`, which checks
      the plan where it arrives (`LocatedRead::accepts`) and carries out
      the default's instead of one it can't: a `LocatedRun` is data alone,
      and a client's plan is checked in the owner.
@@ -570,7 +571,8 @@ session ending the last read before it takes the next's frames, 1 µs.
       `LocatedRun::planned_by` plans with `T4Caching`'s read policy and
       `TierWork::take_gets` takes. A read's runs are located one at a time,
       each after the GETs of the one before claim what they widen to, as
-      before;
+      before. A round is one run since 16 Nov 2026, its gaps memory hits to
+      the policy: no GET widens into a run not yet located;
    2. waiters served by the storage half: no `Location` leaves it.
       Built 29 Oct 2026: the waiters already were (`TierWork::finish`);
       the blocks left to fetch go to the fetch half as a `BlocksToFetch`,
@@ -588,10 +590,12 @@ session ending the last read before it takes the next's frames, 1 µs.
       of it inside: this process's own `InProcessCacheStore` once it
       takes the lock, served to clients by its `OwnerListener`; until
       then its owner's, through an `OwnerConnection`; and the hand-off
-      once that owner goes. A read through either is a
-      `CacheStoreRead`, each of its fetches a `CacheStoreFetch`: an
-      `InProcessRead` and `FetchedBlocks`, or a client's `ClientRead`
-      and `ClientFetch`. The fetch half holds them as `dyn`, so
+      once that owner goes. A read through either goes a round at a
+      time, a `ReadRound`, which plans its GETs and hands back its
+      fetches, each a `CacheStoreFetch`, and its end: another round, or
+      the read's output (`ServedOutput`). An `InProcessRound` and
+      `FetchedBlocks`, or a client's `ClientRound` and `ClientFetch`.
+      The fetch half holds them as `dyn`, so
       `T4Caching::read_through`, `fetch` and `turn` serve both with one
       copy of their logic. The boxes cost no measured time: an owner's
       hot 4 KiB read took 429 ns, against 421 ns through the enum,

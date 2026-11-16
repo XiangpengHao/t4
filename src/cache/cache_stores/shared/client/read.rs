@@ -10,29 +10,32 @@ use super::connection::{OwnerConnection, WaitingCall};
 use super::fetch::ClientFetch;
 use crate::PAGE_SIZE_U64;
 use crate::cache::cache_stores::shared::protocol::{
-    ClientFrame, MOST_READ_BYTES, NextStep, OwnerFrame, RegionSpan, SpanName,
+    ClientFrame, FetchSpec, MOST_READ_BYTES, NextStep, OwnerFrame, RegionSpan, SpanName,
 };
-use crate::cache::cache_stores::{CacheStoreFetch, CacheStoreRead, FileVersionKey};
-use crate::cache::policy::{ReadIntent, ReadPlan};
+use crate::cache::cache_stores::{
+    CacheStoreFetch, FileVersionKey, ReadRound, RoundEnd, RoundFetches, ServedOutput,
+};
+use crate::cache::policy::{ReadIntent, ReadPlan, ReadPolicy};
 use crate::cache::read_output::ReadOutput;
-use crate::cache::storage::{CacheableFile, FileVersion, LocatedRun};
+use crate::cache::storage::{CacheableFile, FileVersion};
 use crate::io::error::{Error, Result};
 
+/// What a client's read keeps from round to round.
 pub(in crate::cache::cache_stores::shared) struct ClientRead<'c> {
     number: std::sync::Arc<ReadNumber>,
     path: &'c [u8],
     version: FileVersion,
     asked: Range<u64>,
-    next: Option<NextStep>,
-    /// Sent as the round starts: the owner holds it till the round's work is done, so that a
-    /// read of hits is one round trip.
-    finish: Option<WaitingCall>,
-    served: Option<Served>,
+    intent: Option<ReadIntent>,
+    reads: &'c dyn ReadPolicy,
 }
 
-enum Served {
-    InFrame(Option<Bytes>),
-    InSpan(Range<u64>),
+pub(in crate::cache::cache_stores::shared) struct ClientRound<'c> {
+    read: ClientRead<'c>,
+    next: NextStep,
+    /// Sent as the round starts: the owner holds it till the round's work is done, so that a
+    /// read of hits is one round trip.
+    finish: WaitingCall,
 }
 
 impl<'c> ClientRead<'c> {
@@ -43,7 +46,8 @@ impl<'c> ClientRead<'c> {
         size: u64,
         range: Range<u64>,
         intent: Option<ReadIntent>,
-    ) -> Result<Option<Self>> {
+        reads: &'c dyn ReadPolicy,
+    ) -> Result<Option<ClientRound<'c>>> {
         if range.end - range.start > MOST_READ_BYTES {
             return Ok(None);
         }
@@ -66,15 +70,17 @@ impl<'c> ClientRead<'c> {
             |call| ClientFrame::Finish { call, read },
         )?;
         match started.await? {
-            OwnerFrame::Started { version, next, .. } => Ok(Some(Self {
-                number: std::sync::Arc::new(number),
-                path,
-                version,
-                asked,
-                next: Some(next),
-                finish: Some(finish),
-                served: None,
-            })),
+            OwnerFrame::Started { version, next, .. } => {
+                let read = Self {
+                    number: std::sync::Arc::new(number),
+                    path,
+                    version,
+                    asked,
+                    intent,
+                    reads,
+                };
+                Ok(Some(ClientRound { read, next, finish }))
+            }
             OwnerFrame::Uncacheable { .. } => Ok(None),
             answer => Err(Self::failed(&answer)),
         }
@@ -86,93 +92,74 @@ impl<'c> ClientRead<'c> {
             answer => OwnerConnection::unexpected(answer),
         }
     }
-}
 
-impl<'c> CacheStoreRead<'c> for ClientRead<'c> {
-    fn file(&self) -> CacheableFile<'c> {
-        CacheableFile::named(self.path, self.version)
-    }
-
-    fn locate_next_run(&mut self) -> Result<Option<LocatedRun>> {
-        match self.next.take() {
-            Some(NextStep::Plan(run)) => Ok(Some(run)),
-            other => {
-                self.next = other;
-                Ok(None)
-            }
+    async fn take_gets(&self, plan: ReadPlan) -> Result<Vec<FetchSpec>> {
+        let read = self.number.number;
+        let answer = (self.number.owner)
+            .call(|call| ClientFrame::TakeGets { call, read, plan })
+            .await?;
+        match answer {
+            OwnerFrame::Next {
+                next: NextStep::Fetch(specs),
+                ..
+            } => Ok(specs),
+            answer => Err(Self::failed(&answer)),
         }
     }
 
-    fn take_gets<'a>(&'a mut self, gets: &'a ReadPlan) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async move {
-            let read = self.number.number;
-            let answer = self
-                .number
-                .owner
-                .call(|call| ClientFrame::TakeGets {
-                    call,
-                    read,
-                    plan: gets.clone(),
-                })
-                .await?;
-            match answer {
-                OwnerFrame::Next { next, .. } => {
-                    self.next = Some(next);
-                    Ok(())
-                }
-                answer => Err(Self::failed(&answer)),
-            }
-        })
-    }
-
-    fn fetches(&mut self) -> Result<Vec<Box<dyn CacheStoreFetch<'c> + 'c>>> {
-        let Some(NextStep::Fetch(specs)) = self.next.take() else {
-            return Ok(Vec::new());
-        };
+    fn fetches(&self, specs: Vec<FetchSpec>) -> Vec<Box<dyn CacheStoreFetch<'c> + 'c>> {
         let file = FileVersionKey::new(self.number.owner.version_ids(), self.version.id());
-        Ok((0..)
+        (0..)
             .zip(specs)
             .map(|(fetch, spec)| {
                 let read = std::sync::Arc::clone(&self.number);
                 Box::new(ClientFetch::new(read, fetch, spec, file))
                     as Box<dyn CacheStoreFetch<'c> + 'c>
             })
-            .collect())
+            .collect()
     }
 
-    fn finish(&mut self) -> BoxFuture<'_, Result<bool>> {
-        Box::pin(async move {
-            let finish = self
-                .finish
-                .take()
-                .expect("a round's finish, sent as it starts");
-            match finish.await? {
-                OwnerFrame::Retry { next, .. } => {
-                    self.next = Some(next);
-                    let owner = &self.number.owner;
-                    let read = self.number.number;
-                    self.finish = Some(owner.send_call(|call| ClientFrame::Finish { call, read })?);
-                    Ok(true)
-                }
-                OwnerFrame::Served { bytes, .. } => {
-                    self.served = Some(Served::InFrame(bytes));
-                    Ok(false)
-                }
-                OwnerFrame::ServedInSpan { asked, .. } => {
-                    self.served = Some(Served::InSpan(asked));
-                    Ok(false)
-                }
-                answer => Err(Self::failed(&answer)),
+    async fn finish(self, finish: WaitingCall) -> Result<RoundEnd<'c>> {
+        match finish.await? {
+            OwnerFrame::Retry { next, .. } => {
+                let (owner, read) = (&self.number.owner, self.number.number);
+                let finish = owner.send_call(|call| ClientFrame::Finish { call, read })?;
+                let next = ClientRound {
+                    read: self,
+                    next,
+                    finish,
+                };
+                Ok(RoundEnd::Retry(Box::new(next)))
             }
-        })
+            OwnerFrame::Served { bytes, .. } => Ok(self.served(Served::InFrame(bytes))),
+            OwnerFrame::ServedInSpan { asked, .. } => Ok(self.served(Served::InSpan(asked))),
+            answer => Err(Self::failed(&answer)),
+        }
     }
 
+    fn served(self, served: Served) -> RoundEnd<'c> {
+        RoundEnd::Served(Box::new(ClientOutput { read: self, served }))
+    }
+}
+
+struct ClientOutput<'c> {
+    read: ClientRead<'c>,
+    served: Served,
+}
+
+enum Served {
+    InFrame(Option<Bytes>),
+    InSpan(Range<u64>),
+}
+
+impl ServedOutput for ClientOutput<'_> {
     /// Their address agrees with their file offset mod 4 KiB, as an owner's read's does.
-    fn into_bytes(mut self: Box<Self>) -> Option<Bytes> {
-        match self.served.take()? {
+    fn into_bytes(self: Box<Self>) -> Option<Bytes> {
+        let read = &self.read;
+        match self.served {
             Served::InFrame(served) => {
                 let served = served?;
-                let start = self.asked.start;
+                let start = read.asked.start;
                 let mut output = ReadOutput::new(start..start + served.len() as u64).ok()?;
                 output.copy_in(start, &served);
                 output.into_bytes()
@@ -180,12 +167,31 @@ impl<'c> CacheStoreRead<'c> for ClientRead<'c> {
             Served::InSpan(asked) => {
                 let at = usize::try_from(asked.start % PAGE_SIZE_U64).ok()?;
                 let len = usize::try_from(asked.end - asked.start).ok()?;
-                let span = self.number.take_output()?;
-                let within = self.asked.start <= asked.start && asked.end <= self.asked.end;
+                let span = read.number.take_output()?;
+                let within = read.asked.start <= asked.start && asked.end <= read.asked.end;
                 let fits = (at + len) as u64 <= span.name().len();
                 (within && fits).then(|| span.into_bytes(at..at + len))
             }
         }
+    }
+}
+
+impl<'c> ReadRound<'c> for ClientRound<'c> {
+    fn plan_gets(self: Box<Self>) -> BoxFuture<'c, Result<RoundFetches<'c>>> {
+        Box::pin(async move {
+            let Self { read, next, finish } = *self;
+            let specs = match next {
+                NextStep::Plan(run) => {
+                    let file = CacheableFile::named(read.path, read.version);
+                    let gets = run.planned_by(read.reads, &file, read.intent);
+                    read.take_gets(gets).await?
+                }
+                NextStep::Fetch(specs) => specs,
+            };
+            let fetches = read.fetches(specs);
+            let ended = Box::pin(read.finish(finish));
+            Ok(RoundFetches { fetches, ended })
+        })
     }
 }
 

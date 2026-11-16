@@ -394,19 +394,18 @@ impl<'c> ServedRead<'c> {
         mut answer: StepAnswer,
         finish: &mut Option<u64>,
     ) -> Option<Vec<FetchedBlocks<'c>>> {
-        loop {
-            match work.locate_next_run(read) {
-                Ok(Some(run)) => {
-                    self.outbox.send(answer.with(NextStep::Plan(run)));
-                    let (call, plan) = self.run_gets(finish).await?;
-                    work.take_gets(read, &plan);
-                    answer = StepAnswer::Next { call };
-                }
-                Ok(None) => break,
-                Err(_) => {
-                    self.fail(answer, *finish);
-                    return None;
-                }
+        match work.locate(read) {
+            Ok(Some(held)) => {
+                self.outbox
+                    .send(answer.with(NextStep::Plan(held.run().clone())));
+                let (call, plan) = self.run_gets(finish).await?;
+                work.take_gets(read, held, &plan);
+                answer = StepAnswer::Next { call };
+            }
+            Ok(None) => {}
+            Err(_) => {
+                self.fail(answer, *finish);
+                return None;
             }
         }
         let mut fetches = Vec::new();
