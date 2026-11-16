@@ -46,20 +46,20 @@
           };
           # Keep in sync with the `vstd` pin in Cargo.toml, and
           # verusRustToolchain with the release's rust-toolchain.toml.
-          verusVersion = "0.2026.08.30.b432e82";
+          verusVersion = "0.2026.11.02.8bf68ee";
           verusArtifact =
             {
               x86_64-linux = {
                 suffix = "x86-linux";
-                hash = "sha256-VMM0e9/Gb6fBFIqGoZaB+XLdwph2s5KuIdX6gmSY/ss=";
+                hash = "sha256-rRdcaRMbXq1Q5SN/JJ0vUzguLmF8i52PBYXgBSFUgtY=";
               };
               aarch64-darwin = {
                 suffix = "arm64-macos";
-                hash = "sha256-no0xc8eGK7DNWLGiYUAirzGO8gBpr/RiIP4Rp6TmW4k=";
+                hash = "sha256-tWKvQlyZhEtCd0HEyeg5RatnmXx1GO9JJcttD6LudCA=";
               };
             }
             .${system};
-          verusRustToolchain = pkgs.rust-bin.stable."1.97.1".minimal.override {
+          verusRustToolchain = pkgs.rust-bin.stable."1.99.1".minimal.override {
             extensions = [
               "rustc-dev"
               "llvm-tools"

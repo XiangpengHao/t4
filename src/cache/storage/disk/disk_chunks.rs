@@ -16,9 +16,9 @@ pub(in crate::cache) struct DiskChunks {
 
 impl DiskChunks {
     pub(in crate::cache) fn new(files: NonZeroU32, chunks_per_file: u32) -> Result<Self> {
-        let striping = ChunkStriping::new(files.get(), chunks_per_file).ok_or(
-            Error::InvalidArgument("a disk tier holds 2^32 chunks or fewer"),
-        )?;
+        let striping = ChunkStriping::new(files, chunks_per_file).ok_or(Error::InvalidArgument(
+            "a disk tier holds 2^32 chunks or fewer",
+        ))?;
         Ok(Self {
             striping,
             table: ChunkTable::new(striping.chunk_count()),
@@ -99,10 +99,8 @@ impl ChunkStriping {
         0 < self.files && self.files * self.chunks_per_file <= u32::MAX
     }
 
-    fn new(files: u32, chunks_per_file: u32) -> Option<Self>
-        requires
-            0 < files,
-    {
+    fn new(files: NonZeroU32, chunks_per_file: u32) -> Option<Self> {
+        let files = files.get();
         files.checked_mul(chunks_per_file)?;
         Some(Self { files, chunks_per_file })
     }
@@ -230,7 +228,7 @@ mod tests {
         assert!(DiskChunks::new(TWO, u32::MAX).is_err());
         // Counted, not built: its chunk table would take 64 GiB, which CI's runners refuse.
         assert_eq!(
-            ChunkStriping::new(2, u32::MAX / 2).unwrap().chunk_count(),
+            ChunkStriping::new(TWO, u32::MAX / 2).unwrap().chunk_count(),
             u32::MAX - 1
         );
     }
