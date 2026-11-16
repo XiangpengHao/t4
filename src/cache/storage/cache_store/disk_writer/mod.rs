@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::future::Future;
 use std::task::{Context, Poll, Wake, Waker};
 
@@ -17,29 +16,37 @@ pub(super) struct PendingDisk {
 #[derive(Default)]
 struct DiskQueue {
     blocks: Vec<(ChunkId, BlockKey)>,
-    held: BTreeSet<(ChunkId, BlockKey)>,
     active: bool,
     stopping: bool,
 }
 
 impl PendingDisk {
+    /// A batch, and the most blocks that wait behind the one being written.
+    const BATCH: usize = 16;
+
+    /// A memory tier smaller than a batch keeps its budget and writes a block at a time.
     pub(super) fn new(memory_chunks: u32) -> Self {
+        let batch_size = if (memory_chunks as usize) < Self::BATCH {
+            1
+        } else {
+            Self::BATCH
+        };
         Self {
-            batch_size: if memory_chunks < 16 { 1 } else { 16 },
+            batch_size,
             queue: Mutex::default(),
             changed: Condvar::new(),
         }
     }
 
+    /// A block is queued once: the fill that published it, or the policy that picked it, which
+    /// forgets a victim until it is admitted again.
     pub(super) fn enqueue(&self, chunk: ChunkId, block: BlockKey) -> bool {
         let mut queue = self.queue.lock().unwrap();
-        if queue.stopping || queue.blocks.len() == 16 {
+        if queue.stopping || queue.blocks.len() == Self::BATCH {
             return false;
         }
-        if queue.held.insert((chunk, block)) {
-            queue.blocks.push((chunk, block));
-            self.changed.notify_all();
-        }
+        queue.blocks.push((chunk, block));
+        self.changed.notify_all();
         true
     }
 
@@ -57,13 +64,6 @@ impl PendingDisk {
         }
     }
 
-    fn release(&self, batch: &[(ChunkId, BlockKey)]) {
-        let mut queue = self.queue.lock().unwrap();
-        for block in batch {
-            queue.held.remove(block);
-        }
-    }
-
     fn completed(&self) {
         let mut queue = self.queue.lock().unwrap();
         queue.active = false;
@@ -72,7 +72,6 @@ impl PendingDisk {
 
     fn abandon(&self) -> Vec<(ChunkId, BlockKey)> {
         let mut queue = self.queue.lock().unwrap();
-        queue.held.clear();
         self.changed.notify_all();
         std::mem::take(&mut queue.blocks)
     }
@@ -130,7 +129,6 @@ impl Tiers {
                     Poll::Pending => thread::park(),
                 }
             };
-            self.pending.release(&batch);
             for (chunk, block) in retry {
                 self.keep_in_memory(chunk, block);
             }
