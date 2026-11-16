@@ -101,22 +101,14 @@ fn reads_of_one_block_across_owner_and_client_fetch_it_once() {
         let _ = client_done.send(read_listed(&client, &clients_meta, 0..MIB));
     });
     wait_until(|| clients.gets_out_now() == 1, "the client's GET goes out");
-    let owner = Arc::new(owner);
-    let waiting = Arc::clone(&owner);
+    let waiting = owner.clone();
 
     let (owner_done, owner_read) = mpsc::channel();
     std::thread::spawn(move || {
         let _ = owner_done.send(read_listed(&waiting, &owners_meta, 0..MIB));
     });
     wait_until(
-        || {
-            owner
-                .cache_store()
-                .owned()
-                .unwrap()
-                .fetch_waiters_registered()
-                == 1
-        },
+        || fetch_waiters_registered(&owner) == 1,
         "the owner's read waits for the client's GET",
     );
     drop(open);
@@ -241,14 +233,7 @@ fn a_clients_read_waiting_on_another_when_the_owner_goes_reads_from_its_store() 
     );
     let waited = read_on_thread(waiting, waitings_meta, 0..MIB);
     wait_until(
-        || {
-            owner
-                .cache_store()
-                .owned()
-                .unwrap()
-                .fetch_waiters_registered()
-                == 1
-        },
+        || fetch_waiters_registered(&owner) == 1,
         "the read waits for the other client's GET",
     );
 
@@ -489,9 +474,8 @@ fn a_client_shut_down_leaves_its_owner_be_and_takes_over_nothing() {
 
     drop(owner);
     wait_until(|| !reads_through_an_owner(&client), "the owner goes");
-    for _ in 0..5 {
-        assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
-    }
+    // This first read tries a hand-off: none was tried before the owner went.
+    assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
     assert!(!owns(&client), "it took over nothing");
 }
 

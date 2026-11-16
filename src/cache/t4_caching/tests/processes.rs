@@ -7,7 +7,7 @@
 //! starting at once.
 
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 
 use super::*;
@@ -15,7 +15,17 @@ use super::*;
 /// A child process of the test binary, playing `role` over a directory
 /// its parent shares with it ([`Self::spawn`]): killed, and reaped, as it
 /// drops, so that a failed test leaves none behind.
-struct ChildProcess(Child);
+struct ChildProcess {
+    child: Child,
+    stdin: Option<ChildStdin>,
+}
+
+impl From<Child> for ChildProcess {
+    fn from(mut child: Child) -> Self {
+        let stdin = Some(child.stdin.take().expect("a child with piped stdin"));
+        Self { child, stdin }
+    }
+}
 
 impl ChildProcess {
     /// The environment variables that name a child's role and directory.
@@ -25,14 +35,14 @@ impl ChildProcess {
     /// The test binary run as a child that plays `role` over `dir`: only
     /// [`a_child_process_plays_its_role`] runs in it.
     fn spawn(role: &str, dir: &std::path::Path) -> Self {
-        Self(Self::command(role, dir).spawn().unwrap())
+        Self::from(Self::command(role, dir).spawn().unwrap())
     }
 
     /// As [`Self::spawn`], with `temp_dir` the child's `TMPDIR`, as a shell
     /// that sets its own gives it.
     fn spawn_with_temp_dir(role: &str, dir: &std::path::Path, temp_dir: &std::path::Path) -> Self {
         let mut command = Self::command(role, dir);
-        Self(command.env("TMPDIR", temp_dir).spawn().unwrap())
+        Self::from(command.env("TMPDIR", temp_dir).spawn().unwrap())
     }
 
     fn command(role: &str, dir: &std::path::Path) -> Command {
@@ -43,26 +53,33 @@ impl ChildProcess {
             .args([test.as_str(), "--exact", "--nocapture", "--test-threads=1"])
             .env(Self::ROLE, role)
             .env(Self::DIR, dir)
+            .stdin(Stdio::piped())
             .stdout(Stdio::null());
         command
     }
 
     /// Kills the child, as `SIGKILL` does, and waits for it to end.
     fn kill(&mut self) {
-        self.0.kill().unwrap();
-        self.0.wait().unwrap();
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+    }
+
+    /// Ends the parent's hold on the child: EOF releases its stdin read,
+    /// as the parent's death does even when no destructor can run.
+    fn close_stdin(&mut self) {
+        drop(self.stdin.take());
     }
 
     /// Whether the child exited successfully, once it exits.
     fn exited_ok(&mut self) -> bool {
-        self.0.wait().unwrap().success()
+        self.child.wait().unwrap().success()
     }
 }
 
 impl Drop for ChildProcess {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -230,7 +247,8 @@ fn a_child_process_plays_its_role() {
             markers.set(&format!("fetched-{index}"), &fetched);
         }
     }
-    markers.said("done");
+    // EOF means the parent finished, or died without running destructors.
+    std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink()).unwrap();
     drop(held);
 }
 
@@ -320,15 +338,7 @@ fn a_client_killed_holding_a_claim_hands_it_to_its_waiter() {
 
     let read = owner.read_on_thread(0..MIB);
     wait_until(
-        || {
-            owner
-                .cache
-                .cache_store()
-                .owned()
-                .unwrap()
-                .fetch_waiters_registered()
-                == 1
-        },
+        || fetch_waiters_registered(&owner.cache) == 1,
         "the owner's read waits on the client's claim",
     );
     client.kill();
@@ -361,7 +371,9 @@ fn eight_processes_starting_at_once_fetch_each_block_once() {
                 .unwrap()
         })
         .sum();
-    markers.set("done", "");
+    for reader in &mut readers {
+        reader.close_stdin();
+    }
 
     for reader in &mut readers {
         assert!(reader.exited_ok(), "each read its bytes right");

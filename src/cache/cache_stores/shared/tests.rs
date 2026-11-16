@@ -42,11 +42,6 @@ fn shared(inner: &Arc<InMemory>, dir: &TempDir) -> T4CachingBuilder {
         .with_multiprocess_sharing()
 }
 
-/// What `work` returns on a thread of its own, once it completes.
-fn on_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
-    std::thread::spawn(work).join().unwrap()
-}
-
 /// Waits for the state `done`; the CI step bounds a hung test.
 fn wait_until(done: impl Fn() -> bool) {
     while !done() {
@@ -159,11 +154,8 @@ fn a_frame_half_come_is_held_till_the_rest_comes() {
     let encoded = frame.encode();
     one.write_all(&encoded[..5]).unwrap();
 
-    let mut other = on_thread(move || {
-        assert!(other.fill().unwrap());
-        assert!(other.next_frame(FrameSocket::MOST_BYTES).unwrap().is_none());
-        other
-    });
+    assert!(other.fill().unwrap());
+    assert!(other.next_frame(FrameSocket::MOST_BYTES).unwrap().is_none());
     let sending = std::thread::spawn(move || {
         one.write_all(&encoded[5..]).unwrap();
         one
@@ -199,31 +191,25 @@ fn a_senders_frames_go_in_order_whoever_writes_them() {
         })
         .collect();
     let encoded: Vec<Vec<u8>> = frames.iter().map(ClientFrame::encode).collect();
-    let sender = on_thread(move || {
-        // One, two, then three at a time, cut anywhere by a full socket.
-        let mut rest = &encoded[..];
-        for together in [1, 2, 3].into_iter().cycle() {
-            if rest.is_empty() {
-                break;
-            }
-            let (now, later) = rest.split_at(together.min(rest.len()));
-            sender.send(now.to_vec());
-            rest = later;
+    // One, two, then three at a time, cut anywhere by a full socket.
+    let mut rest = &encoded[..];
+    for together in [1, 2, 3].into_iter().cycle() {
+        if rest.is_empty() {
+            break;
         }
-        sender
-    });
+        let (now, later) = rest.split_at(together.min(rest.len()));
+        sender.send(now.to_vec());
+        rest = later;
+    }
     for frame in frames {
         let body = other.receive(FrameSocket::MOST_BYTES).unwrap().unwrap();
         assert_eq!(ClientFrame::decode(body).unwrap(), frame);
     }
 
     drop(other);
-    let sender = on_thread(move || {
-        for read in 0..64 {
-            sender.send(vec![ClientFrame::EndRead { read }.encode()]);
-        }
-        sender
-    });
+    for read in 0..64 {
+        sender.send(vec![ClientFrame::EndRead { read }.encode()]);
+    }
     drop(sender);
 }
 
@@ -341,22 +327,18 @@ fn a_cache_built_for_sharing_on_owned_files_is_their_owners_client() {
 /// address.
 #[test]
 fn an_owner_dropped_hands_its_files_to_the_next_cache() {
-    let dir = Arc::new(tempfile::tempdir().unwrap());
+    let dir = tempfile::tempdir().unwrap();
     let inner = Arc::new(InMemory::new());
     let owner = shared(&inner, &dir).build().unwrap();
     let client = shared(&inner, &dir).build().unwrap();
 
-    on_thread(move || drop(owner));
+    drop(owner);
     wait_until(|| owner_gone(&client));
-    let kept = Arc::clone(&dir);
-    let (next_owner, next_client) = on_thread(move || {
-        let next_owner = shared(&inner, &dir).build().unwrap();
-        let next_client = shared(&inner, &dir).build().unwrap();
-        (next_owner, next_client)
-    });
+    let next_owner = shared(&inner, &dir).build().unwrap();
+    let next_client = shared(&inner, &dir).build().unwrap();
     assert!(next_owner.cache_store().owned().is_some());
     assert!(!owner_gone(&next_client));
-    drop((next_client, next_owner, kept));
+    drop((next_client, next_owner));
 }
 
 /// How the owner answers `hello`, sent on a connection of its own: its
@@ -519,9 +501,10 @@ fn the_owner_tells_a_client_of_another_version_its_own() {
 }
 
 /// A cache built for sharing whose files' owner speaks another protocol
-/// version is `Busy`.
+/// version is `Busy` at once: told the owner's version, it doesn't try
+/// that owner till `OWNER_WAIT` runs out.
 #[test]
-fn a_cache_whose_owner_speaks_another_version_is_busy() {
+fn a_cache_whose_owner_speaks_another_version_is_busy_at_once() {
     let dir = tempfile::tempdir().unwrap();
     let inner = Arc::new(InMemory::new());
     let cache_file = File::options()
@@ -542,11 +525,19 @@ fn a_cache_whose_owner_speaks_another_version_is_busy() {
         socket
             .send(&OwnerFrame::Welcome { version, region }.encode())
             .unwrap();
+        listener
     });
 
     let refused = shared(&inner, &dir).build().unwrap_err();
     assert!(matches!(refused, crate::Error::Busy), "{refused}");
-    other_owner.join().unwrap();
+    let listener = other_owner.join().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let retry = listener.accept().unwrap_err();
+    assert_eq!(
+        retry.kind(),
+        std::io::ErrorKind::WouldBlock,
+        "no retry connection"
+    );
     address.remove();
 }
 

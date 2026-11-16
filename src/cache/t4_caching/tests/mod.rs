@@ -313,10 +313,20 @@ fn builder(inner: &Arc<CountingStore>, dir: impl AsRef<std::path::Path>) -> T4Ca
 }
 
 /// Waits until `done`; the CI step bounds a hung test.
+/// The label names the state for the reader.
 fn wait_until(mut done: impl FnMut() -> bool, _what: &str) {
     while !done() {
         std::thread::yield_now();
     }
+}
+
+/// Wakers registered on the owned cache's fetches in flight.
+fn fetch_waiters_registered(cache: &T4Caching) -> usize {
+    cache
+        .cache_store()
+        .owned()
+        .expect("an owner")
+        .fetch_waiters_registered()
 }
 
 /// A cache over a [`CountingStore`], in a directory of its own that lives

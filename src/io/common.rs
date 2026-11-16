@@ -564,6 +564,7 @@ mod tests {
         }
 
         /// Waits until `done` holds of the kernel.
+        /// The label names the state for the reader.
         fn wait_until(&self, _what: &str, done: impl Fn(&ScriptedKernel) -> bool) {
             while !self.with(|kernel| done(kernel)) {
                 std::thread::yield_now();
