@@ -232,3 +232,37 @@ fn a_shutdown_whose_wakeup_is_lost_hangs_no_process() {
     )
     .check();
 }
+
+/// A read given up leaves its write to disk in flight, holding its chunk till done. With one
+/// chunk, the reads at once find no room, so each runs to its end without waiting and fetches
+/// the block; with two, they share one GET (fuzz run 43946954212, 16 Nov 2026).
+#[test]
+fn a_read_given_up_holds_a_disk_chunk_while_its_write_goes_on() {
+    for disk_blocks in [1, 2] {
+        SharedScenario::new(
+            SharedSettings::new(2).with_tiers(1, disk_blocks).on_disk(),
+            vec![
+                WriteBehind {
+                    file: 1,
+                    size: Some(256),
+                },
+                // A read in flight till the end, so that no step waits for the processes to
+                // settle, and the given-up write may outlast the reads.
+                Spawn {
+                    process: 1,
+                    read: whole(0),
+                },
+                GiveUp {
+                    process: 0,
+                    read: whole(1),
+                    polls: 1,
+                },
+                ReadAtOnce {
+                    process: 0,
+                    reads: vec![whole(1), whole(1), whole(1)],
+                },
+            ],
+        )
+        .check();
+    }
+}

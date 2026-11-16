@@ -9,6 +9,8 @@ use std::ops::Range;
 use bytes::Bytes;
 use object_store::GetRange;
 
+use crate::cache::BLOCK_SIZE_U64;
+
 /// Each byte a hash of the id and offset, so no two contents agree for long.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Content {
@@ -106,6 +108,15 @@ impl Model {
 
     pub(super) fn current(&self, file: usize) -> Option<Content> {
         self.files[file].last().and_then(|written| written.content)
+    }
+
+    /// The blocks of the largest version of `file` written so far.
+    pub(super) fn most_blocks(&self, file: usize) -> u64 {
+        (self.files[file].iter())
+            .filter_map(|written| written.content)
+            .map(|content| content.size.div_ceil(BLOCK_SIZE_U64))
+            .max()
+            .unwrap_or(0)
     }
 
     /// What a read that started at `started`, by a process built at `built`, may answer.

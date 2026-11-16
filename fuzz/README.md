@@ -85,7 +85,10 @@ It checks that:
   dropped, killed or restarted, or a read given up. Unchecked for a file
   written again, as the owner keeps one version of a path and a process
   that still trusts another replaces it at each read; where more blocks
-  were fetched than the tier holds; and once a cache on disk shut down;
+  were fetched than the tier holds beside those of the reads given up, as
+  a given-up read's write to a tier goes on after it, holding its chunk,
+  and a block that finds no room isn't cached; and once a cache on disk
+  shut down;
 - no thread is left waiting once every process is dropped: shuttle reports
   a deadlock.
 
