@@ -3,6 +3,7 @@ mod log_file;
 
 use std::collections::HashSet;
 
+pub(in crate::cache) use log::BootIdReader;
 use log_file::CacheLayout;
 pub(in crate::cache) use log_file::PersistenceLog;
 

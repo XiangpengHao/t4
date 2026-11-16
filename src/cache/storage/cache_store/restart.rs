@@ -39,7 +39,7 @@ impl ObjectCache {
         chunks: u32,
     ) -> Option<DiskSnapshot> {
         let file = std::fs::File::open(first).unwrap();
-        super::super::snapshot::PersistenceLog::beside(first, &[file], chunks)
+        super::super::snapshot::PersistenceLog::beside(first, &[file], chunks, Default::default())
             .unwrap()
             .unwrap()
             .inspect()

@@ -5,7 +5,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
-use super::log::{BootId, DiskLog, LogEntry};
+use super::log::{BootId, BootIdReader, DiskLog, LogEntry};
 use super::{DiskSnapshot, SnapshotReader, SnapshotWriter, VersionOnDisk};
 use crate::cache::storage::FileIdentity;
 use crate::cache::{BlockKey, ChunkId};
@@ -24,12 +24,14 @@ impl PersistenceLog {
         first: &Path,
         opened: &[File],
         chunks_per_file: u32,
+        boot_id_reader: BootIdReader,
     ) -> io::Result<Option<Self>> {
         let mut path = first.as_os_str().to_owned();
         path.push(".log");
         let path = PathBuf::from(path);
-        let boot = BootId::current()?;
-        let Some(files) = opened.iter().map(FileStamp::of).collect::<Option<_>>() else {
+        let boot = boot_id_reader.read().ok();
+        let files = opened.iter().map(FileStamp::of).collect::<Option<_>>();
+        let (Some(boot), Some(files)) = (boot, files) else {
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}

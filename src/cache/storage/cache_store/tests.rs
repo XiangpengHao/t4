@@ -26,6 +26,7 @@ fn cache(memory_chunks: u32, disk_chunks: u32) -> (TempDir, ObjectCache, Arc<Tes
         NonZeroU32::new(8).unwrap(),
         true,
         FileAllocation::Eager,
+        Default::default(),
     )
     .unwrap();
     let policy = Arc::new(TestPolicy::new());
@@ -94,6 +95,7 @@ fn the_default_policy_streams_blocks_through_both_tiers() {
             NonZeroU32::new(8).unwrap(),
             true,
             FileAllocation::Eager,
+            Default::default(),
         )
         .unwrap();
         let (memory, disk_chunks) = (NonZeroU32::new(2).unwrap(), NonZeroU32::new(3).unwrap());
@@ -749,7 +751,14 @@ fn on_demand_cache(
 ) -> (ObjectCache, Arc<TestPolicy>) {
     let file = DiskFile::new(dir.path().join("cache"), u64::from(disk_chunks) * MIB);
     let on_demand = FileAllocation::OnDemand { keep_free };
-    let disk = CacheFiles::open(&[file], NonZeroU32::new(8).unwrap(), true, on_demand).unwrap();
+    let disk = CacheFiles::open(
+        &[file],
+        NonZeroU32::new(8).unwrap(),
+        true,
+        on_demand,
+        Default::default(),
+    )
+    .unwrap();
     let policy = Arc::new(TestPolicy::new());
     policy.set_admit(Admit::Disk);
     let placement = Arc::clone(&policy) as Arc<dyn PlacementPolicy>;

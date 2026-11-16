@@ -15,3 +15,4 @@ pub(in crate::cache) use cache_store::{
     CacheableFile, FetchedBlocks, LocatedRun, ObjectCache, PartialRead, TierWork,
 };
 pub(in crate::cache) use index::FileVersion;
+pub(in crate::cache) use snapshot::BootIdReader;

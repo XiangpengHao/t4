@@ -46,7 +46,7 @@ fn snapshot() -> DiskSnapshot {
 fn a_clean_log_is_replayed_and_rebased_on_each_build() {
     let dir = tempfile::tempdir().unwrap();
     let files = opened(dir.path(), &["cache0", "cache1"]);
-    let place = PersistenceLog::beside(&dir.path().join("cache0"), &files, 4)
+    let place = PersistenceLog::beside(&dir.path().join("cache0"), &files, 4, Default::default())
         .unwrap()
         .unwrap();
     assert_eq!(place.path(), dir.path().join("cache0.log"));
@@ -63,14 +63,16 @@ fn a_log_of_other_cache_files_is_rebased_cold() {
     let first = dir.path().join("cache0");
     let files = opened(dir.path(), &["cache0", "cache1"]);
     let keep = |files: &[File]| {
-        let place = PersistenceLog::beside(&first, files, 4).unwrap().unwrap();
+        let place = PersistenceLog::beside(&first, files, 4, Default::default())
+            .unwrap()
+            .unwrap();
         place.seed(&snapshot()).unwrap();
     };
     let reordered = opened(dir.path(), &["cache1", "cache0"]);
     let others = [
-        PersistenceLog::beside(&first, &files, 5),
-        PersistenceLog::beside(&first, &files[..1], 4),
-        PersistenceLog::beside(&first, &reordered, 4),
+        PersistenceLog::beside(&first, &files, 5, Default::default()),
+        PersistenceLog::beside(&first, &files[..1], 4, Default::default()),
+        PersistenceLog::beside(&first, &reordered, 4, Default::default()),
     ];
     for other in others {
         keep(&files);
@@ -84,7 +86,9 @@ fn a_log_of_other_cache_files_is_rebased_cold() {
     drop((files, reordered));
     std::fs::remove_file(&first).unwrap();
     let remade = opened(dir.path(), &["cache0", "cache1"]);
-    let other = PersistenceLog::beside(&first, &remade, 4).unwrap().unwrap();
+    let other = PersistenceLog::beside(&first, &remade, 4, Default::default())
+        .unwrap()
+        .unwrap();
     assert_eq!(other.take().unwrap(), None);
     assert!(other.path().exists());
 }
@@ -93,7 +97,7 @@ fn a_log_of_other_cache_files_is_rebased_cold() {
 fn bytes_no_cache_could_have_kept_are_no_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     let files = opened(dir.path(), &["cache0", "cache1"]);
-    let place = PersistenceLog::beside(&dir.path().join("cache0"), &files, 4)
+    let place = PersistenceLog::beside(&dir.path().join("cache0"), &files, 4, Default::default())
         .unwrap()
         .unwrap();
     let layout = place.layout();
@@ -139,7 +143,7 @@ fn a_log_only_grows_until_its_next_build_rebases_it() {
 
     let dir = tempfile::tempdir().unwrap();
     let files = opened(dir.path(), &["cache0", "cache1"]);
-    let log = PersistenceLog::beside(&dir.path().join("cache0"), &files, 4)
+    let log = PersistenceLog::beside(&dir.path().join("cache0"), &files, 4, Default::default())
         .unwrap()
         .unwrap();
     log.seed(&snapshot()).unwrap();

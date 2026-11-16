@@ -139,8 +139,9 @@ bytes.
     Reads keep using memory, disk and the remote. A failed data write is
     never added. A memory victim whose path was replaced before its batch
     is dropped; a batch scans paths once for the versions it needs.
-    A boot UUID that cannot be read fails the build before reuse; missing
-    creation times discard an old log durably and disable persistence.
+    An unreadable boot UUID or missing creation times discard any old log
+    durably and disable persistence. The cache builds and serves normally;
+    a restart is cold.
     The file is `<first cache file>.log`; old `.snapshot` files are ignored.
 
 ## Measured: stage 1's restart

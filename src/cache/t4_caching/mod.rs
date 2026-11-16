@@ -22,7 +22,7 @@ use super::policy::Tier;
 use super::policy::{
     FetchRuns, PlacementPolicy, RaceStragglers, ReadIntent, ReadPolicy, TierSizes,
 };
-use super::storage::{DiskFile, FileAllocation};
+use super::storage::{BootIdReader, DiskFile, FileAllocation};
 use super::{BLOCK_SIZE_U64, InsertOrAbort};
 use crate::io::sync::Arc;
 
@@ -58,6 +58,7 @@ pub struct T4CachingBuilder {
     queue_depth: u32,
     direct_io: bool,
     disk_allocation: FileAllocation,
+    boot_id_reader: BootIdReader,
     placement: Option<PlacementMaker>,
     reads: Option<Arc<dyn ReadPolicy>>,
     sleep: Option<Sleep>,
@@ -67,6 +68,12 @@ pub struct T4CachingBuilder {
 }
 
 impl T4CachingBuilder {
+    #[cfg(all(test, feature = "shuttle"))]
+    fn with_unreadable_boot_id(mut self) -> Self {
+        self.boot_id_reader = BootIdReader::Unreadable;
+        self
+    }
+
     #[cfg(all(test, feature = "shuttle"))]
     fn with_test_clock(mut self, clock: crate::io::time::Clock) -> Self {
         self.clock = clock;
@@ -195,6 +202,7 @@ impl T4CachingBuilder {
             self.direct_io,
             self.disk_allocation,
             self.placement,
+            self.boot_id_reader,
         );
         tiers.set_clock(self.clock.clone());
         let cache_store: Arc<dyn CacheStore> = if self.sharing {
@@ -261,6 +269,7 @@ impl T4Caching {
             queue_depth: 64,
             direct_io: true,
             disk_allocation: FileAllocation::Eager,
+            boot_id_reader: BootIdReader::default(),
             placement: None,
             reads: None,
             sleep: None,

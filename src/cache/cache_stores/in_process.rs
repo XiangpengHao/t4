@@ -11,8 +11,8 @@ use crate::cache::policy::{
     ClockPolicy, PlacementPolicy, ReadIntent, ReadPlan, ReadPolicy, TierSizes,
 };
 use crate::cache::storage::{
-    CacheFiles, CacheableFile, DiskFile, FetchedBlocks, FileAllocation, LocatedRun, ObjectCache,
-    PartialRead, TierWork,
+    BootIdReader, CacheFiles, CacheableFile, DiskFile, FetchedBlocks, FileAllocation, LocatedRun,
+    ObjectCache, PartialRead, TierWork,
 };
 use crate::io::error::{Error, Result};
 use crate::io::sync::Arc;
@@ -34,6 +34,7 @@ pub(in crate::cache) struct TierSettings {
     queue_depth: NonZeroU32,
     direct_io: bool,
     allocation: FileAllocation,
+    boot_id_reader: BootIdReader,
     placement: PlacementSource,
 }
 
@@ -49,6 +50,7 @@ impl TierSettings {
         direct_io: bool,
         allocation: FileAllocation,
         placement: Option<PlacementMaker>,
+        boot_id_reader: BootIdReader,
     ) -> Self {
         Self {
             clock: Default::default(),
@@ -58,6 +60,7 @@ impl TierSettings {
             direct_io,
             allocation,
             placement: placement.map_or(PlacementSource::Clock, PlacementSource::Given),
+            boot_id_reader,
         }
     }
 
@@ -91,6 +94,7 @@ impl InProcessCacheStore {
             tiers.queue_depth,
             tiers.direct_io,
             tiers.allocation,
+            tiers.boot_id_reader,
         )?;
         let disk_chunks = NonZeroU32::new(disk.chunks().chunk_count())
             .expect("a disk file holds a chunk at least");
