@@ -6,8 +6,11 @@
 //! - `blocks`: where each cached block of each file is.
 //! - `read_plan`: the blocks a read of a byte range covers, where each one
 //!   is, and the part of each the read needs.
+//! - `page_window`: the whole pages around the part of a block a read needs,
+//!   and the range checks under them, proven with Verus.
 
 mod blocks;
+mod page_window;
 mod paths;
 mod read_plan;
 

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::buffer::AlignedBuf;
+use crate::io::aligned_buf::AlignedBuf;
 use crate::io::error::{Error, Result};
 use crate::io::sync::mpsc;
 

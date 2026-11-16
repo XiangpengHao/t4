@@ -133,7 +133,7 @@ pub(crate) fn new_backend(
 mod tests {
     use super::*;
     use crate::PAGE_SIZE_NZ_U32;
-    use crate::buffer::AlignedBuf;
+    use crate::io::aligned_buf::AlignedBuf;
 
     /// A slot frees once its completion is reaped, not once the kernel takes
     /// the entry: so the operations in flight never outgrow the completion
