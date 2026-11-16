@@ -79,8 +79,7 @@ than the cache it replaces, nothing more.
 ## Verification
 
 Parts of the crate are written inside `verus!` and proven with
-[Verus](https://github.com/verus-lang/verus): alignment
-(`src/io/aligned_buf.rs`) and range requests
+[Verus](https://github.com/verus-lang/verus): alignment and range requests
 (`src/cache/storage/index/page_window.rs`). The proofs cover that
 arithmetic only, not the OS, filesystem or hardware. Outside `verus!`,
 Verus compiles the code but checks nothing.
