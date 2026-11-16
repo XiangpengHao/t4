@@ -289,6 +289,10 @@ fn a_callers_send_waits_for_no_room_on_linux() {
             bytes: Bytes::from(vec![7; 4 << 20]),
         };
         sender.send(vec![frame.encode()]);
+        assert!(
+            sender.has_pending_frames(),
+            "the writer holds what did not fit"
+        );
     });
 }
 

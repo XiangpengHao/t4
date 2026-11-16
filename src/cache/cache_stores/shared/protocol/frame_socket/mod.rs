@@ -177,6 +177,12 @@ impl FrameSender {
         })
     }
 
+    #[cfg(all(test, feature = "shuttle", target_os = "linux"))]
+    pub(in crate::cache::cache_stores::shared) fn has_pending_frames(&self) -> bool {
+        let state = self.queue.state();
+        state.writing || !state.frames.is_empty()
+    }
+
     /// Sends `frames`, in order, after every frame sent before them, in one
     /// write if the socket has room and no other caller or the writer is
     /// writing; drops them once the peer has gone.
