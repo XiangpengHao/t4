@@ -153,7 +153,9 @@ chunk table the frame table.
    costs time and egress, never correctness. So nothing is logged while
    the cache runs: no WAL, no tombstones, no `O_DSYNC`. A block reaches
    disk only when memory evicts it or the policy admits it there, as a
-   plain write, and a freed disk chunk can be reused at once.
+   plain write, and a freed disk chunk can be reused at once. A log that
+   keeps the disk tier across a killed process, with no sync while the
+   cache runs: `13-persistence.md` (designed 16 Nov 2026).
 
 ### Front end
 
@@ -225,6 +227,7 @@ chunk table the frame table.
   block to the new bytes: a pending list, and tombstones carried by the
   next batch's WAL write. And in a fixed-size file, the log needs a region
   of its own and compaction. All of it to save one refill after a crash.
+  `13-persistence.md` keeps the order and drops the sync.
 
 ## Later
 
@@ -237,16 +240,12 @@ chunk table the frame table.
   registering the memory pool with io_uring once (`99-brainstorm.md`).
 - **Eviction off the insertion path:** a background thread keeping free
   chunks between two watermarks, if evicting at insertion costs too much.
+  `13-persistence.md`'s batched disk writes take disk writes off the read
+  path (decision 9).
 - **The drive's own garbage collection:** a file kept full leaves the SSD
   no spare room. Leave part of the drive unwritten, or discard freed
   chunks.
-- **The disk tier across a crash, if a refill proves too costly:**
-  write the snapshot every minute or so, and keep each freed disk chunk
-  unused until the next snapshot is durable. After a crash the last
-  snapshot is still true, as no chunk it lists was reused since: a crash
-  loses only the blocks written since. The disk tier then keeps a reserve
-  of free chunks, so that an admission finds one while freed chunks wait
-  (`10-spiral-integration.md`, decision 7, stage 2).
+- **The disk tier across a killed process:** `13-persistence.md`.
 
 ## Code map
 
