@@ -324,6 +324,25 @@ pub(in crate::cache::cache_stores::shared) struct FrameSender {
 }
 
 impl FrameSender {
+    /// Pauses the next caller once it owns the socket, until the test
+    /// releases it; other callers must queue behind it without waiting.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(in crate::cache::cache_stores::shared) fn pause_next_caller(
+        &self,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (entered, observed) = std::sync::mpsc::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        *self.queue.caller_pause.lock().unwrap() = Some(CallerPause { entered, resume });
+        (observed, release)
+    }
+
+    /// Whether frames still belong to the writer or its queue.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(in crate::cache::cache_stores::shared) fn has_pending_frames(&self) -> bool {
+        let state = self.queue.state();
+        state.writing || !state.frames.is_empty()
+    }
+
     /// On macOS, the most a caller's send waits for room on the socket
     /// before it leaves its frames to the writer: a frame takes a few µs to
     /// send; an owner that doesn't read for this long is busy, or stuck.
@@ -350,6 +369,8 @@ impl FrameSender {
             socket,
             state: Mutex::default(),
             waiting: Condvar::new(),
+            #[cfg(all(test, not(feature = "shuttle")))]
+            caller_pause: Mutex::default(),
         });
         let writing = std::sync::Arc::clone(&queue);
         let writer = thread::Builder::new()
@@ -379,6 +400,14 @@ impl FrameSender {
             // The socket is this caller's till it has sent: the others
             // queue behind it meanwhile, unheld.
             state.writing = true;
+        }
+        #[cfg(all(test, not(feature = "shuttle")))]
+        {
+            let pause = self.queue.caller_pause.lock().unwrap().take();
+            if let Some(pause) = pause {
+                pause.entered.send(()).unwrap();
+                pause.resume.recv().unwrap();
+            }
         }
         let sent = self.queue.socket.send_some(frames.make_contiguous());
         let mut state = self.queue.state();
@@ -424,12 +453,21 @@ impl Drop for FrameSender {
     }
 }
 
+/// A test's gate while a caller owns the socket.
+#[cfg(all(test, not(feature = "shuttle")))]
+struct CallerPause {
+    entered: std::sync::mpsc::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
 /// What a [`FrameSender`]'s callers and writer share.
 struct SenderQueue {
     socket: FrameSocket,
     state: Mutex<SenderState>,
     /// Wakes the writer: a frame waits, or the sender stops.
     waiting: Condvar,
+    #[cfg(all(test, not(feature = "shuttle")))]
+    caller_pause: Mutex<Option<CallerPause>>,
 }
 
 #[derive(Default)]

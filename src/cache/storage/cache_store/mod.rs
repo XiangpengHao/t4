@@ -77,6 +77,13 @@ pub(in crate::cache) struct ObjectCache {
 }
 
 impl ObjectCache {
+    /// Wakers registered on fetches in flight, including those of reads
+    /// given up before their fetch ends.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(in crate::cache) fn fetch_waiters_registered(&self) -> usize {
+        self.in_flight.fetch_waiters_registered()
+    }
+
     /// A cache of `memory_chunks` chunks of memory and the chunks of
     /// `disk`: its blocks placed by `placement`, which is built for both
     /// counts. Memory holds nothing; the disk holds what the snapshot the

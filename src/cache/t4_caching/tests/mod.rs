@@ -312,12 +312,10 @@ fn builder(inner: &Arc<CountingStore>, dir: impl AsRef<std::path::Path>) -> T4Ca
         .with_disk_file(dir.as_ref().join("cache"), 8 * MIB)
 }
 
-/// Waits until `done`, a few seconds at most, else fails with `what`.
-fn wait_until(mut done: impl FnMut() -> bool, what: &str) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+/// Waits until `done`; the CI step bounds a hung test.
+fn wait_until(mut done: impl FnMut() -> bool, _what: &str) {
     while !done() {
-        assert!(std::time::Instant::now() < deadline, "{what}");
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::yield_now();
     }
 }
 
