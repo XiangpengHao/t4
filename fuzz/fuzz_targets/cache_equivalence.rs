@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::num::NonZeroU8;
 use std::ops::Range;
 use std::pin::pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,8 +23,8 @@ use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload
 use pollster::block_on;
 use t4::T4Caching;
 use t4::policy::{
-    Admit, BlockKey, BlockRead, ChunkId, DiskHit, MemoryVictim, PlacementPolicy, Tier, TierSizes,
-    VictimAction,
+    Admit, BlockKey, BlockRead, ChunkId, DiskHit, IoEvent, LocatedRead, MemoryVictim,
+    PlacementPolicy, PlannedGet, ReadPlan, ReadPolicy, Tier, TierSizes, VictimAction,
 };
 use tempfile::TempDir;
 
@@ -50,6 +51,8 @@ struct CacheSettings {
     disk_files: u64,
     queue_depth: u32,
     policy: PolicyChoice,
+    reads: ReadsChoice,
+    on_demand: bool,
 }
 
 impl Scenario {
@@ -67,6 +70,12 @@ impl<'a> Arbitrary<'a> for Scenario {
         } else {
             PolicyChoice::Scripted(u.arbitrary()?)
         };
+        let reads = if u.arbitrary()? {
+            ReadsChoice::Default
+        } else {
+            ReadsChoice::Scripted(u.arbitrary()?)
+        };
+        let on_demand = u.arbitrary()?;
         let mut operations = Vec::new();
         while !u.is_empty() && operations.len() < Self::MAX_OPERATIONS {
             operations.push(u.arbitrary()?);
@@ -78,6 +87,8 @@ impl<'a> Arbitrary<'a> for Scenario {
                 disk_files,
                 queue_depth,
                 policy,
+                reads,
+                on_demand,
             },
             operations,
         })
@@ -87,6 +98,14 @@ impl<'a> Arbitrary<'a> for Scenario {
 #[derive(Clone, Debug)]
 enum PolicyChoice {
     Clock,
+    Scripted(Vec<u8>),
+}
+
+#[derive(Clone, Debug)]
+enum ReadsChoice {
+    /// The cache's default.
+    Default,
+    /// [`ScriptedReads`] on these bytes.
     Scripted(Vec<u8>),
 }
 
@@ -399,6 +418,16 @@ impl Harness {
             .with_queue_depth(settings.queue_depth)
             // So the cache files can be on tmpfs (`fuzz/README.md`).
             .with_direct_io(false);
+        let builder = match &settings.reads {
+            ReadsChoice::Default => builder,
+            ReadsChoice::Scripted(script) => builder.with_read_policy(ScriptedReads {
+                script: Script::new(script.clone()),
+            }),
+        };
+        let builder = match settings.on_demand {
+            true => builder.with_on_demand_disk_allocation(),
+            false => builder,
+        };
         let (builder, pickable) = match &settings.policy {
             PolicyChoice::Clock => (builder, None),
             PolicyChoice::Scripted(script) => {
@@ -581,8 +610,7 @@ impl Harness {
 
 struct ScriptedPolicy {
     sizes: TierSizes,
-    script: Vec<u8>,
-    next: AtomicUsize,
+    script: Script,
     pickable: Arc<PickableChunks>,
 }
 
@@ -605,18 +633,13 @@ impl ScriptedPolicy {
     fn new(sizes: TierSizes, script: Vec<u8>, pickable: Arc<PickableChunks>) -> Self {
         Self {
             sizes,
-            script,
-            next: AtomicUsize::new(0),
+            script: Script::new(script),
             pickable,
         }
     }
 
     fn next_byte(&self) -> u8 {
-        if self.script.is_empty() {
-            return 0;
-        }
-        let at = self.next.fetch_add(1, Ordering::Relaxed) % self.script.len();
-        self.script[at]
+        self.script.next_byte()
     }
 
     fn chunk_count(&self, tier: Tier) -> u32 {
@@ -704,4 +727,54 @@ impl PlacementPolicy for ScriptedPolicy {
     fn pick_disk_victims(&self, count: usize) -> Vec<ChunkId> {
         self.pick(Tier::Disk, count)
     }
+}
+
+/// Bytes of the input a policy decides by.
+struct Script {
+    bytes: Vec<u8>,
+    next: AtomicUsize,
+}
+
+impl Script {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            next: AtomicUsize::new(0),
+        }
+    }
+
+    /// The next byte, round and round; 0 if there are none.
+    fn next_byte(&self) -> u8 {
+        if self.bytes.is_empty() {
+            return 0;
+        }
+        let at = self.next.fetch_add(1, Ordering::Relaxed) % self.bytes.len();
+        self.bytes[at]
+    }
+}
+
+/// A read policy whose plans the input makes: up to three GETs around the
+/// read's blocks, racing one to three requests. Many are plans the cache
+/// must refuse, and plan by its default instead.
+struct ScriptedReads {
+    script: Script,
+}
+
+impl ReadPolicy for ScriptedReads {
+    fn plan(&self, read: &LocatedRead<'_>) -> ReadPlan {
+        let blocks = read.blocks();
+        let starts = blocks.len() as u32 + 2;
+        let gets = (0..self.script.next_byte() % 4)
+            .map(|_| {
+                let start =
+                    blocks.start.saturating_sub(1) + u32::from(self.script.next_byte()) % starts;
+                let end = start + u32::from(self.script.next_byte()) % 4;
+                let race = NonZeroU8::new(self.script.next_byte() % 3 + 1).expect("1 to 3");
+                PlannedGet::new(start..end, race)
+            })
+            .collect();
+        ReadPlan::new(gets)
+    }
+
+    fn on_io(&self, _event: &IoEvent<'_>) {}
 }
