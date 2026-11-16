@@ -30,13 +30,12 @@ jobs:
         run: nix develop -c cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run tests
+        timeout-minutes: 5
         run: nix develop -c cargo test
 
       - name: Run proof check
         run: nix develop -c cargo verus focus
 
-      - name: Run shuttle tests
-        run: nix develop -c cargo test --features shuttle shuttle
 
   macos:
     runs-on: macos-latest
@@ -54,7 +53,26 @@ jobs:
         run: nix develop -c cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run tests
+        timeout-minutes: 5
         run: nix develop -c cargo test
 
       - name: Run proof check
         run: nix develop -c cargo verus focus
+
+  shuttle:
+    # Independent of lint/proof jobs: a failure there must not hide a schedule failure.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+      - name: Configure Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+      - name: Run every shuttle test
+        timeout-minutes: 5
+        run: nix develop -c cargo test --locked --features shuttle

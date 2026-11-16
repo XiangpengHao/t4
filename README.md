@@ -62,3 +62,10 @@ pub trait PlacementPolicy: Send + Sync {
     fn pick_disk_victims(&self, count: usize) -> Vec<ChunkId>;
 }
 ```
+
+## Tests
+
+Run `cargo test --locked` and `cargo test --locked --features shuttle`.
+The latter runs every concurrent scenario on checked-in schedules; see
+[the seed and OS-coverage inventory](doc/12-seeded-concurrency-tests.md) for replay
+instructions and the real-OS exceptions.

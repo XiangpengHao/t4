@@ -705,8 +705,11 @@ session ending the last read before it takes the next's frames, 1 µs.
 | `src/cache/cache_stores/shared/owner/` | the owner's listener and a session for each client (decisions 1, 5); a client's reads, each a task of its session's (`client_reads.rs`, decision 5); what wakes a session's thread, waiting on its client's socket and its reads at once (`session_waker.rs`, Cost) | yes |
 | `src/cache/cache_stores/shared/client/` | a client's connection to its owner and its calls (`connection/`), its reads through it (`read.rs`), and their fetches (`fetch.rs`) (decisions 5 to 7) | yes |
 | `src/cache/cache_stores/shared/protocol/frames/` | the frames, each checked as it arrives (decision 5) | yes |
-| `src/cache/cache_stores/shared/protocol/frame_socket.rs` | a socket frames cross whole, raising no `SIGPIPE` (decision 5); the frames that came taken from one read (`FrameReceiver`), and many callers' frames sent with no thread between while the socket has room (`FrameSender`) (Cost) | yes |
+| `src/cache/cache_stores/shared/protocol/frame_socket/` | a socket frames cross whole, raising no `SIGPIPE` (decision 5); the frames that came taken from one read (`FrameReceiver`), and many callers' frames sent with no thread between while the socket has room (`FrameSender`) (Cost) | yes |
 | `src/cache/cache_stores/shared/protocol/address.rs` | the owner's address, by the first cache file's identity (decision 6) | yes |
 | `src/cache/cache_stores/shared/protocol/handshake.rs` | a client's hello, its descriptor by `SCM_RIGHTS`, and the owner's check (decision 6) | yes |
 | `src/cache/cache_stores/shared/protocol/region/` | the region, its spans, and the checks the owner makes of it (decision 5) | yes |
 | `src/cache/t4_caching/tests/sharing.rs`, `processes.rs` | an owner and its clients in one process, and in real ones (build step 3) | yes |
+
+The seeded schedule corpus, replay instructions, and retained OS-test coverage
+are described in [doc/12](12-seeded-concurrency-tests.md).
