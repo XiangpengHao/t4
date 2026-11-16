@@ -41,8 +41,9 @@ io-uring = { version = "0.7", optional = true }
 libc = "0.2"
 # The cache's memory pool, an anonymous mapping, and the cache file's
 # preallocation; a shared cache's handshake, descriptors sent by SCM_RIGHTS,
-# and its region, a memfd (Linux) or POSIX shared memory (macOS).
-rustix = { version = "1.1", features = ["event", "fs", "mm", "net", "process", "shm"] }
+# and its region, a memfd (Linux) or POSIX shared memory (macOS). 1.1.6
+# makes the macOS preallocation all or nothing.
+rustix = { version = "1.1.6", features = ["event", "fs", "mm", "net", "process", "shm"] }
 
 [dev-dependencies]
 pollster = "1.0"
