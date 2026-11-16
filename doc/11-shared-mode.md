@@ -253,7 +253,11 @@ decision 9).
      is the read's until the read ends, whatever becomes of the fetch:
      the fetch hands it over as it drops, before the read's end. A piece
      past the span, as of a GET that brings more bytes than it holds,
-     goes in a frame, for the owner to refuse at the commit. A client's
+     goes in a frame, for the owner to refuse at the commit. A piece
+     staged in its read's own output breaks the protocol: the owner would
+     copy it onto itself, undefined behavior, and an abort where debug
+     assertions check it (fixed 16 Nov 2026,
+     `a_fetch_staged_in_its_reads_output_closes_the_connection`). A client's
      fetched byte is copied once more than an owner's (into the span), in
      place of twice over the socket; landing from the client's region
      straight into a chunk at commit, which saves it, would need a
@@ -274,9 +278,11 @@ decision 9).
      no span lands its bytes in its frames.
    - **The owner trusts no shared byte it acts on.** It reads every
      field of a request from its frame, never from the region, so a
-     client changing the region garbles only its own bytes. It keeps its
-     mapping of a region until every I/O into it completes, even after
-     the client has gone.
+     client changing the region garbles only its own bytes: its reads'
+     outputs, and the pieces it stages, which the owner lands as they are
+     when it takes them, to be served to every reader of the block, as
+     decision 8 allows. It keeps its mapping of a region until every I/O
+     into it completes, even after the client has gone.
 
 6. **A client finds the owner by the first cache file's identity.**
    - **Linux:** an abstract socket, `\0t4/<dev>/<ino>` in hex, from the

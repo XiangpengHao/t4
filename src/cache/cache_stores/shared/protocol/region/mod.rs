@@ -40,6 +40,11 @@ impl SpanName {
     pub(in crate::cache::cache_stores::shared) fn len(self) -> u64 {
         self.len
     }
+
+    pub(in crate::cache::cache_stores::shared) fn overlaps(self, other: Self) -> bool {
+        let end = |span: Self| span.offset.saturating_add(span.len);
+        self.offset < end(other) && other.offset < end(self)
+    }
 }
 
 pub(in crate::cache::cache_stores::shared) struct SharedMapping {

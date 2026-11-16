@@ -874,6 +874,41 @@ fn an_output_span_off_a_page_boundary_closes_the_connection() {
     });
 }
 
+/// Landed from its output's own bytes, a fetch would copy them onto themselves: undefined, and
+/// a panic where debug assertions check it.
+#[cfg(feature = "shuttle")]
+#[test]
+fn a_fetch_staged_in_its_reads_output_closes_the_connection() {
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = TestDirectory::new();
+        let inner = Arc::new(InMemory::new());
+        let path = Path::from("a");
+        let (data, meta) = put_file(&inner, &path, MIB);
+        let owner = shared(&inner, &dir).build().unwrap();
+        let (mut client, region) = RawClient::admitted_with_region(&dir);
+
+        let mut output = region.span(ReadOutput::padded_len(&(0..MIB))).unwrap();
+        client.send(&start_read_into(1, &meta, 0..MIB, output.name()));
+        assert!(matches!(client.answer(), OwnerFrame::Started { .. }));
+        let plan = ReadPlan::new(vec![PlannedGet::once(0..1)]);
+        client.send(&ClientFrame::TakeGets {
+            call: 2,
+            read: 1,
+            plan,
+        });
+        assert!(matches!(client.answer(), OwnerFrame::Next { .. }));
+        output.copy_in(0, &data);
+        let staged = SpanName::new(output.name().offset(), MIB);
+        client.send(&ClientFrame::LandStaged {
+            read: 1,
+            fetch: 0,
+            staged,
+        });
+        assert!(client.closed());
+        assert_eq!(read_listed(&owner, &meta, 0..MIB).unwrap(), data);
+    });
+}
+
 fn read_listed(
     store: &T4Caching,
     meta: &ObjectMeta,

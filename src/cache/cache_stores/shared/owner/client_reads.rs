@@ -324,6 +324,7 @@ impl<'c> ServedRead<'c> {
         let reads = ForwardedDiskReads {
             outbox: self.outbox.clone(),
         };
+        let output_span = output.as_ref().map(|&(_, span)| span);
         let make_output = |asked: Range<u64>| match output {
             Some((region, span)) => region.output(span, asked, std::sync::Arc::clone(&self.end)),
             None => ReadOutput::new(asked),
@@ -354,7 +355,7 @@ impl<'c> ServedRead<'c> {
             let Some(fetches) = self.plan(&mut read, &mut work, answer, &mut finish).await else {
                 return;
             };
-            let landed = self.land(fetches, finish);
+            let landed = self.land(fetches, finish, output_span);
             let (finish, worked) = join(landed, work.finish(&mut read)).await;
             let Some(call) = finish else {
                 return;
@@ -443,7 +444,13 @@ impl<'c> ServedRead<'c> {
         }
     }
 
-    async fn land(&self, fetches: Vec<FetchedBlocks<'c>>, mut finish: Option<u64>) -> Option<u64> {
+    /// A piece staged in the read's `output` would land onto itself.
+    async fn land(
+        &self,
+        fetches: Vec<FetchedBlocks<'c>>,
+        mut finish: Option<u64>,
+        output: Option<SpanName>,
+    ) -> Option<u64> {
         let mut fetches: Vec<_> = fetches.into_iter().map(LandingFetch::Landing).collect();
         while finish.is_none() || fetches.iter().any(LandingFetch::is_open) {
             let frame = self.next_frame().await;
@@ -454,6 +461,9 @@ impl<'c> ServedRead<'c> {
                 },
                 ClientFrame::LandStaged { fetch, staged, .. } => {
                     match (fetches.get_mut(fetch as usize), &self.region) {
+                        _ if output.is_some_and(|output| output.overlaps(staged)) => {
+                            Err("staged bytes: in the read's output")
+                        }
                         (Some(landing), Some(region)) => match region.staged(staged) {
                             Ok(bytes) => landing.land(bytes).await,
                             Err(_) => Err("staged bytes: past the region"),
