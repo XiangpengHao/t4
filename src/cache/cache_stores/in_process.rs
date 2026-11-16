@@ -7,12 +7,15 @@ use bytes::Bytes;
 use futures_util::future::BoxFuture;
 
 use super::{
-    CacheStore, CacheStoreFetch, FileVersionKey, ReadRound, RoundEnd, RoundFetches, ServedOutput,
-    VersionIdSource,
+    BoxedRoundEnd, CacheStore, CacheStoreFetch, FileVersionKey, ReadRound, RoundEnd, RoundFetches,
+    ServedOutput, VersionIdSource,
 };
-use crate::cache::policy::{ClockPolicy, PlacementPolicy, ReadIntent, ReadPolicy, TierSizes};
+use crate::cache::policy::{
+    ClockPolicy, PlacementPolicy, ReadIntent, ReadPlan, ReadPolicy, TierSizes,
+};
+use crate::cache::read_output::ReadOutput;
 use crate::cache::storage::{
-    CacheFiles, CacheableFile, DiskFile, FetchedBlocks, ObjectCache, PartialRead, TierWork,
+    CacheFiles, CacheableFile, DiskFile, FetchedBlocks, HeldRun, ObjectCache, PartialRead, TierWork,
 };
 use crate::io::error::{Error, Result};
 use crate::io::sync::Arc;
@@ -113,16 +116,9 @@ impl CacheStore for InProcessCacheStore {
             let Ok(file) = self.cache.resolve(path, Some(e_tag), size) else {
                 return Ok(None);
             };
-            let (read, work) = self.cache.start_read(&file, range.clone(), intent, reads)?;
-            let round: Box<dyn ReadRound<'s> + 's> = Box::new(InProcessRound {
-                cache: &self.cache,
-                reads,
-                file,
-                range,
-                intent,
-                read,
-                work,
-            });
+            let round =
+                InProcessRound::start(&self.cache, reads, file, range, intent, ReadOutput::new)?;
+            let round: Box<dyn ReadRound<'s> + 's> = Box::new(round);
             Ok(Some(round))
         })
     }
@@ -141,7 +137,8 @@ impl CacheStore for InProcessCacheStore {
     }
 }
 
-struct InProcessRound<'s> {
+/// The owner serves a client's read through it as well, with the client's plan.
+pub(in crate::cache::cache_stores) struct InProcessRound<'s> {
     cache: &'s ObjectCache,
     reads: &'s dyn ReadPolicy,
     file: CacheableFile<'s>,
@@ -152,51 +149,101 @@ struct InProcessRound<'s> {
 }
 
 impl<'s> InProcessRound<'s> {
-    fn take_planned_gets(self) -> Result<RoundFetches<'s>> {
-        let Self {
+    pub(in crate::cache::cache_stores) fn start(
+        cache: &'s ObjectCache,
+        reads: &'s dyn ReadPolicy,
+        file: CacheableFile<'s>,
+        range: Range<u64>,
+        intent: Option<ReadIntent>,
+        output: impl FnOnce(Range<u64>) -> Result<ReadOutput>,
+    ) -> Result<Self> {
+        let (read, work) = cache.start_read_into(&file, range.clone(), intent, reads, output)?;
+        Ok(Self {
+            cache,
+            reads,
+            file,
+            range,
+            intent,
+            read,
+            work,
+        })
+    }
+
+    /// Takes the round's hits; the run is `None` if it leaves nothing to fetch.
+    pub(in crate::cache::cache_stores) fn locate(&mut self) -> Result<Option<HeldRun>> {
+        self.work.locate(&mut self.read)
+    }
+
+    pub(in crate::cache::cache_stores) fn take_gets(&mut self, held: HeldRun, gets: &ReadPlan) {
+        self.work.take_gets(&mut self.read, held, gets);
+    }
+
+    pub(in crate::cache::cache_stores) fn into_fetches(
+        mut self,
+    ) -> Result<(Vec<FetchedBlocks<'s>>, FetchingRound<'s>)> {
+        let fetches = (self.read.fetches().into_iter())
+            .map(|fetch| self.cache.receive(&mut self.read, fetch))
+            .collect::<Result<_>>()?;
+        Ok((fetches, FetchingRound(self)))
+    }
+
+    fn plan_gets_by_policy(mut self) -> Result<RoundFetches<'s>> {
+        if let Some(held) = self.locate()? {
+            let gets = held.run().planned_by(self.reads, &self.file, self.intent);
+            self.take_gets(held, &gets);
+        }
+        let (fetches, fetching) = self.into_fetches()?;
+        let fetches = (fetches.into_iter())
+            .map(|blocks| Box::new(blocks) as Box<dyn CacheStoreFetch<'s> + 's>)
+            .collect();
+        let ended = Box::pin(async move {
+            let ended: BoxedRoundEnd<'s> = match fetching.ended().await? {
+                RoundEnd::Retry(next) => RoundEnd::Retry(Box::new(next)),
+                RoundEnd::Served(read) => RoundEnd::Served(Box::new(read)),
+            };
+            Ok(ended)
+        });
+        Ok(RoundFetches { fetches, ended })
+    }
+}
+
+/// A round whose fetches are out.
+pub(in crate::cache::cache_stores) struct FetchingRound<'s>(InProcessRound<'s>);
+
+impl<'s> FetchingRound<'s> {
+    /// Done once the round's fetches and its reads from the tiers are.
+    pub(in crate::cache::cache_stores) async fn ended(
+        self,
+    ) -> Result<RoundEnd<InProcessRound<'s>, PartialRead>> {
+        let InProcessRound {
             cache,
             reads,
             file,
             range,
             intent,
             mut read,
-            mut work,
-        } = self;
-        if let Some(held) = work.locate(&mut read)? {
-            let gets = held.run().planned_by(reads, &file, intent);
-            work.take_gets(&mut read, held, &gets);
+            work,
+        } = self.0;
+        let left = work.finish(&mut read).await?;
+        if left.is_empty() {
+            return Ok(RoundEnd::Served(read));
         }
-        let fetches = (read.fetches().into_iter())
-            .map(|fetch| {
-                let blocks: Box<dyn CacheStoreFetch<'s> + 's> =
-                    Box::new(cache.receive(&mut read, fetch)?);
-                Ok(blocks)
-            })
-            .collect::<Result<_>>()?;
-        let ended = Box::pin(async move {
-            let left = work.finish(&mut read).await?;
-            if left.is_empty() {
-                return Ok(RoundEnd::Served(Box::new(read)));
-            }
-            let work = cache.retry(&file, range.clone(), intent, left, reads);
-            let next = Self {
-                cache,
-                reads,
-                file,
-                range,
-                intent,
-                read,
-                work,
-            };
-            Ok(RoundEnd::Retry(Box::new(next)))
-        });
-        Ok(RoundFetches { fetches, ended })
+        let work = cache.retry(&file, range.clone(), intent, left, reads);
+        Ok(RoundEnd::Retry(InProcessRound {
+            cache,
+            reads,
+            file,
+            range,
+            intent,
+            read,
+            work,
+        }))
     }
 }
 
 impl<'s> ReadRound<'s> for InProcessRound<'s> {
     fn plan_gets(self: Box<Self>) -> BoxFuture<'s, Result<RoundFetches<'s>>> {
-        Box::pin(std::future::ready(self.take_planned_gets()))
+        Box::pin(std::future::ready(self.plan_gets_by_policy()))
     }
 }
 

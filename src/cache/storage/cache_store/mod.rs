@@ -31,7 +31,7 @@ pub(in crate::cache) use fill::FetchedBlocks;
 pub use fuzzing::{FuzzedLogBase, FuzzedVersion};
 pub(in crate::cache) use located_run::LocatedRun;
 pub(in crate::cache) use partial_read::PartialRead;
-pub(in crate::cache) use tier_work::TierWork;
+pub(in crate::cache) use tier_work::{HeldRun, TierWork};
 
 pub(in crate::cache) struct ObjectCache {
     clock: crate::io::time::Clock,
@@ -110,6 +110,7 @@ impl ObjectCache {
         Ok(CacheableFile { path, version })
     }
 
+    #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::cache) fn start_read<'c>(
         &'c self,
         file: &CacheableFile<'c>,

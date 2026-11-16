@@ -13,7 +13,7 @@ use crate::cache::cache_stores::shared::protocol::{
     ClientFrame, FetchSpec, MOST_READ_BYTES, NextStep, OwnerFrame, RegionSpan, SpanName,
 };
 use crate::cache::cache_stores::{
-    CacheStoreFetch, FileVersionKey, ReadRound, RoundEnd, RoundFetches, ServedOutput,
+    BoxedRoundEnd, CacheStoreFetch, FileVersionKey, ReadRound, RoundEnd, RoundFetches, ServedOutput,
 };
 use crate::cache::policy::{ReadIntent, ReadPlan, ReadPolicy};
 use crate::cache::read_output::ReadOutput;
@@ -119,7 +119,7 @@ impl<'c> ClientRead<'c> {
             .collect()
     }
 
-    async fn finish(self, finish: WaitingCall) -> Result<RoundEnd<'c>> {
+    async fn finish(self, finish: WaitingCall) -> Result<BoxedRoundEnd<'c>> {
         match finish.await? {
             OwnerFrame::Retry { next, .. } => {
                 let (owner, read) = (&self.number.owner, self.number.number);
@@ -137,7 +137,7 @@ impl<'c> ClientRead<'c> {
         }
     }
 
-    fn served(self, served: Served) -> RoundEnd<'c> {
+    fn served(self, served: Served) -> BoxedRoundEnd<'c> {
         RoundEnd::Served(Box::new(ClientOutput { read: self, served }))
     }
 }

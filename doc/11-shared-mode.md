@@ -201,7 +201,9 @@ decision 9).
        protocol error.
 
      The owner runs a client's reads as tasks on the connection's thread
-     (`shared/owner/client_reads.rs`), each taking its frames in order, and
+     (`shared/owner/client_reads.rs`), each taking its frames in order and
+     going a round at a time through an `InProcessRound`, as an owner's
+     own read does, the client's plan in place of its own policy's. It
      tells the client each read from disk it makes for one (`DiskRead`),
      for the client's read policy. A frame the protocol doesn't allow
      where it comes (GETs where none were due, a fetch or a read the
