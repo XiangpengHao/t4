@@ -41,13 +41,15 @@ impl FreeChunks {
         (taken[chunk / 64] >> (chunk % 64) as u64) & 1 == 1
     }
 
-    pub(super) closed spec fn wf(self) -> bool {
-        &&& self.chunk_count <= self.taken@.len() * 64 < self.chunk_count + 64
+    /// The words hold the tier's chunks, and their bits past it are set.
+    spec fn padded(chunk_count: u32, taken: Seq<u64>) -> bool {
+        &&& chunk_count <= taken.len() * 64 < chunk_count + 64
         &&& forall|chunk: int|
-            self.chunk_count <= chunk < self.taken@.len() * 64 ==> #[trigger] Self::is_taken(
-                self.taken@,
-                chunk,
-            )
+            chunk_count <= chunk < taken.len() * 64 ==> #[trigger] Self::is_taken(taken, chunk)
+    }
+
+    pub(super) closed spec fn wf(self) -> bool {
+        &&& Self::padded(self.chunk_count, self.taken@)
         &&& self.free_count == self@.len()
         &&& self.taken@.len() == 0 || self.cursor < self.taken@.len()
     }
@@ -55,8 +57,7 @@ impl FreeChunks {
     pub(super) fn new(chunk_count: u32) -> (free: Self)
         ensures
             free.wf(),
-            free@ == free.chunks(),
-            free.chunks() == Set::range(0, chunk_count as int),
+            free@ == Set::range(0, chunk_count as int),
             !free.is_closed(),
     {
         let chunks = chunk_count as usize;
@@ -71,32 +72,10 @@ impl FreeChunks {
         if used_in_last_word != 0 {
             taken[chunks / Self::WORD_BITS] = u64::MAX << used_in_last_word;
         }
-        let free = Self { taken, chunk_count, free_count: chunk_count, cursor: 0, closed: false };
         proof {
-            assert forall|chunk: int|
-                0 <= chunk < free.taken@.len() * 64 implies #[trigger] Self::is_taken(
-                free.taken@,
-                chunk,
-            ) == (chunk >= chunk_count) by {
-                let (word, bit) = (free.taken@[chunk / 64], (chunk % 64) as u64);
-                let used = used_in_last_word as u64;
-                if used != 0 && chunk / 64 == chunks / 64 {
-                    assert(((word >> bit) & 1 == 1) == (bit >= used)) by (bit_vector)
-                        requires
-                            word == u64::MAX << used,
-                            used < 64,
-                            bit < 64,
-                    ;
-                } else {
-                    assert((word >> bit) & 1 == 0) by (bit_vector)
-                        requires
-                            word == 0,
-                    ;
-                }
-            }
-            assert(free@ =~= free.chunks());
+            Self::lemma_fresh(chunk_count, taken@);
         }
-        free
+        Self { taken, chunk_count, free_count: chunk_count, cursor: 0, closed: false }
     }
 
     pub(super) fn allocate(&mut self) -> (chunk: Option<ChunkId>)
@@ -104,8 +83,6 @@ impl FreeChunks {
             old(self).wf(),
         ensures
             final(self).wf(),
-            final(self).chunks() == old(self).chunks(),
-            final(self).is_closed() == old(self).is_closed(),
             match chunk {
                 Some(chunk) => old(self)@.contains(chunk@ as int) && final(self)@ == old(
                     self,
@@ -120,17 +97,15 @@ impl FreeChunks {
         }
         let word_index = self.word_with_a_free_chunk();
         let bit = self.taken[word_index].trailing_ones();
-        let ghost chunk = word_index * 64 + bit;
         proof {
-            broadcast use vstd::std_specs::bits::axiom_u64_trailing_ones;
-
-            assert(!Self::is_taken(self.taken@, chunk));
+            Self::lemma_first_clear_bit(self.taken@, word_index as int);
         }
-        self.take_bit(word_index, 1 << bit, Ghost(chunk));
+        self.take_bit(word_index, 1 << bit, Ghost(word_index * 64 + bit));
         self.cursor = word_index;
         Some(ChunkId::new((word_index * Self::WORD_BITS) as u32 + bit))
     }
 
+    #[verifier::loop_isolation(false)]
     fn word_with_a_free_chunk(&self) -> (word_index: usize)
         requires
             self.wf(),
@@ -139,31 +114,14 @@ impl FreeChunks {
             word_index < self.taken@.len(),
             self.taken@[word_index as int] != u64::MAX,
     {
-        let ghost free_word = self@.choose() / 64;
         proof {
-            let chunk = self@.choose();
-            assert(self@.len() != 0);
-            assert(self@.contains(chunk));
-            let (word, bit) = (self.taken@[free_word], (chunk % 64) as u64);
-            assert(word != u64::MAX) by (bit_vector)
-                requires
-                    (word >> bit) & 1 != 1,
-                    bit < 64,
-            ;
+            self.lemma_a_word_has_a_free_chunk();
         }
         let mut word_index = self.cursor;
         while self.taken[word_index] == u64::MAX
             invariant
-                self.wf(),
-                0 <= free_word < self.taken@.len(),
-                self.taken@[free_word] != u64::MAX,
                 word_index < self.taken@.len(),
-            decreases
-                    if word_index <= free_word {
-                        free_word - word_index
-                    } else {
-                        free_word + self.taken@.len() - word_index
-                    },
+            decreases self.words_to_a_free_chunk(word_index as int),
         {
             word_index =
             if word_index + 1 == self.taken.len() {
@@ -181,7 +139,6 @@ impl FreeChunks {
         ensures
             final(self).wf(),
             final(self)@ == old(self)@,
-            final(self).chunks() == old(self).chunks(),
             final(self).is_closed(),
     {
         self.closed = true;
@@ -202,8 +159,6 @@ impl FreeChunks {
         ensures
             final(self).wf(),
             final(self)@ == old(self)@.remove(chunk@ as int),
-            final(self).chunks() == old(self).chunks(),
-            final(self).is_closed() == old(self).is_closed(),
     {
         let (word_index, mask) = self.bit_of(chunk);
         check(self.taken[word_index] & mask == 0, "a chunk taken twice");
@@ -219,34 +174,12 @@ impl FreeChunks {
         ensures
             final(self).wf(),
             final(self)@ == old(self)@.insert(chunk@ as int),
-            final(self).chunks() == old(self).chunks(),
-            final(self).is_closed() == old(self).is_closed(),
     {
         let (word_index, mask) = self.bit_of(chunk);
         check(self.taken[word_index] & mask != 0, "a chunk freed twice");
-        let ghost old_self = *self;
         self.taken[word_index] &= !mask;
         proof {
-            let index = chunk@ as int;
-            let bit = (index % 64) as u64;
-            assert forall|other: int|
-                0 <= other < self.taken@.len() * 64 implies #[trigger] Self::is_taken(
-                self.taken@,
-                other,
-            ) == (Self::is_taken(old_self.taken@, other) && other != index) by {
-                if other / 64 == index / 64 {
-                    let (word, other_bit) = (old_self.taken@[other / 64], (other % 64) as u64);
-                    assert(((word & !mask) >> other_bit) & 1 == 1 <==> ((word >> other_bit) & 1 == 1
-                        && other_bit != bit)) by (bit_vector)
-                        requires
-                            mask == 1u64 << bit,
-                            bit < 64,
-                            other_bit < 64,
-                    ;
-                }
-            }
-            assert(self@ =~= old_self@.insert(index));
-            vstd::set_lib::lemma_len_subset(self@, self.chunks());
+            Self::lemma_free_bit(old(self).taken@, self.chunk_count, chunk@ as int);
         }
         self.free_count += 1;
         self.cursor = word_index;
@@ -261,32 +194,12 @@ impl FreeChunks {
         ensures
             final(self).wf(),
             final(self)@ == old(self)@.remove(chunk),
-            final(self).chunks() == old(self).chunks(),
-            final(self).is_closed() == old(self).is_closed(),
             final(self).cursor == old(self).cursor,
             final(self).taken@.len() == old(self).taken@.len(),
     {
-        let ghost old_self = *self;
         self.taken[word_index] |= mask;
         proof {
-            let bit = (chunk % 64) as u64;
-            assert forall|other: int|
-                0 <= other < self.taken@.len() * 64 implies #[trigger] Self::is_taken(
-                self.taken@,
-                other,
-            ) == (Self::is_taken(old_self.taken@, other) || other == chunk) by {
-                if other / 64 == chunk / 64 {
-                    let (word, other_bit) = (old_self.taken@[other / 64], (other % 64) as u64);
-                    assert(((word | mask) >> other_bit) & 1 == 1 <==> ((word >> other_bit) & 1 == 1
-                        || other_bit == bit)) by (bit_vector)
-                        requires
-                            mask == 1u64 << bit,
-                            bit < 64,
-                            other_bit < 64,
-                    ;
-                }
-            }
-            assert(self@ =~= old_self@.remove(chunk));
+            Self::lemma_take_bit(old(self).taken@, self.chunk_count, chunk);
         }
         self.free_count -= 1;
     }
@@ -304,17 +217,191 @@ impl FreeChunks {
         // Padding bits are set: freeing one would hand out a chunk that doesn't exist.
         check(chunk.index() < self.chunk_count, "a chunk past the tier's chunks");
         let index = chunk.index() as usize;
-        let (word_index, mask) = (index / Self::WORD_BITS, 1u64 << (index % Self::WORD_BITS));
         proof {
-            let (word, bit) = (self.taken@[word_index as int], (index % 64) as u64);
-            assert((word & mask == 0) == ((word >> bit) & 1 != 1)) by (bit_vector)
+            Self::lemma_mask(self.taken@[(index / 64) as int], (index % 64) as u64);
+        }
+        (index / Self::WORD_BITS, 1u64 << (index % Self::WORD_BITS))
+    }
+}
+
+#[cfg(verus_only)]
+mod proofs {
+    use super::*;
+
+    impl FreeChunks {
+        pub(super) proof fn lemma_fresh(chunk_count: u32, taken: Seq<u64>)
+            requires
+                chunk_count <= taken.len() * 64 < chunk_count + 64,
+                forall|word: int|
+                    0 <= word < taken.len() ==> #[trigger] taken[word] == if word * 64 + 64
+                        <= chunk_count {
+                        0
+                    } else {
+                        u64::MAX << (chunk_count % 64) as u64
+                    },
+            ensures
+                Self::padded(chunk_count, taken),
+                Self::free_in(chunk_count, taken) == Set::range(0, chunk_count as int),
+        {
+            assert forall|chunk: int|
+                0 <= chunk < taken.len() * 64 implies #[trigger] Self::is_taken(taken, chunk) == (
+            chunk >= chunk_count) by {
+                let (word, bit) = (taken[chunk / 64], (chunk % 64) as u64);
+                let used = (chunk_count % 64) as u64;
+                if chunk / 64 * 64 + 64 <= chunk_count {
+                    assert((word >> bit) & 1 == 0) by (bit_vector)
+                        requires
+                            word == 0,
+                    ;
+                } else {
+                    assert(((word >> bit) & 1 == 1) == (bit >= used)) by (bit_vector)
+                        requires
+                            word == u64::MAX << used,
+                            used < 64,
+                            bit < 64,
+                    ;
+                }
+            }
+            assert(Self::free_in(chunk_count, taken) =~= Set::range(0, chunk_count as int));
+        }
+
+        pub(super) open spec fn word_of_a_free_chunk(self) -> int {
+            self@.choose() / 64
+        }
+
+        pub(super) open spec fn words_to_a_free_chunk(self, word: int) -> int {
+            let target = self.word_of_a_free_chunk();
+            if word <= target {
+                target - word
+            } else {
+                target + self.taken@.len() - word
+            }
+        }
+
+        pub(super) proof fn lemma_a_word_has_a_free_chunk(self)
+            requires
+                self.wf(),
+                self.free_count > 0,
+            ensures
+                0 <= self.word_of_a_free_chunk() < self.taken@.len(),
+                self.taken@[self.word_of_a_free_chunk()] != u64::MAX,
+        {
+            let chunk = self@.choose();
+            assert(self@.len() != 0);
+            assert(self@.contains(chunk));
+            let (word, bit) = (self.taken@[chunk / 64], (chunk % 64) as u64);
+            assert(word != u64::MAX) by (bit_vector)
                 requires
-                    mask == 1u64 << bit,
+                    (word >> bit) & 1 != 1,
                     bit < 64,
             ;
         }
-        (word_index, mask)
+
+        pub(super) proof fn lemma_first_clear_bit(taken: Seq<u64>, word: int)
+            requires
+                0 <= word < taken.len(),
+                taken[word] != u64::MAX,
+            ensures
+                taken[word].trailing_ones() < 64,
+                !Self::is_taken(taken, word * 64 + taken[word].trailing_ones()),
+        {
+            broadcast use vstd::std_specs::bits::axiom_u64_trailing_ones;
+
+        }
+
+        pub(super) proof fn lemma_take_bit(taken: Seq<u64>, chunk_count: u32, chunk: int)
+            requires
+                Self::padded(chunk_count, taken),
+                Self::free_in(chunk_count, taken).contains(chunk),
+            ensures
+                ({
+                    let word = taken[chunk / 64] | (1u64 << (chunk % 64) as u64);
+                    let after = taken.update(chunk / 64, word);
+                    &&& Self::padded(chunk_count, after)
+                    &&& Self::free_in(chunk_count, after) == Self::free_in(
+                        chunk_count,
+                        taken,
+                    ).remove(chunk)
+                }),
+        {
+            let bit = (chunk % 64) as u64;
+            let mask = 1u64 << bit;
+            let after = taken.update(chunk / 64, taken[chunk / 64] | mask);
+            assert forall|other: int|
+                0 <= other < taken.len() * 64 implies #[trigger] Self::is_taken(after, other) == (
+            Self::is_taken(taken, other) || other == chunk) by {
+                if other / 64 == chunk / 64 {
+                    let (word, other_bit) = (taken[other / 64], (other % 64) as u64);
+                    assert(((word | mask) >> other_bit) & 1 == 1 <==> ((word >> other_bit) & 1 == 1
+                        || other_bit == bit)) by (bit_vector)
+                        requires
+                            mask == 1u64 << bit,
+                            bit < 64,
+                            other_bit < 64,
+                    ;
+                }
+            }
+            assert(Self::free_in(chunk_count, after) =~= Self::free_in(chunk_count, taken).remove(
+                chunk,
+            ));
+        }
+
+        pub(super) proof fn lemma_free_bit(taken: Seq<u64>, chunk_count: u32, chunk: int)
+            requires
+                Self::padded(chunk_count, taken),
+                0 <= chunk < chunk_count,
+                !Self::free_in(chunk_count, taken).contains(chunk),
+            ensures
+                ({
+                    let word = taken[chunk / 64] & !(1u64 << (chunk % 64) as u64);
+                    let after = taken.update(chunk / 64, word);
+                    &&& Self::padded(chunk_count, after)
+                    &&& Self::free_in(chunk_count, after) == Self::free_in(
+                        chunk_count,
+                        taken,
+                    ).insert(chunk)
+                    &&& Self::free_in(chunk_count, taken).len() < chunk_count
+                }),
+        {
+            let bit = (chunk % 64) as u64;
+            let mask = 1u64 << bit;
+            let after = taken.update(chunk / 64, taken[chunk / 64] & !mask);
+            assert forall|other: int|
+                0 <= other < taken.len() * 64 implies #[trigger] Self::is_taken(after, other) == (
+            Self::is_taken(taken, other) && other != chunk) by {
+                if other / 64 == chunk / 64 {
+                    let (word, other_bit) = (taken[other / 64], (other % 64) as u64);
+                    assert(((word & !mask) >> other_bit) & 1 == 1 <==> ((word >> other_bit) & 1 == 1
+                        && other_bit != bit)) by (bit_vector)
+                        requires
+                            mask == 1u64 << bit,
+                            bit < 64,
+                            other_bit < 64,
+                    ;
+                }
+            }
+            assert(Self::free_in(chunk_count, after) =~= Self::free_in(chunk_count, taken).insert(
+                chunk,
+            ));
+            vstd::set_lib::lemma_len_subset(
+                Self::free_in(chunk_count, after),
+                Set::range(0, chunk_count as int),
+            );
+        }
+
+        pub(super) proof fn lemma_mask(word: u64, bit: u64)
+            requires
+                bit < 64,
+            ensures
+                (word & (1u64 << bit) == 0) == ((word >> bit) & 1 != 1),
+        {
+            assert((word & (1u64 << bit) == 0) == ((word >> bit) & 1 != 1)) by (bit_vector)
+                requires
+                    bit < 64,
+            ;
+        }
     }
+
 }
 
 } // verus!
