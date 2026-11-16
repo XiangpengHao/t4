@@ -125,7 +125,11 @@ impl SharedProcess {
 
     fn read(&self, range: Range<u64>) -> Bytes {
         let file = self.cache.open_listed(self.meta.clone());
-        block_on(file.read(range, None)).unwrap()
+        let bytes = block_on(file.read(range, None)).unwrap();
+        if let Some(cache) = self.cache.cache_store().owned() {
+            cache.wait_for_disk_writes();
+        }
+        bytes
     }
 
     fn read_on_thread(&self, range: Range<u64>) -> mpsc::Receiver<Bytes> {
@@ -161,6 +165,10 @@ fn a_child_process_plays_its_role() {
     };
     let dir = PathBuf::from(std::env::var(ChildProcess::DIR).unwrap());
     let markers = Markers::new(&dir);
+    if role == "persistence-load" {
+        PersistenceProcess::load(&dir);
+        return;
+    }
     let process = match role.as_str() {
         "shut-down-owner" => SharedProcess::start_on_disk(&dir),
         _ => SharedProcess::start(&dir),
@@ -314,4 +322,207 @@ fn eight_processes_starting_at_once_fetch_each_block_once() {
     let owners = roles.iter().filter(|role| *role == "owner").count();
     assert_eq!(owners, 1, "{roles:?}");
     assert_eq!(fetched, SharedProcess::SIZE, "the file fetched once");
+}
+
+struct PersistenceProcess {
+    cache: T4Caching,
+    store: Arc<CountingStore>,
+    metas: Vec<ObjectMeta>,
+    activity: Arc<PersistenceActivity>,
+}
+
+impl PersistenceProcess {
+    const FILES: usize = 96;
+
+    fn start(dir: &std::path::Path, loading: bool) -> Self {
+        let store = Arc::new(CountingStore::default());
+        let metas = (0..Self::FILES)
+            .map(|index| {
+                let path = Path::from(format!("object-{index}"));
+                put(store.as_ref(), &path, &file_bytes(64, index as u8));
+                block_on(store.head(&path)).unwrap()
+            })
+            .collect();
+        let builder = || {
+            T4Caching::builder(Arc::clone(&store) as Arc<dyn ObjectStore>)
+                .with_memory_capacity(16 * MIB)
+                .with_disk_file(dir.join("cache"), 32 * MIB)
+        };
+        let activity = Arc::new(PersistenceActivity::default());
+        let recorded = Arc::clone(&activity);
+        let cache = if loading {
+            builder()
+                .with_placement_policy(move |sizes| PersistencePlacement::new(sizes, recorded))
+                .build()
+                .unwrap()
+        } else {
+            // A killed process's lock goes once its files close. On Linux, io_uring finishes the
+            // I/O it had in flight after the process is reaped, holding the files until then.
+            loop {
+                let built = builder()
+                    .with_placement_policy(|sizes| {
+                        crate::cache::policy::FixedPlacementPolicy::new(sizes, Admit::Disk)
+                    })
+                    .build();
+                match built {
+                    Err(crate::Error::Busy) => std::thread::yield_now(),
+                    built => break built.unwrap(),
+                }
+            }
+        };
+        store.take_asked();
+        Self {
+            cache,
+            store,
+            metas,
+            activity,
+        }
+    }
+
+    fn load(dir: &std::path::Path) {
+        let process = Self::start(dir, true);
+        let markers = Markers::new(dir);
+        for step in 0..1024 {
+            // Sequential fills exceed both tiers; revisits make the policy promote too.
+            let index = if step % 3 == 0 {
+                (step / 3) % 32
+            } else {
+                step % Self::FILES
+            };
+            let meta = &process.metas[index];
+            let bytes =
+                block_on(process.cache.open_listed(meta.clone()).read(0..64, None)).unwrap();
+            assert_eq!(bytes, file_bytes(64, index as u8));
+            markers.set(
+                "progress",
+                &format!(
+                    "{step},{},{}",
+                    process.activity.promotions.load(Ordering::Relaxed),
+                    process.activity.evictions.load(Ordering::Relaxed)
+                ),
+            );
+        }
+        let _ = std::io::stdin().read(&mut [0]);
+    }
+}
+
+#[derive(Default)]
+struct PersistenceActivity {
+    promotions: AtomicUsize,
+    evictions: AtomicUsize,
+}
+
+struct PersistencePlacement {
+    clock: ClockPolicy,
+    activity: Arc<PersistenceActivity>,
+}
+
+impl PersistencePlacement {
+    fn new(sizes: crate::cache::policy::TierSizes, activity: Arc<PersistenceActivity>) -> Self {
+        Self {
+            clock: ClockPolicy::new(sizes.memory_chunks(), sizes.disk_chunks()),
+            activity,
+        }
+    }
+}
+
+impl crate::cache::policy::PlacementPolicy for PersistencePlacement {
+    fn on_remote_read(&self, _: &BlockRead<'_>) -> Admit {
+        Admit::Disk
+    }
+    fn on_memory_hit(&self, chunk: ChunkId, read: &BlockRead<'_>) {
+        self.clock.on_memory_hit(chunk, read);
+    }
+    fn on_disk_hit(&self, _: ChunkId, _: &BlockRead<'_>) -> DiskHit {
+        self.activity.promotions.fetch_add(1, Ordering::Relaxed);
+        DiskHit::Promote
+    }
+    fn on_admit(&self, tier: Tier, chunk: ChunkId, block: BlockKey) {
+        self.clock.on_admit(tier, chunk, block);
+    }
+    fn pick_memory_victims(&self, count: usize) -> Vec<MemoryVictim> {
+        self.clock.pick_memory_victims(count)
+    }
+    fn pick_disk_victims(&self, count: usize) -> Vec<ChunkId> {
+        let victims = self.clock.pick_disk_victims(count);
+        self.activity
+            .evictions
+            .fetch_add(victims.len(), Ordering::Relaxed);
+        victims
+    }
+}
+
+#[test]
+fn kills_during_fills_promotions_and_evictions_keep_only_coherent_logged_blocks() {
+    let mut seed = 0x57bf_0283_u64;
+    for _ in 0..4 {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let cut = 128 + seed as usize % 256;
+        let dir = tempfile::tempdir().unwrap();
+        let markers = Markers::new(dir.path());
+        let mut child = ChildProcess::spawn("persistence-load", dir.path());
+        loop {
+            let progress: Vec<usize> = markers
+                .said("progress")
+                .split(',')
+                .map(|value| value.parse().unwrap())
+                .collect();
+            if progress[0] >= cut && progress[1] > 0 && progress[2] > 0 {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        child.kill();
+        let kept =
+            crate::cache::storage::ObjectCache::replay_log(&dir.path().join("cache"), 32).unwrap();
+        let blocks: usize = kept
+            .versions()
+            .iter()
+            .map(|version| version.blocks().len())
+            .sum();
+        assert!(blocks > 0, "the child appended adds before kill {cut}");
+        let next = PersistenceProcess::start(dir.path(), false);
+        let mut restored = std::collections::HashSet::new();
+        for version in kept.versions() {
+            let path = std::str::from_utf8(version.path()).unwrap();
+            let index: usize = path.strip_prefix("object-").unwrap().parse().unwrap();
+            restored.insert(index);
+            assert_eq!(block_on(next.cache.known_size(&Path::from(path))), Some(64));
+            let bytes = block_on(
+                next.cache
+                    .open_listed(next.metas[index].clone())
+                    .read(0..64, None),
+            )
+            .unwrap();
+            assert_eq!(
+                bytes,
+                file_bytes(64, index as u8),
+                "kill {cut}, chunk {:?}",
+                version.blocks()
+            );
+            assert!(
+                next.store.take_asked().is_empty(),
+                "an appended add needs no GET"
+            );
+        }
+        for index in 0..PersistenceProcess::FILES {
+            if restored.contains(&index) {
+                continue;
+            }
+            let bytes = block_on(
+                next.cache
+                    .open_listed(next.metas[index].clone())
+                    .read(0..64, None),
+            )
+            .unwrap();
+            assert_eq!(bytes, file_bytes(64, index as u8));
+            assert_eq!(
+                next.store.take_asked(),
+                [bounded(0..64)],
+                "no unlogged block survives"
+            );
+        }
+    }
 }

@@ -2,20 +2,19 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use t4::__fuzz::{FuzzedSnapshot, FuzzedVersion};
+use t4::__fuzz::{FuzzedLogBase, FuzzedVersion};
 
 const MIB: u32 = 1 << 20;
 
 fuzz_target!(|input: Input| {
-    let snapshot = match input {
-        Input::Body(body) => FuzzedSnapshot::new(&body),
-        Input::Versions { next_id, versions } => FuzzedSnapshot::of_versions(
-            next_id,
-            versions.into_iter().map(Version::fuzzed).collect(),
-        ),
+    let base = match input {
+        Input::Body(body) => FuzzedLogBase::new(&body),
+        Input::Versions { next_id, versions } => {
+            FuzzedLogBase::of_versions(next_id, versions.into_iter().map(Version::fuzzed).collect())
+        }
     };
     let dir = tempfile::tempdir().unwrap();
-    snapshot.check(dir.path());
+    base.check(dir.path());
 });
 
 #[derive(Debug)]
@@ -27,7 +26,7 @@ enum Input {
     },
 }
 
-/// Small values, so that snapshots are often valid and often just off: a chunk past the tier's 8.
+/// Small values, so that bases are often valid and often just off: a chunk past the tier's 8.
 #[derive(Debug)]
 struct Version {
     id: u64,

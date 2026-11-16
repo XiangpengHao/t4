@@ -8,7 +8,9 @@ naming each file as a path (decision 2). macOS runs t4 for real, untuned
 (decision 12). Revised 29 Oct 2026: Spiral's processes share one cache
 through its owner, `11-shared-mode.md` (decision 8); the lock is built
 (plan step 3), and shared mode with it. Revised 2 Nov 2026: the disk tier
-survives a clean restart, built (decision 7, stage 1); a crash, Later. A
+survives a clean restart, built (decision 7, stage 1). Revised 16 Nov
+2026: a log in its place keeps it across a killed process too, built
+(`13-persistence.md`). A
 user's machine's cache file is allocated on demand, built (decision 9).
 Revised 16 Nov 2026: every cache file allocated on demand, a server's
 too; the eager allocation and `with_on_demand_disk_allocation` gone
@@ -148,7 +150,7 @@ nothing; Kismet's non-unix fallbacks have no user.
 | no HEAD for a file Spiral already knows | `open_listed` takes the file's size and e_tag from the caller and asks nothing |
 | fetches through Spiral's own GET | t4 GETs from its inner store, carrying each read's `GetOptions::extensions` |
 | fetch-once | yes, within a process |
-| survives a restart | a clean one: the disk tier, kept in a snapshot as the cache drops (decision 7, built 2 Nov 2026); a crash loses everything |
+| survives a restart | clean or killed: the disk tier, kept in a log beside the cache files (`13-persistence.md`, built 16 Nov 2026); a machine crash loses it |
 | several processes, one cache | shared mode: one process owns the cache and the others read through it (`11-shared-mode.md`, built); a cache not built for sharing on owned files fails to build, `Error::Busy` |
 | a laptop's footprint | cache files allocated on demand, each write leaving its drive Kismet's room (decision 9, built 2 Nov 2026); a memory capacity is required |
 | a disk error served from the remote | yes: a failed cache-file read goes to the inner store |
@@ -272,8 +274,10 @@ hosts is one.
 
 7. **The disk tier survives a restart.** 03's Later, needed now: a
    desktop app restarts, and Kismet's cache doesn't start cold. In two
-   stages: a clean restart (built 2 Nov 2026), then a crash, once the
-   first is measured in Studio.
+   stages: a clean restart (built 2 Nov 2026), then a killed process
+   (`13-persistence.md`, which measures the first). Stage 2's log has
+   replaced stage 1's snapshot (16 Nov 2026); the stage 1 bullets below
+   record it as it was built.
 
    - **As the cache drops,** once nothing reads through it (in a shared
      cache, once its owner's listener and sessions are gone), and before
@@ -345,12 +349,8 @@ hosts is one.
      Kismet's CRC32 covers what t4 doesn't do: writing without a sync. A
      failed read of the cache file goes to the remote, as now.
    - **A crash loses the whole cache,** in stage 1: the snapshot is gone
-     once taken back. Stage 2 (Later): a snapshot every minute or so, each
-     freed disk chunk held back until the next is durable, and the loaded
-     snapshot kept, as it stays true. That needs the disk tier to keep a
-     reserve of free chunks: a full tier evicts only when an allocation
-     finds none, so with freed chunks held back it would evict for nothing.
-     The reserve costs capacity, to be measured.
+     once taken back. Stage 2, a log that keeps the disk tier across a
+     killed process, built 16 Nov 2026: `13-persistence.md`.
 
    Spiral's names are stable across processes, a SHA-256 of canonical
    bytes, so a restarted process opens the files it cached before under
@@ -715,10 +715,8 @@ Phase 1, t4 in Kismet's place:
    a client shut down leaves its owner be and takes over nothing; an owner
    shut down, then killed, leaves its disk tier
    (`an_owner_shut_down_then_killed_leaves_its_disk_tier`, real
-   processes). Stage 2, a crash: a snapshot every minute,
-   freed chunks held back, a reserve of free disk chunks; tests that a
-   process killed keeps the last snapshot's blocks and no others. Later,
-   once stage 1 is measured in Studio.
+   processes). Stage 2, the log in the snapshot's place: built 16 Nov
+   2026, `13-persistence.md`, its build order.
 5. **The cache file allocated on demand, in t4** (decision 9). Built 2
    Nov 2026; every cache file since 16 Nov 2026. Tests: a file is sized
    but takes room only as blocks are written
@@ -817,7 +815,7 @@ Phase 2, t4 in the read path:
 | t4 | `src/cache/storage/disk/cache_files.rs` | the lock (decision 8) | yes |
 | t4 | `src/cache/storage/disk/headroom.rs` | the room cache files, allocated on demand, leave their drives (decision 9) | yes |
 | t4 | `11-shared-mode.md`'s code map | shared mode (decision 8) | yes |
-| t4 | `src/cache/storage/snapshot/` | the disk tier's snapshot: its bytes and checks, and its file (decision 7) | stage 1 |
+| t4 | `src/cache/storage/persistence/` | the disk tier's log, which replaced stage 1's snapshot (decision 7; `13-persistence.md`) | stages 1 and 2 |
 | t4 | `src/cache/storage/cache_store/restart.rs` | the disk tier captured as the cache drops, restored as the next builds (decision 7) | stage 1 |
 | t4 | `src/cache/t4_caching/`, `cache_stores/` | `known_size`, and a client's `KnownSize` call (decision 7) | yes |
 | spiraldb | `spiraldb/spiral-io/src/cache/t4_cache.rs` | `T4Cache`: the names, `SpiralFetch`, `SpiralFetchRouter`, the profiles, the metrics wrappers; its tests | yes, branch `xiangpeng/t4-cache` |

@@ -201,12 +201,12 @@ impl<'s> ScenarioRun<'s> {
             }
             SharedOperation::Drop { process } => self.drop_process(process, step),
             SharedOperation::Kill { process } => {
-                // A directory where the snapshot is written first fails the write: a kill
-                // keeps none.
-                let blocker = self.dir.join("cache.snapshot.tmp");
-                std::fs::create_dir(&blocker).unwrap();
+                if let Some(process) = self.process(process)
+                    && let Some(owner) = process.cache.cache_store().owned()
+                {
+                    owner.abandon_persistence();
+                }
                 self.drop_process(process, step);
-                std::fs::remove_dir(&blocker).unwrap();
             }
             SharedOperation::DropMidRead {
                 process,

@@ -914,7 +914,11 @@ fn read_listed(
     meta: &ObjectMeta,
     range: Range<u64>,
 ) -> object_store::Result<Bytes> {
-    block_on(store.open_listed(meta.clone()).read(range, None))
+    let result = block_on(store.open_listed(meta.clone()).read(range, None));
+    if let Some(cache) = store.cache_store().owned() {
+        cache.wait_for_disk_writes();
+    }
+    result
 }
 
 #[cfg(feature = "shuttle")]

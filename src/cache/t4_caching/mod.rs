@@ -364,6 +364,14 @@ impl T4Caching {
         }
     }
 
+    #[cfg(feature = "__fuzz")]
+    #[doc(hidden)]
+    pub fn abandon_persistence(&self) {
+        if let Some(cache) = self.cache_store.owned() {
+            cache.abandon_persistence();
+        }
+    }
+
     #[cfg(any(test, all(feature = "__fuzz", feature = "shuttle", t4_simulated)))]
     pub(super) fn cache_store(&self) -> Arc<dyn CacheStore> {
         Arc::clone(&self.cache_store)

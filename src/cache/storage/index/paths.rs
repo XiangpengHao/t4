@@ -1,4 +1,4 @@
-use std::ops::{ControlFlow, Range};
+use std::ops::Range;
 
 use bbtree::BBTreeMap;
 use vstd::prelude::*;
@@ -113,24 +113,31 @@ impl PathTable {
         }
     }
 
-    /// A replaced version leaves its blocks behind, for eviction to reclaim.
-    pub(in crate::cache) fn resolve(
+    /// The version `path` holds at `e_tag` and `size`, if the cache knows it.
+    pub(in crate::cache) fn find(
         &self,
         path: &[u8],
-        e_tag: Option<&str>,
+        e_tag: &str,
         size: u64,
-    ) -> Result<FileVersion, UncacheableObject> {
-        let e_tag = Self::check_cacheable(path, e_tag, size)?;
-        let held = self
+    ) -> Option<FileVersion> {
+        let id = self
             .paths
             .read(path, |_, entry| {
                 entry.is_version(e_tag, size).then_some(entry.id)
             })
-            .flatten();
-        if let Some(id) = held {
-            return Ok(FileVersion { id, size });
-        }
-        // A racing resolution of this version may win: its id stands, and this one is wasted.
+            .flatten()?;
+        Some(FileVersion { id, size })
+    }
+
+    /// Names a new version of `path`; true if this call named it. A racing resolution of this
+    /// version may win: its id stands, and this one is wasted. A replaced version leaves its
+    /// blocks behind, for eviction to reclaim.
+    pub(in crate::cache) fn name(
+        &self,
+        path: &[u8],
+        e_tag: &str,
+        size: u64,
+    ) -> (FileVersion, bool) {
         let fresh = FileEntry {
             id: self.take_fresh_id(),
             e_tag: e_tag.into(),
@@ -147,22 +154,26 @@ impl PathTable {
             })
             .or_abort()
             .unwrap_or(fresh_id);
-        Ok(FileVersion { id, size })
+        (FileVersion { id, size }, id == fresh_id)
+    }
+
+    /// As the cache resolves a path, less its log (`Tiers::resolve`).
+    #[cfg(test)]
+    pub(in crate::cache) fn resolve(
+        &self,
+        path: &[u8],
+        e_tag: Option<&str>,
+        size: u64,
+    ) -> Result<FileVersion, UncacheableObject> {
+        let e_tag = Self::cacheable(path, e_tag, size)?;
+        Ok(match self.find(path, e_tag, size) {
+            Some(version) => version,
+            None => self.name(path, e_tag, size).0,
+        })
     }
 
     pub(in crate::cache) fn known_size(&self, path: &[u8]) -> Option<u64> {
         self.paths.read(path, |_, entry| entry.size)
-    }
-
-    pub(in crate::cache) fn scan(&self, mut found: impl FnMut(&[u8], &str, FileVersion)) {
-        self.paths.scan::<[u8], ()>(.., |path, entry| {
-            let version = FileVersion {
-                id: entry.id,
-                size: entry.size,
-            };
-            found(path, &entry.e_tag, version);
-            ControlFlow::Continue(())
-        });
     }
 
     pub(in crate::cache) fn next_id(&self) -> u64 {
@@ -177,7 +188,7 @@ impl PathTable {
             size: version.size,
         };
         let held = self.paths.insert(path.into(), entry).or_abort();
-        assert!(held.is_none(), "a snapshot names a path once");
+        assert!(held.is_none(), "a base names a path once");
     }
 
     pub(in crate::cache) fn resume_ids_at(&self, next_id: u64) {
@@ -204,7 +215,8 @@ impl PathTable {
         }
     }
 
-    fn check_cacheable<'e>(
+    /// Checked where a path comes in, before `find` and `name`.
+    pub(in crate::cache) fn cacheable<'e>(
         path: &[u8],
         e_tag: Option<&'e str>,
         size: u64,

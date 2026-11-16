@@ -24,7 +24,7 @@ pub mod __bench {
 #[cfg(all(unix, feature = "__fuzz"))]
 #[doc(hidden)]
 pub mod __fuzz {
-    pub use crate::cache::{FuzzedFrame, FuzzedSnapshot, FuzzedVersion};
+    pub use crate::cache::{FuzzedFrame, FuzzedLogBase, FuzzedVersion};
     /// Built with `--cfg t4_simulated` alone: the owner and its clients run on shuttle.
     #[cfg(all(feature = "shuttle", t4_simulated))]
     pub use crate::cache::{

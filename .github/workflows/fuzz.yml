@@ -20,7 +20,7 @@ jobs:
         include:
           - target: cache_equivalence
           - target: frames
-          - target: snapshot
+          - target: log_base
           # Its owner and clients run on shuttle (`fuzz/README.md`).
           - target: shared_owner
             rustflags: --cfg t4_simulated

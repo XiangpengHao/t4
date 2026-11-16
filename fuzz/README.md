@@ -19,7 +19,9 @@ Random sequences of operations on `T4Caching` over an in-memory
   fill, an eviction or a promotion;
 - shutdowns, after which the cache serves reads but writes no more to
   disk, and restarts: the cache dropped, keeping its disk tier in a
-  snapshot, and built again on its files, taking it back. Where the cache
+  log, and built again on its files, replaying and rebasing it. A simulated
+  kill suppresses the clean mark before rebuilding, so the next build
+  replays the live appends too. Where the cache
   files' file system reports no creation time, the cache keeps none, and a
   restart starts cold.
 
@@ -62,7 +64,7 @@ input replays exactly. The script, each step aimed at any process:
   after a few polls;
 - writes behind every cache's back, straight to the store;
 - a process dropped (an owner's files handed to the next to try them),
-  killed (no disk tier kept beyond its last shutdown), dropped mid-read,
+  killed (its appended log kept, without a new clean mark), dropped mid-read,
   shut down, or built again on the same files;
 - a process's GETs held until released, time passing, and the script's
   thread stepping aside so that the others run till they wait.
@@ -101,16 +103,16 @@ Shared mode's frames from bytes a peer could send, as a client's frame and
 as an owner's: each is refused, or decodes to a frame that encodes back to
 the same bytes.
 
-## `snapshot`
+## `log_base`
 
-The disk tier's snapshot, after a valid header: its body as the input's
-bytes, or encoded from versions and blocks the input picks, small enough
-that many are valid and many are off by a little. Each is refused, or
-encodes back to the same bytes and is taken back by a cache whose index and
-tiers then agree, each version's size known. A snapshot has
-no checksum: one whose bytes were changed into another valid snapshot is
-taken back as written, so this target checks the cache's consistency, not
-the bytes it would serve.
+The persistence log's base (`doc/13-persistence.md`), after a valid
+header: its body as the input's bytes, or encoded from versions and blocks
+the input picks, small enough that many are valid and many are off by a
+little. Each is refused, or encodes back to the same bytes and is taken
+back by a cache whose index and tiers then agree, each version's size
+known. The body is fuzzed without the log's CRC: one whose bytes were
+changed into another valid base is taken back as written, so this target
+checks the cache's consistency, not the bytes it would serve.
 
 ## `shared_owner`
 

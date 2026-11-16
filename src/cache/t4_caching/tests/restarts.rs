@@ -6,7 +6,9 @@ fn on_disk(inner: &Arc<CountingStore>, dir: &TempDir) -> T4CachingBuilder {
 }
 
 fn read_whole(cache: &T4Caching, meta: &ObjectMeta) -> Bytes {
-    block_on(cache.open_listed(meta.clone()).read(0..meta.size, None)).unwrap()
+    let bytes = block_on(cache.open_listed(meta.clone()).read(0..meta.size, None)).unwrap();
+    cache.cache_store().owned().unwrap().wait_for_disk_writes();
+    bytes
 }
 
 #[test]
@@ -21,11 +23,11 @@ fn a_cache_built_again_serves_the_disk_tier_its_files_held() {
         let first = on_disk(&inner, &dir).build().unwrap();
         assert_eq!(read_whole(&first, &meta), data);
         drop(first);
-        assert!(snapshot_at(&dir).exists());
+        assert!(log_at(&dir).exists());
         inner.take_asked();
 
         let again = on_disk(&inner, &dir).build().unwrap();
-        assert!(!snapshot_at(&dir).exists(), "taken back, and removed");
+        assert!(log_at(&dir).exists(), "rebased before writes");
         assert_eq!(block_on(again.known_size(&path)), Some(meta.size));
         assert_eq!(read_whole(&again, &meta), data);
         assert_eq!(inner.take_asked(), [], "served from disk");
@@ -64,7 +66,7 @@ fn memorys_blocks_go_with_the_cache() {
     });
 }
 
-/// Its chunks are other chunks, so the snapshot can't be taken back.
+/// Its chunks are other chunks, so the log can't be replayed.
 #[test]
 fn a_cache_of_another_capacity_starts_cold() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -85,7 +87,7 @@ fn a_cache_of_another_capacity_starts_cold() {
             .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
             .build()
             .unwrap();
-        assert!(!snapshot_at(&dir).exists());
+        assert!(log_at(&dir).exists());
         assert_eq!(block_on(larger.known_size(&path)), None);
         assert_eq!(read_whole(&larger, &meta), data);
         assert_eq!(inner.take_asked(), [bounded(0..2 * MIB)]);
@@ -132,7 +134,7 @@ fn a_cache_shut_down_keeps_its_disk_tier_and_writes_no_more() {
         let cache = on_disk(&inner, &dir).build().unwrap();
         assert_eq!(read_whole(&cache, &a_meta), a_data);
         cache.shut_down().unwrap();
-        assert!(snapshot_at(&dir).exists(), "kept at once");
+        assert!(log_at(&dir).exists(), "kept at once");
         inner.take_asked();
 
         assert_eq!(read_whole(&cache, &a_meta), a_data);

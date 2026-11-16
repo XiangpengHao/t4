@@ -1,25 +1,17 @@
 use std::num::NonZeroU32;
 
-use futures_util::future::join_all;
-
 use crate::PAGE_SIZE_U32;
 use crate::cache::io_report::IoReport;
-use crate::cache::policy::{Io, MemoryVictim, PlacementPolicy, ReadPolicy, Tier, VictimAction};
+use crate::cache::policy::{Io, MemoryVictim, ReadPolicy, Tier, VictimAction};
 use crate::cache::storage::disk::{DiskChunkReader, DiskChunkWriter};
 use crate::cache::storage::index::{Location, PlannedBlock};
 use crate::cache::storage::memory::{MemoryChunkReader, MemoryChunkWriter};
 use crate::cache::{BlockKey, ChunkId};
 use crate::io::error::Result;
 
-use super::ObjectCache;
+use super::{ObjectCache, Tiers};
 
 impl ObjectCache {
-    /// Batched: one eviction makes room for the insertions after it too.
-    const EVICTION_BATCH: usize = 8;
-
-    /// More than one: a victim's chunk goes free only once its readers have left.
-    const EVICTION_ROUNDS: usize = 4;
-
     /// If the block left disk meanwhile, the memory copy still serves the caller, then goes back.
     pub(super) async fn promote<'c>(
         &'c self,
@@ -27,7 +19,8 @@ impl ObjectCache {
         block: &PlannedBlock,
         reads: &dyn ReadPolicy,
     ) -> Result<Promotion<'c>> {
-        let Some(writer) = self.allocate_memory().await? else {
+        let tiers = &*self.tiers;
+        let Some(writer) = tiers.allocate_memory().await? else {
             return Ok(Promotion::NoRoom(on_disk));
         };
         let range = block.object_range();
@@ -35,7 +28,7 @@ impl ObjectCache {
             .ok()
             .and_then(|len| NonZeroU32::new(len.next_multiple_of(PAGE_SIZE_U32)))
             .expect("a block is a chunk's bytes or fewer, one or more");
-        let (buffer, lent) = writer.lend_for_read(&self.memory, pages);
+        let (buffer, lent) = writer.lend_for_read(&tiers.memory, pages);
         let report = IoReport::start(
             reads,
             Io::DiskRead {
@@ -45,7 +38,7 @@ impl ObjectCache {
             &self.clock,
         );
         let filled = report
-            .awaiting(self.disk.read_chunk_start(&on_disk, buffer))
+            .awaiting(tiers.disk.read_chunk_start(&on_disk, buffer))
             .await?;
         let block = on_disk.block();
         let in_memory = lent.publish(filled, block);
@@ -53,15 +46,28 @@ impl ObjectCache {
             Location::Disk(on_disk.chunk()),
             Location::Memory(in_memory.chunk()),
         );
-        if self.blocks.replace_if(block, from, to) {
+        let mut changes = tiers.disk.log().map(|log| log.changes());
+        if tiers.blocks.replace_if(block, from, to) {
+            if let Some(log) = &mut changes {
+                log.free(on_disk.chunk());
+            }
             on_disk.unpublish();
-            self.placement
+            tiers
+                .placement
                 .on_admit(Tier::Memory, in_memory.chunk(), block);
         } else {
             in_memory.unpublish();
         }
         Ok(Promotion::InMemory(in_memory))
     }
+}
+
+impl Tiers {
+    /// Batched: one eviction makes room for the insertions after it too.
+    const EVICTION_BATCH: usize = 8;
+
+    /// More than one: a victim's chunk goes free only once its readers have left.
+    const EVICTION_ROUNDS: usize = 4;
 
     pub(super) async fn allocate_memory(&self) -> Result<Option<MemoryChunkWriter<'_>>> {
         for _ in 0..Self::EVICTION_ROUNDS {
@@ -105,48 +111,80 @@ impl ObjectCache {
     }
 
     async fn evict_memory_victims(&self, victims: &[MemoryVictim]) -> Result<()> {
-        let mut moves = Vec::new();
         for victim in victims {
             match victim.action() {
                 VictimAction::Drop => {
                     self.evict_from_memory(victim.chunk());
                 }
-                VictimAction::ToDisk => moves.push(self.move_to_disk(victim.chunk())),
+                VictimAction::ToDisk => {
+                    if let Some(held) = self.memory.pin_for_eviction(victim.chunk())
+                        && !self.pending.enqueue(held.chunk(), held.block())
+                    {
+                        self.placement
+                            .on_admit(Tier::Memory, held.chunk(), held.block());
+                    }
+                }
             }
-        }
-        for moved in join_all(moves).await {
-            moved?;
         }
         Ok(())
     }
 
-    /// The write holds both chunks until it is done, even if this future is dropped first.
-    pub(super) async fn move_to_disk(&self, chunk: ChunkId) -> Result<MoveToDisk> {
-        let Some(victim) = self.memory.pin_for_eviction(chunk) else {
-            return Ok(MoveToDisk::NoBlock);
-        };
-        let block = victim.block();
-        let picked = PickedVictim::new(self.placement.as_ref(), chunk, block);
-        let Some(writer) = self.allocate_disk() else {
-            return Ok(MoveToDisk::DiskFull);
-        };
-        let hold = writer.hold_for_write(self.disk.chunks());
-        let pages = victim.lend_for_write(&self.memory, hold);
-        self.disk.write(&writer, pages).await?;
-        picked.settle();
-        let on_disk = writer.publish(block);
-        let to_disk = Location::Disk(on_disk.chunk());
-        if self
-            .blocks
-            .replace_if(block, Location::Memory(chunk), to_disk)
-        {
-            victim.unpublish();
-            self.placement.on_admit(Tier::Disk, on_disk.chunk(), block);
-            Ok(MoveToDisk::Moved)
-        } else {
-            on_disk.unpublish();
-            Ok(MoveToDisk::Superseded)
+    pub(super) async fn write_disk_batch(
+        &self,
+        batch: &[(ChunkId, BlockKey)],
+    ) -> Vec<(ChunkId, BlockKey)> {
+        let mut moves = Vec::new();
+        let mut writes = Vec::new();
+        let mut retry = Vec::new();
+        for &(chunk, block) in batch {
+            let Some(victim) = self.memory.read(chunk, block) else {
+                continue;
+            };
+            let Some(writer) = self.allocate_disk() else {
+                retry.push((chunk, block));
+                continue;
+            };
+            let hold = writer.hold_for_write(self.disk.chunks());
+            writes.push(crate::io::io_task::PageWrite {
+                buf: victim.lend_for_write(&self.memory, hold),
+                at: writer.position(),
+            });
+            moves.push((victim, writer));
         }
+        let frees_logged = self
+            .disk
+            .log()
+            .is_none_or(|log| log.changes().flush().is_ok());
+        if !frees_logged {
+            self.disk.chunks().close();
+        }
+        if !frees_logged || writes.is_empty() || self.disk.write_batch(writes).await.is_err() {
+            retry.extend(
+                moves
+                    .iter()
+                    .map(|(victim, _)| (victim.chunk(), victim.block())),
+            );
+            return retry;
+        }
+        let mut changes = self.disk.log().map(|log| log.changes());
+        for (victim, writer) in moves {
+            let block = victim.block();
+            let on_disk = writer.publish(block);
+            if self.blocks.replace_if(
+                block,
+                Location::Memory(victim.chunk()),
+                Location::Disk(on_disk.chunk()),
+            ) {
+                if let Some(log) = &mut changes {
+                    log.add(block, on_disk.chunk());
+                }
+                victim.unpublish();
+                self.placement.on_admit(Tier::Disk, on_disk.chunk(), block);
+            } else {
+                on_disk.unpublish();
+            }
+        }
+        retry
     }
 
     pub(super) fn evict_from_memory(&self, chunk: ChunkId) -> bool {
@@ -160,7 +198,12 @@ impl ObjectCache {
         let Some(victim) = self.disk.chunks().pin_for_eviction(chunk) else {
             return false;
         };
-        self.forget_if_closed(victim.unpublish(), victim.block(), Location::Disk(chunk))
+        let mut changes = self.disk.log().map(|log| log.changes());
+        let closed = victim.unpublish();
+        if closed && let Some(log) = &mut changes {
+            log.free(chunk);
+        }
+        self.forget_if_closed(closed, victim.block(), Location::Disk(chunk))
     }
 
     /// Closed first, so a read that finds the entry from then on finds the chunk closed.
@@ -175,44 +218,4 @@ impl ObjectCache {
 pub(super) enum Promotion<'cache> {
     InMemory(MemoryChunkReader<'cache>),
     NoRoom(DiskChunkReader<'cache>),
-}
-
-/// The policy forgot the chunk when it picked it: a move that leaves the block
-/// in memory must give it back, or the policy never picks it again.
-struct PickedVictim<'c> {
-    policy: &'c dyn PlacementPolicy,
-    chunk: ChunkId,
-    block: BlockKey,
-    settled: bool,
-}
-
-impl<'c> PickedVictim<'c> {
-    fn new(policy: &'c dyn PlacementPolicy, chunk: ChunkId, block: BlockKey) -> Self {
-        Self {
-            policy,
-            chunk,
-            block,
-            settled: false,
-        }
-    }
-
-    fn settle(mut self) {
-        self.settled = true;
-    }
-}
-
-impl Drop for PickedVictim<'_> {
-    fn drop(&mut self) {
-        if !self.settled {
-            self.policy.on_admit(Tier::Memory, self.chunk, self.block);
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum MoveToDisk {
-    Moved,
-    NoBlock,
-    DiskFull,
-    Superseded,
 }

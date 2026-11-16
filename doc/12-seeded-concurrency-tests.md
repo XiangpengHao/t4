@@ -72,7 +72,7 @@ allocator and ownership rules all run under shuttle. Only the boundaries differ:
   tests retain seals, descriptor and mapping checks.
 - The existing simulated I/O driver schedules submission and completion. Its
   optional file backing performs synchronous file operations at completion;
-  retaining the file also retains its lock. This preserves snapshots, restart
+  retaining the file also retains its lock. This preserves logs, restart
   bytes and allocation checks without starting a kernel I/O worker. The
   focused storage races still use entirely in-memory `SimDisk`s. Nonblocking
   file-lock and metadata syscalls are serial side effects under shuttle, not
@@ -137,8 +137,9 @@ each the shape of a past bug. Reverting the fix:
 | 57bf283, a going owner hands claims on | a block fetched 3 times | about 1 in 220 |
 
 The corpus's 32 schedules don't reach 57bf283's race; the focused test below
-does. a1c1f69's race needs a killed owner: one that drops keeps a snapshot,
-whose next version id the next owner resumes from, so ids no longer repeat.
+does. a1c1f69's race needs an owner that leaves no log: one that keeps its
+log has its next version id resumed by the next owner, so ids no longer
+repeat.
 
 ## Real-OS coverage retained
 
@@ -158,7 +159,7 @@ without elapsed-time assertions or delays:
 `shared/protocol/region/tests.rs` remains outside shuttle too: its four tests
 (five on Linux) are single-threaded checks of actual mappings, span allocation,
 and refusal of shrinkable/unsealed memory. Pure frame-format tests and the
-synchronous snapshot checks also stay ordinary unit tests.
+synchronous log checks also stay ordinary unit tests.
 No original concurrent scenario was removed: the remaining shared/client,
 restart, network, claim and policy scenarios moved to the modeled suite.
 

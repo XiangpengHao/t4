@@ -11,9 +11,11 @@ use crate::cache::policy::{PlacementPolicy, ReadIntent, ReadPolicy};
 use crate::cache::read_output::ReadOutput;
 use crate::io::error::Result;
 use crate::io::sync::Arc;
+use disk_writer::{DiskWriter, PendingDisk};
 
 #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
 mod at_rest;
+mod disk_writer;
 mod eviction;
 mod fill;
 #[cfg(feature = "__fuzz")]
@@ -26,22 +28,34 @@ mod tier_work;
 
 pub(in crate::cache) use fill::FetchedBlocks;
 #[cfg(feature = "__fuzz")]
-pub use fuzzing::{FuzzedSnapshot, FuzzedVersion};
+pub use fuzzing::{FuzzedLogBase, FuzzedVersion};
 pub(in crate::cache) use located_run::LocatedRun;
 pub(in crate::cache) use partial_read::PartialRead;
 pub(in crate::cache) use tier_work::TierWork;
 
 pub(in crate::cache) struct ObjectCache {
     clock: crate::io::time::Clock,
+    tiers: Arc<Tiers>,
+    in_flight: Arc<InFlight>,
+    writer: DiskWriter,
+}
+
+/// The index and the two tiers it names: what reads and the disk writer share.
+struct Tiers {
     paths: PathTable,
     blocks: BlockTable,
     memory: Arc<MemoryPool>,
     disk: CacheFiles,
     placement: Arc<dyn PlacementPolicy>,
-    in_flight: Arc<InFlight>,
+    pending: PendingDisk,
 }
 
 impl ObjectCache {
+    #[cfg(any(test, feature = "__fuzz"))]
+    pub(in crate::cache) fn wait_for_disk_writes(&self) {
+        self.tiers.pending.wait_for_idle();
+    }
+
     pub(in crate::cache) fn with_clock(mut self, clock: crate::io::time::Clock) -> Self {
         self.clock = clock;
         self
@@ -57,28 +71,33 @@ impl ObjectCache {
         disk: CacheFiles,
         placement: Arc<dyn PlacementPolicy>,
     ) -> Result<Self> {
-        let kept = match disk.snapshot() {
-            Some(snapshot) => snapshot.take()?,
+        let kept = match disk.log() {
+            Some(log) => log.take()?,
             None => None,
         };
-        let cache = Self {
-            clock: Default::default(),
+        let tiers = Arc::new(Tiers {
             paths: PathTable::new(),
             blocks: BlockTable::new(),
             memory: Arc::new(MemoryPool::new(memory_chunks)?),
             disk,
             placement,
-            in_flight: Arc::default(),
-        };
+            pending: PendingDisk::new(memory_chunks.get()),
+        });
+        let writer = DiskWriter::start(Arc::clone(&tiers))?;
         if let Some(kept) = kept {
-            cache.restore(&kept);
+            tiers.restore(&kept);
         }
-        Ok(cache)
+        Ok(Self {
+            clock: Default::default(),
+            tiers,
+            in_flight: Arc::default(),
+            writer,
+        })
     }
 
     /// Names its owner's address (`doc/11-shared-mode.md`, decision 6).
     pub(in crate::cache) fn first_file(&self) -> Option<FileIdentity> {
-        self.disk.first_file()
+        self.tiers.disk.first_file()
     }
 
     pub(in crate::cache) fn resolve<'p>(
@@ -87,7 +106,7 @@ impl ObjectCache {
         e_tag: Option<&str>,
         size: u64,
     ) -> std::result::Result<CacheableFile<'p>, UncacheableObject> {
-        let version = self.paths.resolve(path, e_tag, size)?;
+        let version = self.tiers.resolve(path, e_tag, size)?;
         Ok(CacheableFile { path, version })
     }
 
@@ -109,7 +128,7 @@ impl ObjectCache {
         reads: &'c dyn ReadPolicy,
         output: impl FnOnce(Range<u64>) -> Result<ReadOutput>,
     ) -> Result<(PartialRead, TierWork<'c>)> {
-        let plan = self.blocks.plan_read(file.version, range.clone());
+        let plan = self.tiers.blocks.plan_read(file.version, range.clone());
         let read = PartialRead::new(file.version, output(plan.bytes())?);
         let work = TierWork::new(self, reads, *file, range, intent, plan.into_blocks());
         Ok((read, work))
@@ -126,7 +145,7 @@ impl ObjectCache {
         let relocated = blocks
             .0
             .iter()
-            .map(|block| block.relocated(self.blocks.get(block.key())))
+            .map(|block| block.relocated(self.tiers.blocks.get(block.key())))
             .collect();
         TierWork::new(self, reads, *file, range, intent, relocated)
     }
@@ -191,6 +210,28 @@ impl ObjectCache {
             }
             work = self.retry_planned(&mut read, file, range.clone(), intent, retry, reads)?;
         }
+    }
+}
+
+impl Tiers {
+    /// A new version's path is logged under the log's lock, which every add takes too: no add
+    /// can name a version before its path. A lookup that finds its version takes no lock.
+    fn resolve(
+        &self,
+        path: &[u8],
+        e_tag: Option<&str>,
+        size: u64,
+    ) -> std::result::Result<FileVersion, UncacheableObject> {
+        let e_tag = PathTable::cacheable(path, e_tag, size)?;
+        if let Some(version) = self.paths.find(path, e_tag, size) {
+            return Ok(version);
+        }
+        let mut changes = self.disk.log().map(|log| log.changes());
+        let (version, named_here) = self.paths.name(path, e_tag, size);
+        if named_here && let Some(log) = &mut changes {
+            log.path(path, e_tag, version);
+        }
+        Ok(version)
     }
 }
 

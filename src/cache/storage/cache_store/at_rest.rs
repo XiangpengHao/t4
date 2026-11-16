@@ -7,15 +7,16 @@ impl ObjectCache {
     pub(in crate::cache) fn check_at_rest(
         &self,
     ) -> std::result::Result<Vec<(Tier, ChunkId)>, String> {
+        self.wait_for_disk_writes();
         if !self.in_flight.is_empty() {
             return Err("a block is still in flight".to_owned());
         }
         let mut memory =
-            (self.memory.blocks_at_rest()).map_err(|error| format!("memory {error}"))?;
+            (self.tiers.memory.blocks_at_rest()).map_err(|error| format!("memory {error}"))?;
         let mut disk =
-            (self.disk.chunks().blocks_at_rest()).map_err(|error| format!("disk {error}"))?;
+            (self.tiers.disk.chunks().blocks_at_rest()).map_err(|error| format!("disk {error}"))?;
         let mut in_use = Vec::new();
-        for (block, location) in self.blocks.entries() {
+        for (block, location) in self.tiers.blocks.entries() {
             let (chunks, tier, chunk) = match location {
                 Location::Memory(chunk) => (&mut memory, Tier::Memory, chunk),
                 Location::Disk(chunk) => (&mut disk, Tier::Disk, chunk),

@@ -4,10 +4,10 @@ mod disk;
 mod in_flight;
 mod index;
 mod memory;
-mod snapshot;
+mod persistence;
 
 #[cfg(feature = "__fuzz")]
-pub use cache_store::{FuzzedSnapshot, FuzzedVersion};
+pub use cache_store::{FuzzedLogBase, FuzzedVersion};
 
 pub(in crate::cache) use disk::{CacheFiles, DiskFile, FileIdentity};
 

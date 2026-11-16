@@ -4,10 +4,10 @@ use std::num::NonZeroU32;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use super::disk_chunks::{DiskChunkReader, DiskChunkWriter, DiskChunks};
+use super::disk_chunks::{DiskChunkReader, DiskChunks};
 use super::headroom::DriveHeadroom;
 use crate::cache::BLOCK_SIZE_U64;
-use crate::cache::storage::snapshot::SnapshotFile;
+use crate::cache::storage::persistence::PersistenceLog;
 use crate::io::aligned_buf::AlignedBuf;
 use crate::io::error::{Error, Result};
 use crate::io::io_task::PageWrite;
@@ -63,12 +63,13 @@ pub(in crate::cache) struct CacheFiles {
     chunks: Arc<DiskChunks>,
     /// Names its owner's address (`doc/11-shared-mode.md`, decision 6).
     first_file: Option<FileIdentity>,
-    snapshot: Option<SnapshotFile>,
+    log: Option<PersistenceLog>,
     headroom: Option<DriveHeadroom>,
 }
 
 impl CacheFiles {
-    /// No `O_DSYNC`: a snapshot flushes the files first, and nothing else must survive a crash.
+    /// No `O_DSYNC`: a clean exit flushes the files before the log's clean mark, and a kill
+    /// loses no write already done (`doc/13-persistence.md`).
     pub(in crate::cache) fn open(
         files: &[DiskFile],
         queue_depth: NonZeroU32,
@@ -95,11 +96,11 @@ impl CacheFiles {
             })
             .collect::<Result<Vec<_>>>()?;
         let first_file = FileIdentity::of(&opened[0])?;
-        let snapshot = SnapshotFile::beside(&files[0].path, &opened, chunks_per_file);
+        let log = PersistenceLog::beside(&files[0].path, &opened, chunks_per_file)?;
         let headroom = DriveHeadroom::of(&opened)?;
         let mut files = Self::on(IoWorker::new(queue_depth, opened)?, count, chunks_per_file)?;
         files.first_file = Some(first_file);
-        files.snapshot = snapshot;
+        files.log = log;
         files.headroom = Some(headroom);
         Ok(files)
     }
@@ -121,7 +122,7 @@ impl CacheFiles {
             io,
             chunks: Arc::new(DiskChunks::new(files, chunks_per_file)?),
             first_file: None,
-            snapshot: None,
+            log: None,
             headroom: None,
         })
     }
@@ -134,8 +135,8 @@ impl CacheFiles {
         self.first_file
     }
 
-    pub(in crate::cache) fn snapshot(&self) -> Option<&SnapshotFile> {
-        self.snapshot.as_ref()
+    pub(in crate::cache) fn log(&self) -> Option<&PersistenceLog> {
+        self.log.as_ref()
     }
 
     pub(in crate::cache) fn takes_a_block(&self) -> bool {
@@ -146,16 +147,8 @@ impl CacheFiles {
                 .is_none_or(DriveHeadroom::allows_a_block)
     }
 
-    pub(in crate::cache) async fn write(
-        &self,
-        writer: &DiskChunkWriter<'_>,
-        pages: AlignedBuf,
-    ) -> Result<()> {
-        let write = PageWrite {
-            buf: pages,
-            at: writer.position(),
-        };
-        self.io.write(vec![write])?.await
+    pub(in crate::cache) async fn write_batch(&self, writes: Vec<PageWrite>) -> Result<()> {
+        self.io.write(writes)?.await
     }
 
     pub(in crate::cache) async fn read_chunk_start(

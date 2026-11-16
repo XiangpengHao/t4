@@ -118,13 +118,14 @@ enum Operation {
     GetAtOnce([Read; 3]),
     GiveUp { read: Read, polls: u8 },
     Restart,
+    Kill,
     ShutDown,
 }
 
 impl<'a> Arbitrary<'a> for Operation {
     /// Reads two times in five, as they fill, evict and promote.
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        Ok(match u.choose_index(19)? {
+        Ok(match u.choose_index(20)? {
             0 | 1 => Self::Put {
                 file: u.arbitrary()?,
                 size: u.arbitrary()?,
@@ -158,6 +159,7 @@ impl<'a> Arbitrary<'a> for Operation {
             13 | 14 => Self::GetAtOnce(u.arbitrary()?),
             17 => Self::Restart,
             18 => Self::ShutDown,
+            19 => Self::Kill,
             _ => Self::GiveUp {
                 read: u.arbitrary()?,
                 polls: u.int_in_range(1..=4)?,
@@ -566,7 +568,10 @@ impl Harness {
                 }
             }
             Operation::ShutDown => self.cache().shut_down().unwrap(),
-            Operation::Restart => {
+            Operation::Restart | Operation::Kill => {
+                if matches!(operation, Operation::Kill) {
+                    self.cache().abandon_persistence();
+                }
                 // Dropped first, so its files' lock is free for the rebuild.
                 self.cache = None;
                 self.build().unwrap();
