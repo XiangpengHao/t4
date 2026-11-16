@@ -6,8 +6,7 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use object_store::ObjectStore;
 
-use super::cache_stores::CacheStoreRead;
-use super::policy::{ReadIntent, ReadPolicy};
+use super::policy::ReadPolicy;
 use crate::io::sync::Arc;
 
 mod get;
@@ -54,19 +53,6 @@ impl Network {
     #[cfg(all(test, feature = "shuttle"))]
     pub(super) fn gets_waiting(&self) -> usize {
         self.gets.waiting()
-    }
-
-    /// Takes each run's GETs before locating the next: they claim the blocks they widen to.
-    pub(super) async fn plan_gets(
-        &self,
-        read: &mut dyn CacheStoreRead<'_>,
-        intent: Option<ReadIntent>,
-    ) -> crate::Result<()> {
-        while let Some(run) = read.locate_next_run()? {
-            let gets = run.planned_by(&*self.reads, &read.file(), intent);
-            read.take_gets(&gets).await?;
-        }
-        Ok(())
     }
 
     pub(super) fn cache_error(error: crate::io::error::Error) -> object_store::Error {

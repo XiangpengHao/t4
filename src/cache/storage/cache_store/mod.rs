@@ -167,9 +167,9 @@ impl ObjectCache {
         intent: Option<ReadIntent>,
         reads: &dyn ReadPolicy,
     ) -> Result<()> {
-        while let Some(run) = work.locate_next_run(read)? {
-            let gets = run.planned_by(reads, file, intent);
-            work.take_gets(read, &gets);
+        if let Some(held) = work.locate(read)? {
+            let gets = held.run().planned_by(reads, file, intent);
+            work.take_gets(read, held, &gets);
         }
         Ok(())
     }

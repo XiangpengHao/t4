@@ -601,15 +601,11 @@ fn a_fetch_dropped_after_its_read_gives_its_span_back() {
         let reads = FetchRuns::default();
         let path = path.as_ref().as_bytes();
         let started = cache_store.start_read(path, &e_tag, meta.size, 0..MIB, None, &reads);
-        let mut read = block_on(started).unwrap().expect("a cacheable file");
-        while let Some(run) = read.locate_next_run().unwrap() {
-            let gets = run.planned_by(&reads, &read.file(), None);
-            block_on(read.take_gets(&gets)).unwrap();
-        }
-        let fetches = read.fetches().unwrap();
+        let round = block_on(started).unwrap().expect("a cacheable file");
+        let RoundFetches { fetches, ended } = block_on(round.plan_gets()).unwrap();
         assert!(!fetches.is_empty(), "the read fetches its block");
 
-        drop(read);
+        drop(ended);
         thread::yield_now();
         drop(fetches);
         wait_until(|| region_free_pages(&client) == all, "every span is free");

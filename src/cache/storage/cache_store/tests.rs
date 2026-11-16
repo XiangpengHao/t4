@@ -760,10 +760,10 @@ fn a_plan_taken_that_the_cache_cant_carry_out_fetches_as_the_default() {
         let file = cache.resolve(b"a", Some("v1"), 2 * MIB).unwrap();
         let (mut read, mut work) = cache.start_read(&file, 0..2 * MIB, None, &reads).unwrap();
 
-        let run = work.locate_next_run(&mut read).unwrap().unwrap();
-        assert_eq!(run.planned_by(&reads, &file, None).gets().len(), 1);
-        work.take_gets(&mut read, &ReadPlan::default());
-        assert!(work.locate_next_run(&mut read).unwrap().is_none());
+        let held = work.locate(&mut read).unwrap().unwrap();
+        assert_eq!(held.run().planned_by(&reads, &file, None).gets().len(), 1);
+        work.take_gets(&mut read, held, &ReadPlan::default());
+        assert!(work.locate(&mut read).unwrap().is_none());
         assert_eq!(read.fetches(), [0..2 * MIB], "the default's GET");
 
         block_on(cache.take_fetched(&mut read, 0..2 * MIB, &data)).unwrap();

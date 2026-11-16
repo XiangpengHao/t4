@@ -6,10 +6,9 @@ use bytes::Bytes;
 use futures_util::future::BoxFuture;
 
 use super::FileVersionId;
-use super::policy::{ReadIntent, ReadPlan, ReadPolicy};
+use super::policy::{ReadIntent, ReadPolicy};
 #[cfg(any(test, feature = "__fuzz"))]
 use super::storage::ObjectCache;
-use super::storage::{CacheableFile, LocatedRun};
 use crate::io::error::Result;
 
 mod in_process;
@@ -34,7 +33,7 @@ pub(super) trait CacheStore: Send + Sync {
         range: Range<u64>,
         intent: Option<ReadIntent>,
         reads: &'s dyn ReadPolicy,
-    ) -> BoxFuture<'s, Result<Option<Box<dyn CacheStoreRead<'s> + 's>>>>;
+    ) -> BoxFuture<'s, Result<Option<Box<dyn ReadRound<'s> + 's>>>>;
 
     fn known_size<'s>(&'s self, path: &'s [u8]) -> BoxFuture<'s, Option<u64>>;
 
@@ -56,17 +55,26 @@ pub(super) trait CacheStore: Send + Sync {
     }
 }
 
-pub(super) trait CacheStoreRead<'s>: Send {
-    fn file(&self) -> CacheableFile<'s>;
+/// A pass over the blocks a read still lacks: hits taken, the rest fetched.
+pub(super) trait ReadRound<'s>: Send {
+    /// Plans the round's GETs with the read's policy and claims the blocks they fetch.
+    fn plan_gets(self: Box<Self>) -> BoxFuture<'s, Result<RoundFetches<'s>>>;
+}
 
-    fn locate_next_run(&mut self) -> Result<Option<LocatedRun>>;
+pub(super) struct RoundFetches<'s> {
+    pub(super) fetches: Vec<Box<dyn CacheStoreFetch<'s> + 's>>,
+    /// Done once the fetches and the round's reads from the tiers are.
+    pub(super) ended: BoxFuture<'s, Result<RoundEnd<'s>>>,
+}
 
-    fn take_gets<'a>(&'a mut self, gets: &'a ReadPlan) -> BoxFuture<'a, Result<()>>;
+pub(super) enum RoundEnd<'s> {
+    /// Blocks it waited for ended uncached: the read fetches them itself.
+    Retry(Box<dyn ReadRound<'s> + 's>),
+    Served(Box<dyn ServedOutput + 's>),
+}
 
-    fn fetches(&mut self) -> Result<Vec<Box<dyn CacheStoreFetch<'s> + 's>>>;
-
-    fn finish(&mut self) -> BoxFuture<'_, Result<bool>>;
-
+/// Taken once the round's fetches are done: till then they may be landing in it.
+pub(super) trait ServedOutput: Send {
     /// `None` if a read from disk is still writing the bytes, as after one failed.
     fn into_bytes(self: Box<Self>) -> Option<Bytes>;
 }

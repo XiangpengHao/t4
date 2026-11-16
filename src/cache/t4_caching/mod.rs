@@ -14,7 +14,8 @@ use object_store::{Extensions, GetRange, ObjectMeta, ObjectStore, ObjectStoreExt
 #[cfg(feature = "__fuzz")]
 use super::ChunkId;
 use super::cache_stores::{
-    CacheStore, InProcessCacheStore, PlacementMaker, SharedCacheStore, TierSettings,
+    CacheStore, InProcessCacheStore, PlacementMaker, RoundEnd, RoundFetches, SharedCacheStore,
+    TierSettings,
 };
 use super::network::{Network, Sleep};
 #[cfg(feature = "__fuzz")]
@@ -321,23 +322,20 @@ impl T4Caching {
             .cache_store
             .start_read(path, e_tag, size, range, intent, self.network.read_policy())
             .await;
-        let Ok(Some(mut read)) = started else {
+        let Ok(Some(mut round)) = started else {
             return Ok(None);
         };
         loop {
-            if self.network.plan_gets(&mut *read, intent).await.is_err() {
-                return Ok(None);
-            }
-            let Ok(receivers) = read.fetches() else {
+            let Ok(RoundFetches { fetches, ended }) = round.plan_gets().await else {
                 return Ok(None);
             };
             // The GETs are polled first, so they are sent before the tier work is waited on.
             let fetches = join_all(
-                receivers
+                fetches
                     .into_iter()
                     .map(|blocks| self.network.fetch(location, e_tag, blocks, extensions)),
             );
-            let (fetched, worked) = join(fetches, read.finish()).await;
+            let (fetched, ended) = join(fetches, ended).await;
             for fetched in fetched {
                 match fetched {
                     Ok(()) => {}
@@ -348,9 +346,9 @@ impl T4Caching {
                     Err(error) => return Err(error),
                 }
             }
-            match worked {
-                Ok(true) => {}
-                Ok(false) => return Ok(read.into_bytes()),
+            match ended {
+                Ok(RoundEnd::Retry(next)) => round = next,
+                Ok(RoundEnd::Served(output)) => return Ok(output.into_bytes()),
                 Err(_) => return Ok(None),
             }
         }
