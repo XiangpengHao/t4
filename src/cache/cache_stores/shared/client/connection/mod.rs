@@ -43,12 +43,12 @@ impl OwnerConnection {
         first_file: &Path,
         reads: Arc<dyn ReadPolicy>,
         number: u64,
-        #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
+        #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
         transport: &super::super::protocol::Transport,
     ) -> Result<Option<Self>> {
         match Self::admitted(
             first_file,
-            #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
+            #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
             transport,
         ) {
             Ok((socket, frames, region)) => {
@@ -62,7 +62,7 @@ impl OwnerConnection {
     /// A client that can't make a region goes without: its reads' bytes go in the frames.
     fn admitted(
         first_file: &Path,
-        #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
+        #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
         transport: &super::super::protocol::Transport,
     ) -> Result<(
         FrameSocket,
@@ -72,7 +72,7 @@ impl OwnerConnection {
         let cache_file = File::options().read(true).write(true).open(first_file)?;
         let address = OwnerAddress::of(
             FileIdentity::of(&cache_file)?,
-            #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
+            #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
             transport,
         )?;
         let socket = FrameSocket::new(address.connect(rustix::process::geteuid())?)?;
@@ -80,9 +80,9 @@ impl OwnerConnection {
         let region = ClientRegion::make().ok();
         let mut hello = Hello::new(PROTOCOL_VERSION, cache_file);
         if let Some(region) = &region {
-            #[cfg(not(all(any(test, fuzzing), feature = "shuttle")))]
+            #[cfg(not(all(feature = "shuttle", any(test, t4_simulated))))]
             let descriptor = region.descriptor().try_clone_to_owned()?;
-            #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
+            #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
             let descriptor = region.descriptor();
             hello = hello.with_region(descriptor);
         }
@@ -237,7 +237,7 @@ impl OwnerConnection {
     }
 
     /// Every span free: none lent to the owner, none held by a caller's bytes.
-    #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
+    #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
     pub(in crate::cache) fn region_all_free(&self) -> bool {
         let all = ClientRegion::BYTES / crate::PAGE_SIZE_U64;
         self.region
@@ -268,7 +268,7 @@ impl OwnerConnection {
             .is_some_and(|region| region.holds(bytes))
     }
 
-    #[cfg(all(any(test, fuzzing), feature = "shuttle"))]
+    #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
     pub(in crate::cache) fn calls_waiting(&self) -> Vec<u64> {
         let mut waiting: Vec<u64> = self.calls.calls().waiting.keys().copied().collect();
         waiting.sort_unstable();

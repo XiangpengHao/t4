@@ -10,11 +10,8 @@ cargo test --locked --features shuttle
 The ordinary suite keeps pure state/format tests and the OS adapter checks
 listed below. The shuttle build runs the concurrent cache, network, policy,
 I/O-worker and shared-mode tests. Some pure state tests run in both builds.
-The `shuttle` feature substitutes primitives only in the unit-test binary,
-and in a `cargo fuzz` build (`cfg(fuzzing)`), for the `shared_mode` target
-(`fuzz/README.md`); normal library consumers still get the real
-implementations, and so do the other fuzz targets, built without the
-feature.
+The `shuttle` feature substitutes primitives only in the unit-test binary;
+normal library consumers still get the real implementations.
 
 ## Schedules and replay
 
@@ -97,6 +94,24 @@ wait budget and a hello held until the final nanosecond of its deadline.
 Readiness checks observe registered claim waiters, calls, spans, or channel
 acknowledgements. A protocol round trip replaces the old “quiet for 100 ms”
 check. There are no test sleeps, receive timeouts or elapsed-time assertions.
+
+## The simulated world outside the tests
+
+The `shared_owner` and `shared_mode` fuzz targets (`fuzz/README.md`) run a
+real owner and its clients over the modeled transport, so they need the shuttle build of the
+library in a binary that isn't the unit-test one. `--cfg t4_simulated` builds
+it there, as `--cfg loom` builds loom's: the gates that pick the simulated
+socket, region, bell, address, clock, I/O driver and primitives read
+`all(feature = "shuttle", any(test, t4_simulated))`. A feature couldn't: the
+lint job builds the library with `--all-features`, and would lint only the
+simulated world. Test-only helpers keep `all(test, feature = "shuttle")`. The
+`shuttle` feature alone still changes nothing outside the tests: the fuzz crate
+turns it on for every target, to build shuttle in, and passes the cfg for
+those two only.
+
+Each fuzz input is one PCT run at depth 3 from a seed the input picks
+(`TestSchedule::fuzzed`), so that an input replays exactly; the corpus's
+seeds above stay the tests'.
 
 ## Scenarios an input writes
 

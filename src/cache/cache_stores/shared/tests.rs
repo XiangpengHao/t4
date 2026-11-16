@@ -23,8 +23,8 @@ use rustix::process::geteuid;
 use shuttle::future::block_on;
 
 use super::protocol::{
-    ClientFrame, ClientRegion, FetchSpec, FrameReceiver, FrameSender, FrameSocket, Hello, NextStep,
-    OwnerAddress, OwnerFrame, PROTOCOL_VERSION, SpanName,
+    ClientFrame, ClientRegion, FetchSpec, FrameReceiver, FrameSender, FrameSocket, Hello,
+    MOST_READ_BYTES, NextStep, OwnerAddress, OwnerFrame, PROTOCOL_VERSION, SpanName,
 };
 use crate::cache::policy::{
     Admit, BlockSource, FixedPlacementPolicy, IoPhase, PlannedGet, ReadPlan,
@@ -815,6 +815,44 @@ fn the_owner_serves_a_read_into_its_clients_span() {
     });
 }
 
+/// A client may name a version of any size: planned, a read of all of it would take the owner's
+/// memory, for bytes that come back in no frame.
+#[cfg(feature = "shuttle")]
+#[test]
+fn a_read_longer_than_a_client_asks_fails_at_once() {
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = TestDirectory::new();
+        let inner = Arc::new(InMemory::new());
+        let (_data, meta) = put_file(&inner, &Path::from("a"), MIB);
+        let _owner = shared(&inner, &dir).build().unwrap();
+        let mut client = RawClient::admitted(&dir);
+
+        let size = MOST_READ_BYTES + 1;
+        let ClientFrame::StartRead {
+            call,
+            read,
+            path,
+            e_tag,
+            ..
+        } = start_read(1, &meta, 0..size)
+        else {
+            unreachable!("a start");
+        };
+        client.send(&ClientFrame::StartRead {
+            call,
+            read,
+            path,
+            e_tag,
+            size,
+            range: 0..size,
+            intent: None,
+            output: None,
+        });
+        assert_eq!(client.answer(), OwnerFrame::Failed { call });
+        assert!(client.quiet(), "the client is still served");
+    });
+}
+
 #[cfg(feature = "shuttle")]
 #[test]
 fn an_output_span_off_a_page_boundary_closes_the_connection() {
@@ -833,6 +871,41 @@ fn an_output_span_off_a_page_boundary_closes_the_connection() {
         let off_a_page = SpanName::new(whole.offset() + 512, whole.len() - 512);
         client.send(&start_read_into(1, &meta, 0..MIB, off_a_page));
         assert!(client.closed());
+    });
+}
+
+/// Landed from its output's own bytes, a fetch would copy them onto themselves: undefined, and
+/// a panic where debug assertions check it.
+#[cfg(feature = "shuttle")]
+#[test]
+fn a_fetch_staged_in_its_reads_output_closes_the_connection() {
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = TestDirectory::new();
+        let inner = Arc::new(InMemory::new());
+        let path = Path::from("a");
+        let (data, meta) = put_file(&inner, &path, MIB);
+        let owner = shared(&inner, &dir).build().unwrap();
+        let (mut client, region) = RawClient::admitted_with_region(&dir);
+
+        let mut output = region.span(ReadOutput::padded_len(&(0..MIB))).unwrap();
+        client.send(&start_read_into(1, &meta, 0..MIB, output.name()));
+        assert!(matches!(client.answer(), OwnerFrame::Started { .. }));
+        let plan = ReadPlan::new(vec![PlannedGet::once(0..1)]);
+        client.send(&ClientFrame::TakeGets {
+            call: 2,
+            read: 1,
+            plan,
+        });
+        assert!(matches!(client.answer(), OwnerFrame::Next { .. }));
+        output.copy_in(0, &data);
+        let staged = SpanName::new(output.name().offset(), MIB);
+        client.send(&ClientFrame::LandStaged {
+            read: 1,
+            fetch: 0,
+            staged,
+        });
+        assert!(client.closed());
+        assert_eq!(read_listed(&owner, &meta, 0..MIB).unwrap(), data);
     });
 }
 

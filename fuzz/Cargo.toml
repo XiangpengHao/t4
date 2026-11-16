@@ -7,10 +7,6 @@ edition = "2024"
 [package.metadata]
 cargo-fuzz = true
 
-[features]
-# t4 on shuttle's primitives, which work only inside its runtime: for `shared_mode` alone.
-shared-mode = ["t4/shuttle"]
-
 [dependencies]
 arbitrary = "1"
 bytes = "1"
@@ -19,7 +15,8 @@ libc = "0.2"
 libfuzzer-sys = "0.4"
 object_store = { version = "0.13.2", default-features = false }
 pollster = "1.0"
-t4 = { path = "..", features = ["__fuzz"] }
+# `shuttle` only builds shuttle in: the library runs on it under `--cfg t4_simulated` alone.
+t4 = { path = "..", features = ["__fuzz", "shuttle"] }
 tempfile = "3"
 
 [[bin]]
@@ -44,9 +41,18 @@ doc = false
 bench = false
 
 [[bin]]
-name = "shared_mode"
-path = "fuzz_targets/shared_mode.rs"
-required-features = ["shared-mode"]
+name = "shared_owner"
+path = "fuzz_targets/shared_owner.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "shared_mode"
+path = "fuzz_targets/shared_mode.rs"
+test = false
+doc = false
+bench = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(t4_simulated)'] }

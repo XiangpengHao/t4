@@ -55,7 +55,9 @@ verify = true
 
 [lints.rust]
 # Verus sets `verus_only` while it verifies; ghost-only imports sit behind it.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)', 'cfg(fuzzing)'] }
+# `t4_simulated` builds the shuttle tests' simulated world outside the test binary, for the
+# `shared_owner` and `shared_mode` fuzz targets (`fuzz/README.md`).
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)', 'cfg(t4_simulated)'] }
 
 [lints.clippy]
 # A module with submodules is a `mod.rs` in its own directory, never a

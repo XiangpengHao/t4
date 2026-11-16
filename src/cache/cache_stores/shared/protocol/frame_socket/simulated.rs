@@ -134,7 +134,7 @@ pub(in crate::cache::cache_stores::shared) struct FrameSocket {
 }
 impl FrameSocket {
     pub(super) fn read_into(&self, buffer: &mut bytes::BytesMut) -> io::Result<usize> {
-        let mut bytes = vec![0; buffer.capacity() - buffer.len()];
+        let mut bytes = vec![0; (buffer.capacity() - buffer.len()).min(Self::CAPACITY)];
         let read = (&*self).read(&mut bytes)?;
         buffer.extend_from_slice(&bytes[..read]);
         Ok(read)

@@ -12,7 +12,7 @@ use crate::cache::read_output::ReadOutput;
 use crate::io::error::Result;
 use crate::io::sync::Arc;
 
-#[cfg(any(all(any(test, fuzzing), feature = "shuttle"), feature = "__fuzz"))]
+#[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
 mod at_rest;
 mod eviction;
 mod fill;

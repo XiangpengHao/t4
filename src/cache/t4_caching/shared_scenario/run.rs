@@ -337,7 +337,8 @@ impl<'s> ScenarioRun<'s> {
             }
             clients += usize::from(!owner.owner_gone());
         }
-        let serving = live().find_map(|(_, process)| process.cache.cache_store.sessions_serving());
+        let owner = live().find(|(_, process)| process.cache.cache_store.owned().is_some());
+        let serving = owner.map(|(_, process)| process.cache.cache_store.live_sessions());
         match serving {
             Some(serving) if serving != clients => Some(format!(
                 "the owner serves {serving} sessions, for {clients} clients"

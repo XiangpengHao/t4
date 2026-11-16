@@ -115,10 +115,10 @@ impl SharedScenario {
     }
 
     /// Runs the one schedule `seed` picks, its cache files under `dir`: an input replays exactly.
-    #[cfg(fuzzing)]
+    #[cfg(t4_simulated)]
     pub fn run(self, seed: u64, dir: &std::path::Path) {
         let dir = dir.to_owned();
-        crate::io::test_schedule::TestSchedule::seeded(seed, move || self.play(&dir));
+        crate::io::test_schedule::TestSchedule::fuzzed(seed, move || self.play(&dir));
     }
 
     /// Under the checked-in schedule corpus.

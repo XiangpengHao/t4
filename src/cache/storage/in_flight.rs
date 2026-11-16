@@ -54,7 +54,7 @@ impl InFlight {
         })
     }
 
-    #[cfg(any(all(any(test, fuzzing), feature = "shuttle"), feature = "__fuzz"))]
+    #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
     pub(in crate::cache) fn is_empty(&self) -> bool {
         self.fetches().is_empty()
     }

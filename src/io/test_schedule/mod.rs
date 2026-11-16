@@ -29,9 +29,23 @@ impl TestSchedule {
     #[cfg(test)]
     pub(crate) fn once(test: impl Fn() + Send + Sync + 'static) {
         #[cfg(feature = "shuttle")]
-        Self::seeded(Self::SEEDS[0], test);
+        shuttle::Runner::new(
+            PctScheduler::new_from_seed(Self::SEEDS[0], Self::PCT_DEPTH, 1),
+            Self::config(),
+        )
+        .run(test);
         #[cfg(not(feature = "shuttle"))]
         test();
+    }
+
+    /// A fuzz input is one run from its own seed, so that it replays exactly.
+    #[cfg(all(feature = "shuttle", t4_simulated))]
+    pub(crate) fn fuzzed(seed: u64, test: impl Fn() + Send + Sync + 'static) {
+        shuttle::Runner::new(
+            PctScheduler::new_from_seed(seed, Self::PCT_DEPTH, 1),
+            Self::config(),
+        )
+        .run(test);
     }
 
     /// `T4_SHUTTLE_SEED` (hex) replaces the corpus's seeds, and `T4_SHUTTLE_BUDGET` multiplies
@@ -65,16 +79,6 @@ impl TestSchedule {
             )
             .run(move || test());
         }
-    }
-
-    /// The one schedule `seed` picks, for an input that carries its own seed.
-    #[cfg(feature = "shuttle")]
-    pub(crate) fn seeded(seed: u64, test: impl Fn() + Send + Sync + 'static) {
-        shuttle::Runner::new(
-            PctScheduler::new_from_seed(seed, Self::PCT_DEPTH, 1),
-            Self::config(),
-        )
-        .run(test);
     }
 
     #[cfg(all(test, feature = "shuttle"))]
