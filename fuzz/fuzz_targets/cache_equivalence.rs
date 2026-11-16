@@ -1,16 +1,7 @@
 #![no_main]
 
-//! `T4Caching` against the store under it: random writes through the cache
-//! and behind its back, reads of every shape, some at once, some given up
-//! on midway, shutdowns and restarts, with tiers of a few blocks, under the
-//! default policy or one the input scripts.
-//!
-//! Every answer must be one the cache may give: the file as the store holds
-//! it, or, after a write behind its back, a version the cache may still
-//! trust (`doc/03-cache.md`, decision 11). After every operation, once the
-//! I/O reads given up on left behind is done, the cache's index and tiers
-//! must agree (`T4Caching::check_at_rest`), and a scripted policy must
-//! still be able to pick every chunk that holds a block.
+//! A read may answer a version written over behind the cache's back: the cache may still trust
+//! it (`doc/03-cache.md`, decision 11).
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -36,7 +27,6 @@ use t4::policy::{
 };
 use tempfile::TempDir;
 
-/// The cache's blocks: it caches and fetches whole ones.
 const BLOCK: u64 = 1 << 20;
 const PAGE: u64 = 4096;
 
@@ -46,21 +36,17 @@ fuzz_target!(|scenario: Scenario| {
     }
 });
 
-/// A cache, its policy, and what is done to it.
 #[derive(Debug)]
 struct Scenario {
     settings: CacheSettings,
     operations: Vec<Operation>,
 }
 
-/// How the cache is built, each time.
 #[derive(Clone, Debug)]
 struct CacheSettings {
     memory_blocks: u64,
-    /// The blocks the smallest cache file holds: the first; the others are
-    /// a block larger each, room the tier leaves unused.
+    /// The smallest cache file's; each other is a block larger, room the tier leaves unused.
     disk_blocks: u64,
-    /// The cache files the disk tier stripes over.
     disk_files: u64,
     queue_depth: u32,
     policy: PolicyChoice,
@@ -81,7 +67,6 @@ impl<'a> Arbitrary<'a> for Scenario {
         } else {
             PolicyChoice::Scripted(u.arbitrary()?)
         };
-        // The rest of the input, an operation at a time.
         let mut operations = Vec::new();
         while !u.is_empty() && operations.len() < Self::MAX_OPERATIONS {
             operations.push(u.arbitrary()?);
@@ -101,66 +86,29 @@ impl<'a> Arbitrary<'a> for Scenario {
 
 #[derive(Clone, Debug)]
 enum PolicyChoice {
-    /// The default, a CLOCK for each tier.
     Clock,
-    /// A [`ScriptedPolicy`] on these bytes.
     Scripted(Vec<u8>),
 }
 
 #[derive(Debug)]
 enum Operation {
-    /// A new version of the file, written through the cache.
-    Put {
-        file: FileName,
-        size: FileSize,
-    },
-    /// The same, as a multipart upload of two parts.
-    PutMultipart {
-        file: FileName,
-        size: FileSize,
-    },
-    /// A new version, written to the store behind the cache's back.
-    PutBehind {
-        file: FileName,
-        size: FileSize,
-    },
-    Delete {
-        file: FileName,
-    },
-    DeleteBehind {
-        file: FileName,
-    },
-    Copy {
-        from: FileName,
-        to: FileName,
-    },
-    Rename {
-        from: FileName,
-        to: FileName,
-    },
-    Head {
-        file: FileName,
-    },
+    Put { file: FileName, size: FileSize },
+    PutMultipart { file: FileName, size: FileSize },
+    PutBehind { file: FileName, size: FileSize },
+    Delete { file: FileName },
+    DeleteBehind { file: FileName },
+    Copy { from: FileName, to: FileName },
+    Rename { from: FileName, to: FileName },
+    Head { file: FileName },
     Get(Read),
-    /// Reads joined on one thread, which interleave at each I/O.
     GetAtOnce([Read; 3]),
-    /// A read polled a few times, then given up on, its future dropped
-    /// wherever it got to: a fetch, a fill, an eviction, a promotion.
-    GiveUp {
-        read: Read,
-        polls: u8,
-    },
-    /// The cache dropped, keeping its disk tier, and built again on its
-    /// files, taking it back.
+    GiveUp { read: Read, polls: u8 },
     Restart,
-    /// The cache shut down: its disk tier kept, and written no more, while
-    /// it goes on serving reads, until a restart.
     ShutDown,
 }
 
 impl<'a> Arbitrary<'a> for Operation {
-    /// An operation in a byte or so: reads two times in five, as they
-    /// fill, evict and promote.
+    /// Reads two times in five, as they fill, evict and promote.
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         Ok(match u.choose_index(19)? {
             0 | 1 => Self::Put {
@@ -222,8 +170,6 @@ impl<'a> Arbitrary<'a> for FileName {
     }
 }
 
-/// A file's size: up to three whole blocks, and a tail that is none, a page
-/// or two, nearly a block, or any part of one.
 #[derive(Clone, Copy, Debug)]
 struct FileSize(u64);
 
@@ -240,8 +186,6 @@ impl<'a> Arbitrary<'a> for FileSize {
     }
 }
 
-/// An offset into a file, or past its end: in one of five blocks, at its
-/// start, a page or two in, near its end, or anywhere in it.
 #[derive(Clone, Copy, Debug)]
 struct Offset(u64);
 
@@ -258,7 +202,6 @@ impl<'a> Arbitrary<'a> for Offset {
     }
 }
 
-/// A get of a file: whole, or a range of each kind `GetRange` has.
 #[derive(Clone, Debug)]
 struct Read {
     file: FileName,
@@ -266,7 +209,6 @@ struct Read {
 }
 
 impl Read {
-    /// What the store at `store` answers.
     async fn answer(&self, store: &dyn ObjectStore) -> Answer {
         let options = GetOptions {
             range: self.range.clone(),
@@ -299,8 +241,7 @@ impl<'a> Arbitrary<'a> for Read {
     }
 }
 
-/// A file version's bytes: each a function of the content's id and its
-/// offset, so no two contents agree for long.
+/// Each byte is a hash of the id and offset, so no two contents agree for long.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Content {
     id: u64,
@@ -323,7 +264,6 @@ impl Content {
     }
 }
 
-/// What a get answers: the bytes of a range of the file, or an error.
 #[derive(PartialEq, Eq)]
 enum Answer {
     Bytes { range: Range<u64>, bytes: Bytes },
@@ -331,8 +271,6 @@ enum Answer {
 }
 
 impl Answer {
-    /// What a read of `range` of the file answers if it is `content`, or
-    /// no file.
     fn of(content: Option<Content>, range: Option<&GetRange>) -> Self {
         let Some(content) = content else {
             return Self::Failed;
@@ -363,24 +301,19 @@ impl fmt::Debug for Answer {
     }
 }
 
-/// What the store holds of a file, and what the cache may take it for.
 #[derive(Debug, Default)]
 struct ModelFile {
-    /// The store's version; `None` if there's no file.
     current: Option<Content>,
-    /// Versions written over behind the cache's back since it last forgot
-    /// the path: any of them, it may still trust.
+    /// Written over behind the cache's back since it last forgot the path: it may still trust them.
     stale: Vec<Content>,
 }
 
 impl ModelFile {
-    /// The versions a read may see: the store's, and each stale one.
     fn readable(&self) -> impl Iterator<Item = Option<Content>> + '_ {
         std::iter::once(self.current).chain(self.stale.iter().copied().map(Some))
     }
 }
 
-/// What the store holds, and what the cache may still trust of it.
 #[derive(Debug, Default)]
 struct Model {
     files: [ModelFile; FileName::COUNT],
@@ -400,22 +333,20 @@ impl Model {
         &self.files[file.0]
     }
 
-    /// A write through the cache, which forgets the path.
+    /// A write through the cache makes it forget the path.
     fn write_through(&mut self, file: FileName, content: Option<Content>) {
         let file = &mut self.files[file.0];
         file.current = content;
         file.stale.clear();
     }
 
-    /// The cache built again: it knows no path, and asks the store what
-    /// each is when it is next read, so it trusts no version written over.
+    /// A rebuilt cache asks the store afresh, so it trusts no version written over.
     fn restart(&mut self) {
         for file in &mut self.files {
             file.stale.clear();
         }
     }
 
-    /// A write behind the cache's back: it may still trust what was there.
     fn write_behind(&mut self, file: FileName, content: Option<Content>) {
         let file = &mut self.files[file.0];
         let overwritten = std::mem::replace(&mut file.current, content);
@@ -423,16 +354,12 @@ impl Model {
     }
 }
 
-/// A cache over an in-memory store, and the model of both.
 struct Harness {
-    /// The cache files' directory, which outlives each cache built on them.
     dir: TempDir,
     settings: CacheSettings,
     store: Arc<InMemory>,
-    /// `None` only while it is built again.
     cache: Option<T4Caching>,
     model: Model,
-    /// What a scripted policy can still pick; `None` under CLOCK.
     pickable: Option<Arc<PickableChunks>>,
 }
 
@@ -458,8 +385,6 @@ impl Harness {
         }
     }
 
-    /// Builds the cache on the cache files, as the settings say, and a
-    /// scripted policy anew, which hears of each chunk the cache takes back.
     fn build(&mut self) -> t4::Result<()> {
         let settings = &self.settings;
         let builder = (0..settings.disk_files)
@@ -505,10 +430,7 @@ impl Harness {
         }
     }
 
-    /// The chunks that hold a block, each with its tier, once the cache is
-    /// at rest: a read given up on may leave I/O in flight, which holds its
-    /// chunks until it is done. Panics if the index and tiers don't agree by
-    /// then.
+    /// Retries: a read given up on may leave I/O in flight, holding its chunks until it's done.
     fn at_rest(&self, after: &Operation) -> Vec<(Tier, ChunkId)> {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -522,8 +444,7 @@ impl Harness {
         }
     }
 
-    /// Panics unless a scripted policy can still pick every chunk in use:
-    /// the cache gives each victim it doesn't free back to the policy.
+    /// The cache gives each victim it doesn't free back to the policy.
     fn check_policy_can_pick(&self, in_use: &[(Tier, ChunkId)], after: &Operation) {
         let Some(pickable) = &self.pickable else {
             return;
@@ -584,8 +505,7 @@ impl Harness {
                 let renamed = self.cache().rename(&from.path(), &to.path()).await;
                 let source = self.model.file(from).current;
                 assert_eq!(renamed.is_ok(), source.is_some(), "{renamed:?}");
-                // A copy, then a delete of the source, which may be the
-                // target; the cache forgets both, renamed or not.
+                // A copy then a delete of the source, which may be the target; the cache forgets both.
                 let target = source.or(self.model.file(to).current);
                 self.model.write_through(to, target);
                 let source = if source.is_some() {
@@ -627,8 +547,7 @@ impl Harness {
             }
             Operation::ShutDown => self.cache().shut_down().unwrap(),
             Operation::Restart => {
-                // Dropped first: it keeps its disk tier, and its files'
-                // lock goes with it.
+                // Dropped first, so its files' lock is free for the rebuild.
                 self.cache = None;
                 self.build().unwrap();
                 self.model.restart();
@@ -642,8 +561,6 @@ impl Harness {
         }
     }
 
-    /// Panics unless `answer` is what `read` may get of some version the
-    /// cache may take the file for.
     fn check_answer(&self, read: &Read, answer: &Answer) {
         let file = self.model.file(read.file);
         let allowed = file
@@ -652,8 +569,7 @@ impl Harness {
         assert!(allowed, "{read:?} answered {answer:?}; the model: {file:?}");
     }
 
-    /// Panics unless the store holds what the model says: the harness's own
-    /// check, so that a failure is the cache's.
+    /// The harness's own check, so any other failure is the cache's.
     async fn check_model(&self) {
         for (index, file) in self.model.files.iter().enumerate() {
             let path = FileName(index).path();
@@ -663,21 +579,13 @@ impl Harness {
     }
 }
 
-/// A policy whose every decision the input makes: where each fetched block
-/// goes, whether a disk hit moves to memory, and which chunks a full tier
-/// gives up, a chunk that holds nothing among them. Panics if the cache
-/// names a chunk past its tier's.
 struct ScriptedPolicy {
     sizes: TierSizes,
     script: Vec<u8>,
     next: AtomicUsize,
-    /// Where its victims mostly come from.
     pickable: Arc<PickableChunks>,
 }
 
-/// Each tier's chunks a [`ScriptedPolicy`] can still pick: those the cache
-/// said took a block, less those it picked since, by index. Shared with the
-/// harness, which checks that every chunk in use is among them.
 #[derive(Default)]
 struct PickableChunks {
     memory: Mutex<BTreeSet<u32>>,
@@ -703,7 +611,6 @@ impl ScriptedPolicy {
         }
     }
 
-    /// The script's next byte, round and round; 0 if it is empty.
     fn next_byte(&self) -> u8 {
         if self.script.is_empty() {
             return 0;
@@ -727,8 +634,6 @@ impl ScriptedPolicy {
         );
     }
 
-    /// Up to `count` victims of `tier`, none at times: mostly chunks it
-    /// admitted, else any chunk.
     fn pick(&self, tier: Tier, count: usize) -> Vec<ChunkId> {
         let mut admitted = self.pickable.of(tier);
         let wanted = match self.next_byte() {

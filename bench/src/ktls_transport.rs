@@ -1,26 +1,5 @@
-//! [`KtlsConnector`]: an HTTP transport for object_store whose TLS the
-//! kernel decrypts (kTLS), so that a response's body lands, decrypted, in
-//! the buffer it is handed over in.
-//!
-//! A byte of a body costs one pass: the kernel decrypts it from its
-//! receive buffers into ours. object_store's own transport, reqwest over
-//! hyper and rustls, costs five before the body reaches its caller: the
-//! kernel's copy of the ciphertext into rustls's buffer, rustls decrypting
-//! it in place, its copies of the plaintext into its queue and from there
-//! into hyper's buffer, and `bytes()` joining hyper's pieces into one.
-//!
-//! The handshake is rustls's, with ring and the system's roots as reqwest
-//! sets it up; then the session's keys go to the kernel, and the
-//! connection speaks HTTP/1.1 ([`Http1Connection`]). Connections are kept
-//! per host and reused, one exchange at a time each, new ones spread over
-//! the addresses the host resolves to. It ignores [`ClientOptions`]'
-//! timeouts and proxies. Given a runtime, it runs every exchange there,
-//! object_store's [`SpawnService`](object_store::client::SpawnService)
-//! moving the bodies over. kTLS is Linux's:
-//! elsewhere the connector fails.
-//!
-//! The `ktls` crate ignores a TLS 1.3 `KeyUpdate`, which then fails the
-//! connection's later reads; object_store retries such a request.
+//! Why kTLS: a body byte costs one pass, the kernel's decrypt; reqwest over rustls costs five.
+//! The `ktls` crate ignores a TLS 1.3 `KeyUpdate`, failing later reads; object_store retries.
 
 use object_store::ClientOptions;
 #[cfg(target_os = "linux")]
@@ -28,8 +7,6 @@ use object_store::client::SpawnService;
 use object_store::client::{HttpClient, HttpConnector};
 use tokio::runtime::Handle;
 
-/// Gives a store's builder kTLS clients:
-/// `with_http_connector(KtlsConnector::new(io))`.
 #[derive(Debug)]
 pub struct KtlsConnector {
     // Only Linux's clients run on it.
@@ -38,8 +15,6 @@ pub struct KtlsConnector {
 }
 
 impl KtlsConnector {
-    /// Clients that run on `io`'s runtime if given, else on whichever
-    /// calls them.
     pub fn new(io: Option<Handle>) -> Self {
         Self { io }
     }
@@ -88,13 +63,10 @@ mod linux {
 
     type KtlsConnection = Http1Connection<KtlsStream<TcpStream>>;
 
-    /// object_store's HTTP client over kTLS connections; its clones share
-    /// them.
     #[derive(Clone)]
     pub(super) struct KtlsTransport {
         tls: Arc<ClientConfig>,
         idle: Arc<IdleConnections>,
-        /// Counts new connections, to spread them over a host's addresses.
         opened: Arc<AtomicUsize>,
     }
 
@@ -118,8 +90,6 @@ mod linux {
             })
         }
 
-        /// A new connection to `request`'s host, its TLS handed to the
-        /// kernel.
         async fn open(&self, request: &OutgoingRequest) -> Result<KtlsConnection, HttpError> {
             let connect = |error: io::Error| HttpError::new(HttpErrorKind::Connect, error);
             let addresses: Vec<SocketAddr> =
@@ -134,9 +104,7 @@ mod linux {
             tcp.set_nodelay(true).map_err(connect)?;
             let name = ServerName::try_from(request.host().to_owned())
                 .map_err(|error| connect(io::Error::new(io::ErrorKind::InvalidInput, error)))?;
-            // CorkStream stops rustls at a record's end, so that whatever it
-            // read past the handshake is drained, not lost, when the kernel
-            // takes over.
+            // CorkStream stops rustls at a record's end, so bytes past the handshake aren't lost.
             let tls = TlsConnector::from(Arc::clone(&self.tls))
                 .connect(name, CorkStream::new(tcp))
                 .await
@@ -158,8 +126,7 @@ mod linux {
                 None => (self.open(&request).await?, false),
             };
             let mut answer = connection.exchange(&request).await;
-            // A kept connection the server closed meanwhile fails before
-            // answering: the request goes once more, on a new one.
+            // A kept connection the server closed meanwhile fails unanswered: retry on a new one.
             if kept && request.idempotent() && matches!(answer, Err(ExchangeError::Unanswered(_))) {
                 connection = self.open(&request).await?;
                 answer = connection.exchange(&request).await;
@@ -180,7 +147,6 @@ mod linux {
         }
     }
 
-    /// Connections between exchanges, by the host and port they reach.
     #[derive(Default)]
     struct IdleConnections {
         by_authority: Mutex<HashMap<String, Vec<KtlsConnection>>>,

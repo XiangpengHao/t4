@@ -1,7 +1,4 @@
-//! [`SyntheticObjects`]: a read-only object store whose objects have sizes
-//! but no stored bytes: it computes them. A workload over terabytes needs
-//! no dataset, no drive and no page cache to serve it, and every byte the
-//! cache returns can be checked against [`SyntheticObjects::bytes`].
+//! Computed bytes: terabytes need no drive or page cache, and every byte read can be checked.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -18,26 +15,20 @@ use object_store::{
     ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 
-/// Objects of given sizes whose bytes are a pseudo-random pattern, each
-/// object's started at its own offset in it.
 pub struct SyntheticObjects {
     objects: BTreeMap<Path, SyntheticObject>,
-    /// [`Self::PATTERN_LEN`] pseudo-random bytes, twice over: a read of up to
-    /// the pattern's length is one slice of it, wherever it starts.
+    /// Twice over, so a read up to [`Self::PATTERN_LEN`] is one slice wherever it starts.
     pattern: Bytes,
 }
 
 struct SyntheticObject {
     meta: ObjectMeta,
-    /// Where the object's first byte is in the pattern.
     pattern_offset: u64,
 }
 
 impl SyntheticObjects {
-    /// The pattern's length; reads up to it cost no copy.
     const PATTERN_LEN: u64 = 64 << 20;
 
-    /// The objects at `objects`' paths, each of its size.
     pub fn new(objects: impl IntoIterator<Item = (Path, u64)>) -> Self {
         let objects = objects
             .into_iter()
@@ -65,11 +56,6 @@ impl SyntheticObjects {
         }
     }
 
-    /// The bytes of `range` of the object at `path`, which it holds.
-    ///
-    /// # Panics
-    ///
-    /// If there is no object at `path`.
     pub fn bytes(&self, path: &Path, range: Range<u64>) -> Bytes {
         self.object_bytes(&self.objects[path], range)
     }
@@ -91,8 +77,7 @@ impl SyntheticObjects {
         bytes.into()
     }
 
-    /// FNV-1a: where a path's object starts in the pattern, the same in
-    /// every run.
+    /// FNV-1a, so an object's offset in the pattern is the same in every run.
     fn path_hash(path: &Path) -> u64 {
         path.as_ref()
             .bytes()
@@ -101,7 +86,7 @@ impl SyntheticObjects {
             })
     }
 
-    /// The pattern, twice over, from xorshift64*.
+    /// xorshift64*.
     fn pattern() -> Bytes {
         let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
         let once: Vec<u8> = (0..Self::PATTERN_LEN / 8)
@@ -252,8 +237,7 @@ mod tests {
         SyntheticObjects::new([(Path::from("a"), 3 * LEN), (Path::from("b"), 100)])
     }
 
-    /// A read is the same bytes wherever it is cut: one long read, across
-    /// the pattern's end twice, equals its pieces read apart.
+    /// The long read crosses the pattern's end twice.
     #[tokio::test]
     async fn reads_agree_however_they_are_cut() {
         let store = objects();
@@ -267,7 +251,6 @@ mod tests {
         assert_eq!(whole, store.bytes(&path, 5..2 * LEN + 9));
     }
 
-    /// Two objects' bytes differ at the same offsets.
     #[tokio::test]
     async fn objects_differ() {
         let store = objects();
@@ -276,8 +259,6 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    /// A suffix read, a HEAD, and `If-Match` on another e_tag answer as an
-    /// object store does.
     #[tokio::test]
     async fn answers_as_an_object_store() {
         let store = objects();

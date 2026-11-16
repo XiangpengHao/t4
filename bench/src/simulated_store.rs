@@ -1,8 +1,3 @@
-//! [`SimulatedStore`]: an object store over another that answers like a
-//! remote one, as its [`NetworkModel`] says, so t4's remote reads can be
-//! measured without a cloud. Writes, lists, copies and deletes pass
-//! through at once: t4 only reads.
-
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -19,29 +14,16 @@ use object_store::{
 };
 use tokio::time::{Instant, sleep_until};
 
-/// How a simulated remote store answers. Each request's first byte comes
-/// `first_byte` after it is issued; its bytes then flow at
-/// `stream_bandwidth` at most, and all requests share one link of
-/// `link_bandwidth`.
-///
-/// The link sends whole responses one after another, in the order they are
-/// ready, where a real one shares itself between them: a long response
-/// delays the short ones behind it more than TCP would. The link's total
-/// is the same, and the total is what a cache that keeps the NIC busy
-/// meets.
+/// The link sends whole responses in turn, not shared as TCP would: short ones wait longer,
+/// but the total, what a cache keeping the NIC busy meets, is the same.
 #[derive(Clone, Copy, Debug)]
 pub struct NetworkModel {
     first_byte: Duration,
-    /// Bytes a second.
     stream_bandwidth: u64,
-    /// Bytes a second.
     link_bandwidth: u64,
 }
 
 impl NetworkModel {
-    /// # Panics
-    ///
-    /// If a bandwidth is 0.
     pub fn new(first_byte: Duration, stream_bandwidth: u64, link_bandwidth: u64) -> Self {
         assert!(
             stream_bandwidth > 0 && link_bandwidth > 0,
@@ -54,23 +36,17 @@ impl NetworkModel {
         }
     }
 
-    /// How long `bytes` take at `bandwidth` bytes a second.
     fn transfer(bytes: u64, bandwidth: u64) -> Duration {
         let nanos = u128::from(bytes) * 1_000_000_000 / u128::from(bandwidth);
         Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
     }
 }
 
-/// An object store over `inner` whose reads arrive as a [`NetworkModel`]
-/// says, each rounded up to tokio's timer, a millisecond. The inner store
-/// is asked at once, and should answer well before the model does: a
-/// response it holds back past its arrival is late, and
-/// [`Self::late_responses`] counts it.
+/// Arrivals round up to tokio's timer, a millisecond.
 #[derive(Debug)]
 pub struct SimulatedStore {
     inner: Arc<dyn ObjectStore>,
     network: NetworkModel,
-    /// When the link is free of the responses ahead.
     link_free_at: Mutex<Instant>,
     late_responses: AtomicU64,
 }
@@ -85,17 +61,11 @@ impl SimulatedStore {
         }
     }
 
-    /// The responses the inner store held back past their arrival, which
-    /// arrived late: so many that the inner store, not the model, set the
-    /// pace.
+    /// Late responses mean the inner store, not the model, set the pace.
     pub fn late_responses(&self) -> u64 {
         self.late_responses.load(Ordering::Relaxed)
     }
 
-    /// When a response of `bytes` to a request issued at `issued` arrives:
-    /// its first byte, then its bytes over the link after the responses
-    /// ahead, and no sooner than one stream carries them. Takes its turn on
-    /// the link.
     fn arrival(&self, issued: Instant, bytes: u64) -> Instant {
         let first_byte = issued + self.network.first_byte;
         let sent = {
@@ -110,7 +80,6 @@ impl SimulatedStore {
         sent.max(first_byte + NetworkModel::transfer(bytes, self.network.stream_bandwidth))
     }
 
-    /// Waits until `arrival`, counting a response already past it late.
     async fn arrive_at(&self, arrival: Instant) {
         if Instant::now() > arrival {
             self.late_responses.fetch_add(1, Ordering::Relaxed);
@@ -222,8 +191,6 @@ mod tests {
 
     const MB: u64 = 1_000_000;
 
-    /// A simulated store over objects `a` and `b`, each of 10 MB: 10 ms to
-    /// the first byte, 100 MB/s a stream, 1,000 MB/s on the link.
     async fn two_objects() -> SimulatedStore {
         let inner = InMemory::new();
         for name in ["a", "b"] {
@@ -236,8 +203,6 @@ mod tests {
         SimulatedStore::new(Arc::new(inner), network)
     }
 
-    /// A read takes the first-byte latency, then its bytes at the stream's
-    /// bandwidth: 100 KB 1 ms, 10 MB 100 ms.
     #[tokio::test(start_paused = true)]
     async fn one_read_takes_its_first_byte_then_its_stream() {
         let store = two_objects().await;
@@ -251,8 +216,6 @@ mod tests {
         assert_eq!(store.late_responses(), 0);
     }
 
-    /// Twenty streams of 10 MB at once fill the link: 200 MB at 1,000 MB/s
-    /// take 200 ms after the first byte, not one stream's 100 ms.
     #[tokio::test(start_paused = true)]
     async fn reads_at_once_share_the_link() {
         let store = two_objects().await;
@@ -266,7 +229,6 @@ mod tests {
         assert_eq!(start.elapsed(), Duration::from_millis(210));
     }
 
-    /// A HEAD, and a read of a missing object, take the first-byte latency.
     #[tokio::test(start_paused = true)]
     async fn heads_and_errors_take_the_first_byte() {
         let store = two_objects().await;
