@@ -69,16 +69,10 @@ impl LogFixture {
     fn raw_record(body: &[u8]) -> Vec<u8> {
         let mut out = SnapshotWriter::default();
         out.u32(body.len() as u32);
-        out.u32(RecordChecksum::of(body));
+        out.u32(crc32c::crc32c(body));
         out.raw(body);
         out.0
     }
-}
-
-#[test]
-fn crc32c_matches_the_castagnoli_check_value() {
-    assert_eq!(RecordChecksum::of(b"123456789"), 0xe306_9283);
-    assert_eq!(RecordChecksum::of(b""), 0);
 }
 
 #[test]
@@ -230,7 +224,7 @@ fn a_bad_header_or_base_starts_cold() {
     let mut wrong_layout = bytes;
     // Keep the base CRC valid: the snapshot decoder must reject the wrong block size.
     wrong_layout[40 + 12] ^= 1;
-    let checksum = RecordChecksum::of(&wrong_layout[40..]);
+    let checksum = crc32c::crc32c(&wrong_layout[40..]);
     wrong_layout[36..40].copy_from_slice(&checksum.to_le_bytes());
     assert_eq!(fixture.replay(&wrong_layout), None);
 }

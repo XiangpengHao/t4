@@ -33,6 +33,9 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 object_store = { version = "0.13.2", default-features = false }
 async-trait = "0.1"
 bytes = "1"
+# The persistence log's checksums (`doc/13-persistence.md`), on the CPU's CRC
+# instruction where it has one.
+crc32c = "0.6.9"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7", optional = true }

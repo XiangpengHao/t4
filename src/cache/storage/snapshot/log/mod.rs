@@ -22,7 +22,7 @@ impl DiskLog {
         out.raw(boot.as_bytes());
         let base = snapshot.encode(layout);
         out.u64(base.len() as u64);
-        out.u32(RecordChecksum::of(&base));
+        out.u32(crc32c::crc32c(&base));
         out.raw(&base);
         out.0
     }
@@ -34,7 +34,7 @@ impl DiskLog {
         }
         let mut out = SnapshotWriter::default();
         out.u32(u32::try_from(body.0.len()).expect("a log record fits in 4 GiB"));
-        out.u32(RecordChecksum::of(&body.0));
+        out.u32(crc32c::crc32c(&body.0));
         out.raw(&body.0);
         out.0
     }
@@ -48,7 +48,7 @@ impl DiskLog {
         let base_len = usize::try_from(input.u64()?).ok()?;
         let checksum = input.u32()?;
         let base = input.take(base_len)?;
-        if RecordChecksum::of(base) != checksum {
+        if crc32c::crc32c(base) != checksum {
             return None;
         }
         let mut replay = LogReplay::new(DiskSnapshot::decode(base, layout)?, layout.chunk_count()?);
@@ -56,7 +56,7 @@ impl DiskLog {
             let Some((checksum, body)) = Self::take_record(&mut input) else {
                 break;
             };
-            if RecordChecksum::of(body) != checksum {
+            if crc32c::crc32c(body) != checksum {
                 return None;
             }
             let mut record = SnapshotReader { bytes: body };
@@ -245,21 +245,6 @@ impl LogReplay {
             })
             .collect();
         DiskSnapshot::new(self.next_id, versions)
-    }
-}
-
-struct RecordChecksum;
-
-impl RecordChecksum {
-    fn of(bytes: &[u8]) -> u32 {
-        let mut crc = !0u32;
-        for byte in bytes {
-            crc ^= u32::from(*byte);
-            for _ in 0..8 {
-                crc = (crc >> 1) ^ (0x82f6_3b78 & 0u32.wrapping_sub(crc & 1));
-            }
-        }
-        !crc
     }
 }
 
