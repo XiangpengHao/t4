@@ -1,4 +1,5 @@
 use super::region::RegionDescriptor;
+#[cfg(not(all(feature = "shuttle", any(test, t4_simulated))))]
 use std::fs::File;
 use std::io::Read;
 #[cfg(not(all(feature = "shuttle", any(test, t4_simulated))))]
@@ -10,7 +11,6 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::time::Duration;
 
 use bytes::Bytes;
-use rustix::fs::OFlags;
 #[cfg(not(all(feature = "shuttle", any(test, t4_simulated))))]
 use rustix::net::{
     RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendAncillaryBuffer,
@@ -19,13 +19,13 @@ use rustix::net::{
 
 use super::frame_socket::FrameSocket;
 use super::frames::{ClientFrame, FrameReader, PROTOCOL_VERSION};
-use crate::cache::storage::FileIdentity;
 use crate::io::error::{Error, Result};
+use crate::io::file_system::{FileIdentity, OpenFile};
 
 /// Admission is by write access to the first cache file: whoever may write it may use the cache.
 pub(in crate::cache::cache_stores::shared) struct Hello {
     version: u32,
-    cache_file: File,
+    cache_file: OpenFile,
     region: Option<RegionDescriptor>,
 }
 
@@ -49,7 +49,7 @@ impl Hello {
     ))]
     const RECEIVE_FLAGS: RecvFlags = RecvFlags::empty();
 
-    pub(in crate::cache::cache_stores::shared) fn new(version: u32, cache_file: File) -> Self {
+    pub(in crate::cache::cache_stores::shared) fn new(version: u32, cache_file: OpenFile) -> Self {
         Self {
             version,
             cache_file,
@@ -185,7 +185,7 @@ impl Hello {
             }
             let mut descriptors = descriptors.into_iter();
             let cache_file = descriptors.next().expect("one descriptor at least");
-            (File::from(cache_file), descriptors.next())
+            (OpenFile::from(File::from(cache_file)), descriptors.next())
         };
         #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
         if region != region_descriptor.is_some() {
@@ -205,11 +205,10 @@ impl Hello {
         if self.version != PROTOCOL_VERSION {
             return Err(Self::refused("of another protocol version"));
         }
-        if FileIdentity::of(&self.cache_file)? != first_file {
+        if self.cache_file.identity()? != first_file {
             return Err(Self::refused("with a descriptor of another file"));
         }
-        let access = rustix::fs::fcntl_getfl(&self.cache_file).map_err(std::io::Error::from)?;
-        if access & OFlags::RWMODE != OFlags::RDWR {
+        if !self.cache_file.is_writable()? {
             return Err(Self::refused("with a descriptor not open for writing"));
         }
         Ok(())

@@ -114,28 +114,21 @@ impl SharedScenario {
         }
     }
 
-    /// Runs the one schedule `seed` picks, its cache files under `dir`: an input replays exactly.
+    /// Runs the one schedule `seed` picks: an input replays exactly.
     #[cfg(t4_simulated)]
-    pub fn run(self, seed: u64, dir: &std::path::Path) {
-        let dir = dir.to_owned();
-        crate::io::test_schedule::TestSchedule::fuzzed(seed, move || self.play(&dir));
+    pub fn run(self, seed: u64) {
+        crate::io::test_schedule::TestSchedule::fuzzed(seed, move || self.play());
     }
 
     /// Under the checked-in schedule corpus.
     #[cfg(test)]
     fn check(self) {
-        crate::io::test_schedule::TestSchedule::check(move || {
-            let dir = tempfile::tempdir().unwrap();
-            self.play(dir.path());
-        });
+        crate::io::test_schedule::TestSchedule::check(move || self.play());
     }
 
-    fn play(&self, dir: &std::path::Path) {
-        // Each schedule on fresh files: one schedule's log would warm the next.
-        let dir = dir.join("shared");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut run = ScenarioRun::start(&self.settings, dir);
+    /// Each schedule on a disk of its own: one schedule's log would warm the next.
+    fn play(&self) {
+        let mut run = ScenarioRun::start(&self.settings);
         for (index, operation) in self.operations.iter().enumerate() {
             run.apply(index + 1, operation);
         }

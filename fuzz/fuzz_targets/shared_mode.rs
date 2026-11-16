@@ -13,10 +13,7 @@ mod scenario {
     const BLOCK: u64 = 1 << 20;
     const PAGE: u64 = 4096;
 
-    fuzz_target!(|input: Input| {
-        let dir = tempfile::tempdir().unwrap();
-        input.scenario.run(input.seed, dir.path());
-    });
+    fuzz_target!(|input: Input| input.scenario.run(input.seed));
 
     /// The script, and the seed of the schedule it runs in.
     #[derive(Debug)]

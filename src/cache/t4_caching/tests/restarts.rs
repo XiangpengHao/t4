@@ -1,8 +1,9 @@
 use super::*;
 use crate::cache::policy::FixedPlacementPolicy;
 
-fn on_disk(inner: &Arc<CountingStore>, dir: &TempDir) -> T4CachingBuilder {
-    builder(inner, dir).with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
+fn on_disk(inner: &Arc<CountingStore>, dir: &CacheDirectory) -> T4CachingBuilder {
+    dir.builder(inner)
+        .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
 }
 
 fn read_whole(cache: &T4Caching, meta: &ObjectMeta) -> Bytes {
@@ -14,7 +15,7 @@ fn read_whole(cache: &T4Caching, meta: &ObjectMeta) -> Bytes {
 #[test]
 fn a_cache_built_again_serves_the_disk_tier_its_files_held() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let inner = Arc::new(CountingStore::default());
         let path = Path::from("a");
         let data = file_bytes(3 * MIB + 5, 21);
@@ -23,11 +24,11 @@ fn a_cache_built_again_serves_the_disk_tier_its_files_held() {
         let first = on_disk(&inner, &dir).build().unwrap();
         assert_eq!(read_whole(&first, &meta), data);
         drop(first);
-        assert!(log_at(&dir).exists());
+        assert!(dir.holds_log());
         inner.take_asked();
 
         let again = on_disk(&inner, &dir).build().unwrap();
-        assert!(log_at(&dir).exists(), "rebased before writes");
+        assert!(dir.holds_log(), "rebased before writes");
         assert_eq!(block_on(again.known_size(&path)), Some(meta.size));
         assert_eq!(read_whole(&again, &meta), data);
         assert_eq!(inner.take_asked(), [], "served from disk");
@@ -48,18 +49,18 @@ fn a_cache_built_again_serves_the_disk_tier_its_files_held() {
 #[test]
 fn memorys_blocks_go_with_the_cache() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let inner = Arc::new(CountingStore::default());
         let path = Path::from("a");
         let data = file_bytes(MIB, 22);
         put(inner.as_ref(), &path, &data);
         let meta = block_on(inner.head(&path)).unwrap();
-        let first = builder(&inner, &dir).build().unwrap();
+        let first = dir.builder(&inner).build().unwrap();
         assert_eq!(read_whole(&first, &meta), data);
         drop(first);
         inner.take_asked();
 
-        let again = builder(&inner, &dir).build().unwrap();
+        let again = dir.builder(&inner).build().unwrap();
         assert_eq!(block_on(again.known_size(&path)), None);
         assert_eq!(read_whole(&again, &meta), data);
         assert_eq!(inner.take_asked(), [bounded(0..MIB)]);
@@ -70,7 +71,7 @@ fn memorys_blocks_go_with_the_cache() {
 #[test]
 fn a_cache_of_another_capacity_starts_cold() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let inner = Arc::new(CountingStore::default());
         let path = Path::from("a");
         let data = file_bytes(2 * MIB, 23);
@@ -81,13 +82,16 @@ fn a_cache_of_another_capacity_starts_cold() {
         drop(first);
         inner.take_asked();
 
-        let larger = T4Caching::builder(Arc::clone(&inner) as Arc<dyn ObjectStore>)
+        let larger = dir
+            .holding(T4Caching::builder(
+                Arc::clone(&inner) as Arc<dyn ObjectStore>
+            ))
             .with_memory_capacity(4 * MIB)
             .with_disk_file(dir.path().join("cache"), 16 * MIB)
             .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
             .build()
             .unwrap();
-        assert!(log_at(&dir).exists());
+        assert!(dir.holds_log());
         assert_eq!(block_on(larger.known_size(&path)), None);
         assert_eq!(read_whole(&larger, &meta), data);
         assert_eq!(inner.take_asked(), [bounded(0..2 * MIB)]);
@@ -98,7 +102,7 @@ fn a_cache_of_another_capacity_starts_cold() {
 #[test]
 fn a_file_written_over_between_caches_is_fetched_again() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let inner = Arc::new(CountingStore::default());
         let path = Path::from("a");
         let old = file_bytes(2 * MIB, 24);
@@ -121,7 +125,7 @@ fn a_file_written_over_between_caches_is_fetched_again() {
 #[test]
 fn a_cache_shut_down_keeps_its_disk_tier_and_writes_no_more() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let inner = Arc::new(CountingStore::default());
         let (a, b) = (Path::from("a"), Path::from("b"));
         let (a_data, b_data) = (file_bytes(2 * MIB, 26), file_bytes(MIB, 27));
@@ -134,7 +138,7 @@ fn a_cache_shut_down_keeps_its_disk_tier_and_writes_no_more() {
         let cache = on_disk(&inner, &dir).build().unwrap();
         assert_eq!(read_whole(&cache, &a_meta), a_data);
         cache.shut_down().unwrap();
-        assert!(log_at(&dir).exists(), "kept at once");
+        assert!(dir.holds_log(), "kept at once");
         inner.take_asked();
 
         assert_eq!(read_whole(&cache, &a_meta), a_data);

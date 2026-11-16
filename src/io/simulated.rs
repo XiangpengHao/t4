@@ -1,24 +1,19 @@
 //! An operation reaches the disk only when it completes, so reads see writes in completion order.
 
-mod disk;
-
-pub(crate) use disk::SimDisk;
-
 use std::collections::VecDeque;
-use std::fs::File;
 
 use shuttle::rand::{Rng, thread_rng};
 
 use crate::io::common::{BackendLoop, CompletionEvent, IoDriver, SubmissionEntry};
 use crate::io::error::{Error, Result};
+use crate::io::file_system::OpenFile;
 use crate::io::io_task::{FilePosition, WorkerRequest};
 use crate::io::sync::mpsc;
-use disk::Completion;
 
 const MAX_WAITS: u32 = 8;
 
 pub(crate) struct SimulatedDriver {
-    disks: Vec<SimDisk>,
+    files: Vec<OpenFile>,
     queue_depth: usize,
     inflight: Vec<InflightOp>,
     completions: VecDeque<CompletionEvent>,
@@ -45,8 +40,9 @@ enum SimOp {
 }
 
 impl SimOp {
-    fn complete(&self, disks: &mut [SimDisk]) -> i32 {
-        let (file, completion) = match *self {
+    /// `push` checked the file is the worker's.
+    fn complete(&self, files: &[OpenFile]) -> i32 {
+        let done = match *self {
             Self::Read {
                 buf_ptr,
                 buf_len,
@@ -54,8 +50,7 @@ impl SimOp {
             } => {
                 // SAFETY: the backend loop keeps the buffer alive and untouched until this completes.
                 let buf = unsafe { std::slice::from_raw_parts_mut(buf_ptr, buf_len as usize) };
-                let offset = at.offset();
-                (at.file(), Completion::Read { offset, buf })
+                files[at.file() as usize].read_at(buf, at.offset())
             }
             Self::Write {
                 buf_ptr,
@@ -64,11 +59,13 @@ impl SimOp {
             } => {
                 // SAFETY: the backend loop keeps the buffer alive and unchanged until this completes.
                 let bytes = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len as usize) };
-                let offset = at.offset();
-                (at.file(), Completion::Write { offset, bytes })
+                files[at.file() as usize].write_at(bytes, at.offset())
             }
         };
-        disks[file as usize].complete(completion)
+        match done {
+            Ok(len) => len as i32,
+            Err(error) => -error.raw_os_error().unwrap_or(libc::EIO),
+        }
     }
 }
 
@@ -85,7 +82,7 @@ impl IoDriver for SimulatedDriver {
                 at,
                 user_data,
             } => {
-                self.disk(at)?;
+                self.file(at)?;
                 (
                     SimOp::Read {
                         buf_ptr,
@@ -102,7 +99,7 @@ impl IoDriver for SimulatedDriver {
                 user_data,
                 ..
             } => {
-                self.disk(at)?;
+                self.file(at)?;
                 (
                     SimOp::Write {
                         buf_ptr,
@@ -136,7 +133,7 @@ impl IoDriver for SimulatedDriver {
 
     fn wait_for_progress(&mut self, _request_rx: &mpsc::Receiver<WorkerRequest>) {
         shuttle::thread::yield_now();
-        let disks = &mut self.disks;
+        let files = &self.files;
         let completions = &mut self.completions;
         self.inflight.retain_mut(|inflight| {
             if inflight.waits_left > 0 {
@@ -145,7 +142,7 @@ impl IoDriver for SimulatedDriver {
             }
             completions.push_back(CompletionEvent {
                 user_data: inflight.user_data,
-                result: inflight.op.complete(disks),
+                result: inflight.op.complete(files),
             });
             false
         });
@@ -153,40 +150,27 @@ impl IoDriver for SimulatedDriver {
 }
 
 impl SimulatedDriver {
-    fn disk(&mut self, at: FilePosition) -> Result<&mut SimDisk> {
-        self.disks
-            .get_mut(at.file() as usize)
+    fn file(&self, at: FilePosition) -> Result<&OpenFile> {
+        self.files
+            .get(at.file() as usize)
             .ok_or(Error::InvalidArgument(
                 "an I/O names a file the worker hasn't",
             ))
     }
 }
 
-pub(crate) fn new_backend_on(
-    disks: Vec<SimDisk>,
+/// Files are read and written on the simulated disk at the scheduled completion.
+pub(crate) fn new_backend(
+    files: Vec<OpenFile>,
     queue_depth: u32,
     rx: mpsc::Receiver<WorkerRequest>,
-) -> BackendLoop<SimulatedDriver> {
+) -> Result<BackendLoop<SimulatedDriver>> {
     let queue_depth = queue_depth as usize;
     let driver = SimulatedDriver {
-        disks,
+        files,
         queue_depth,
         inflight: Vec::with_capacity(queue_depth),
         completions: VecDeque::new(),
     };
-    BackendLoop::new(queue_depth, rx, driver)
-}
-
-/// Files are read and written at the scheduled completion: restart bytes and locks hold
-/// with no OS I/O worker.
-pub(crate) fn new_backend(
-    files: Vec<File>,
-    queue_depth: u32,
-    rx: mpsc::Receiver<WorkerRequest>,
-) -> Result<BackendLoop<SimulatedDriver>> {
-    Ok(new_backend_on(
-        files.into_iter().map(SimDisk::on_file).collect(),
-        queue_depth,
-        rx,
-    ))
+    Ok(BackendLoop::new(queue_depth, rx, driver))
 }

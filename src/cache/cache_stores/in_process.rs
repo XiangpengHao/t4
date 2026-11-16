@@ -18,6 +18,7 @@ use crate::cache::storage::{
     CacheFiles, CacheableFile, DiskFile, FetchedBlocks, HeldRun, ObjectCache, PartialRead, TierWork,
 };
 use crate::io::error::{Error, Result};
+use crate::io::file_system::FileSystem;
 use crate::io::sync::Arc;
 
 pub(in crate::cache) type PlacementMaker =
@@ -32,6 +33,7 @@ enum PlacementSource {
 
 pub(in crate::cache) struct TierSettings {
     clock: crate::io::time::Clock,
+    file_system: FileSystem,
     memory_chunks: NonZeroU32,
     disk_files: Vec<DiskFile>,
     queue_depth: NonZeroU32,
@@ -45,6 +47,7 @@ impl TierSettings {
     }
 
     pub(in crate::cache) fn new(
+        file_system: FileSystem,
         memory_chunks: NonZeroU32,
         disk_files: Vec<DiskFile>,
         queue_depth: NonZeroU32,
@@ -53,12 +56,17 @@ impl TierSettings {
     ) -> Self {
         Self {
             clock: Default::default(),
+            file_system,
             memory_chunks,
             disk_files,
             queue_depth,
             direct_io,
             placement: placement.map_or(PlacementSource::Clock, PlacementSource::Given),
         }
+    }
+
+    pub(super) fn file_system(&self) -> &FileSystem {
+        &self.file_system
     }
 
     pub(super) fn first_file(&self) -> &Path {
@@ -86,7 +94,12 @@ pub(in crate::cache) struct InProcessCacheStore {
 
 impl InProcessCacheStore {
     pub(in crate::cache) fn open(tiers: &mut TierSettings) -> Result<Self> {
-        let disk = CacheFiles::open(&tiers.disk_files, tiers.queue_depth, tiers.direct_io)?;
+        let disk = CacheFiles::open(
+            &tiers.file_system,
+            &tiers.disk_files,
+            tiers.queue_depth,
+            tiers.direct_io,
+        )?;
         let disk_chunks = NonZeroU32::new(disk.chunks().chunk_count())
             .expect("a disk file holds a chunk at least");
         let placement = tiers.placement(disk_chunks)?;

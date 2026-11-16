@@ -2,7 +2,6 @@ use crate::io::sync::Mutex;
 use crate::io::sync::atomic::{AtomicU64, Ordering};
 use crate::io::sync::thread::{self, JoinHandle};
 use std::collections::BTreeMap;
-use std::fs::File;
 use std::future::Future;
 use std::io;
 use std::path::Path;
@@ -18,8 +17,8 @@ use crate::cache::cache_stores::shared::protocol::{
     OwnerAddress, OwnerFrame, PROTOCOL_VERSION, RegionSpan,
 };
 use crate::cache::policy::{Io, IoEvent, ReadPolicy};
-use crate::cache::storage::FileIdentity;
 use crate::io::error::{Error, Result};
+use crate::io::file_system::FileSystem;
 use crate::io::io_task::TaskCompletion;
 use crate::io::sync::Arc;
 
@@ -40,6 +39,7 @@ impl OwnerConnection {
     const WELCOME_BYTES: u64 = 16;
 
     pub(in crate::cache::cache_stores::shared) fn connect(
+        file_system: &FileSystem,
         first_file: &Path,
         reads: Arc<dyn ReadPolicy>,
         number: u64,
@@ -47,6 +47,7 @@ impl OwnerConnection {
         transport: &super::super::protocol::Transport,
     ) -> Result<Option<Self>> {
         match Self::admitted(
+            file_system,
             first_file,
             #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
             transport,
@@ -61,6 +62,7 @@ impl OwnerConnection {
 
     /// A client that can't make a region goes without: its reads' bytes go in the frames.
     fn admitted(
+        file_system: &FileSystem,
         first_file: &Path,
         #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
         transport: &super::super::protocol::Transport,
@@ -69,9 +71,9 @@ impl OwnerConnection {
         FrameReceiver,
         Option<std::sync::Arc<ClientRegion>>,
     )> {
-        let cache_file = File::options().read(true).write(true).open(first_file)?;
+        let cache_file = file_system.open_existing(first_file, true)?;
         let address = OwnerAddress::of(
-            FileIdentity::of(&cache_file)?,
+            cache_file.identity()?,
             #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
             transport,
         )?;

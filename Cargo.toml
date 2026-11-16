@@ -13,7 +13,7 @@ members = [".", "bench", "fuzz"]
 default = ["io-uring"]
 shuttle = ["dep:shuttle"]
 io-uring = ["dep:io-uring"]
-# Exposes internal types (IoWorker, AlignedBuf, PageWrite) for benchmarking.
+# Exposes internal types (IoWorker, OpenFile, AlignedBuf, PageWrite) for benchmarking.
 # Not part of the public API; the leading underscores signal "do not depend on this".
 __bench = []
 # Exposes `T4Caching::check_at_rest` to the fuzz target (`fuzz/`). Not part of

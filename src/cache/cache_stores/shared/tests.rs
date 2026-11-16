@@ -1,7 +1,6 @@
 #[cfg(feature = "shuttle")]
 use super::protocol::FrameSocket as UnixStream;
 use crate::io::sync::mpsc;
-use std::fs::File;
 use std::io::Write;
 use std::num::NonZeroU8;
 use std::ops::Range;
@@ -30,10 +29,10 @@ use crate::cache::policy::{
     Admit, BlockSource, FixedPlacementPolicy, IoPhase, PlannedGet, ReadPlan,
 };
 use crate::cache::read_output::ReadOutput;
-use crate::cache::storage::FileIdentity;
 use crate::cache::storage::FileVersion;
 use crate::cache::storage::LocatedRun;
 use crate::cache::{FileVersionId, T4Caching, T4CachingBuilder};
+use crate::io::file_system::{FileIdentity, FileSystem, OpenFile};
 use crate::io::sync::Arc;
 
 const MIB: u64 = 1 << 20;
@@ -44,7 +43,8 @@ fn shared(inner: &Arc<InMemory>, dir: &TestDirectory) -> T4CachingBuilder {
         .with_disk_file(dir.path().join("cache"), 8 * MIB)
         .with_multiprocess_sharing();
     #[cfg(feature = "shuttle")]
-    let builder = builder.with_test_transport(dir.transport.clone());
+    let builder = (builder.with_test_transport(dir.transport.clone()))
+        .with_test_file_system(dir.file_system.clone());
     builder
 }
 
@@ -326,6 +326,7 @@ fn a_cache_built_for_sharing_on_owned_files_is_their_owners_client() {
         let unshared = T4Caching::builder(Arc::clone(&inner) as Arc<dyn ObjectStore>)
             .with_memory_capacity(4 * MIB)
             .with_disk_file(dir.path().join("cache"), 8 * MIB)
+            .with_test_file_system(dir.file_system.clone())
             .build()
             .unwrap_err();
         assert!(matches!(unshared, crate::Error::Busy), "{unshared}");
@@ -383,27 +384,17 @@ fn the_owner_admits_only_a_writer_of_its_first_cache_file() {
         let inner = Arc::new(InMemory::new());
         let _owner = shared(&inner, &dir).build().unwrap();
         let cache_path = dir.path().join("cache");
-        let writable = || {
-            File::options()
-                .read(true)
-                .write(true)
-                .open(&cache_path)
-                .unwrap()
-        };
+        let writable = || dir.file_system.open_existing(&cache_path, true).unwrap();
         let address = OwnerAddress::of(
-            FileIdentity::of(&writable()).unwrap(),
+            writable().identity().unwrap(),
             #[cfg(feature = "shuttle")]
             &dir.transport,
         )
         .unwrap();
-        let other = File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(dir.path().join("other"))
+        let other = (dir.file_system)
+            .open_cache_file(&dir.path().join("other"), false)
             .unwrap();
-        let read_only = File::open(&cache_path).unwrap();
+        let read_only = dir.file_system.open_existing(&cache_path, false).unwrap();
 
         let welcome = answer_to(&address, |socket| {
             Hello::new(PROTOCOL_VERSION, writable())
@@ -438,9 +429,11 @@ fn a_client_connects_only_to_an_owner_of_its_user() {
     let dir = TestDirectory::new();
     let inner = Arc::new(InMemory::new());
     let _owner = shared(&inner, &dir).build().unwrap();
-    let cache_file = File::open(dir.path().join("cache")).unwrap();
+    let cache_file = (dir.file_system)
+        .open_existing(&dir.path().join("cache"), false)
+        .unwrap();
     let address = OwnerAddress::of(
-        FileIdentity::of(&cache_file).unwrap(),
+        cache_file.identity().unwrap(),
         #[cfg(feature = "shuttle")]
         &dir.transport,
     )
@@ -459,15 +452,11 @@ fn an_owner_whose_address_is_held_still_owns_its_cache() {
     let dir = TestDirectory::new();
     let inner = Arc::new(InMemory::new());
     let (data, meta) = put_file(&inner, &Path::from("a"), 2 * MIB);
-    let cache_file = File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dir.path().join("cache"))
+    let cache_file = (dir.file_system)
+        .open_cache_file(&dir.path().join("cache"), false)
         .unwrap();
     let address = OwnerAddress::of(
-        FileIdentity::of(&cache_file).unwrap(),
+        cache_file.identity().unwrap(),
         #[cfg(feature = "shuttle")]
         &dir.transport,
     )
@@ -490,7 +479,7 @@ fn a_hellos_descriptors_close_on_exec() {
     );
     let region = ClientRegion::make().unwrap();
     let memory = region.descriptor().try_clone_to_owned().unwrap();
-    let file = tempfile::tempfile().unwrap();
+    let file = OpenFile::from(tempfile::tempfile().unwrap());
     Hello::new(PROTOCOL_VERSION, file)
         .with_region(memory)
         .send(&client)
@@ -509,13 +498,11 @@ fn the_owner_tells_a_client_of_another_version_its_own() {
         let dir = TestDirectory::new();
         let inner = Arc::new(InMemory::new());
         let _owner = shared(&inner, &dir).build().unwrap();
-        let cache_file = File::options()
-            .read(true)
-            .write(true)
-            .open(dir.path().join("cache"))
+        let cache_file = (dir.file_system)
+            .open_existing(&dir.path().join("cache"), true)
             .unwrap();
         let address = OwnerAddress::of(
-            FileIdentity::of(&cache_file).unwrap(),
+            cache_file.identity().unwrap(),
             #[cfg(feature = "shuttle")]
             &dir.transport,
         )
@@ -543,16 +530,12 @@ fn a_cache_whose_owner_speaks_another_version_is_busy_at_once() {
     crate::io::test_schedule::TestSchedule::check(|| {
         let dir = TestDirectory::new();
         let inner = Arc::new(InMemory::new());
-        let cache_file = File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(dir.path().join("cache"))
+        let cache_file = (dir.file_system)
+            .open_cache_file(&dir.path().join("cache"), false)
             .unwrap();
         cache_file.try_lock().unwrap();
         let address = OwnerAddress::of(
-            FileIdentity::of(&cache_file).unwrap(),
+            cache_file.identity().unwrap(),
             #[cfg(feature = "shuttle")]
             &dir.transport,
         )
@@ -584,15 +567,9 @@ fn the_owner_maps_a_clients_region_that_cannot_shrink() {
     let inner = Arc::new(InMemory::new());
     let _owner = shared(&inner, &dir).build().unwrap();
     let cache_path = dir.path().join("cache");
-    let writable = || {
-        File::options()
-            .read(true)
-            .write(true)
-            .open(&cache_path)
-            .unwrap()
-    };
+    let writable = || dir.file_system.open_existing(&cache_path, true).unwrap();
     let address = OwnerAddress::of(
-        FileIdentity::of(&writable()).unwrap(),
+        writable().identity().unwrap(),
         #[cfg(feature = "shuttle")]
         &dir.transport,
     )
@@ -646,13 +623,11 @@ impl RawClient {
     }
 
     fn admitted_with(dir: &TestDirectory, region: Option<&std::sync::Arc<ClientRegion>>) -> Self {
-        let cache_file = File::options()
-            .read(true)
-            .write(true)
-            .open(dir.path().join("cache"))
+        let cache_file = (dir.file_system)
+            .open_existing(&dir.path().join("cache"), true)
             .unwrap();
         let address = OwnerAddress::of(
-            FileIdentity::of(&cache_file).unwrap(),
+            cache_file.identity().unwrap(),
             #[cfg(feature = "shuttle")]
             &dir.transport,
         )
@@ -1249,9 +1224,13 @@ fn a_clients_read_sends_its_finish_with_its_start() {
         let _holder = T4Caching::builder(Arc::clone(&inner) as Arc<dyn ObjectStore>)
             .with_memory_capacity(4 * MIB)
             .with_disk_file(dir.path().join("cache"), 8 * MIB)
+            .with_test_file_system(dir.file_system.clone())
             .build()
             .unwrap();
-        let first_file = FileIdentity::of(&File::open(dir.path().join("cache")).unwrap()).unwrap();
+        let first_file = (dir.file_system)
+            .open_existing(&dir.path().join("cache"), false)
+            .and_then(|file| file.identity())
+            .unwrap();
         let address = OwnerAddress::of(
             first_file,
             #[cfg(feature = "shuttle")]
@@ -1449,21 +1428,30 @@ fn a_clients_misuse_closes_its_connection() {
     });
 }
 
+/// Where the test's caches keep their files: under shuttle, on a simulated disk they share.
 struct TestDirectory {
+    #[cfg(not(feature = "shuttle"))]
     directory: tempfile::TempDir,
+    file_system: FileSystem,
     #[cfg(feature = "shuttle")]
     transport: super::protocol::Transport,
 }
 impl TestDirectory {
     fn new() -> Self {
         Self {
+            #[cfg(not(feature = "shuttle"))]
             directory: tempfile::tempdir().unwrap(),
+            file_system: FileSystem::default(),
             #[cfg(feature = "shuttle")]
             transport: Default::default(),
         }
     }
     fn path(&self) -> &std::path::Path {
-        self.directory.path()
+        #[cfg(not(feature = "shuttle"))]
+        let path = self.directory.path();
+        #[cfg(feature = "shuttle")]
+        let path = std::path::Path::new("/simulated");
+        path
     }
 }
 
@@ -1476,6 +1464,7 @@ fn an_absent_owner_exhausts_the_builders_wait_on_the_manual_clock() {
         let _holder = T4Caching::builder(inner.clone())
             .with_memory_capacity(MIB)
             .with_disk_file(dir.path().join("cache"), MIB)
+            .with_test_file_system(dir.file_system.clone())
             .build()
             .unwrap();
         let clock = dir.transport.clock();

@@ -1,7 +1,8 @@
 use crate::io::sync::{Arc, Mutex};
 
+use std::path::Path;
+
 use shuttle::future::block_on;
-use tempfile::TempDir;
 
 use super::locate::HeldBlock;
 use super::test_policy::{Heard, TestPolicy};
@@ -13,14 +14,20 @@ use crate::cache::policy::{
 use crate::cache::storage::DiskFile;
 use crate::cache::storage::index::Location;
 use crate::cache::{BLOCK_SIZE_U64, BlockKey, ChunkId};
+use crate::io::file_system::FileSystem;
 use std::num::NonZeroU8;
 
 const MIB: u64 = BLOCK_SIZE_U64;
 
-fn cache(memory_chunks: u32, disk_chunks: u32) -> (TempDir, ObjectCache, Arc<TestPolicy>) {
-    let dir = tempfile::tempdir().unwrap();
-    let file = DiskFile::new(dir.path().join("cache"), u64::from(disk_chunks) * MIB);
-    let disk = CacheFiles::open(&[file], NonZeroU32::new(8).unwrap(), true).unwrap();
+fn cache(memory_chunks: u32, disk_chunks: u32) -> (ObjectCache, Arc<TestPolicy>) {
+    let file = DiskFile::new("cache".into(), u64::from(disk_chunks) * MIB);
+    let disk = CacheFiles::open(
+        &FileSystem::default(),
+        &[file],
+        NonZeroU32::new(8).unwrap(),
+        true,
+    )
+    .unwrap();
     let policy = Arc::new(TestPolicy::new());
     let memory = NonZeroU32::new(memory_chunks).unwrap();
     let cache = ObjectCache::new(
@@ -29,7 +36,7 @@ fn cache(memory_chunks: u32, disk_chunks: u32) -> (TempDir, ObjectCache, Arc<Tes
         Arc::clone(&policy) as Arc<dyn PlacementPolicy>,
     )
     .unwrap();
-    (dir, cache, policy)
+    (cache, policy)
 }
 
 fn file_bytes(size: u64) -> Vec<u8> {
@@ -80,12 +87,12 @@ fn key(file: &CacheableFile<'_>, index: u32) -> BlockKey {
 #[test]
 fn the_default_policy_streams_blocks_through_both_tiers() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
         let files: Vec<_> = ["a", "b", "c"]
             .iter()
-            .map(|name| DiskFile::new(dir.path().join(name), MIB))
+            .map(|name| DiskFile::new(name.into(), MIB))
             .collect();
-        let disk = CacheFiles::open(&files, NonZeroU32::new(8).unwrap(), true).unwrap();
+        let queue_depth = NonZeroU32::new(8).unwrap();
+        let disk = CacheFiles::open(&FileSystem::default(), &files, queue_depth, true).unwrap();
         let (memory, disk_chunks) = (NonZeroU32::new(2).unwrap(), NonZeroU32::new(3).unwrap());
         let policy = Arc::new(crate::cache::policy::ClockPolicy::new(memory, disk_chunks));
         let cache = ObjectCache::new(memory, disk, policy).unwrap();
@@ -112,7 +119,7 @@ fn the_default_policy_streams_blocks_through_both_tiers() {
 #[test]
 fn a_remote_read_fetches_whole_blocks_and_then_hits() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, policy) = cache(4, 1);
+        let (cache, policy) = cache(4, 1);
         let size = 2 * MIB + MIB / 2;
         let data = file_bytes(size);
         let file = cache.resolve(b"a.parquet", Some("v1"), size).unwrap();
@@ -144,7 +151,7 @@ fn a_remote_read_fetches_whole_blocks_and_then_hits() {
 #[test]
 fn a_read_fetches_only_the_blocks_memory_lacks() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, _policy) = cache(4, 1);
+        let (cache, _policy) = cache(4, 1);
         let data = file_bytes(4 * MIB);
         let file = cache.resolve(b"a", Some("v1"), 4 * MIB).unwrap();
         read_through(&cache, &file, &data, MIB..2 * MIB);
@@ -165,7 +172,7 @@ fn a_read_fetches_only_the_blocks_memory_lacks() {
 #[test]
 fn the_policy_hears_each_block_where_it_is() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, policy) = cache(4, 4);
+        let (cache, policy) = cache(4, 4);
         let data = file_bytes(3 * MIB);
         let file = cache.resolve(b"a", Some("v1"), 3 * MIB).unwrap();
         read_through(&cache, &file, &data, 0..2 * MIB);
@@ -193,7 +200,7 @@ fn the_policy_hears_each_block_where_it_is() {
 fn concurrent_reads_of_one_block_fetch_it_once() {
     crate::io::test_schedule::TestSchedule::check(|| {
         const THREADS: usize = 8;
-        let (_dir, cache, _policy) = cache(THREADS as u32, 1);
+        let (cache, _policy) = cache(THREADS as u32, 1);
         let data = file_bytes(MIB);
         let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
         let fetched: Vec<_> = crate::io::sync::thread::scope(|scope| {
@@ -218,7 +225,7 @@ fn concurrent_reads_of_one_block_fetch_it_once() {
 #[test]
 fn a_stale_entry_reads_as_remote() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, _policy) = cache(1, 1);
+        let (cache, _policy) = cache(1, 1);
         let data = file_bytes(MIB);
         let old = cache.resolve(b"old", Some("v1"), MIB).unwrap();
         read_through(&cache, &old, &data, 0..MIB);
@@ -256,7 +263,7 @@ fn a_stale_entry_reads_as_remote() {
 #[test]
 fn an_evicted_block_reads_as_remote_and_its_chunk_goes_free() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, _policy) = cache(1, 1);
+        let (cache, _policy) = cache(1, 1);
         let data = file_bytes(MIB);
         let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
         read_through(&cache, &file, &data, 0..MIB);
@@ -287,7 +294,7 @@ fn an_evicted_block_reads_as_remote_and_its_chunk_goes_free() {
 #[test]
 fn blocks_moved_to_disk_read_back_from_disk() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, _policy) = cache(4, 4);
+        let (cache, _policy) = cache(4, 4);
         let size = 2 * MIB + 5000;
         let data = file_bytes(size);
         let file = cache.resolve(b"a", Some("v1"), size).unwrap();
@@ -313,7 +320,7 @@ fn blocks_moved_to_disk_read_back_from_disk() {
 #[test]
 fn a_full_memory_moves_its_victims_to_disk() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, policy) = cache(1, 2);
+        let (cache, policy) = cache(1, 2);
         let data = file_bytes(2 * MIB);
         let file = cache.resolve(b"a", Some("v1"), 2 * MIB).unwrap();
         read_through(&cache, &file, &data, 0..MIB);
@@ -337,7 +344,7 @@ fn a_full_memory_moves_its_victims_to_disk() {
 #[test]
 fn a_dropped_victim_leaves_the_cache() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, policy) = cache(1, 1);
+        let (cache, policy) = cache(1, 1);
         policy.set_victim_action(VictimAction::Drop);
         let data = file_bytes(2 * MIB);
         let file = cache.resolve(b"a", Some("v1"), 2 * MIB).unwrap();
@@ -352,7 +359,7 @@ fn a_dropped_victim_leaves_the_cache() {
 #[test]
 fn a_full_disk_drops_its_victims_to_take_memorys() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, _policy) = cache(1, 1);
+        let (cache, _policy) = cache(1, 1);
         let data = file_bytes(3 * MIB);
         let file = cache.resolve(b"a", Some("v1"), 3 * MIB).unwrap();
         for index in 0..3_u32 {
@@ -375,7 +382,7 @@ fn a_full_disk_drops_its_victims_to_take_memorys() {
 #[test]
 fn a_block_admitted_to_disk_goes_straight_there() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, policy) = cache(1, 1);
+        let (cache, policy) = cache(1, 1);
         policy.set_admit(Admit::Disk);
         let size = MIB / 2 + 7;
         let data = file_bytes(size);
@@ -392,7 +399,7 @@ fn a_block_admitted_to_disk_goes_straight_there() {
 #[test]
 fn a_discarded_block_is_fetched_every_time() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, policy) = cache(1, 1);
+        let (cache, policy) = cache(1, 1);
         policy.set_admit(Admit::Discard);
         let data = file_bytes(MIB);
         let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
@@ -410,7 +417,7 @@ fn a_discarded_block_is_fetched_every_time() {
 #[test]
 fn a_promoted_block_moves_to_memory() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, policy) = cache(1, 1);
+        let (cache, policy) = cache(1, 1);
         policy.set_admit(Admit::Disk);
         let size = MIB - 100;
         let data = file_bytes(size);
@@ -444,7 +451,7 @@ fn a_promoted_block_moves_to_memory() {
 #[test]
 fn a_promotion_with_no_room_reads_from_disk() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, policy) = cache(1, 1);
+        let (cache, policy) = cache(1, 1);
         policy.set_admit(Admit::Disk);
         let data = file_bytes(2 * MIB);
         let file = cache.resolve(b"a", Some("v1"), 2 * MIB).unwrap();
@@ -469,7 +476,7 @@ fn a_promotion_with_no_room_reads_from_disk() {
 #[test]
 fn a_victim_kept_for_want_of_disk_goes_back_to_the_policy() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, policy) = cache(1, 1);
+        let (cache, policy) = cache(1, 1);
         let data = file_bytes(3 * MIB);
         let file = cache.resolve(b"a", Some("v1"), 3 * MIB).unwrap();
         policy.set_admit(Admit::Disk);
@@ -500,7 +507,7 @@ fn a_victim_kept_for_want_of_disk_goes_back_to_the_policy() {
 #[test]
 fn a_free_chunk_has_no_block_to_move_or_evict() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, _policy) = cache(1, 1);
+        let (cache, _policy) = cache(1, 1);
         let free = ChunkId::new(0);
         let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
         assert!(cache.tiers.pending.enqueue(free, key(&file, 0)));
@@ -514,7 +521,7 @@ fn a_free_chunk_has_no_block_to_move_or_evict() {
 #[test]
 fn a_block_evicted_from_disk_reads_as_remote_and_its_chunk_goes_free() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, policy) = cache(1, 1);
+        let (cache, policy) = cache(1, 1);
         policy.set_admit(Admit::Disk);
         let data = file_bytes(MIB);
         let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
@@ -537,7 +544,7 @@ fn a_block_evicted_from_disk_reads_as_remote_and_its_chunk_goes_free() {
 #[test]
 fn a_new_version_reads_none_of_the_old_ones_blocks() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, _policy) = cache(4, 1);
+        let (cache, _policy) = cache(4, 1);
         let data = file_bytes(MIB);
         let v1 = cache.resolve(b"a", Some("v1"), MIB).unwrap();
         read_through(&cache, &v1, &data, 0..MIB);
@@ -550,7 +557,7 @@ fn a_new_version_reads_none_of_the_old_ones_blocks() {
 #[test]
 fn the_check_at_rest_finds_held_free_and_unnamed_chunks() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, _policy) = cache(2, 1);
+        let (cache, _policy) = cache(2, 1);
         let data = file_bytes(MIB);
         let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
         read_through(&cache, &file, &data, 0..MIB);
@@ -589,7 +596,7 @@ fn the_check_at_rest_finds_held_free_and_unnamed_chunks() {
 #[test]
 fn fetched_bytes_land_in_pieces_of_any_size() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, _policy) = cache(4, 1);
+        let (cache, _policy) = cache(4, 1);
         let size = 2 * MIB + MIB / 2;
         let data = file_bytes(size);
         let file = cache.resolve(b"a", Some("v1"), size).unwrap();
@@ -614,7 +621,7 @@ fn fetched_bytes_land_in_pieces_of_any_size() {
 #[test]
 fn a_fetch_bringing_more_than_it_holds_is_refused() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, _policy) = cache(1, 1);
+        let (cache, _policy) = cache(1, 1);
         let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
         let mut read = block_on(cache.read(&file, 0..MIB, None, &FetchRuns::default())).unwrap();
         let mut blocks = cache.receive(&mut read, 0..MIB).unwrap();
@@ -625,7 +632,7 @@ fn a_fetch_bringing_more_than_it_holds_is_refused() {
 #[test]
 fn a_fetch_cut_short_caches_nothing() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, _policy) = cache(1, 1);
+        let (cache, _policy) = cache(1, 1);
         let data = file_bytes(MIB);
         let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
 
@@ -648,7 +655,7 @@ fn a_fetch_cut_short_caches_nothing() {
 #[test]
 fn a_read_waits_for_a_block_another_is_fetching() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, _policy) = cache(2, 1);
+        let (cache, _policy) = cache(2, 1);
         let reads = FetchRuns::default();
         let data = file_bytes(MIB);
         let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
@@ -671,7 +678,7 @@ fn a_read_waits_for_a_block_another_is_fetching() {
 #[test]
 fn a_read_waiting_for_a_fetch_given_up_on_fetches_the_block_itself() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, _policy) = cache(2, 1);
+        let (cache, _policy) = cache(2, 1);
         let reads = FetchRuns::default();
         let data = file_bytes(MIB);
         let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
@@ -714,7 +721,7 @@ impl ReadPolicy for HeardPlans {
 #[test]
 fn a_retry_of_blocks_apart_is_planned_once() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, _policy) = cache(4, 1);
+        let (cache, _policy) = cache(4, 1);
         let reads = FetchRuns::default();
         let data = file_bytes(3 * MIB);
         let file = cache.resolve(b"a", Some("v1"), 3 * MIB).unwrap();
@@ -771,7 +778,7 @@ impl ReadPolicy for RacesInFlight {
 #[test]
 fn a_racing_read_joins_a_fetch_in_flight() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, _policy) = cache(2, 1);
+        let (cache, _policy) = cache(2, 1);
         let data = file_bytes(MIB);
         let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
         let mut first = block_on(cache.read(&file, 0..MIB, None, &RacesInFlight)).unwrap();
@@ -797,7 +804,7 @@ fn a_racing_read_joins_a_fetch_in_flight() {
 #[test]
 fn a_plan_taken_that_the_cache_cant_carry_out_fetches_as_the_default() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let (_dir, cache, _policy) = cache(4, 1);
+        let (cache, _policy) = cache(4, 1);
         let reads = FetchRuns::default();
         let data = file_bytes(2 * MIB);
         let file = cache.resolve(b"a", Some("v1"), 2 * MIB).unwrap();
@@ -817,12 +824,12 @@ fn a_plan_taken_that_the_cache_cant_carry_out_fetches_as_the_default() {
 }
 
 fn disk_admitting_cache(
-    dir: &TempDir,
+    file_system: &FileSystem,
     disk_chunks: u32,
     keep_free: u64,
 ) -> (ObjectCache, Arc<TestPolicy>) {
-    let file = DiskFile::new(dir.path().join("cache"), u64::from(disk_chunks) * MIB);
-    let disk = CacheFiles::open(&[file], NonZeroU32::new(8).unwrap(), true)
+    let file = DiskFile::new("cache".into(), u64::from(disk_chunks) * MIB);
+    let disk = CacheFiles::open(file_system, &[file], NonZeroU32::new(8).unwrap(), true)
         .unwrap()
         .keeping_free(keep_free);
     let policy = Arc::new(TestPolicy::new());
@@ -832,24 +839,16 @@ fn disk_admitting_cache(
     (cache, policy)
 }
 
-fn allocated(path: &std::path::Path) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    // `st_blocks` counts 512-byte units, whatever the file system's blocks.
-    std::fs::metadata(path).unwrap().blocks() * 512
-}
-
 #[test]
 fn a_cache_file_takes_room_as_blocks_are_written() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
-        let (cache, _policy) = disk_admitting_cache(&dir, 8, 0);
-        let path = dir.path().join("cache");
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 8 * MIB, "sized");
-        assert!(
-            allocated(&path) < MIB,
-            "not allocated: {}",
-            allocated(&path)
-        );
+        let file_system = FileSystem::default();
+        let (cache, _policy) = disk_admitting_cache(&file_system, 8, 0);
+        let path = Path::new("cache");
+        let allocated = || file_system.allocated(path).unwrap();
+        let size = file_system.open_existing(path, false).unwrap().size();
+        assert_eq!(size.unwrap(), 8 * MIB, "sized");
+        assert!(allocated() < MIB, "not allocated: {}", allocated());
 
         let data = file_bytes(3 * MIB);
         let file = cache.resolve(b"a", Some("v1"), 3 * MIB).unwrap();
@@ -858,23 +857,23 @@ fn a_cache_file_takes_room_as_blocks_are_written() {
         for index in 0..3 {
             disk_chunk(&cache, &file, index);
         }
-        assert!(allocated(&path) >= 3 * MIB, "{}", allocated(&path));
+        assert!(allocated() >= 3 * MIB, "{}", allocated());
     });
 }
 
 #[test]
 fn a_drive_short_of_room_takes_no_block_and_evicts_none() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let file_system = FileSystem::default();
         let a = file_bytes(4 * MIB);
         {
             // A cache with room fills the tier, and keeps it as it drops.
-            let (cache, _policy) = disk_admitting_cache(&dir, 4, 0);
+            let (cache, _policy) = disk_admitting_cache(&file_system, 4, 0);
             let file = cache.resolve(b"a", Some("v1"), 4 * MIB).unwrap();
             read_through(&cache, &file, &a, 0..4 * MIB);
             assert_eq!(cache.tiers.disk.chunks().free_count(), 0);
         }
-        let (cache, policy) = disk_admitting_cache(&dir, 4, u64::MAX);
+        let (cache, policy) = disk_admitting_cache(&file_system, 4, u64::MAX);
         let kept = policy.queued(Tier::Disk);
         assert_eq!(kept.len(), 4, "taken back");
 

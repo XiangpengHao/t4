@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use rustix::fs::Uid;
 
-use crate::cache::storage::FileIdentity;
 use crate::io::error::{Error, Result};
+use crate::io::file_system::FileIdentity;
 
 /// On Linux an abstract socket's name: no file holds it, and it goes with the owner's
 /// socket however the owner exits.

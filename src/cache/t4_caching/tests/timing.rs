@@ -30,8 +30,9 @@ fn network_timings_come_from_the_builders_owned_clock() {
             events: Arc::default(),
         };
         let inner = Arc::new(CountingStore::default());
-        let dir = tempfile::tempdir().unwrap();
-        let store = builder(&inner, &dir)
+        let dir = CacheDirectory::new();
+        let store = dir
+            .builder(&inner)
             .with_test_clock(clock)
             .with_read_policy(reads.clone())
             .build()

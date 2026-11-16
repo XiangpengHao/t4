@@ -3,13 +3,14 @@
 use std::num::NonZeroU32;
 use std::ops::Range;
 
-use super::disk::{CacheFiles, FileIdentity};
+use super::disk::CacheFiles;
 use super::in_flight::InFlight;
 use super::index::{BlockTable, FileVersion, PathTable, PlannedBlock, UncacheableObject};
 use super::memory::MemoryPool;
 use crate::cache::policy::{PlacementPolicy, ReadIntent, ReadPolicy};
 use crate::cache::read_output::ReadOutput;
 use crate::io::error::Result;
+use crate::io::file_system::FileIdentity;
 use crate::io::sync::Arc;
 use disk_writer::{DiskWriter, PendingDisk};
 

@@ -1,7 +1,6 @@
 //! An owner served one client whose frames the fuzzer picks, while a well-behaved client reads
 //! beside it (`fuzz/README.md`, `shared_owner`).
 use std::ops::Range;
-use std::path::Path;
 
 use bytes::Bytes;
 use object_store::ObjectMeta;
@@ -10,6 +9,7 @@ use shuttle::future::block_on;
 use super::protocol::Transport;
 use crate::cache::policy::{ReadIntent, ReadPlan};
 use crate::cache::{BLOCK_SIZE_U64, T4Caching};
+use crate::io::file_system::FileSystem;
 use crate::io::sync::{Arc, thread};
 use crate::io::test_schedule::TestSchedule;
 
@@ -181,17 +181,17 @@ impl FuzzedSession {
 
     /// Panics if the owner panics or hangs, if the well-behaved client reads a wrong byte, or
     /// if, once all is quiet, the owner holds anything of the session's or its cache isn't whole.
-    pub fn check(self, dir: &Path) {
+    pub fn check(self) {
         let session = Arc::new(self);
-        let dir = dir.to_path_buf();
-        TestSchedule::fuzzed(session.seed, move || session.run(&dir));
+        TestSchedule::fuzzed(session.seed, move || session.run());
     }
 
-    fn run(&self, dir: &Path) {
+    fn run(&self) {
         let files = Arc::new(SharedFiles::put());
         let transport = Transport::default();
-        let owner = Self::cache(dir, &files, &transport).expect("the owner");
-        let reader = Self::cache(dir, &files, &transport).expect("a client of the owner");
+        let file_system = FileSystem::default();
+        let owner = Self::cache(&file_system, &files, &transport).expect("the owner");
+        let reader = Self::cache(&file_system, &files, &transport).expect("a client of the owner");
         let reading = {
             let (files, reads) = (Arc::clone(&files), self.reads.clone());
             thread::spawn(move || {
@@ -205,7 +205,7 @@ impl FuzzedSession {
             })
         };
 
-        let mut client = MisbehavingClient::connect(dir, &transport, &self.hello);
+        let mut client = MisbehavingClient::connect(&file_system, &transport, &self.hello);
         for step in &self.steps {
             client.take(step, &files);
         }
@@ -233,12 +233,17 @@ impl FuzzedSession {
         }
     }
 
-    fn cache(dir: &Path, files: &SharedFiles, transport: &Transport) -> crate::Result<T4Caching> {
+    fn cache(
+        file_system: &FileSystem,
+        files: &SharedFiles,
+        transport: &Transport,
+    ) -> crate::Result<T4Caching> {
         T4Caching::builder(files.store())
             .with_memory_capacity(2 * BLOCK_SIZE_U64)
-            .with_disk_file(dir.join(Self::CACHE_FILE), 3 * BLOCK_SIZE_U64)
+            .with_disk_file(Self::CACHE_FILE, 3 * BLOCK_SIZE_U64)
             .with_multiprocess_sharing()
             .with_test_transport(transport.clone())
+            .with_test_file_system(file_system.clone())
             .build()
     }
 

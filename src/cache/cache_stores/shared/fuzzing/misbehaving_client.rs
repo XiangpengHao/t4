@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::fs::File;
 use std::path::Path;
 use std::sync::PoisonError;
 
@@ -13,7 +12,8 @@ use crate::cache::cache_stores::shared::protocol::{
 };
 use crate::cache::policy::FetchRuns;
 use crate::cache::read_output::ReadOutput;
-use crate::cache::storage::{CacheableFile, FileIdentity, FileVersion, LocatedRun};
+use crate::cache::storage::{CacheableFile, FileVersion, LocatedRun};
+use crate::io::file_system::{FileSystem, OpenFile};
 use crate::io::sync::thread::{self, JoinHandle};
 use crate::io::sync::{Arc, Condvar, Mutex, MutexGuard};
 
@@ -47,9 +47,13 @@ impl MisbehavingClient {
     /// The rest of a fetch of a version the script made up may be GiBs.
     const MOST_LANDED: u64 = 4 << 20;
 
-    pub(super) fn connect(dir: &Path, transport: &Transport, hello: &FuzzedHello) -> Self {
-        let cache_file = Self::cache_file(dir, true);
-        let file = FileIdentity::of(&cache_file).expect("the cache file's identity");
+    pub(super) fn connect(
+        file_system: &FileSystem,
+        transport: &Transport,
+        hello: &FuzzedHello,
+    ) -> Self {
+        let cache_file = Self::cache_file(file_system, true);
+        let file = cache_file.identity().expect("the cache file's identity");
         let address = OwnerAddress::of(file, transport).expect("the owner's address");
         let socket = address
             .connect(rustix::process::geteuid())
@@ -79,7 +83,7 @@ impl MisbehavingClient {
             probes_answered: 0,
             next_call: Self::FIRST_OWN_CALL,
         };
-        client.say_hello(dir, hello, cache_file);
+        client.say_hello(file_system, hello, cache_file);
         client
     }
 
@@ -306,15 +310,16 @@ impl MisbehavingClient {
     }
 
     /// Its descriptors go beside its first byte, as `SCM_RIGHTS` sends them.
-    fn say_hello(&mut self, dir: &Path, hello: &FuzzedHello, cache_file: File) {
+    fn say_hello(&mut self, file_system: &FileSystem, hello: &FuzzedHello, cache_file: OpenFile) {
         let region = self.region.is_some();
         let hello_of = |version| ClientFrame::Hello { version, region }.encode();
         let (frame, cache_file) = match hello {
             FuzzedHello::Admitted { .. } => (hello_of(PROTOCOL_VERSION), cache_file),
             &FuzzedHello::Versioned { version, .. } => (hello_of(version), cache_file),
-            FuzzedHello::ReadOnly { .. } => {
-                (hello_of(PROTOCOL_VERSION), Self::cache_file(dir, false))
-            }
+            FuzzedHello::ReadOnly { .. } => (
+                hello_of(PROTOCOL_VERSION),
+                Self::cache_file(file_system, false),
+            ),
             FuzzedHello::Raw { bytes, .. } => (bytes.clone(), cache_file),
         };
         let descriptor = self.region.as_ref().map(|region| region.descriptor());
@@ -322,12 +327,9 @@ impl MisbehavingClient {
         self.send(&frame);
     }
 
-    fn cache_file(dir: &Path, writable: bool) -> File {
-        File::options()
-            .read(true)
-            .write(writable)
-            .open(dir.join(super::FuzzedSession::CACHE_FILE))
-            .expect("the owner's cache file")
+    fn cache_file(file_system: &FileSystem, writable: bool) -> OpenFile {
+        let path = Path::new(super::FuzzedSession::CACHE_FILE);
+        (file_system.open_existing(path, writable)).expect("the owner's cache file")
     }
 
     fn send_frame(&mut self, frame: &ClientFrame) {

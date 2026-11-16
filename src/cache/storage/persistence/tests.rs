@@ -1,22 +1,15 @@
-use std::fs::File;
 use std::path::Path;
 
 use super::*;
+use crate::io::file_system::{FileSystem, OpenFile};
 
 const MIB: u64 = 1 << 20;
 
-fn opened(dir: &Path, names: &[&str]) -> Vec<File> {
+fn opened(dir: &Path, names: &[&str]) -> Vec<OpenFile> {
+    let file_system = FileSystem::default();
     names
         .iter()
-        .map(|name| {
-            File::options()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(dir.join(name))
-                .unwrap()
-        })
+        .map(|name| file_system.open_cache_file(&dir.join(name), false).unwrap())
         .collect()
 }
 
@@ -46,9 +39,14 @@ fn sample_base() -> LogBase {
 fn a_clean_log_is_replayed_and_rebased_on_each_build() {
     let dir = tempfile::tempdir().unwrap();
     let files = opened(dir.path(), &["cache0", "cache1"]);
-    let place = PersistenceLog::beside(&dir.path().join("cache0"), &files, 4)
-        .unwrap()
-        .unwrap();
+    let place = PersistenceLog::beside(
+        &FileSystem::default(),
+        &dir.path().join("cache0"),
+        &files,
+        4,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(place.path(), dir.path().join("cache0.log"));
 
     place.seed(&sample_base()).unwrap();
@@ -62,15 +60,17 @@ fn a_log_of_other_cache_files_is_rebased_cold() {
     let dir = tempfile::tempdir().unwrap();
     let first = dir.path().join("cache0");
     let files = opened(dir.path(), &["cache0", "cache1"]);
-    let keep = |files: &[File]| {
-        let place = PersistenceLog::beside(&first, files, 4).unwrap().unwrap();
+    let keep = |files: &[OpenFile]| {
+        let place = PersistenceLog::beside(&FileSystem::default(), &first, files, 4)
+            .unwrap()
+            .unwrap();
         place.seed(&sample_base()).unwrap();
     };
     let reordered = opened(dir.path(), &["cache1", "cache0"]);
     let others = [
-        PersistenceLog::beside(&first, &files, 5),
-        PersistenceLog::beside(&first, &files[..1], 4),
-        PersistenceLog::beside(&first, &reordered, 4),
+        PersistenceLog::beside(&FileSystem::default(), &first, &files, 5),
+        PersistenceLog::beside(&FileSystem::default(), &first, &files[..1], 4),
+        PersistenceLog::beside(&FileSystem::default(), &first, &reordered, 4),
     ];
     for other in others {
         keep(&files);
@@ -84,7 +84,9 @@ fn a_log_of_other_cache_files_is_rebased_cold() {
     drop((files, reordered));
     std::fs::remove_file(&first).unwrap();
     let remade = opened(dir.path(), &["cache0", "cache1"]);
-    let other = PersistenceLog::beside(&first, &remade, 4).unwrap().unwrap();
+    let other = PersistenceLog::beside(&FileSystem::default(), &first, &remade, 4)
+        .unwrap()
+        .unwrap();
     assert_eq!(other.take().unwrap(), None);
     assert!(other.path().exists());
 }
@@ -93,9 +95,14 @@ fn a_log_of_other_cache_files_is_rebased_cold() {
 fn bytes_no_cache_could_have_kept_are_no_base() {
     let dir = tempfile::tempdir().unwrap();
     let files = opened(dir.path(), &["cache0", "cache1"]);
-    let place = PersistenceLog::beside(&dir.path().join("cache0"), &files, 4)
-        .unwrap()
-        .unwrap();
+    let place = PersistenceLog::beside(
+        &FileSystem::default(),
+        &dir.path().join("cache0"),
+        &files,
+        4,
+    )
+    .unwrap()
+    .unwrap();
     let layout = place.layout();
     let whole = sample_base().encode(layout);
     assert_eq!(LogBase::decode(&whole, layout), Some(sample_base()));
@@ -139,9 +146,14 @@ fn a_log_only_grows_until_its_next_build_rebases_it() {
 
     let dir = tempfile::tempdir().unwrap();
     let files = opened(dir.path(), &["cache0", "cache1"]);
-    let log = PersistenceLog::beside(&dir.path().join("cache0"), &files, 4)
-        .unwrap()
-        .unwrap();
+    let log = PersistenceLog::beside(
+        &FileSystem::default(),
+        &dir.path().join("cache0"),
+        &files,
+        4,
+    )
+    .unwrap()
+    .unwrap();
     log.seed(&sample_base()).unwrap();
     assert_eq!(log.take().unwrap(), Some(sample_base()));
     let base = std::fs::read(log.path()).unwrap();
@@ -176,13 +188,15 @@ fn with_no_boot_id_no_log_is_kept_and_an_old_one_is_removed() {
     let dir = tempfile::tempdir().unwrap();
     let files = opened(dir.path(), &["cache0", "cache1"]);
     let first = dir.path().join("cache0");
-    let log = PersistenceLog::beside(&first, &files, 4).unwrap().unwrap();
+    let log = PersistenceLog::beside(&FileSystem::default(), &first, &files, 4)
+        .unwrap()
+        .unwrap();
     log.seed(&sample_base()).unwrap();
     let path = log.path().to_owned();
     drop(log);
     assert!(path.exists());
     assert!(
-        PersistenceLog::beside_in_boot(&first, &files, 4, None)
+        PersistenceLog::beside_in_boot(&FileSystem::default(), &first, &files, 4, None)
             .unwrap()
             .is_none()
     );

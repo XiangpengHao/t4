@@ -50,10 +50,15 @@ Where io_uring is refused (`EPERM` or `ENOSYS`), it skips every scenario and
 passes. GitHub's runners allow io_uring, as CI's tests use it; a runner that
 didn't would make the Monday run pass without testing anything.
 
+Its cache files stay real: it runs the production I/O driver, for io_uring's
+late, out-of-order completions on tmpfs (Run it, below), and the in-memory
+disk exists only in the shuttle build. Its temporary directory and its log's
+syncs come with that, and cost little on tmpfs.
+
 ## `shared_mode`
 
 Shared mode's owner and two or three clients in one process, as the sharing
-tests build them, on the simulated socket and clock
+tests build them, on the simulated socket, clock and disk
 (`doc/12-seeded-concurrency-tests.md`), driven by a script
 (`src/cache/t4_caching/shared_scenario/`). Its input is the script and a
 shuttle seed: the target runs the one PCT schedule the seed picks, so an
@@ -94,8 +99,9 @@ It checks that:
 - no thread is left waiting once every process is dropped: shuttle reports
   a deadlock.
 
-Like `shared_owner`, it runs on shuttle only when built with
-`--cfg t4_simulated`.
+The processes' files live on a disk in memory that each input's run owns, so
+an input touches no file system. Like `shared_owner`, it runs on shuttle only
+when built with `--cfg t4_simulated`.
 
 ## `frames`
 
@@ -114,13 +120,17 @@ known. The body is fuzzed without the log's CRC: one whose bytes were
 changed into another valid base is taken back as written, so this target
 checks the cache's consistency, not the bytes it would serve.
 
+Its cache's one file, real, gives the cache an I/O worker; no input reads or
+writes it, and the cache keeps no log. It builds without shuttle, where the
+in-memory disk doesn't exist.
+
 ## `shared_owner`
 
 Shared mode's owner, serving a client whose frames the input picks, while a
 well-behaved client (a `T4Caching` built for sharing) reads beside it
 (`doc/11-shared-mode.md`). A client is another process: an older version, a
 buggy one, or one killed mid-frame. The owner and both clients run on
-shuttle, over the modeled socket and region (`doc/12-seeded-concurrency-tests.md`),
+shuttle, over the modeled socket, region and disk (`doc/12-seeded-concurrency-tests.md`),
 each input under PCT from a seed of its own, so it replays exactly. Its
 `T4Caching` and `ClientRegion` are the real ones; the owner holds two blocks
 in memory and three on disk.
@@ -236,7 +246,9 @@ T4_SHUTTLE_SEED=<seed> T4_SHUTTLE_BUDGET=8 cargo test --locked --features shuttl
 - Writes given up on: its store applies a write in the call's first poll,
   so there's no point to give one up at. The unit test
   `a_write_given_up_on_after_it_lands_is_read_back` covers them.
-- Direct I/O, and I/O or a store that fails.
+- Direct I/O on a drive, and I/O or a store that fails. The shared targets'
+  simulated disk checks direct I/O's alignment only, and is where a disk
+  failure would be injected (`doc/12-seeded-concurrency-tests.md`).
 - Shared mode across real processes, killed by `SIGKILL`, and over real
   sockets and shared memory: the process and adapter tests
   (`doc/12-seeded-concurrency-tests.md`, Real-OS coverage retained).

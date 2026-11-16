@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::num::NonZeroU32;
 use std::path::Path;
 
@@ -7,6 +6,7 @@ use crate::cache::policy::{ClockPolicy, PlacementPolicy, Tier};
 use crate::cache::storage::persistence::{LogBase, VersionOnDisk};
 use crate::cache::storage::{CacheFiles, FileVersion};
 use crate::cache::{ChunkId, FileVersionId};
+use crate::io::file_system::FileSystem;
 use crate::io::io_worker::IoWorker;
 use crate::io::sync::Arc;
 
@@ -86,12 +86,8 @@ impl FuzzedLogBase {
     }
 
     fn cache(dir: &Path) -> ObjectCache {
-        let file = File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(dir.join("cache"))
+        let file = (FileSystem::default())
+            .open_cache_file(&dir.join("cache"), false)
             .expect("a cache file");
         let io = IoWorker::new(NonZeroU32::MIN, vec![file]).expect("an I/O worker");
         let disk = CacheFiles::on(io, NonZeroU32::MIN, Self::DISK_CHUNKS.get()).expect("a tier");
