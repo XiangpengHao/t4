@@ -1,10 +1,10 @@
 mod log;
-mod snapshot_file;
+mod log_file;
 
 use std::collections::HashSet;
 
-use snapshot_file::CacheLayout;
-pub(in crate::cache) use snapshot_file::SnapshotFile;
+use log_file::CacheLayout;
+pub(in crate::cache) use log_file::PersistenceLog;
 
 use super::index::{FileVersion, PathTable};
 use crate::cache::{BLOCK_SIZE, BLOCK_SIZE_U64, ChunkId, FileVersionId};

@@ -1,6 +1,6 @@
-//! Times a clean restart of t4's disk tier: the snapshot kept as the cache shuts down and again
-//! as it drops, and taken back as the next cache builds (doc/13-persistence.md). A last build on
-//! the same files with the snapshot removed is the baseline the taking back adds to.
+//! Times a clean restart of t4's disk tier: the log finished as the cache shuts down,
+//! and replayed and rebased as the next builds (doc/13-persistence.md). A last build
+//! with the log removed is the cold baseline. A partial batch stays in memory.
 //!
 //! ```text
 //! cargo build --release -p t4-bench --bin snapshot_restart
@@ -29,13 +29,13 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Parser)]
 struct Args {
-    /// A directory a cache file, each on its own drive; the snapshot goes beside the first.
+    /// A directory a cache file, each on its own drive; the log goes beside the first.
     #[arg(long, required = true)]
     dir: Vec<PathBuf>,
-    /// The 1 MiB blocks filled, every one on disk: 20 GiB unless set.
+    /// The 1 MiB blocks filled toward disk: 20 GiB unless set.
     #[arg(long, default_value_t = 20 << 10)]
     blocks: u64,
-    /// Each file's blocks. The snapshot keeps a file's path and e_tag once for all of them.
+    /// Each file's blocks. The log keeps a file version's path and e_tag once for all of them.
     #[arg(long, default_value_t = 64)]
     file_blocks: u64,
     /// Cache files that grow as blocks are written, as on a desktop's shared drive.
@@ -69,7 +69,7 @@ struct RestartBench {
 
 impl RestartBench {
     const BLOCK: u64 = 1 << 20;
-    /// t4 needs some memory; the policy puts nothing there, so every block is in the snapshot.
+    /// Disk admissions wait in memory until their batch goes.
     const MEMORY: u64 = 64 << 20;
 
     fn new(args: &Args) -> Self {
@@ -104,16 +104,16 @@ impl RestartBench {
         }
     }
 
-    fn snapshot_path(&self) -> PathBuf {
+    fn log_path(&self) -> PathBuf {
         let mut path = self.cache_files[0].clone().into_os_string();
-        path.push(".snapshot");
+        path.push(".log");
         path.into()
     }
 
     /// Only files this bench names: a run starts cold and leaves the drives as it found them.
     fn remove_files(&self) -> Result<(), Error> {
-        let snapshot = self.snapshot_path();
-        for path in self.cache_files.iter().chain([&snapshot]) {
+        let log = self.log_path();
+        for path in self.cache_files.iter().chain([&log]) {
             match std::fs::remove_file(path) {
                 Err(error) if error.kind() != ErrorKind::NotFound => return Err(error.into()),
                 _ => {}
@@ -150,8 +150,7 @@ impl RestartBench {
         )
     }
 
-    /// A read returns once its block is written and named in the index, so each is in the
-    /// snapshot.
+    /// Reads return in memory; disk writes finish in the background.
     async fn fill(self: &Arc<Self>, cache: &T4Caching, in_flight: u64) -> Result<Duration, Error> {
         let start = Instant::now();
         let next = Arc::new(AtomicU64::new(0));
@@ -176,7 +175,7 @@ impl RestartBench {
         Ok(start.elapsed())
     }
 
-    /// Every file's first and last block, from the drive and right: none fetched again.
+    /// Read every file's first and last block, checking bytes and counting refetches.
     async fn check_taken_back(&self, cache: &T4Caching) -> Result<u64, Error> {
         let gets_before = self.gets.counts().gets();
         for first in (0..self.blocks).step_by(self.file_blocks as usize) {
@@ -192,15 +191,15 @@ impl RestartBench {
         Ok(self.gets.counts().gets() - gets_before)
     }
 
-    fn snapshot_bytes(&self) -> u64 {
-        std::fs::metadata(self.snapshot_path()).map_or(0, |meta| meta.len())
+    fn log_bytes(&self) -> u64 {
+        std::fs::metadata(self.log_path()).map_or(0, |meta| meta.len())
     }
 }
 
 /// One build of the cache, and how the one before it ended.
 struct RestartRow {
     restart: String,
-    snapshot_bytes: u64,
+    log_bytes: u64,
     shut_down: Option<Duration>,
     drop: Option<Duration>,
     build: Duration,
@@ -209,7 +208,7 @@ struct RestartRow {
 
 impl RestartRow {
     const CSV_COLUMNS: &str = "label,restart,blocks,file_blocks,cache_files,on_demand,\
-                               snapshot_bytes,shut_down_ms,drop_ms,build_ms,gets_after_build";
+                               log_bytes,shut_down_ms,drop_ms,build_ms,gets_after_build";
 
     fn csv(&self, label: &str, bench: &RestartBench) -> String {
         let millis = |time: Option<Duration>| {
@@ -224,7 +223,7 @@ impl RestartRow {
             bench.file_blocks,
             bench.cache_files.len(),
             bench.on_demand,
-            self.snapshot_bytes,
+            self.log_bytes,
             millis(self.shut_down),
             millis(self.drop),
             millis(Some(self.build)),
@@ -257,7 +256,7 @@ async fn main() -> Result<(), Error> {
     );
     write_row(RestartRow {
         restart: "first".to_owned(),
-        snapshot_bytes: 0,
+        log_bytes: 0,
         shut_down: None,
         drop: None,
         build: cold_build,
@@ -268,7 +267,7 @@ async fn main() -> Result<(), Error> {
         let start = Instant::now();
         cache.shut_down()?;
         let shut_down = start.elapsed();
-        let snapshot_bytes = bench.snapshot_bytes();
+        let log_bytes = bench.log_bytes();
         let start = Instant::now();
         drop(cache);
         let dropped = start.elapsed();
@@ -277,7 +276,7 @@ async fn main() -> Result<(), Error> {
         let gets_after_build = bench.check_taken_back(&cache).await?;
         write_row(RestartRow {
             restart: restart.to_string(),
-            snapshot_bytes,
+            log_bytes,
             shut_down: Some(shut_down),
             drop: Some(dropped),
             build,
@@ -286,14 +285,14 @@ async fn main() -> Result<(), Error> {
     }
 
     drop(cache);
-    std::fs::remove_file(bench.snapshot_path())?;
+    std::fs::remove_file(bench.log_path())?;
     let (cache, build) = bench.timed_build()?;
     let gets_before = bench.gets.counts().gets();
     let (path, range) = bench.block_range(0);
     cache.get_range(&path, range).await?;
     write_row(RestartRow {
         restart: "no-snapshot".to_owned(),
-        snapshot_bytes: 0,
+        log_bytes: 0,
         shut_down: None,
         drop: None,
         build,

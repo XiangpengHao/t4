@@ -9,7 +9,7 @@ use super::allocation::{DriveHeadroom, FileAllocation};
 use super::disk_chunks::DiskChunkWriter;
 use super::disk_chunks::{DiskChunkReader, DiskChunks};
 use crate::cache::BLOCK_SIZE_U64;
-use crate::cache::storage::snapshot::SnapshotFile;
+use crate::cache::storage::snapshot::PersistenceLog;
 use crate::io::aligned_buf::AlignedBuf;
 use crate::io::error::{Error, Result};
 use crate::io::io_task::PageWrite;
@@ -65,7 +65,7 @@ pub(in crate::cache) struct CacheFiles {
     chunks: Arc<DiskChunks>,
     /// Names its owner's address (`doc/11-shared-mode.md`, decision 6).
     first_file: Option<FileIdentity>,
-    snapshot: Option<SnapshotFile>,
+    log: Option<PersistenceLog>,
     headroom: Option<DriveHeadroom>,
 }
 
@@ -95,11 +95,11 @@ impl CacheFiles {
             })
             .collect::<Result<Vec<_>>>()?;
         let first_file = FileIdentity::of(&opened[0])?;
-        let snapshot = SnapshotFile::beside(&files[0].path, &opened, chunks_per_file);
+        let log = PersistenceLog::beside(&files[0].path, &opened, chunks_per_file)?;
         let headroom = allocation.headroom(&opened)?;
         let mut files = Self::on(IoWorker::new(queue_depth, opened)?, count, chunks_per_file)?;
         files.first_file = Some(first_file);
-        files.snapshot = snapshot;
+        files.log = log;
         files.headroom = headroom;
         Ok(files)
     }
@@ -113,7 +113,7 @@ impl CacheFiles {
             io,
             chunks: Arc::new(DiskChunks::new(files, chunks_per_file)?),
             first_file: None,
-            snapshot: None,
+            log: None,
             headroom: None,
         })
     }
@@ -126,8 +126,8 @@ impl CacheFiles {
         self.first_file
     }
 
-    pub(in crate::cache) fn snapshot(&self) -> Option<&SnapshotFile> {
-        self.snapshot.as_ref()
+    pub(in crate::cache) fn log(&self) -> Option<&PersistenceLog> {
+        self.log.as_ref()
     }
 
     pub(in crate::cache) fn takes_a_block(&self) -> bool {

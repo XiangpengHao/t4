@@ -79,7 +79,7 @@ pub(super) enum LogEntry {
         chunk: u32,
     },
     Free(u32),
-    Clean,
+    Clean(u64),
 }
 
 impl LogEntry {
@@ -106,7 +106,10 @@ impl LogEntry {
                 out.raw(&[2]);
                 out.u32(*chunk);
             }
-            Self::Clean => out.raw(&[3]),
+            Self::Clean(next_id) => {
+                out.raw(&[3]);
+                out.u64(*next_id);
+            }
         }
     }
 
@@ -132,14 +135,14 @@ impl LogEntry {
                 chunk: input.u32()?,
             }),
             2 => Some(Self::Free(input.u32()?)),
-            3 => Some(Self::Clean),
+            3 => Some(Self::Clean(input.u64()?)),
             _ => None,
         }
     }
 }
 
 struct LogReplay {
-    base_next_id: u64,
+    minimum_new_id: u64,
     next_id: u64,
     versions: BTreeMap<u64, VersionOnDisk>,
     paths: BTreeMap<Box<[u8]>, u64>,
@@ -151,7 +154,7 @@ struct LogReplay {
 impl LogReplay {
     fn new(base: DiskSnapshot, chunks: u32) -> Self {
         let mut replay = Self {
-            base_next_id: base.next_id,
+            minimum_new_id: base.next_id,
             next_id: base.next_id,
             versions: BTreeMap::new(),
             paths: BTreeMap::new(),
@@ -174,11 +177,11 @@ impl LogReplay {
     }
 
     fn apply(&mut self, entry: LogEntry) -> Option<()> {
-        self.clean = matches!(entry, LogEntry::Clean);
+        self.clean = matches!(entry, LogEntry::Clean(_));
         match entry {
             LogEntry::Path(version) => {
                 let id = version.version.id().get();
-                if id < self.base_next_id || self.versions.contains_key(&id) {
+                if id < self.minimum_new_id || self.versions.contains_key(&id) {
                     return None;
                 }
                 self.next_id = self.next_id.max(id + 1);
@@ -207,7 +210,13 @@ impl LogReplay {
                 let key = self.chunks.get_mut(chunk as usize)?.take()?;
                 self.blocks.remove(&key);
             }
-            LogEntry::Clean => {}
+            LogEntry::Clean(next_id) => {
+                if next_id < self.next_id || next_id > FileVersionId::LIMIT {
+                    return None;
+                }
+                self.next_id = next_id;
+                self.minimum_new_id = next_id;
+            }
         }
         Some(())
     }

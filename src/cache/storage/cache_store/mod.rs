@@ -78,8 +78,8 @@ impl ObjectCache {
         disk: CacheFiles,
         placement: Arc<dyn PlacementPolicy>,
     ) -> Result<Self> {
-        let kept = match disk.snapshot() {
-            Some(snapshot) => snapshot.take()?,
+        let kept = match disk.log() {
+            Some(log) => log.take()?,
             None => None,
         };
         let state = Arc::new(CacheState {

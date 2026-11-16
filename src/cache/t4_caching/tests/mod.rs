@@ -289,8 +289,8 @@ fn builder(inner: &Arc<CountingStore>, dir: impl AsRef<std::path::Path>) -> T4Ca
 }
 
 #[cfg(feature = "shuttle")]
-fn snapshot_at(dir: &TempDir) -> std::path::PathBuf {
-    dir.path().join("cache.snapshot")
+fn log_at(dir: &TempDir) -> std::path::PathBuf {
+    dir.path().join("cache.log")
 }
 
 /// No deadline: shuttle fails a schedule that stalls here.

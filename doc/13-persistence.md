@@ -1,11 +1,11 @@
 # 13 — Persistence
 
-Status: build steps 1 and 2 built (2026-11-16): the log format, strict
-replay, and disk writes off the read path. A live log is next; the running
-cache still takes and removes a clean snapshot. Stage 1, a clean restart, is built
+Status: build steps 1 to 3 built (2026-11-16): the log format, strict
+replay, disk writes off the read path, and live appends across a kill.
+Step 4, measurement on Linux, is left. Stage 1, a clean restart, is built
 (`10-spiral-integration.md`, decision 7, 2 Nov 2026) and measured here.
 Stage 2, a log that keeps the disk tier across a killed process, is the
-design below, with its format built.
+design below, now built.
 
 t4 is a cache: the object store holds the true data, so the cache may lose
 any block, but never returns wrong bytes (`03-cache.md`). Persistence keeps
@@ -128,7 +128,17 @@ bytes.
     integers are little endian. A bad base starts cold; a bad record
     ends replay before any of its entries. Unknown entries start cold.
     A path may replace a path, in record order, but never reuse an id,
-    including any id below the base's next id.
+    including any id below the base's next id. The clean mark carries the
+    next id too, including ids a racing resolution allocated and wasted.
+
+12. **Failure stops reuse.** A failed log append closes the disk tier
+    before its batch writes; nothing appends past a possibly torn record.
+    Reads keep using memory, disk and the remote. A failed data write is
+    never added. A memory victim whose path was replaced before its batch
+    is dropped; a batch scans paths once for the versions it needs.
+    A boot UUID that cannot be read fails the build before reuse; missing
+    creation times discard an old log durably and disable persistence.
+    The file is `<first cache file>.log`; old `.snapshot` files are ignored.
 
 ## Measured: stage 1's restart
 
@@ -218,6 +228,7 @@ build with the snapshot removed is the baseline.
 
 | Where | What it is | Decisions |
 |---|---|---|
-| `src/cache/storage/snapshot/` | stage 1's snapshot: its bytes and checks, and its file beside the cache files; stage 2's base | 2, 7 |
-| `src/cache/storage/cache_store/restart.rs` | the disk tier captured as the cache ends, and restored as the next builds | 6 |
+| `src/cache/storage/snapshot/` | the checked snapshot base; `log/` frames and replays entries; `log_file.rs` appends, finishes and rebases the file | 2, 6, 7 |
+| `src/cache/storage/cache_store/restart.rs` | the disk tier closed and its log finished, and restored as the next builds | 6 |
+| `src/cache/storage/cache_store/disk_writer/`, `eviction.rs` | one writer, batches, and adds and frees ordered with chunk ownership | 3, 9 |
 | `bench/src/bin/snapshot_restart.rs`, `bench/snapshot_restart/` | the restart's cost | Measured |

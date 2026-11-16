@@ -1,26 +1,10 @@
 use super::super::index::Location;
-use super::super::snapshot::{DiskSnapshot, VersionOnDisk};
+use super::super::snapshot::DiskSnapshot;
 use super::ObjectCache;
 use crate::cache::BlockKey;
 use crate::cache::policy::Tier;
 
 impl ObjectCache {
-    /// Safe mid-write: the index names a chunk only once its block is written whole.
-    pub(super) fn capture_snapshot(&self) -> DiskSnapshot {
-        let mut held = Vec::new();
-        self.paths.scan(|path, e_tag, version| {
-            held.push((Box::<[u8]>::from(path), Box::<str>::from(e_tag), version));
-        });
-        let versions = held
-            .into_iter()
-            .filter_map(|(path, e_tag, version)| {
-                let blocks = self.blocks.on_disk(version);
-                (!blocks.is_empty()).then(|| VersionOnDisk::new(path, e_tag, version, blocks))
-            })
-            .collect();
-        DiskSnapshot::new(self.paths.next_id(), versions)
-    }
-
     /// The snapshot was checked as it was read: each chunk in it once, and in the tier.
     pub(super) fn restore(&self, snapshot: &DiskSnapshot) {
         self.paths.resume_ids_at(snapshot.next_id());
@@ -37,16 +21,34 @@ impl ObjectCache {
         }
     }
 
-    /// For a process that exits without dropping the cache. The tier closes first, so
-    /// the snapshot names only chunks no write will touch.
+    /// Closing and joining precede the clean mark: no chunk it names can be overwritten.
     pub(in crate::cache) fn shut_down(&self) -> std::io::Result<()> {
         self.disk.chunks().close();
         if let Some(writer) = &self.writer {
             writer.stop();
         }
-        match self.disk.snapshot() {
-            Some(snapshot) => snapshot.keep(&self.capture_snapshot()),
+        match self.disk.log() {
+            Some(log) => log.finish(self.paths.next_id()),
             None => Ok(()),
+        }
+    }
+
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(in crate::cache) fn replay_log(
+        first: &std::path::Path,
+        chunks: u32,
+    ) -> Option<DiskSnapshot> {
+        let file = std::fs::File::open(first).unwrap();
+        super::super::snapshot::PersistenceLog::beside(first, &[file], chunks)
+            .unwrap()
+            .unwrap()
+            .inspect()
+    }
+
+    #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
+    pub(in crate::cache) fn abandon_persistence(&self) {
+        if let Some(log) = self.disk.log() {
+            log.abandon();
         }
     }
 
@@ -55,7 +57,7 @@ impl ObjectCache {
     }
 }
 
-/// Kept again after `shut_down`: writes in flight then may have published blocks since.
+/// The writer is joined before the log and its cache-file locks close.
 impl Drop for ObjectCache {
     fn drop(&mut self) {
         if self.writer.is_some() {

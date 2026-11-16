@@ -1,11 +1,11 @@
 use std::fs::File;
 
 use super::*;
-use crate::cache::storage::snapshot::SnapshotFile;
+use crate::cache::storage::snapshot::PersistenceLog;
 
 struct LogFixture {
     _directory: tempfile::TempDir,
-    file: SnapshotFile,
+    file: PersistenceLog,
     boot: BootId,
 }
 
@@ -15,7 +15,9 @@ impl LogFixture {
         let path = directory.path().join("cache");
         let opened = File::create(&path).unwrap();
         Self {
-            file: SnapshotFile::beside(&path, &[opened], 4).unwrap(),
+            file: PersistenceLog::beside(&path, &[opened], 4)
+                .unwrap()
+                .unwrap(),
             boot: BootId::current().unwrap(),
             _directory: directory,
         }
@@ -143,7 +145,7 @@ fn another_boot_needs_a_final_clean_mark() {
     let mut other_boot = fixture.base();
     other_boot[12] ^= 1;
     assert_eq!(fixture.replay(&other_boot), None);
-    other_boot.extend(DiskLog::record(&[LogEntry::Clean]));
+    other_boot.extend(DiskLog::record(&[LogEntry::Clean(3)]));
     assert_eq!(fixture.replay(&other_boot), Some(LogFixture::snapshot()));
     let clean = other_boot.clone();
     other_boot.extend(DiskLog::record(&[LogEntry::Free(0)]));
@@ -158,6 +160,9 @@ fn another_boot_needs_a_final_clean_mark() {
 fn replay_rejects_impossible_ownership_and_reused_version_ids() {
     let fixture = LogFixture::new();
     let impossible = [
+        vec![LogEntry::Clean(2)],
+        vec![LogEntry::Clean(FileVersionId::LIMIT + 1)],
+        vec![LogEntry::Clean(8), LogFixture::path(7, b"b")],
         vec![LogFixture::add(1, 1, 0)],
         vec![LogFixture::add(1, 0, 1)],
         vec![LogFixture::add(2, 0, 1)],

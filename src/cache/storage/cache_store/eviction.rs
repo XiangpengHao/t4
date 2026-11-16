@@ -53,7 +53,11 @@ impl ObjectCache {
             Location::Disk(on_disk.chunk()),
             Location::Memory(in_memory.chunk()),
         );
+        let mut changes = self.disk.log().map(|log| log.changes());
         if self.blocks.replace_if(block, from, to) {
+            if let Some(log) = &mut changes {
+                log.free(on_disk.chunk());
+            }
             on_disk.unpublish();
             self.placement
                 .on_admit(Tier::Memory, in_memory.chunk(), block);
@@ -130,10 +134,32 @@ impl ObjectCache {
         let mut moves = Vec::new();
         let mut writes = Vec::new();
         let mut retry = Vec::new();
+        let mut versions = Vec::new();
+        self.paths.scan(|path, e_tag, version| {
+            if batch
+                .iter()
+                .any(|(_, block)| block.file_version() == version.id())
+            {
+                versions.push(crate::cache::storage::snapshot::VersionOnDisk::new(
+                    path.into(),
+                    e_tag.into(),
+                    version,
+                    Vec::new(),
+                ));
+            }
+        });
         for &(chunk, block) in batch {
             let Some(victim) = self.memory.read(chunk, block) else {
                 continue;
             };
+            if self.disk.log().is_some()
+                && !versions
+                    .iter()
+                    .any(|version| version.version().id() == block.file_version())
+            {
+                self.forget_if_closed(victim.unpublish(), block, Location::Memory(chunk));
+                continue;
+            }
             let Some(writer) = self.allocate_disk() else {
                 retry.push((chunk, block));
                 continue;
@@ -145,7 +171,14 @@ impl ObjectCache {
             });
             moves.push((victim, writer));
         }
-        if writes.is_empty() || self.disk.write_batch(writes).await.is_err() {
+        let prepared = self
+            .disk
+            .log()
+            .is_none_or(|log| log.changes().prepare(versions).is_ok());
+        if !prepared {
+            self.disk.chunks().close();
+        }
+        if !prepared || writes.is_empty() || self.disk.write_batch(writes).await.is_err() {
             retry.extend(
                 moves
                     .iter()
@@ -153,6 +186,7 @@ impl ObjectCache {
             );
             return retry;
         }
+        let mut changes = self.disk.log().map(|log| log.changes());
         for (victim, writer) in moves {
             let block = victim.block();
             let on_disk = writer.publish(block);
@@ -161,6 +195,9 @@ impl ObjectCache {
                 Location::Memory(victim.chunk()),
                 Location::Disk(on_disk.chunk()),
             ) {
+                if let Some(log) = &mut changes {
+                    log.add(block, on_disk.chunk());
+                }
                 victim.unpublish();
                 self.placement.on_admit(Tier::Disk, on_disk.chunk(), block);
             } else {
@@ -211,7 +248,12 @@ impl ObjectCache {
         let Some(victim) = self.disk.chunks().pin_for_eviction(chunk) else {
             return false;
         };
-        self.forget_if_closed(victim.unpublish(), victim.block(), Location::Disk(chunk))
+        let mut changes = self.disk.log().map(|log| log.changes());
+        let closed = victim.unpublish();
+        if closed && let Some(log) = &mut changes {
+            log.free(chunk);
+        }
+        self.forget_if_closed(closed, victim.block(), Location::Disk(chunk))
     }
 
     /// Closed first, so a read that finds the entry from then on finds the chunk closed.

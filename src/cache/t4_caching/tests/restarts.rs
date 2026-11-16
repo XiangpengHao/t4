@@ -23,11 +23,11 @@ fn a_cache_built_again_serves_the_disk_tier_its_files_held() {
         let first = on_disk(&inner, &dir).build().unwrap();
         assert_eq!(read_whole(&first, &meta), data);
         drop(first);
-        assert!(snapshot_at(&dir).exists());
+        assert!(log_at(&dir).exists());
         inner.take_asked();
 
         let again = on_disk(&inner, &dir).build().unwrap();
-        assert!(!snapshot_at(&dir).exists(), "taken back, and removed");
+        assert!(log_at(&dir).exists(), "rebased before writes");
         assert_eq!(block_on(again.known_size(&path)), Some(meta.size));
         assert_eq!(read_whole(&again, &meta), data);
         assert_eq!(inner.take_asked(), [], "served from disk");
@@ -87,7 +87,7 @@ fn a_cache_of_another_capacity_starts_cold() {
             .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
             .build()
             .unwrap();
-        assert!(!snapshot_at(&dir).exists());
+        assert!(log_at(&dir).exists());
         assert_eq!(block_on(larger.known_size(&path)), None);
         assert_eq!(read_whole(&larger, &meta), data);
         assert_eq!(inner.take_asked(), [bounded(0..2 * MIB)]);
@@ -134,7 +134,7 @@ fn a_cache_shut_down_keeps_its_disk_tier_and_writes_no_more() {
         let cache = on_disk(&inner, &dir).build().unwrap();
         assert_eq!(read_whole(&cache, &a_meta), a_data);
         cache.shut_down().unwrap();
-        assert!(snapshot_at(&dir).exists(), "kept at once");
+        assert!(log_at(&dir).exists(), "kept at once");
         inner.take_asked();
 
         assert_eq!(read_whole(&cache, &a_meta), a_data);

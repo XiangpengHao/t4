@@ -43,38 +43,40 @@ fn snapshot() -> DiskSnapshot {
 }
 
 #[test]
-fn a_kept_snapshot_is_taken_back_once() {
+fn a_clean_log_is_replayed_and_rebased_on_each_build() {
     let dir = tempfile::tempdir().unwrap();
     let files = opened(dir.path(), &["cache0", "cache1"]);
-    let place = SnapshotFile::beside(&dir.path().join("cache0"), &files, 4).unwrap();
-    assert_eq!(place.path(), dir.path().join("cache0.snapshot"));
+    let place = PersistenceLog::beside(&dir.path().join("cache0"), &files, 4)
+        .unwrap()
+        .unwrap();
+    assert_eq!(place.path(), dir.path().join("cache0.log"));
 
-    place.keep(&snapshot()).unwrap();
+    place.seed(&snapshot()).unwrap();
     assert_eq!(place.take().unwrap(), Some(snapshot()));
-    assert!(!place.path().exists(), "removed as it is taken");
-    assert_eq!(place.take().unwrap(), None);
+    assert!(place.path().exists(), "replaced with an unclean base");
+    assert_eq!(place.take().unwrap(), Some(snapshot()));
 }
 
 #[test]
-fn a_snapshot_of_other_cache_files_is_removed_not_taken() {
+fn a_log_of_other_cache_files_is_rebased_cold() {
     let dir = tempfile::tempdir().unwrap();
     let first = dir.path().join("cache0");
     let files = opened(dir.path(), &["cache0", "cache1"]);
     let keep = |files: &[File]| {
-        let place = SnapshotFile::beside(&first, files, 4).unwrap();
-        place.keep(&snapshot()).unwrap();
+        let place = PersistenceLog::beside(&first, files, 4).unwrap().unwrap();
+        place.seed(&snapshot()).unwrap();
     };
     let reordered = opened(dir.path(), &["cache1", "cache0"]);
     let others = [
-        SnapshotFile::beside(&first, &files, 5),
-        SnapshotFile::beside(&first, &files[..1], 4),
-        SnapshotFile::beside(&first, &reordered, 4),
+        PersistenceLog::beside(&first, &files, 5),
+        PersistenceLog::beside(&first, &files[..1], 4),
+        PersistenceLog::beside(&first, &reordered, 4),
     ];
     for other in others {
         keep(&files);
-        let other = other.unwrap();
+        let other = other.unwrap().unwrap();
         assert_eq!(other.take().unwrap(), None);
-        assert!(!other.path().exists());
+        assert!(other.path().exists());
     }
 
     // The first file made again, at the same path: another file.
@@ -82,16 +84,18 @@ fn a_snapshot_of_other_cache_files_is_removed_not_taken() {
     drop((files, reordered));
     std::fs::remove_file(&first).unwrap();
     let remade = opened(dir.path(), &["cache0", "cache1"]);
-    let other = SnapshotFile::beside(&first, &remade, 4).unwrap();
+    let other = PersistenceLog::beside(&first, &remade, 4).unwrap().unwrap();
     assert_eq!(other.take().unwrap(), None);
-    assert!(!other.path().exists());
+    assert!(other.path().exists());
 }
 
 #[test]
 fn bytes_no_cache_could_have_kept_are_no_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     let files = opened(dir.path(), &["cache0", "cache1"]);
-    let place = SnapshotFile::beside(&dir.path().join("cache0"), &files, 4).unwrap();
+    let place = PersistenceLog::beside(&dir.path().join("cache0"), &files, 4)
+        .unwrap()
+        .unwrap();
     let layout = place.layout();
     let whole = snapshot().encode(layout);
     assert_eq!(DiskSnapshot::decode(&whole, layout), Some(snapshot()));
@@ -126,5 +130,44 @@ fn bytes_no_cache_could_have_kept_are_no_snapshot() {
 
     std::fs::write(place.path(), b"no snapshot").unwrap();
     assert_eq!(place.take().unwrap(), None);
-    assert!(!place.path().exists());
+    assert!(place.path().exists());
+}
+
+#[test]
+fn a_log_only_grows_until_its_next_build_rebases_it() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let files = opened(dir.path(), &["cache0", "cache1"]);
+    let log = PersistenceLog::beside(&dir.path().join("cache0"), &files, 4)
+        .unwrap()
+        .unwrap();
+    log.seed(&snapshot()).unwrap();
+    assert_eq!(log.take().unwrap(), Some(snapshot()));
+    let base = std::fs::read(log.path()).unwrap();
+    let inode = std::fs::metadata(log.path()).unwrap().ino();
+    let version = FileVersion::named(FileVersionId::new(9), MIB).unwrap();
+    {
+        let mut changes = log.changes();
+        changes
+            .prepare(vec![on_disk(b"digest/c", 9, MIB, &[])])
+            .unwrap();
+        changes.add(
+            crate::cache::BlockKey::new(version.id(), 0),
+            ChunkId::new(1),
+        );
+        changes.free(ChunkId::new(5));
+        changes.prepare(Vec::new()).unwrap();
+    }
+    log.finish(10).unwrap();
+    let appended = std::fs::read(log.path()).unwrap();
+    assert!(appended.starts_with(&base));
+    assert_eq!(std::fs::metadata(log.path()).unwrap().ino(), inode);
+    let replayed = log.inspect().unwrap();
+    assert_eq!(replayed.next_id(), 10);
+    assert_eq!(replayed.versions()[0].blocks(), &[(1, ChunkId::new(0))]);
+    assert_eq!(replayed.versions()[2].blocks(), &[(0, ChunkId::new(1))]);
+    assert_eq!(log.take().unwrap(), Some(replayed));
+    assert!(std::fs::metadata(log.path()).unwrap().len() < appended.len() as u64);
+    assert_ne!(std::fs::metadata(log.path()).unwrap().ino(), inode);
 }
