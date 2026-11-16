@@ -336,8 +336,8 @@ decision 9).
      or shut down (`10-spiral-integration.md`, decision 7), or cold after a
      crash; the others connect to it. A client that shut its cache down
      tries the next owner only, never the lock: it is exiting. A version id names a version only in the
-     cache that gave it, and the next owner gives its ids again, to other
-     files: so a client's GETs still waiting under the last owner merge
+     cache that gave it, and the next owner, cold after a crash, gives its
+     ids again, to other files: so a client's GETs still waiting under the last owner merge
      with none of the next's, each keyed by its id and the cache it came
      from, the client's own or the owner on a numbered connection
      (`FileVersionKey`). Merged, a read of one file would take another's

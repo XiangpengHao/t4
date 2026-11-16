@@ -332,7 +332,8 @@ fn two_clients_whose_owner_went_one_owns_and_the_other_reads_through_it() {
     });
 }
 
-/// The client's own cache names `c` with the id the owner gave `b`, so a merge would mix files.
+/// Killed, the owner keeps no snapshot: the client's own cache then names `c` with the id the
+/// owner gave `b`, so a merge would mix files.
 #[test]
 fn a_get_waiting_as_its_owner_goes_merges_with_none_of_the_next_cache() {
     crate::io::test_schedule::TestSchedule::check(|| {
@@ -364,6 +365,7 @@ fn a_get_waiting_as_its_owner_goes_merges_with_none_of_the_next_cache() {
         );
 
         drop(owner);
+        std::fs::remove_file(snapshot_at(&dir)).unwrap();
         wait_until(
             || {
                 assert_eq!(read_listed(&client, &long_meta, 0..10), long_data);
