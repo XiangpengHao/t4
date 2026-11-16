@@ -12,6 +12,6 @@ pub use cache_store::{FuzzedSnapshot, FuzzedVersion};
 pub(in crate::cache) use disk::{CacheFiles, DiskFile, FileIdentity};
 
 pub(in crate::cache) use cache_store::{
-    CacheableFile, FetchedBlocks, LocatedRun, ObjectCache, PartialRead, TierWork,
+    CacheableFile, FetchedBlocks, HeldRun, LocatedRun, ObjectCache, PartialRead, TierWork,
 };
 pub(in crate::cache) use index::FileVersion;

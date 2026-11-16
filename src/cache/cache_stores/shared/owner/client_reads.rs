@@ -17,10 +17,11 @@ use crate::cache::cache_stores::shared::protocol::{
     ClientFrame, FetchSpec, FrameReader, MOST_READ_BYTES, NextStep, OwnerFrame, OwnerRegion,
     SpanName,
 };
+use crate::cache::cache_stores::{InProcessRound, RoundEnd};
 use crate::cache::policy::{FetchRuns, Io, IoEvent, LocatedRead, ReadIntent, ReadPlan, ReadPolicy};
 use crate::cache::read_output::ReadOutput;
 use crate::cache::storage::FileVersion;
-use crate::cache::storage::{FetchedBlocks, ObjectCache, PartialRead, TierWork};
+use crate::cache::storage::{FetchedBlocks, ObjectCache};
 use crate::io::error::Result;
 
 pub(super) struct ClientReads<'c> {
@@ -329,11 +330,9 @@ impl<'c> ServedRead<'c> {
             Some((region, span)) => region.output(span, asked, std::sync::Arc::clone(&self.end)),
             None => ReadOutput::new(asked),
         };
-        let started = self
-            .cache
-            .start_read_into(&file, range.clone(), intent, &reads, make_output);
-        let (mut read, mut work) = match started {
-            Ok(started) => started,
+        let started = InProcessRound::start(self.cache, &reads, file, range, intent, make_output);
+        let mut round = match started {
+            Ok(round) => round,
             // A span that can't hold the read is the client's mistake: it breaks the protocol.
             Err(_) if in_span => {
                 self.outbox
@@ -350,18 +349,29 @@ impl<'c> ServedRead<'c> {
             version: file.version(),
         };
         loop {
-            // The client may send the round's finish with its start, before its runs are planned.
+            // The client may send the round's finish with its start, before its run is planned.
             let mut finish = None;
-            let Some(fetches) = self.plan(&mut read, &mut work, answer, &mut finish).await else {
+            let Some(answer_fetches) = self.plan(&mut round, answer, &mut finish).await else {
                 return;
             };
+            let (fetches, fetching) = match round.into_fetches() {
+                Ok(fetching) => fetching,
+                Err(_) => {
+                    self.fail(answer_fetches, finish);
+                    return;
+                }
+            };
+            let specs = (fetches.iter())
+                .map(|blocks| FetchSpec::new(blocks.range(), blocks.race(), blocks.late_race()))
+                .collect();
+            (self.outbox).send(answer_fetches.with(NextStep::Fetch(specs)));
             let landed = self.land(fetches, finish, output_span);
-            let (finish, worked) = join(landed, work.finish(&mut read)).await;
+            let (finish, ended) = join(landed, fetching.ended()).await;
             let Some(call) = finish else {
                 return;
             };
-            match worked {
-                Ok(left) if left.is_empty() => {
+            match ended {
+                Ok(RoundEnd::Served(read)) => {
                     let served = if !in_span {
                         let bytes = read.into_bytes();
                         OwnerFrame::Served { call, bytes }
@@ -375,8 +385,8 @@ impl<'c> ServedRead<'c> {
                     self.outbox.send(served);
                     return;
                 }
-                Ok(left) => {
-                    work = self.cache.retry(&file, range.clone(), intent, left, &reads);
+                Ok(RoundEnd::Retry(next)) => {
+                    round = next;
                     answer = StepAnswer::Retry { call };
                 }
                 Err(_) => {
@@ -387,41 +397,27 @@ impl<'c> ServedRead<'c> {
         }
     }
 
+    /// The answer the round's fetches go in: a run's GETs are taken in a call of their own.
     async fn plan(
         &self,
-        read: &mut PartialRead,
-        work: &mut TierWork<'_>,
-        mut answer: StepAnswer,
+        round: &mut InProcessRound<'_>,
+        answer: StepAnswer,
         finish: &mut Option<u64>,
-    ) -> Option<Vec<FetchedBlocks<'c>>> {
-        match work.locate(read) {
+    ) -> Option<StepAnswer> {
+        match round.locate() {
             Ok(Some(held)) => {
                 self.outbox
                     .send(answer.with(NextStep::Plan(held.run().clone())));
                 let (call, plan) = self.run_gets(finish).await?;
-                work.take_gets(read, held, &plan);
-                answer = StepAnswer::Next { call };
+                round.take_gets(held, &plan);
+                Some(StepAnswer::Next { call })
             }
-            Ok(None) => {}
+            Ok(None) => Some(answer),
             Err(_) => {
                 self.fail(answer, *finish);
-                return None;
+                None
             }
         }
-        let mut fetches = Vec::new();
-        for bytes in read.fetches() {
-            let Ok(blocks) = self.cache.receive(read, bytes) else {
-                self.fail(answer, *finish);
-                return None;
-            };
-            fetches.push(blocks);
-        }
-        let specs = fetches
-            .iter()
-            .map(|blocks| FetchSpec::new(blocks.range(), blocks.race(), blocks.late_race()))
-            .collect();
-        self.outbox.send(answer.with(NextStep::Fetch(specs)));
-        Some(fetches)
     }
 
     async fn run_gets(&self, finish: &mut Option<u64>) -> Option<(u64, ReadPlan)> {
@@ -446,7 +442,7 @@ impl<'c> ServedRead<'c> {
     /// A piece staged in the read's `output` would land onto itself.
     async fn land(
         &self,
-        fetches: Vec<FetchedBlocks<'c>>,
+        fetches: Vec<FetchedBlocks<'_>>,
         mut finish: Option<u64>,
         output: Option<SpanName>,
     ) -> Option<u64> {

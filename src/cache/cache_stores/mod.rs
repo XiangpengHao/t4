@@ -19,6 +19,7 @@ pub use shared::FuzzedFrame;
 #[cfg(all(feature = "__fuzz", feature = "shuttle", t4_simulated))]
 pub use shared::{FuzzedHello, FuzzedPath, FuzzedRead, FuzzedSession, FuzzedSpan, FuzzedStep};
 
+use in_process::InProcessRound;
 pub(super) use in_process::{InProcessCacheStore, PlacementMaker, TierSettings};
 #[cfg(any(test, all(feature = "shuttle", t4_simulated)))]
 use shared::OwnerConnection;
@@ -64,14 +65,17 @@ pub(super) trait ReadRound<'s>: Send {
 pub(super) struct RoundFetches<'s> {
     pub(super) fetches: Vec<Box<dyn CacheStoreFetch<'s> + 's>>,
     /// Done once the fetches and the round's reads from the tiers are.
-    pub(super) ended: BoxFuture<'s, Result<RoundEnd<'s>>>,
+    pub(super) ended: BoxFuture<'s, Result<BoxedRoundEnd<'s>>>,
 }
 
-pub(super) enum RoundEnd<'s> {
+pub(super) enum RoundEnd<Round, Output> {
     /// Blocks it waited for ended uncached: the read fetches them itself.
-    Retry(Box<dyn ReadRound<'s> + 's>),
-    Served(Box<dyn ServedOutput + 's>),
+    Retry(Round),
+    Served(Output),
 }
+
+pub(super) type BoxedRoundEnd<'s> =
+    RoundEnd<Box<dyn ReadRound<'s> + 's>, Box<dyn ServedOutput + 's>>;
 
 /// Taken once the round's fetches are done: till then they may be landing in it.
 pub(super) trait ServedOutput: Send {
