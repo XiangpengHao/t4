@@ -5,8 +5,6 @@ use super::*;
 
 const PAGE: u64 = PAGE_SIZE_U64;
 
-/// Spans are taken first fit, and given back merged with the free runs
-/// beside them: the region's pages, all given back, are one run again.
 #[test]
 fn spans_are_taken_first_fit_and_merged_when_given_back() {
     let mut free = FreeSpans::new(10);
@@ -25,8 +23,6 @@ fn spans_are_taken_first_fit_and_merged_when_given_back() {
     assert_eq!(free.take(1), None);
 }
 
-/// A span its client writes is read by its owner, through the owner's own
-/// mapping of the region; and a span dropped gives its pages back.
 #[test]
 fn a_span_its_client_writes_is_read_by_its_owner() {
     let region = ClientRegion::make().unwrap();
@@ -49,7 +45,6 @@ fn a_span_its_client_writes_is_read_by_its_owner() {
     assert_eq!(region.free_pages(), pages - 1);
 }
 
-/// The owner takes no span past its mapping of the region.
 #[test]
 fn the_owner_takes_no_span_past_the_region() {
     let region = ClientRegion::make().unwrap();
@@ -63,8 +58,6 @@ fn the_owner_takes_no_span_past_the_region() {
     assert!(owner.staged(last).is_ok());
 }
 
-/// The owner maps only shared memory that can't shrink under it: not a
-/// regular file, which takes an `ftruncate`.
 #[test]
 fn the_owner_refuses_memory_that_could_shrink() {
     let mut file = tempfile::tempfile().unwrap();
@@ -74,7 +67,6 @@ fn the_owner_refuses_memory_that_could_shrink() {
     assert_eq!(file.metadata().unwrap().len(), PAGE, "left as it was");
 }
 
-/// A memfd left unsealed could shrink: the owner refuses it.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_owner_refuses_an_unsealed_memfd() {

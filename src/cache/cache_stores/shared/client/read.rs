@@ -1,6 +1,3 @@
-//! [`ClientRead`]: a client's read through its owner, and [`ReadNumber`],
-//! the read's number on the connection, which its fetches hold too.
-
 use std::io;
 use std::ops::Range;
 use std::sync::{Mutex, PoisonError};
@@ -20,47 +17,27 @@ use crate::cache::read_output::ReadOutput;
 use crate::cache::storage::{CacheableFile, FileVersion, LocatedRun};
 use crate::io::error::{Error, Result};
 
-/// A client's read through its owner (`doc/11-shared-mode.md`, decision
-/// 5): its number on the connection, the read's next step as the owner
-/// answered it, its round's finish, and, once served, where its bytes are.
-/// Its client plans its GETs and makes them; the owner does the rest.
 pub(in crate::cache::cache_stores::shared) struct ClientRead<'c> {
     number: std::sync::Arc<ReadNumber>,
     path: &'c [u8],
     version: FileVersion,
-    /// The file's bytes the client asked for.
     asked: Range<u64>,
     next: Option<NextStep>,
-    /// The round's finish, sent as the round starts, with the read's start
-    /// or once the owner answers `Retry`: the owner holds it till the
-    /// round's work is done, so that a read of hits is one round trip.
+    /// Sent as the round starts: the owner holds it till the round's work is done, so that a
+    /// read of hits is one round trip.
     finish: Option<WaitingCall>,
     served: Option<Served>,
 }
 
-/// Where the owner served a read's bytes.
 enum Served {
-    /// In its answer's frame; none if a read from disk was still writing
-    /// them, as after one failed.
     InFrame(Option<Bytes>),
-    /// In the read's output's span: the file's bytes `asked`, where an
-    /// output of them has them.
     InSpan(Range<u64>),
 }
 
 impl<'c> ClientRead<'c> {
-    /// The most bytes a client's read takes: its bytes come back in one
-    /// frame (decision 5), which holds 2 GiB.
+    /// Its bytes come back in one frame (`doc/11-shared-mode.md`, decision 5), which holds 2 GiB.
     const MOST_BYTES: u64 = 1 << 30;
 
-    /// Starts a read through `owner` of `range` of the version of the file
-    /// at `path` with `e_tag` and `size`, within it, for `intent`, its first
-    /// round's finish sent with it. `None` if the cache can't hold the file,
-    /// or a client's read of that many bytes.
-    ///
-    /// # Errors
-    ///
-    /// If the owner failed the read, or is gone.
     pub(in crate::cache::cache_stores::shared) async fn start(
         owner: std::sync::Arc<OwnerConnection>,
         path: &'c [u8],
@@ -73,7 +50,6 @@ impl<'c> ClientRead<'c> {
             return Ok(None);
         }
         let number = ReadNumber::take(std::sync::Arc::clone(&owner));
-        // No span free, the read's bytes come in the frame.
         let output = owner.span(ReadOutput::padded_len(&range));
         let output = number.lend_output(output);
         let asked = range.clone();
@@ -106,8 +82,6 @@ impl<'c> ClientRead<'c> {
         }
     }
 
-    /// The error of a read the owner answered `answer`: failed it, or
-    /// answered as no call of the kind takes.
     fn failed(answer: &OwnerFrame) -> Error {
         match answer {
             OwnerFrame::Failed { .. } => Error::Io(io::Error::other("the owner failed the read")),
@@ -117,13 +91,10 @@ impl<'c> ClientRead<'c> {
 }
 
 impl<'c> CacheStoreRead<'c> for ClientRead<'c> {
-    /// The read's file, as the owner named its version.
     fn file(&self) -> CacheableFile<'c> {
         CacheableFile::named(self.path, self.version)
     }
 
-    /// The run of the read the owner located last, for the client to plan
-    /// its GETs; `None` once its GETs are planned.
     fn locate_next_run(&mut self) -> Result<Option<LocatedRun>> {
         match self.next.take() {
             Some(NextStep::Plan(run)) => Ok(Some(run)),
@@ -134,12 +105,6 @@ impl<'c> CacheStoreRead<'c> for ClientRead<'c> {
         }
     }
 
-    /// Hands the owner `gets`, planned for the run it located last: it
-    /// answers with the next run, or the read's fetches.
-    ///
-    /// # Errors
-    ///
-    /// If the owner failed the read, or is gone.
     fn take_gets<'a>(&'a mut self, gets: &'a ReadPlan) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let read = self.number.number;
@@ -162,8 +127,6 @@ impl<'c> CacheStoreRead<'c> for ClientRead<'c> {
         })
     }
 
-    /// The read's fetches, which the client makes, as the owner answered
-    /// once every run was planned; none after.
     fn fetches(&mut self) -> Result<Vec<Box<dyn CacheStoreFetch<'c> + 'c>>> {
         let Some(NextStep::Fetch(specs)) = self.next.take() else {
             return Ok(Vec::new());
@@ -179,19 +142,6 @@ impl<'c> CacheStoreRead<'c> for ClientRead<'c> {
             .collect())
     }
 
-    /// Waits for the read's work in the owner, done once the owner has
-    /// served what it holds and the read's fetches are committed or
-    /// abandoned: whether blocks are left to fetch, those it waited for
-    /// that no fetch cached, its next step. The finish was sent as the
-    /// round started; the next round's goes at once.
-    ///
-    /// # Errors
-    ///
-    /// If the owner failed the read, or is gone.
-    ///
-    /// # Panics
-    ///
-    /// If the read was served already: it has no round left to finish.
     fn finish(&mut self) -> BoxFuture<'_, Result<bool>> {
         Box::pin(async move {
             let finish = self
@@ -219,12 +169,7 @@ impl<'c> CacheStoreRead<'c> for ClientRead<'c> {
         })
     }
 
-    /// The read's bytes, once served, their address agreeing with their
-    /// file offset mod 4 KiB, as an owner's read's does: in the read's
-    /// output's span, which they hold until the last of them drops; or, from
-    /// a frame, copied into an output of the client's own. `None` if the
-    /// owner served none, as after a read from disk failed, or served them
-    /// where they can't be.
+    /// Their address agrees with their file offset mod 4 KiB, as an owner's read's does.
     fn into_bytes(mut self: Box<Self>) -> Option<Bytes> {
         match self.served.take()? {
             Served::InFrame(served) => {
@@ -235,8 +180,6 @@ impl<'c> CacheStoreRead<'c> for ClientRead<'c> {
                 output.into_bytes()
             }
             Served::InSpan(asked) => {
-                // An output's bytes start in its first page, where the
-                // file's first asked would.
                 let at = usize::try_from(asked.start % PAGE_SIZE_U64).ok()?;
                 let len = usize::try_from(asked.end - asked.start).ok()?;
                 let span = self.number.take_output()?;
@@ -248,20 +191,13 @@ impl<'c> CacheStoreRead<'c> for ClientRead<'c> {
     }
 }
 
-/// A read's number on its connection, from its start, held by the read and
-/// each of its fetches; and the spans they lent the owner. Dropped with the
-/// last of them, it ends the read in the owner, served or not, which drops
-/// all it holds of it, and keeps the spans until the owner says it has
-/// (`OwnerConnection::keep_until_ended`): no frame of the read's goes after
-/// its end, which would break the protocol.
+/// Shared by the read and its fetches, the last to drop ends the read: no frame of the read's
+/// may go after its end.
 pub(super) struct ReadNumber {
-    /// The read's own handle on the connection: it outlives the store's,
-    /// replaced once its owner goes.
+    /// Outlives the store's handle, which is replaced once its owner goes.
     owner: std::sync::Arc<OwnerConnection>,
     number: u64,
-    /// The read's output's span, until its caller takes it, served.
     output: Mutex<Option<RegionSpan>>,
-    /// The spans its fetches staged their bytes in, as they drop.
     staged: Mutex<Vec<RegionSpan>>,
 }
 
@@ -275,15 +211,12 @@ impl ReadNumber {
         }
     }
 
-    /// Keeps `output`, the read's output's span if one was free, and names
-    /// it for the read's start.
     fn lend_output(&self, output: Option<RegionSpan>) -> Option<SpanName> {
         let name = output.as_ref().map(RegionSpan::name);
         *self.output.lock().unwrap_or_else(PoisonError::into_inner) = output;
         name
     }
 
-    /// The read's output's span, served: its caller's now.
     fn take_output(&self) -> Option<RegionSpan> {
         self.output
             .lock()
@@ -291,17 +224,14 @@ impl ReadNumber {
             .take()
     }
 
-    /// The read's number on its connection.
     pub(super) fn number(&self) -> u64 {
         self.number
     }
 
-    /// The connection the read goes through.
     pub(super) fn owner(&self) -> &OwnerConnection {
         &self.owner
     }
 
-    /// Keeps `staged`, a fetch's span, until the owner ends the read.
     pub(super) fn keep_staged(&self, staged: Option<RegionSpan>) {
         (self.staged.lock().unwrap_or_else(PoisonError::into_inner)).extend(staged);
     }
