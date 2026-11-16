@@ -6,7 +6,7 @@ pub(crate) mod io_worker;
 pub(crate) mod sync;
 
 cfg_if::cfg_if! {
-    if #[cfg(all(feature = "shuttle", test))] {
+    if #[cfg(all(feature = "shuttle", any(test, t4_simulated)))] {
         pub(crate) mod simulated;
         pub(crate) use simulated::new_backend;
     } else if #[cfg(all(feature = "io-uring", target_os = "linux"))] {
@@ -19,7 +19,7 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(feature = "shuttle", t4_simulated)))]
 pub(crate) mod test_schedule;
 
 pub(crate) mod time;

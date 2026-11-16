@@ -17,7 +17,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [cache_equivalence, frames, snapshot]
+        include:
+          - target: cache_equivalence
+          - target: frames
+          - target: snapshot
+          # Its owner and clients run on shuttle (`fuzz/README.md`).
+          - target: shared_owner
+            rustflags: --cfg t4_simulated
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7

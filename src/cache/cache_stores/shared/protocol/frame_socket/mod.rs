@@ -9,15 +9,15 @@ use std::io;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
-#[cfg(all(test, feature = "shuttle"))]
+#[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
 pub(super) mod simulated;
-#[cfg(not(all(test, feature = "shuttle")))]
+#[cfg(not(all(feature = "shuttle", any(test, t4_simulated))))]
 mod unix;
-#[cfg(all(test, feature = "shuttle"))]
+#[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
 pub(in crate::cache::cache_stores::shared) use simulated::FrameSocket;
-#[cfg(all(test, feature = "shuttle"))]
+#[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
 pub(crate) use simulated::Transport;
-#[cfg(not(all(test, feature = "shuttle")))]
+#[cfg(not(all(feature = "shuttle", any(test, t4_simulated))))]
 pub(in crate::cache::cache_stores::shared) use unix::FrameSocket;
 
 pub(in crate::cache::cache_stores::shared) struct FrameReceiver {

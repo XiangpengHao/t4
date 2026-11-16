@@ -1,6 +1,6 @@
 # t4 fuzzing
 
-Three targets, each run for an hour every Monday by
+Four targets, each run for an hour every Monday by
 `.github/workflows/fuzz.yml`, from an empty corpus: nothing is kept between
 runs.
 
@@ -64,6 +64,55 @@ no checksum: one whose bytes were changed into another valid snapshot is
 taken back as written, so this target checks the cache's consistency, not
 the bytes it would serve.
 
+## `shared_owner`
+
+Shared mode's owner, serving a client whose frames the input picks, while a
+well-behaved client (a `T4Caching` built for sharing) reads beside it
+(`doc/11-shared-mode.md`). A client is another process: an older version, a
+buggy one, or one killed mid-frame. The owner and both clients run on
+shuttle, over the modeled socket and region (`doc/12-seeded-concurrency-tests.md`),
+each input under PCT from a seed of its own, so it replays exactly. Its
+`T4Caching` and `ClientRegion` are the real ones; the owner holds two blocks
+in memory and three on disk.
+
+The misbehaving client's hello is a proper one, of another version, with a
+read-only descriptor, or any bytes. Then it sends well-formed frames, most
+where the protocol doesn't allow them: reads, fetches and calls it never
+started, or ended twice, other reads' numbers, `Land`, `Commit` and `Abandon`
+out of order, spans past the region, overlapping or reused, `EndRead` before
+`Finish`; frames of any body, or a length and fewer bytes than it says, the
+client killed mid-frame; writes to its own region, lent or not. `Proceed`
+steps send what a well-behaved client would next for a read, as far as the
+owner's answers say, so that the others come mid-read.
+
+It checks that:
+
+- the owner never panics, and never hangs: once the script is done, the
+  owner answers two probes in turn, or has closed the connection, unless the
+  script cut a frame short;
+- the well-behaved client reads each file's bytes, while the other is served
+  and after;
+- once the misbehaving client is killed and all is quiet, the owner serves no
+  session, holds none of its region, reads each file right, and its index and
+  tiers agree (`T4Caching::check_at_rest`).
+
+A client may commit any bytes under any name (decision 8), so the misbehaving
+client lands only a file's true bytes for the files the other client reads:
+each byte is a function of its path and offset, and it lands a fetch's bytes
+only once the owner has named the fetch. For a third file, and paths the store
+doesn't hold, it lands any bytes, anywhere. It stages the shared files' bytes
+in fresh spans at its region's start, and names spans and writes only past its
+middle.
+
+The library runs on shuttle only when built with `--cfg t4_simulated`, which
+every `cargo fuzz` command of this target takes:
+
+```bash
+RUSTFLAGS="--cfg t4_simulated" cargo fuzz run shared_owner -- -timeout=10 -rss_limit_mb=8192
+```
+
+Without it the target builds, and panics on its first input.
+
 ## Run it
 
 From the repository root, in the dev shell, which has `cargo-fuzz` and a
@@ -110,14 +159,21 @@ cargo fuzz fmt <target> fuzz/artifacts/<target>/<file>
 cargo fuzz run <target> fuzz/artifacts/<target>/<file>
 ```
 
-The second prints the input; the third runs it again.
+The second prints the input; the third runs it again. For `shared_owner`,
+prefix both with `RUSTFLAGS="--cfg t4_simulated"`.
 
 ## What it leaves to others
 
 - Threads racing: the shuttle tests (`cargo test --features shuttle
-  shuttle`). The target's concurrent reads share one thread.
+  shuttle`). `cache_equivalence`'s concurrent reads share one thread;
+  `shared_owner`'s threads run one PCT schedule an input.
 - Writes given up on: its store applies a write in the call's first poll,
   so there's no point to give one up at. The unit test
   `a_write_given_up_on_after_it_lands_is_read_back` covers them.
 - Direct I/O, and I/O or a store that fails.
-- Shared mode's owner and clients talking: `frames` checks the codec only.
+- Shared mode's well-behaved owners and clients agreeing with an unshared
+  cache: the scenario tests. `frames` checks the codec only, and
+  `shared_owner` one client misbehaving.
+- Too much at once from a client that follows the protocol: many reads in
+  flight, each a few MiB of the owner's memory, or claims it never lands.
+  `shared_owner` caps a script at 40 steps.

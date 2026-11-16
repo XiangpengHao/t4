@@ -17,6 +17,8 @@ mod shared;
 
 #[cfg(feature = "__fuzz")]
 pub use shared::FuzzedFrame;
+#[cfg(all(feature = "__fuzz", feature = "shuttle", t4_simulated))]
+pub use shared::{FuzzedHello, FuzzedPath, FuzzedRead, FuzzedSession, FuzzedSpan, FuzzedStep};
 
 pub(super) use in_process::{InProcessCacheStore, PlacementMaker, TierSettings};
 #[cfg(test)]
@@ -41,6 +43,11 @@ pub(super) trait CacheStore: Send + Sync {
     #[cfg(any(test, feature = "__fuzz"))]
     fn owned(&self) -> Option<&ObjectCache> {
         None
+    }
+
+    #[cfg(all(feature = "__fuzz", feature = "shuttle", t4_simulated))]
+    fn live_sessions(&self) -> usize {
+        0
     }
 
     #[cfg(test)]
@@ -101,5 +108,5 @@ pub(super) enum VersionIdSource {
     },
 }
 
-#[cfg(all(test, feature = "shuttle"))]
+#[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
 pub(in crate::cache) use shared::TestTransport;

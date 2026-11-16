@@ -14,7 +14,8 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use super::session_waker::SessionWaker;
 use crate::cache::cache_stores::shared::protocol::{
-    ClientFrame, FetchSpec, FrameReader, NextStep, OwnerFrame, OwnerRegion, SpanName,
+    ClientFrame, FetchSpec, FrameReader, MOST_READ_BYTES, NextStep, OwnerFrame, OwnerRegion,
+    SpanName,
 };
 use crate::cache::policy::{FetchRuns, Io, IoEvent, LocatedRead, ReadIntent, ReadPlan, ReadPolicy};
 use crate::cache::read_output::ReadOutput;
@@ -307,10 +308,23 @@ impl<'c> ServedRead<'c> {
             self.outbox.send(OwnerFrame::Uncacheable { call });
             return;
         };
+        // Of a version of any size the client names: planned, its blocks alone would take the
+        // owner's memory, then its output more.
+        let in_span = output.is_some();
+        let end = range.end.min(file.version().size());
+        if end - range.start.min(end) > MOST_READ_BYTES {
+            match in_span {
+                true => self
+                    .outbox
+                    .break_protocol("output: a span that can't hold it"),
+                false => self.outbox.send(OwnerFrame::Failed { call }),
+            }
+            return;
+        }
         let reads = ForwardedDiskReads {
             outbox: self.outbox.clone(),
         };
-        let in_span = output.is_some();
+        let output_span = output.as_ref().map(|&(_, span)| span);
         let make_output = |asked: Range<u64>| match output {
             Some((region, span)) => region.output(span, asked, std::sync::Arc::clone(&self.end)),
             None => ReadOutput::new(asked),
@@ -341,7 +355,7 @@ impl<'c> ServedRead<'c> {
             let Some(fetches) = self.plan(&mut read, &mut work, answer, &mut finish).await else {
                 return;
             };
-            let landed = self.land(fetches, finish);
+            let landed = self.land(fetches, finish, output_span);
             let (finish, worked) = join(landed, work.finish(&mut read)).await;
             let Some(call) = finish else {
                 return;
@@ -430,7 +444,13 @@ impl<'c> ServedRead<'c> {
         }
     }
 
-    async fn land(&self, fetches: Vec<FetchedBlocks<'c>>, mut finish: Option<u64>) -> Option<u64> {
+    /// A piece staged in the read's `output` would land onto itself.
+    async fn land(
+        &self,
+        fetches: Vec<FetchedBlocks<'c>>,
+        mut finish: Option<u64>,
+        output: Option<SpanName>,
+    ) -> Option<u64> {
         let mut fetches: Vec<_> = fetches.into_iter().map(LandingFetch::Landing).collect();
         while finish.is_none() || fetches.iter().any(LandingFetch::is_open) {
             let frame = self.next_frame().await;
@@ -441,6 +461,9 @@ impl<'c> ServedRead<'c> {
                 },
                 ClientFrame::LandStaged { fetch, staged, .. } => {
                     match (fetches.get_mut(fetch as usize), &self.region) {
+                        _ if output.is_some_and(|output| output.overlaps(staged)) => {
+                            Err("staged bytes: in the read's output")
+                        }
                         (Some(landing), Some(region)) => match region.staged(staged) {
                             Ok(bytes) => landing.land(bytes).await,
                             Err(_) => Err("staged bytes: past the region"),

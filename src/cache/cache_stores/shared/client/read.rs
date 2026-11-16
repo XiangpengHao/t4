@@ -10,7 +10,7 @@ use super::connection::{OwnerConnection, WaitingCall};
 use super::fetch::ClientFetch;
 use crate::PAGE_SIZE_U64;
 use crate::cache::cache_stores::shared::protocol::{
-    ClientFrame, NextStep, OwnerFrame, RegionSpan, SpanName,
+    ClientFrame, MOST_READ_BYTES, NextStep, OwnerFrame, RegionSpan, SpanName,
 };
 use crate::cache::cache_stores::{CacheStoreFetch, CacheStoreRead, FileVersionKey};
 use crate::cache::policy::{ReadIntent, ReadPlan};
@@ -36,9 +36,6 @@ enum Served {
 }
 
 impl<'c> ClientRead<'c> {
-    /// Its bytes come back in one frame (`doc/11-shared-mode.md`, decision 5), which holds 2 GiB.
-    const MOST_BYTES: u64 = 1 << 30;
-
     pub(in crate::cache::cache_stores::shared) async fn start(
         owner: std::sync::Arc<OwnerConnection>,
         path: &'c [u8],
@@ -47,7 +44,7 @@ impl<'c> ClientRead<'c> {
         range: Range<u64>,
         intent: Option<ReadIntent>,
     ) -> Result<Option<Self>> {
-        if range.end - range.start > Self::MOST_BYTES {
+        if range.end - range.start > MOST_READ_BYTES {
             return Ok(None);
         }
         let number = ReadNumber::take(std::sync::Arc::clone(&owner));

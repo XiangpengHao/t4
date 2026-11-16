@@ -206,7 +206,13 @@ decision 9).
      where it comes (GETs where none were due, a fetch or a read the
      client never started, a fetch's bytes after its commit) closes the
      connection, as a protocol error does; the owner never panics on a
-     client's frame. Before the region (step
+     client's frame (fuzzed: `fuzz/README.md`, `shared_owner`). A read
+     comes back in one frame or one span, so a client asks for 1 GiB at
+     most (`MOST_READ_BYTES`), and reads more from the remote; the owner
+     fails a longer read at once, unplanned, as its blocks and its output
+     alone would take its memory, for a version of any size a client
+     names (fixed 16 Nov 2026,
+     `a_read_longer_than_a_client_asks_fails_at_once`). Before the region (step
      4), a fetched block's bytes cross the socket twice: to the owner,
      which lands them as its own fetches' (`FetchedBlocks`), and back in
      the read's bytes.
@@ -247,7 +253,11 @@ decision 9).
      is the read's until the read ends, whatever becomes of the fetch:
      the fetch hands it over as it drops, before the read's end. A piece
      past the span, as of a GET that brings more bytes than it holds,
-     goes in a frame, for the owner to refuse at the commit. A client's
+     goes in a frame, for the owner to refuse at the commit. A piece
+     staged in its read's own output breaks the protocol: the owner would
+     copy it onto itself, undefined behavior, and an abort where debug
+     assertions check it (fixed 16 Nov 2026,
+     `a_fetch_staged_in_its_reads_output_closes_the_connection`). A client's
      fetched byte is copied once more than an owner's (into the span), in
      place of twice over the socket; landing from the client's region
      straight into a chunk at commit, which saves it, would need a
@@ -268,9 +278,11 @@ decision 9).
      no span lands its bytes in its frames.
    - **The owner trusts no shared byte it acts on.** It reads every
      field of a request from its frame, never from the region, so a
-     client changing the region garbles only its own bytes. It keeps its
-     mapping of a region until every I/O into it completes, even after
-     the client has gone.
+     client changing the region garbles only its own bytes: its reads'
+     outputs, and the pieces it stages, which the owner lands as they are
+     when it takes them, to be served to every reader of the block, as
+     decision 8 allows. It keeps its mapping of a region until every I/O
+     into it completes, even after the client has gone.
 
 6. **A client finds the owner by the first cache file's identity.**
    - **Linux:** an abstract socket, `\0t4/<dev>/<ino>` in hex, from the
@@ -709,6 +721,7 @@ session ending the last read before it takes the next's frames, 1 µs.
 | `src/cache/cache_stores/shared/protocol/address.rs` | the owner's address, by the first cache file's identity (decision 6) | yes |
 | `src/cache/cache_stores/shared/protocol/handshake.rs` | a client's hello, its descriptor by `SCM_RIGHTS`, and the owner's check (decision 6) | yes |
 | `src/cache/cache_stores/shared/protocol/region/` | the region, its spans, and the checks the owner makes of it (decision 5) | yes |
+| `src/cache/cache_stores/shared/fuzzing/` | a client the `shared_owner` fuzz target scripts frame by frame against an owner, beside a well-behaved client (decisions 5, 8) | yes |
 | `src/cache/t4_caching/tests/sharing.rs`, `processes.rs` | an owner and its clients in one process, and in real ones (build step 3) | yes |
 
 The seeded schedule corpus, replay instructions, and retained OS-test coverage

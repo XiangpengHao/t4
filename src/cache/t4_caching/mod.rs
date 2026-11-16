@@ -50,7 +50,7 @@ pub struct T4Caching {
 /// ```
 pub struct T4CachingBuilder {
     clock: crate::io::time::Clock,
-    #[cfg(all(test, feature = "shuttle"))]
+    #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
     transport: crate::cache::cache_stores::TestTransport,
     inner: Arc<dyn ObjectStore>,
     memory_capacity: Option<u64>,
@@ -73,7 +73,7 @@ impl T4CachingBuilder {
         self
     }
 
-    #[cfg(all(test, feature = "shuttle"))]
+    #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
     pub(in crate::cache) fn with_test_transport(
         mut self,
         transport: crate::cache::cache_stores::TestTransport,
@@ -204,7 +204,7 @@ impl T4CachingBuilder {
                 reads,
                 Self::OWNER_WAIT,
                 self.clock.clone(),
-                #[cfg(all(test, feature = "shuttle"))]
+                #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
                 self.transport,
             )?)
         } else {
@@ -253,7 +253,7 @@ impl T4Caching {
     pub fn builder(inner: Arc<dyn ObjectStore>) -> T4CachingBuilder {
         T4CachingBuilder {
             clock: Default::default(),
-            #[cfg(all(test, feature = "shuttle"))]
+            #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
             transport: Default::default(),
             inner,
             memory_capacity: None,
@@ -376,7 +376,7 @@ impl T4Caching {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, all(feature = "__fuzz", feature = "shuttle", t4_simulated)))]
     pub(super) fn cache_store(&self) -> Arc<dyn CacheStore> {
         Arc::clone(&self.cache_store)
     }

@@ -15,7 +15,8 @@ libc = "0.2"
 libfuzzer-sys = "0.4"
 object_store = { version = "0.13.2", default-features = false }
 pollster = "1.0"
-t4 = { path = "..", features = ["__fuzz"] }
+# `shuttle` only builds shuttle in: the library runs on it under `--cfg t4_simulated` alone.
+t4 = { path = "..", features = ["__fuzz", "shuttle"] }
 tempfile = "3"
 
 [[bin]]
@@ -38,3 +39,13 @@ path = "fuzz_targets/snapshot.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "shared_owner"
+path = "fuzz_targets/shared_owner.rs"
+test = false
+doc = false
+bench = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(t4_simulated)'] }

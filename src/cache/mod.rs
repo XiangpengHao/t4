@@ -6,6 +6,10 @@ mod read_output;
 mod storage;
 mod t4_caching;
 
+#[cfg(all(feature = "__fuzz", feature = "shuttle", t4_simulated))]
+pub use cache_stores::{
+    FuzzedHello, FuzzedPath, FuzzedRead, FuzzedSession, FuzzedSpan, FuzzedStep,
+};
 pub use t4_caching::{FileHandle, T4Caching, T4CachingBuilder};
 #[cfg(feature = "__fuzz")]
 pub use {

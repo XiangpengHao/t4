@@ -1,17 +1,20 @@
 //! The checked-in schedule corpus. Never draw scheduler seeds from entropy.
 #[cfg(feature = "shuttle")]
-use shuttle::scheduler::{PctScheduler, ReplayScheduler};
+use shuttle::scheduler::PctScheduler;
+#[cfg(all(test, feature = "shuttle"))]
+use shuttle::scheduler::ReplayScheduler;
 
 pub(crate) struct TestSchedule;
 
 impl TestSchedule {
-    #[cfg(feature = "shuttle")]
+    #[cfg(all(test, feature = "shuttle"))]
     const SEEDS: [u64; 2] = [0x57bf_0283, 0x0dc8_2a31];
     /// PCT finds every bug of this many ordering constraints with a known
     /// probability per iteration; random scheduling gives no such bound.
     #[cfg(feature = "shuttle")]
     const PCT_DEPTH: usize = 3;
 
+    #[cfg(test)]
     pub(crate) fn check(test: impl Fn() + Send + Sync + 'static) {
         #[cfg(feature = "shuttle")]
         Self::iterations(16, test);
@@ -22,6 +25,7 @@ impl TestSchedule {
     /// A test with no thread of its own: one run, inside shuttle's runtime
     /// because its primitives need one. PCT refuses to repeat a run with no
     /// concurrency, and repeating it would explore nothing.
+    #[cfg(test)]
     pub(crate) fn once(test: impl Fn() + Send + Sync + 'static) {
         #[cfg(feature = "shuttle")]
         shuttle::Runner::new(
@@ -32,7 +36,18 @@ impl TestSchedule {
         #[cfg(not(feature = "shuttle"))]
         test();
     }
-    #[cfg(feature = "shuttle")]
+
+    /// A fuzz input is one run from its own seed, so that it replays exactly.
+    #[cfg(all(feature = "shuttle", t4_simulated))]
+    pub(crate) fn fuzzed(seed: u64, test: impl Fn() + Send + Sync + 'static) {
+        shuttle::Runner::new(
+            PctScheduler::new_from_seed(seed, Self::PCT_DEPTH, 1),
+            Self::config(),
+        )
+        .run(test);
+    }
+
+    #[cfg(all(test, feature = "shuttle"))]
     pub(crate) fn iterations(iterations: usize, test: impl Fn() + Send + Sync + 'static) {
         if let Ok(schedule) = std::env::var("T4_SHUTTLE_REPLAY") {
             shuttle::Runner::new(ReplayScheduler::new_from_encoded(&schedule), Self::config())

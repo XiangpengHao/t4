@@ -24,6 +24,18 @@ fn spans_are_taken_first_fit_and_merged_when_given_back() {
 }
 
 #[test]
+fn spans_overlap_where_they_share_a_byte() {
+    let span = SpanName::new(PAGE, PAGE);
+    assert!(span.overlaps(SpanName::new(2 * PAGE - 1, 10)));
+    assert!(
+        span.overlaps(SpanName::new(0, u64::MAX)),
+        "an end past u64 saturates"
+    );
+    assert!(!span.overlaps(SpanName::new(0, PAGE)), "adjacent");
+    assert!(!span.overlaps(SpanName::new(2 * PAGE, PAGE)), "adjacent");
+}
+
+#[test]
 fn a_span_its_client_writes_is_read_by_its_owner() {
     let region = ClientRegion::make().unwrap();
     let pages = region.free_pages();
