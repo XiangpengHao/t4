@@ -25,7 +25,7 @@ bytes.
 | **Log** | `<first cache file>.log`, beside the cache files: a header, a base, then records |
 | **Base** | the index's disk half, whole, in stage 1's snapshot format: each file version with blocks on disk, each of those blocks' chunk, and the next file version id |
 | **Record** | entries appended together: its length, a CRC32C, its entries |
-| **Entry** | a path's version (path, e_tag, size, id), a block added (version id, block, chunk), or a chunk freed (chunk) |
+| **Entry** | a path's version (path, e_tag, size, id), a block added (version id, block, chunk), a chunk freed (chunk), or the clean mark a clean exit appends |
 | **Batch** | 16 blocks written to disk together, one batch at a time |
 
 ## Decisions
@@ -62,42 +62,43 @@ bytes.
 4. **No sync while the cache runs.** A process's death loses nothing it
    wrote: the kernel holds the log's appended bytes, and a direct-I/O write,
    once done, is on the drive. A kill loses the batch in flight and the
-   blocks waiting, 32 MiB at most to fetch again. About 20 bytes a block
-   written and evicted, one `write()` a batch.
+   blocks waiting, 32 MiB at most to fetch again.
 
 5. **A machine crash starts cold.** It may lose pages the kernel had not
    written, or the drive's reordered writes, so neither order of decision 3
    holds after one. The log's header holds the boot id
-   (`/proc/sys/kernel/random/boot_id`; `kern.bootsessionuuid` on macOS)
-   and a clean flag. The next cache takes the log back if it is clean, or
-   was written in this boot; else it starts cold.
+   (`/proc/sys/kernel/random/boot_id`; `kern.bootsessionuuid` on macOS).
+   The next cache takes the log back if it ends in a clean mark, or was
+   written in this boot; else it starts cold.
 
 6. **The only syncs: as the cache ends, and as the next builds.**
    - As the cache drops or shuts down, its tier closed and its cache files
-     flushed as in stage 1, it writes the log again as a base alone, flagged
-     clean, renamed into place and flushed.
+     flushed as in stage 1, it appends the adds it holds and a clean mark,
+     and flushes the log. The log isn't written again: it only grows.
    - As the next cache builds, it takes the log back, then writes it again
-     as a base alone with its own boot id, not clean, renamed into place
-     and flushed, before it writes a chunk: a clean log left behind would
-     outlive a machine crash and name chunks reused since.
+     as a base alone with its own boot id, renamed into place and flushed,
+     before it writes a chunk. This is the log's only compaction, and it
+     must be durable: the old log, ending clean, would outlive a machine
+     crash and name chunks reused since.
 
 7. **Replay checks every field, as stage 1 checks the snapshot.** The
    header must match: format, block size, chunks per file, and each cache
    file, in order, by device, inode and creation time. An add must find its
-   chunk free. A free of a chunk already free, or a path stated again,
-   changes nothing: compaction can race them (decision 8). A record cut
-   short, or failing its CRC, ends the log there, as a kill can cut the
-   last. An entry that fails a check starts the cache cold: a cold start
-   costs refills, never wrong bytes.
+   chunk free, a free its chunk held, a path a version id never given
+   before. No base is written while the cache runs (decision 8), so no
+   entry races one. A record cut short, or failing its CRC, ends the log
+   there, as a kill can cut the last. An entry that fails a check starts
+   the cache cold: a cold start costs refills, never wrong bytes.
 
-8. **Compaction writes the log again whole.** Once past twice its base, the
-   writer writes the log again as a base alone, between two batches, so no
-   add falls between the base and the next record; a free or a path found
-   as the base is captured lands on either side of it, which replay
-   allows. No sync: a machine crash before the next shutdown finds the log
-   not clean anyway, and a kill finds either file whole. It costs a capture
-   and a write, as a shutdown at rest: 0.7 ms at 20 GiB, 9 ms at 256 GiB
-   (Measured).
+8. **The log grows until the next build** (the user, 16 Nov 2026: keep
+   it simple). Nothing compacts it while the cache runs; the next build
+   does (decision 6). It grows about 25 bytes a MiB written to disk: an
+   add, a later free, a share of its record and its path. That is 5 MB
+   for a heavy desktop session that writes its 20 GiB tier ten times
+   over, and 6 GB for a server filling at 100 MB/s for a month. The next
+   build replays all of it, after a clean exit as after a kill: if an
+   entry costs what taking back a base block does (70 to 90 ns,
+   Measured), some 30 ms and 40 s.
 
 9. **Disk writes leave the read path.** Today a read that fills a block
    returns once the block is on disk (`cache_landed`, in
@@ -148,6 +149,16 @@ build with the snapshot removed is the baseline.
   2026). It survives a machine crash too, but costs a sync each time and a
   reserve of free chunks: a full tier evicts only when an allocation finds
   none, so with freed chunks held back it would evict for nothing.
+- **Compaction while the cache runs,** writing the log again as a base
+  once it passes twice its base's size. It bounds the log and the next
+  build's replay, but the base is captured while promotions and path
+  changes go on, so replay must let a free find its chunk free already,
+  and a path come twice. A log that only grows, compacted as the next
+  cache builds, is simpler (the user, 16 Nov 2026), and grows slowly
+  (decision 8).
+- **Writing the log again as a base at a clean exit.** Its next build
+  does it anyway; a clean mark appended does what a clean flag in a
+  rewritten header would.
 - **A log of adds alone, the next record confirming the batch before it.**
   A freed chunk keeps its bytes until written again, so a free needs no
   entry; but a batch's adds must then go before its writes and count only
@@ -163,6 +174,11 @@ build with the snapshot removed is the baseline.
 
 - **A 64-bit hash of each block in its add,** if laptops losing power
   make cold starts costly (Rejected).
+- **A bound on the log while the cache runs,** if a long-lived server's
+  log grows too large or its replay at the next build too slow (decision
+  8).
+  Either compaction (Rejected), or a cap past which the log is removed
+  and the process keeps nothing across a kill, as in stage 1.
 
 ## Build order
 
