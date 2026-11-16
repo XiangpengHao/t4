@@ -1,25 +1,16 @@
-//! [`FixedPlacementPolicy`]: a placement policy that places every fetched
-//! block alike, in memory, on disk or nowhere, so that a benchmark's pass
-//! measures one tier's hits alone, or t4 with no tier at all. t4's own bench
-//! uses it, and so does Vortex's (`doc/09-vortex-integration.md`, decision
-//! 7).
-
 use super::{
     Admit, BlockKey, BlockRead, ChunkId, ClockPolicy, DiskHit, MemoryVictim, PlacementPolicy, Tier,
     TierSizes,
 };
 
-/// A [`ClockPolicy`] that admits every fetched block as one [`Admit`] says,
-/// and never moves a disk hit to memory. Once its tier holds the working
-/// set, every read is a hit there: all memory hits, or all disk hits. With
-/// [`Admit::Discard`], every read goes to the remote, through t4.
+/// Places every fetched block as one [`Admit`] says, and never moves a disk hit to memory:
+/// for benchmarks that measure one tier alone.
 pub struct FixedPlacementPolicy {
     clock: ClockPolicy,
     admit: Admit,
 }
 
 impl FixedPlacementPolicy {
-    /// Places every block as `admit` says, over tiers of `sizes`.
     pub fn new(sizes: TierSizes, admit: Admit) -> Self {
         Self {
             clock: ClockPolicy::new(sizes.memory_chunks(), sizes.disk_chunks()),

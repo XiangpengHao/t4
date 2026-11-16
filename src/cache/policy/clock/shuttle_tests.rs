@@ -1,6 +1,3 @@
-//! The CLOCK under shuttle: picks racing each other, hits and admits on one
-//! tier's words.
-
 use std::num::NonZeroU32;
 
 use super::ClockPolicy;
@@ -20,7 +17,6 @@ fn admit(policy: &ClockPolicy, tier: Tier, chunk: u32) {
     policy.on_admit(tier, ChunkId::new(chunk), block());
 }
 
-/// Up to `count` memory victims: their chunk numbers.
 fn pick(policy: &ClockPolicy, count: usize) -> Vec<u32> {
     policy
         .pick_memory_victims(count)
@@ -29,10 +25,7 @@ fn pick(policy: &ClockPolicy, count: usize) -> Vec<u32> {
         .collect()
 }
 
-/// Two pickers, a hitter and an admitter on a tier of two words, one picker
-/// reusing a victim's chunk for another block, as the cache does: each
-/// chunk is picked once for each admission, by the race or by a drain after
-/// it.
+/// Picker 0 reuses its first victim's chunk for another block, as the cache does.
 #[test]
 fn every_admission_is_picked_once() {
     shuttle::check_pct(
@@ -79,7 +72,6 @@ fn every_admission_is_picked_once() {
                 picked.extend(victims);
                 admitted.extend(reused);
             }
-            // Alone, two rotations take whatever is left.
             picked.extend(pick(&policy, 10));
             picked.sort_unstable();
             admitted.sort_unstable();
@@ -90,8 +82,6 @@ fn every_admission_is_picked_once() {
     );
 }
 
-/// Two first hits on a disk block racing: one of them is its second, and
-/// moves it to memory.
 #[test]
 fn of_two_racing_first_disk_hits_one_promotes() {
     shuttle::check_pct(

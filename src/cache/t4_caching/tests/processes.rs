@@ -1,11 +1,3 @@
-//! A cache shared by real processes (`doc/11-shared-mode.md`, build step
-//! 3): the test binary runs itself as children ([`ChildProcess`]), each
-//! playing the role its environment names, and each process tells the
-//! others what it did through marker files in a directory they share
-//! ([`Markers`]). What only processes show: the kernel releasing a killed
-//! owner's lock, a killed client's connection closing, and many processes
-//! starting at once.
-
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -13,31 +5,21 @@ use std::time::{Duration, Instant};
 
 use super::*;
 
-/// The most a test waits for a child's marker, its read, or its exit.
 const PATIENCE: Duration = Duration::from_secs(10);
 
-/// The most a child waits for its parent, which may have died, before it
-/// exits: no test leaves a process behind for long.
+/// The parent may have died: no test leaves a process behind for long.
 const CHILD_PATIENCE: Duration = Duration::from_secs(30);
 
-/// A child process of the test binary, playing `role` over a directory
-/// its parent shares with it ([`Self::spawn`]): killed, and reaped, as it
-/// drops, so that a failed test leaves none behind.
 struct ChildProcess(Child);
 
 impl ChildProcess {
-    /// The environment variables that name a child's role and directory.
     const ROLE: &str = "T4_SHARED_TEST_ROLE";
     const DIR: &str = "T4_SHARED_TEST_DIR";
 
-    /// The test binary run as a child that plays `role` over `dir`: only
-    /// [`a_child_process_plays_its_role`] runs in it.
     fn spawn(role: &str, dir: &std::path::Path) -> Self {
         Self(Self::command(role, dir).spawn().unwrap())
     }
 
-    /// As [`Self::spawn`], with `temp_dir` the child's `TMPDIR`, as a shell
-    /// that sets its own gives it.
     fn spawn_with_temp_dir(role: &str, dir: &std::path::Path, temp_dir: &std::path::Path) -> Self {
         let mut command = Self::command(role, dir);
         Self(command.env("TMPDIR", temp_dir).spawn().unwrap())
@@ -55,13 +37,11 @@ impl ChildProcess {
         command
     }
 
-    /// Kills the child, as `SIGKILL` does, and waits for it to end.
     fn kill(&mut self) {
         self.0.kill().unwrap();
         self.0.wait().unwrap();
     }
 
-    /// Whether the child exited successfully, once it exits.
     fn exited_ok(&mut self) -> bool {
         let deadline = Instant::now() + PATIENCE;
         loop {
@@ -81,8 +61,7 @@ impl Drop for ChildProcess {
     }
 }
 
-/// What processes say to each other: files in the directory they share,
-/// each made whole at once (written aside, then renamed), and waited for.
+/// Written aside, then renamed, so no process reads a marker half written.
 struct Markers {
     dir: PathBuf,
 }
@@ -94,15 +73,12 @@ impl Markers {
         }
     }
 
-    /// Says `what`, as marker `name`.
     fn set(&self, name: &str, what: &str) {
         let aside = self.dir.join(format!("{name}.writing"));
         std::fs::write(&aside, what).unwrap();
         std::fs::rename(aside, self.dir.join(name)).unwrap();
     }
 
-    /// What marker `name` says, once set; `None` if it isn't within
-    /// `patience`.
     fn wait_for(&self, name: &str, patience: Duration) -> Option<String> {
         let deadline = Instant::now() + patience;
         loop {
@@ -116,16 +92,12 @@ impl Markers {
         }
     }
 
-    /// What marker `name` says, which a test waits [`PATIENCE`] for.
     fn said(&self, name: &str) -> String {
         self.wait_for(name, PATIENCE)
             .unwrap_or_else(|| panic!("marker {name} is set"))
     }
 }
 
-/// A process's part in a shared cache: a cache built for sharing on the
-/// directory's cache file, over a store of its own that holds the file
-/// every process reads, under the same e_tag.
 struct SharedProcess {
     cache: T4Caching,
     store: Arc<CountingStore>,
@@ -135,7 +107,6 @@ struct SharedProcess {
 impl SharedProcess {
     const SIZE: u64 = 2 * MIB;
 
-    /// The bytes of the file every process reads.
     fn data() -> Bytes {
         file_bytes(Self::SIZE, 31)
     }
@@ -144,7 +115,6 @@ impl SharedProcess {
         Self::start_with(dir, |builder| builder)
     }
 
-    /// A process whose fetched blocks go to disk, and stay there.
     fn start_on_disk(dir: &std::path::Path) -> Self {
         Self::start_with(dir, |builder| {
             builder.with_placement_policy(|sizes| {
@@ -153,7 +123,6 @@ impl SharedProcess {
         })
     }
 
-    /// A process whose cache, built for sharing, `customize` sets up too.
     fn start_with(
         dir: &std::path::Path,
         customize: impl FnOnce(T4CachingBuilder) -> T4CachingBuilder,
@@ -174,8 +143,6 @@ impl SharedProcess {
         block_on(file.read(range, None)).unwrap()
     }
 
-    /// `range` read on a thread of its own: its bytes come through the
-    /// receiver returned.
     fn read_on_thread(&self, range: Range<u64>) -> mpsc::Receiver<Bytes> {
         let (done, read) = mpsc::channel();
         let file = self.cache.open_listed(self.meta.clone());
@@ -189,7 +156,6 @@ impl SharedProcess {
         self.cache.cache_store().owned().is_some()
     }
 
-    /// The bytes the process's store sent since last asked.
     fn fetched_bytes(&self) -> u64 {
         self.store
             .take_asked()
@@ -202,8 +168,7 @@ impl SharedProcess {
     }
 }
 
-/// A child process's part, when the environment names one; nothing
-/// otherwise, as in every run of the tests.
+/// A no-op unless the environment names a role, as in every normal test run.
 #[test]
 fn a_child_process_plays_its_role() {
     let Ok(role) = std::env::var(ChildProcess::ROLE) else {
@@ -215,25 +180,19 @@ fn a_child_process_plays_its_role() {
         "shut-down-owner" => SharedProcess::start_on_disk(&dir),
         _ => SharedProcess::start(&dir),
     };
-    // A gate held till the process ends: the GET it holds is never
-    // answered.
+    // Held till the process ends, so the gated GET is never answered.
     let mut held = None;
     match role.as_str() {
-        // Owns the cache, until it is killed.
         "owner" => {
             assert!(process.owns());
             markers.set("owning", "");
         }
-        // Owns the cache, reads the file to disk, and shuts the cache down,
-        // as an app's exit hook does; then is killed, the cache never
-        // dropped, as the app's process ends around it.
         "shut-down-owner" => {
             assert!(process.owns());
             assert_eq!(process.read(0..SharedProcess::SIZE), SharedProcess::data());
             process.cache.shut_down().unwrap();
             markers.set("shut-down", "");
         }
-        // Reads through its owner, its GET never answered, until killed.
         "stalled-client" => {
             assert!(!process.owns());
             held = Some(process.store.gate_next_get());
@@ -241,8 +200,6 @@ fn a_child_process_plays_its_role() {
             wait_until(|| process.store.gets_out_now() == 1, "its GET goes out");
             markers.set("get-out", "");
         }
-        // Says whether it owns, reads, says what its store sent, and
-        // stays till its parent says the test is done.
         reader => {
             let index = reader.strip_prefix("reader-").unwrap();
             let owns = if process.owns() { "owner" } else { "client" };
@@ -260,10 +217,6 @@ fn a_child_process_plays_its_role() {
     drop(held);
 }
 
-/// The owner killed while its client's read is in flight: the read
-/// returns the right bytes, from the client's store, and a later read
-/// makes the client the owner, as the kernel released the dead owner's
-/// lock.
 #[test]
 fn an_owner_killed_mid_read_leaves_its_client_the_cache() {
     let dir = tempfile::tempdir().unwrap();
@@ -294,10 +247,6 @@ fn an_owner_killed_mid_read_leaves_its_client_the_cache() {
     assert_eq!(client.fetched_bytes(), 0, "the read that took over cached");
 }
 
-/// An owner shut down, then killed, its cache never dropped, as an app's
-/// exit hook and its exit are (`doc/10-spiral-integration.md`, decision 7):
-/// the next cache on its files takes back its disk tier, and reads what it
-/// held with nothing from its store.
 #[test]
 fn an_owner_shut_down_then_killed_leaves_its_disk_tier() {
     let dir = tempfile::tempdir().unwrap();
@@ -316,9 +265,7 @@ fn an_owner_shut_down_then_killed_leaves_its_disk_tier() {
     assert_eq!(next.fetched_bytes(), 0, "the killed owner's disk tier");
 }
 
-/// An owner whose `TMPDIR` isn't its client's, as a terminal's in a shell
-/// that sets its own isn't a desktop app's: the client still finds it, and
-/// reads through it (decision 6).
+/// As a terminal's shell that sets its own `TMPDIR` and a desktop app's differ.
 #[test]
 fn a_client_finds_an_owner_of_another_tmpdir() {
     let dir = tempfile::tempdir().unwrap();
@@ -332,9 +279,6 @@ fn a_client_finds_an_owner_of_another_tmpdir() {
     assert_eq!(client.read(0..SharedProcess::SIZE), SharedProcess::data());
 }
 
-/// A client killed while it holds a claim, its GET out: its connection
-/// closes, the owner abandons its claim, and the owner's read waiting on
-/// it fetches the block itself.
 #[test]
 fn a_client_killed_holding_a_claim_hands_it_to_its_waiter() {
     let dir = tempfile::tempdir().unwrap();
@@ -358,9 +302,6 @@ fn a_client_killed_holding_a_claim_hands_it_to_its_waiter() {
     assert_eq!(owner.fetched_bytes(), MIB, "the owner's own GET");
 }
 
-/// Eight processes started at once on fresh cache files: one owns, the
-/// others read through it, each reads the file right, and together their
-/// stores sent the file once, no block fetched twice across processes.
 /// The default read policy races nothing here (no footer, no timer).
 #[test]
 fn eight_processes_starting_at_once_fetch_each_block_once() {
