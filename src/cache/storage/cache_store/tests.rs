@@ -55,12 +55,15 @@ fn read_through(
         let fetched = &data[fetch.start as usize..fetch.end as usize];
         block_on(cache.take_fetched(&mut read, fetch.clone(), fetched)).unwrap();
     }
-    cache.pending.wait_for_idle();
+    cache.tiers.pending.wait_for_idle();
     (read.into_bytes().unwrap().to_vec(), fetches)
 }
 
 fn location(cache: &ObjectCache, file: &CacheableFile<'_>, index: u32) -> Option<Location> {
-    cache.blocks.get(BlockKey::new(file.version().id(), index))
+    cache
+        .tiers
+        .blocks
+        .get(BlockKey::new(file.version().id(), index))
 }
 
 fn memory_chunk(cache: &ObjectCache, file: &CacheableFile<'_>, index: u32) -> ChunkId {
@@ -107,12 +110,12 @@ fn the_default_policy_streams_blocks_through_both_tiers() {
             let start = index * MIB;
             let (out, _) = read_through(&cache, &file, &data, start..start + MIB);
             assert_eq!(out, data[start as usize..(start + MIB) as usize]);
-            if cache.blocks.get(key(&file, index as u32)).is_none() {
+            if cache.tiers.blocks.get(key(&file, index as u32)).is_none() {
                 read_through(&cache, &file, &data, start..start + MIB);
             }
         }
-        assert_eq!(cache.memory.free_count(), 0);
-        assert_eq!(cache.disk.chunks().free_count(), 0);
+        assert_eq!(cache.tiers.memory.free_count(), 0);
+        assert_eq!(cache.tiers.disk.chunks().free_count(), 0);
         memory_chunk(&cache, &file, 9);
         let (out, _) = read_through(&cache, &file, &data, 0..size);
         assert_eq!(out, data, "every read right, wherever its blocks were");
@@ -132,7 +135,7 @@ fn a_remote_read_fetches_whole_blocks_and_then_hits() {
         let (out, fetches) = read_through(&cache, &file, &data, range.clone());
         assert_eq!(fetches, [0..size], "all three blocks in one GET");
         assert_eq!(out, data[100..2 * MIB as usize + 10]);
-        assert_eq!(cache.memory.free_count(), 1);
+        assert_eq!(cache.tiers.memory.free_count(), 1);
 
         let (out, fetches) = read_through(&cache, &file, &data, range);
         assert!(fetches.is_empty());
@@ -183,6 +186,7 @@ fn the_policy_hears_each_block_where_it_is() {
         let in_memory = memory_chunk(&cache, &file, 0);
         assert!(
             cache
+                .tiers
                 .pending
                 .enqueue(memory_chunk(&cache, &file, 1), key(&file, 1))
         );
@@ -220,7 +224,7 @@ fn concurrent_reads_of_one_block_fetch_it_once() {
         }
         let fetches: Vec<_> = fetched.iter().flat_map(|(_, fetches)| fetches).collect();
         assert_eq!(fetches, [&(0..MIB)], "one fetch");
-        assert_eq!(cache.memory.free_count(), THREADS as u32 - 1);
+        assert_eq!(cache.tiers.memory.free_count(), THREADS as u32 - 1);
         cache.check_at_rest().unwrap();
     });
 }
@@ -235,13 +239,21 @@ fn a_stale_entry_reads_as_remote() {
         let chunk = memory_chunk(&cache, &old, 0);
 
         // Evicted: closed, but its entry not yet dropped.
-        assert!(cache.memory.pin_for_eviction(chunk).unwrap().unpublish());
+        assert!(
+            cache
+                .tiers
+                .memory
+                .pin_for_eviction(chunk)
+                .unwrap()
+                .unpublish()
+        );
         let (_, fetches) = read_through(&cache, &old, &data, 0..MIB);
         assert_eq!(fetches, [0..MIB]);
 
         // The chunk reused for another file's block, a read still holding the old entry.
         assert!(
             cache
+                .tiers
                 .blocks
                 .remove_if(key(&old, 0), Location::Memory(chunk))
         );
@@ -265,13 +277,20 @@ fn an_evicted_block_reads_as_remote_and_its_chunk_goes_free() {
         let chunk = memory_chunk(&cache, &file, 0);
 
         // A read in flight keeps the chunk, not the block.
-        let reader = cache.memory.read(chunk, key(&file, 0));
-        assert!(cache.evict_from_memory(chunk));
-        assert!(!cache.evict_from_memory(chunk), "one eviction of a chunk");
+        let reader = cache.tiers.memory.read(chunk, key(&file, 0));
+        assert!(cache.tiers.evict_from_memory(chunk));
+        assert!(
+            !cache.tiers.evict_from_memory(chunk),
+            "one eviction of a chunk"
+        );
         assert_eq!(location(&cache, &file, 0), None);
-        assert_eq!(cache.memory.free_count(), 0, "the read is still in it");
+        assert_eq!(
+            cache.tiers.memory.free_count(),
+            0,
+            "the read is still in it"
+        );
         drop(reader);
-        assert_eq!(cache.memory.free_count(), 1);
+        assert_eq!(cache.tiers.memory.free_count(), 1);
 
         let (out, fetches) = read_through(&cache, &file, &data, 0..MIB);
         assert_eq!(fetches, [0..MIB]);
@@ -289,12 +308,12 @@ fn blocks_moved_to_disk_read_back_from_disk() {
         read_through(&cache, &file, &data, 0..size);
         for index in 0..3 {
             let chunk = memory_chunk(&cache, &file, index);
-            assert!(cache.pending.enqueue(chunk, key(&file, index)));
+            assert!(cache.tiers.pending.enqueue(chunk, key(&file, index)));
             cache.wait_for_disk_writes();
             disk_chunk(&cache, &file, index);
         }
-        assert_eq!(cache.memory.free_count(), 4);
-        assert_eq!(cache.disk.chunks().free_count(), 1);
+        assert_eq!(cache.tiers.memory.free_count(), 4);
+        assert_eq!(cache.tiers.disk.chunks().free_count(), 1);
 
         for range in [0..size, 5000..5001, 4095..MIB + 4097, 2 * MIB + 10..size] {
             let (out, fetches) = read_through(&cache, &file, &data, range.clone());
@@ -340,7 +359,7 @@ fn a_dropped_victim_leaves_the_cache() {
         read_through(&cache, &file, &data, MIB..2 * MIB);
         assert_eq!(location(&cache, &file, 0), None);
         memory_chunk(&cache, &file, 1);
-        assert_eq!(cache.disk.chunks().free_count(), 1, "nothing written");
+        assert_eq!(cache.tiers.disk.chunks().free_count(), 1, "nothing written");
     });
 }
 
@@ -377,7 +396,7 @@ fn a_block_admitted_to_disk_goes_straight_there() {
         let file = cache.resolve(b"a", Some("v1"), size).unwrap();
         read_through(&cache, &file, &data, 0..size);
         disk_chunk(&cache, &file, 0);
-        assert_eq!(cache.memory.free_count(), 1, "memory untouched");
+        assert_eq!(cache.tiers.memory.free_count(), 1, "memory untouched");
         let (out, fetches) = read_through(&cache, &file, &data, 3..size - 3);
         assert!(fetches.is_empty());
         assert_eq!(out, data[3..size as usize - 3]);
@@ -397,8 +416,8 @@ fn a_discarded_block_is_fetched_every_time() {
             assert_eq!(out, data);
         }
         assert_eq!(location(&cache, &file, 0), None);
-        assert_eq!(cache.memory.free_count(), 1);
-        assert_eq!(cache.disk.chunks().free_count(), 1);
+        assert_eq!(cache.tiers.memory.free_count(), 1);
+        assert_eq!(cache.tiers.disk.chunks().free_count(), 1);
     });
 }
 
@@ -419,7 +438,7 @@ fn a_promoted_block_moves_to_memory() {
         assert_eq!(out, data[5000..6000]);
         let in_memory = memory_chunk(&cache, &file, 0);
         assert_eq!(
-            cache.disk.chunks().free_count(),
+            cache.tiers.disk.chunks().free_count(),
             1,
             "the disk chunk went free"
         );
@@ -448,7 +467,7 @@ fn a_promotion_with_no_room_reads_from_disk() {
         read_through(&cache, &file, &data, MIB..2 * MIB);
         // A read in flight keeps memory's one chunk, which eviction can't free.
         let in_memory = memory_chunk(&cache, &file, 1);
-        let held = cache.memory.read(in_memory, key(&file, 1)).unwrap();
+        let held = cache.tiers.memory.read(in_memory, key(&file, 1)).unwrap();
 
         policy.set_victim_action(VictimAction::Drop);
         policy.set_disk_hit(DiskHit::Promote);
@@ -471,7 +490,12 @@ fn a_victim_kept_for_want_of_disk_goes_back_to_the_policy() {
         read_through(&cache, &file, &data, 0..MIB);
         // A read in flight keeps the disk's one chunk, which eviction can't free.
         let on_disk = disk_chunk(&cache, &file, 0);
-        let held = cache.disk.chunks().read(on_disk, key(&file, 0)).unwrap();
+        let held = cache
+            .tiers
+            .disk
+            .chunks()
+            .read(on_disk, key(&file, 0))
+            .unwrap();
         policy.set_admit(Admit::Memory);
         read_through(&cache, &file, &data, MIB..2 * MIB);
         let in_memory = memory_chunk(&cache, &file, 1);
@@ -493,11 +517,11 @@ fn a_free_chunk_has_no_block_to_move_or_evict() {
         let (_dir, cache, _policy) = cache(1, 1);
         let free = ChunkId::new(0);
         let file = cache.resolve(b"a", Some("v1"), MIB).unwrap();
-        assert!(cache.pending.enqueue(free, key(&file, 0)));
+        assert!(cache.tiers.pending.enqueue(free, key(&file, 0)));
         cache.wait_for_disk_writes();
-        assert!(!cache.evict_from_memory(free));
-        assert!(!cache.evict_from_disk(free));
-        assert_eq!(cache.disk.chunks().free_count(), 1);
+        assert!(!cache.tiers.evict_from_memory(free));
+        assert!(!cache.tiers.evict_from_disk(free));
+        assert_eq!(cache.tiers.disk.chunks().free_count(), 1);
     });
 }
 
@@ -511,10 +535,13 @@ fn a_block_evicted_from_disk_reads_as_remote_and_its_chunk_goes_free() {
         read_through(&cache, &file, &data, 0..MIB);
         let on_disk = disk_chunk(&cache, &file, 0);
 
-        assert!(cache.evict_from_disk(on_disk));
-        assert!(!cache.evict_from_disk(on_disk), "one eviction of a chunk");
+        assert!(cache.tiers.evict_from_disk(on_disk));
+        assert!(
+            !cache.tiers.evict_from_disk(on_disk),
+            "one eviction of a chunk"
+        );
         assert_eq!(location(&cache, &file, 0), None);
-        assert_eq!(cache.disk.chunks().free_count(), 1);
+        assert_eq!(cache.tiers.disk.chunks().free_count(), 1);
         let (out, fetches) = read_through(&cache, &file, &data, 0..MIB);
         assert_eq!(fetches, [0..MIB]);
         assert_eq!(out, data);
@@ -544,7 +571,7 @@ fn the_check_at_rest_finds_held_free_and_unnamed_chunks() {
         let chunk = memory_chunk(&cache, &file, 0);
         assert_eq!(cache.check_at_rest(), Ok(vec![(Tier::Memory, chunk)]));
 
-        let reader = cache.memory.read(chunk, key(&file, 0)).unwrap();
+        let reader = cache.tiers.memory.read(chunk, key(&file, 0)).unwrap();
         let held = cache.check_at_rest().unwrap_err();
         assert!(held.contains("is held"), "{held}");
         // Evicted, and its entry not yet dropped.
@@ -554,12 +581,20 @@ fn the_check_at_rest_finds_held_free_and_unnamed_chunks() {
         assert!(named.contains("which holds None"), "{named}");
         assert!(
             cache
+                .tiers
                 .blocks
                 .remove_if(key(&file, 0), Location::Memory(chunk))
         );
         assert_eq!(cache.check_at_rest(), Ok(vec![]));
 
-        drop(cache.memory.allocate().unwrap().publish(key(&file, 0)));
+        drop(
+            cache
+                .tiers
+                .memory
+                .allocate()
+                .unwrap()
+                .publish(key(&file, 0)),
+        );
         let unnamed = cache.check_at_rest().unwrap_err();
         assert!(unnamed.contains("which no entry names"), "{unnamed}");
     });
@@ -619,7 +654,7 @@ fn a_fetch_cut_short_caches_nothing() {
         block_on(blocks.land(&data[..MIB as usize / 2])).unwrap();
         drop(blocks);
         assert!(location(&cache, &file, 0).is_none());
-        assert_eq!(cache.memory.free_count(), 1);
+        assert_eq!(cache.tiers.memory.free_count(), 1);
         cache.check_at_rest().unwrap();
     });
 }
@@ -713,7 +748,7 @@ fn a_racing_read_joins_a_fetch_in_flight() {
         );
         block_on(cache.take_fetched(&mut first, 0..MIB, &data)).unwrap();
         assert_eq!(fetch.requests(), 0);
-        assert_eq!(cache.memory.free_count(), 1, "one copy cached");
+        assert_eq!(cache.tiers.memory.free_count(), 1, "one copy cached");
         assert_eq!(first.into_bytes().unwrap(), data);
         assert_eq!(racing.into_bytes().unwrap(), data);
         cache.check_at_rest().unwrap();
@@ -804,7 +839,7 @@ fn a_drive_short_of_room_takes_no_block_and_evicts_none() {
             let (cache, _policy) = on_demand_cache(&dir, 4, 0);
             let file = cache.resolve(b"a", Some("v1"), 4 * MIB).unwrap();
             read_through(&cache, &file, &a, 0..4 * MIB);
-            assert_eq!(cache.disk.chunks().free_count(), 0);
+            assert_eq!(cache.tiers.disk.chunks().free_count(), 0);
         }
         let (cache, policy) = on_demand_cache(&dir, 4, u64::MAX);
         let kept = policy.queued(Tier::Disk);

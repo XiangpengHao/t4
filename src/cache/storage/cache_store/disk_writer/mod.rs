@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::task::{Context, Poll, Wake, Waker};
 
-use super::{CacheState, ObjectCache};
+use super::Tiers;
+use crate::cache::policy::Tier;
 use crate::cache::{BlockKey, ChunkId};
 use crate::io::sync::thread::{self, JoinHandle, Thread};
 use crate::io::sync::{Arc, Condvar, Mutex};
@@ -86,53 +87,18 @@ impl PendingDisk {
 }
 
 pub(super) struct DiskWriter {
-    pending: Arc<PendingDisk>,
+    tiers: Arc<Tiers>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl DiskWriter {
-    pub(super) fn start(state: Arc<CacheState>) -> std::io::Result<Self> {
-        let pending = Arc::clone(&state.pending);
+    pub(super) fn start(tiers: Arc<Tiers>) -> std::io::Result<Self> {
+        let writing = Arc::clone(&tiers);
         let thread = thread::Builder::new()
             .name("t4-disk-writer".into())
-            .spawn(move || {
-                let cache = ObjectCache {
-                    clock: Default::default(),
-                    state,
-                    writer: None,
-                };
-                let wake = Waker::from(std::sync::Arc::new(WriterWake(thread::current())));
-                while let Some(batch) = cache.pending.take_batch() {
-                    let mut flush = std::pin::pin!(cache.write_disk_batch(&batch));
-                    let mut context = Context::from_waker(&wake);
-                    let retry = loop {
-                        match flush.as_mut().poll(&mut context) {
-                            Poll::Ready(retry) => break retry,
-                            Poll::Pending => thread::park(),
-                        }
-                    };
-                    cache.pending.release(&batch);
-                    for (chunk, block) in retry {
-                        if cache.memory.read(chunk, block).is_some() {
-                            cache.placement.on_admit(
-                                crate::cache::policy::Tier::Memory,
-                                chunk,
-                                block,
-                            );
-                        }
-                    }
-                    cache.pending.completed();
-                }
-                for (chunk, block) in cache.pending.abandon() {
-                    if cache.memory.read(chunk, block).is_some() {
-                        cache
-                            .placement
-                            .on_admit(crate::cache::policy::Tier::Memory, chunk, block);
-                    }
-                }
-            })?;
+            .spawn(move || writing.write_batches_until_stopped())?;
         Ok(Self {
-            pending,
+            tiers,
             thread: Mutex::new(Some(thread)),
         })
     }
@@ -141,12 +107,44 @@ impl DiskWriter {
         // Keep the handle locked through join: concurrent shutdowns must all wait for the writer.
         let mut thread = self.thread.lock().unwrap();
         {
-            let mut queue = self.pending.queue.lock().unwrap();
+            let pending = &self.tiers.pending;
+            let mut queue = pending.queue.lock().unwrap();
             queue.stopping = true;
-            self.pending.changed.notify_all();
+            pending.changed.notify_all();
         }
         if let Some(thread) = thread.take() {
             thread.join().expect("the disk writer completes");
+        }
+    }
+}
+
+impl Tiers {
+    fn write_batches_until_stopped(&self) {
+        let wake = Waker::from(std::sync::Arc::new(WriterWake(thread::current())));
+        while let Some(batch) = self.pending.take_batch() {
+            let mut flush = std::pin::pin!(self.write_disk_batch(&batch));
+            let mut context = Context::from_waker(&wake);
+            let retry = loop {
+                match flush.as_mut().poll(&mut context) {
+                    Poll::Ready(retry) => break retry,
+                    Poll::Pending => thread::park(),
+                }
+            };
+            self.pending.release(&batch);
+            for (chunk, block) in retry {
+                self.keep_in_memory(chunk, block);
+            }
+            self.pending.completed();
+        }
+        for (chunk, block) in self.pending.abandon() {
+            self.keep_in_memory(chunk, block);
+        }
+    }
+
+    /// The policy forgot the chunk when it picked it as a victim: give it back.
+    fn keep_in_memory(&self, chunk: ChunkId, block: BlockKey) {
+        if self.memory.read(chunk, block).is_some() {
+            self.placement.on_admit(Tier::Memory, chunk, block);
         }
     }
 }

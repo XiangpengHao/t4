@@ -9,15 +9,9 @@ use crate::cache::storage::memory::{MemoryChunkReader, MemoryChunkWriter};
 use crate::cache::{BlockKey, ChunkId};
 use crate::io::error::Result;
 
-use super::ObjectCache;
+use super::{ObjectCache, Tiers};
 
 impl ObjectCache {
-    /// Batched: one eviction makes room for the insertions after it too.
-    const EVICTION_BATCH: usize = 8;
-
-    /// More than one: a victim's chunk goes free only once its readers have left.
-    const EVICTION_ROUNDS: usize = 4;
-
     /// If the block left disk meanwhile, the memory copy still serves the caller, then goes back.
     pub(super) async fn promote<'c>(
         &'c self,
@@ -25,7 +19,8 @@ impl ObjectCache {
         block: &PlannedBlock,
         reads: &dyn ReadPolicy,
     ) -> Result<Promotion<'c>> {
-        let Some(writer) = self.allocate_memory().await? else {
+        let tiers = &*self.tiers;
+        let Some(writer) = tiers.allocate_memory().await? else {
             return Ok(Promotion::NoRoom(on_disk));
         };
         let range = block.object_range();
@@ -33,7 +28,7 @@ impl ObjectCache {
             .ok()
             .and_then(|len| NonZeroU32::new(len.next_multiple_of(PAGE_SIZE_U32)))
             .expect("a block is a chunk's bytes or fewer, one or more");
-        let (buffer, lent) = writer.lend_for_read(&self.memory, pages);
+        let (buffer, lent) = writer.lend_for_read(&tiers.memory, pages);
         let report = IoReport::start(
             reads,
             Io::DiskRead {
@@ -43,7 +38,7 @@ impl ObjectCache {
             &self.clock,
         );
         let filled = report
-            .awaiting(self.disk.read_chunk_start(&on_disk, buffer))
+            .awaiting(tiers.disk.read_chunk_start(&on_disk, buffer))
             .await?;
         let block = on_disk.block();
         let in_memory = lent.publish(filled, block);
@@ -51,19 +46,28 @@ impl ObjectCache {
             Location::Disk(on_disk.chunk()),
             Location::Memory(in_memory.chunk()),
         );
-        let mut changes = self.disk.log().map(|log| log.changes());
-        if self.blocks.replace_if(block, from, to) {
+        let mut changes = tiers.disk.log().map(|log| log.changes());
+        if tiers.blocks.replace_if(block, from, to) {
             if let Some(log) = &mut changes {
                 log.free(on_disk.chunk());
             }
             on_disk.unpublish();
-            self.placement
+            tiers
+                .placement
                 .on_admit(Tier::Memory, in_memory.chunk(), block);
         } else {
             in_memory.unpublish();
         }
         Ok(Promotion::InMemory(in_memory))
     }
+}
+
+impl Tiers {
+    /// Batched: one eviction makes room for the insertions after it too.
+    const EVICTION_BATCH: usize = 8;
+
+    /// More than one: a victim's chunk goes free only once its readers have left.
+    const EVICTION_ROUNDS: usize = 4;
 
     pub(super) async fn allocate_memory(&self) -> Result<Option<MemoryChunkWriter<'_>>> {
         for _ in 0..Self::EVICTION_ROUNDS {

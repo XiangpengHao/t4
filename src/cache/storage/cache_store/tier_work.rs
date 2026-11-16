@@ -37,7 +37,7 @@ impl ObjectCache {
         let into = read
             .output
             .lend(start + u64::from(pages.start)..start + u64::from(pages.end))?;
-        self.disk.read_into(on_disk, pages.start, into)
+        self.tiers.disk.read_into(on_disk, pages.start, into)
     }
 }
 
@@ -184,7 +184,10 @@ impl<'c> TierWork<'c> {
         reader: &MemoryChunkReader<'_>,
     ) {
         let context = self.context(block.key(), true);
-        self.cache.placement.on_memory_hit(reader.chunk(), &context);
+        self.cache
+            .tiers
+            .placement
+            .on_memory_hit(reader.chunk(), &context);
         read.place_from_chunk(block, reader.bytes());
     }
 
@@ -195,7 +198,12 @@ impl<'c> TierWork<'c> {
         reader: DiskChunkReader<'c>,
     ) -> Result<()> {
         let context = self.context(block.key(), true);
-        match self.cache.placement.on_disk_hit(reader.chunk(), &context) {
+        match self
+            .cache
+            .tiers
+            .placement
+            .on_disk_hit(reader.chunk(), &context)
+        {
             DiskHit::Stay => {
                 let report = self.report_disk_read(&reader, block);
                 let pages = self.cache.read_pages(read, &reader, block)?;

@@ -68,7 +68,7 @@ impl FuzzedLogBase {
             return;
         };
         let cache = Self::cache(dir);
-        cache.restore(&base);
+        cache.tiers.restore(&base);
         let in_use = cache
             .check_at_rest()
             .unwrap_or_else(|error| panic!("{base:?} taken back: {error}"));

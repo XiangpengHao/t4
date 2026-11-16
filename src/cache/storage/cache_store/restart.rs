@@ -1,10 +1,10 @@
 use super::super::index::Location;
 use super::super::persistence::LogBase;
-use super::ObjectCache;
+use super::{ObjectCache, Tiers};
 use crate::cache::BlockKey;
 use crate::cache::policy::Tier;
 
-impl ObjectCache {
+impl Tiers {
     /// The base was checked as it was replayed: each chunk in it once, and in the tier.
     pub(super) fn restore(&self, base: &LogBase) {
         self.paths.resume_ids_at(base.next_id());
@@ -20,15 +20,16 @@ impl ObjectCache {
             }
         }
     }
+}
 
+impl ObjectCache {
     /// Closing and joining precede the clean mark: no chunk it names can be overwritten.
     pub(in crate::cache) fn shut_down(&self) -> std::io::Result<()> {
-        self.disk.chunks().close();
-        if let Some(writer) = &self.writer {
-            writer.stop();
-        }
-        match self.disk.log() {
-            Some(log) => log.finish(self.paths.next_id()),
+        let tiers = &self.tiers;
+        tiers.disk.chunks().close();
+        self.writer.stop();
+        match tiers.disk.log() {
+            Some(log) => log.finish(tiers.paths.next_id()),
             None => Ok(()),
         }
     }
@@ -49,21 +50,19 @@ impl ObjectCache {
 
     #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
     pub(in crate::cache) fn abandon_persistence(&self) {
-        if let Some(log) = self.disk.log() {
+        if let Some(log) = self.tiers.disk.log() {
             log.abandon();
         }
     }
 
     pub(in crate::cache) fn known_size(&self, path: &[u8]) -> Option<u64> {
-        self.paths.known_size(path)
+        self.tiers.paths.known_size(path)
     }
 }
 
 /// The writer is joined before the log and its cache-file locks close.
 impl Drop for ObjectCache {
     fn drop(&mut self) {
-        if self.writer.is_some() {
-            let _ = self.shut_down();
-        }
+        let _ = self.shut_down();
     }
 }

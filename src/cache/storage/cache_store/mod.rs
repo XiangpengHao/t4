@@ -35,32 +35,25 @@ pub(in crate::cache) use tier_work::TierWork;
 
 pub(in crate::cache) struct ObjectCache {
     clock: crate::io::time::Clock,
-    state: Arc<CacheState>,
-    writer: Option<DiskWriter>,
+    tiers: Arc<Tiers>,
+    in_flight: Arc<InFlight>,
+    writer: DiskWriter,
 }
 
-pub(in crate::cache) struct CacheState {
-    pending: Arc<PendingDisk>,
+/// The index and the two tiers it names: what reads and the disk writer share.
+struct Tiers {
     paths: PathTable,
     blocks: BlockTable,
     memory: Arc<MemoryPool>,
     disk: CacheFiles,
     placement: Arc<dyn PlacementPolicy>,
-    in_flight: Arc<InFlight>,
-}
-
-impl std::ops::Deref for ObjectCache {
-    type Target = CacheState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.state
-    }
+    pending: PendingDisk,
 }
 
 impl ObjectCache {
     #[cfg(any(test, feature = "__fuzz"))]
     pub(in crate::cache) fn wait_for_disk_writes(&self) {
-        self.pending.wait_for_idle();
+        self.tiers.pending.wait_for_idle();
     }
 
     pub(in crate::cache) fn with_clock(mut self, clock: crate::io::time::Clock) -> Self {
@@ -82,30 +75,29 @@ impl ObjectCache {
             Some(log) => log.take()?,
             None => None,
         };
-        let state = Arc::new(CacheState {
-            pending: Arc::new(PendingDisk::new(memory_chunks.get())),
+        let tiers = Arc::new(Tiers {
             paths: PathTable::new(),
             blocks: BlockTable::new(),
             memory: Arc::new(MemoryPool::new(memory_chunks)?),
             disk,
             placement,
-            in_flight: Arc::default(),
+            pending: PendingDisk::new(memory_chunks.get()),
         });
-        let writer = DiskWriter::start(Arc::clone(&state))?;
-        let cache = Self {
-            clock: Default::default(),
-            state,
-            writer: Some(writer),
-        };
+        let writer = DiskWriter::start(Arc::clone(&tiers))?;
         if let Some(kept) = kept {
-            cache.restore(&kept);
+            tiers.restore(&kept);
         }
-        Ok(cache)
+        Ok(Self {
+            clock: Default::default(),
+            tiers,
+            in_flight: Arc::default(),
+            writer,
+        })
     }
 
     /// Names its owner's address (`doc/11-shared-mode.md`, decision 6).
     pub(in crate::cache) fn first_file(&self) -> Option<FileIdentity> {
-        self.disk.first_file()
+        self.tiers.disk.first_file()
     }
 
     pub(in crate::cache) fn resolve<'p>(
@@ -114,7 +106,7 @@ impl ObjectCache {
         e_tag: Option<&str>,
         size: u64,
     ) -> std::result::Result<CacheableFile<'p>, UncacheableObject> {
-        let version = self.paths.resolve(path, e_tag, size)?;
+        let version = self.tiers.paths.resolve(path, e_tag, size)?;
         Ok(CacheableFile { path, version })
     }
 
@@ -136,7 +128,7 @@ impl ObjectCache {
         reads: &'c dyn ReadPolicy,
         output: impl FnOnce(Range<u64>) -> Result<ReadOutput>,
     ) -> Result<(PartialRead, TierWork<'c>)> {
-        let plan = self.blocks.plan_read(file.version, range.clone());
+        let plan = self.tiers.blocks.plan_read(file.version, range.clone());
         let read = PartialRead::new(file.version, output(plan.bytes())?);
         let work = TierWork::new(
             self,
@@ -160,7 +152,7 @@ impl ObjectCache {
         let relocated: Vec<PlannedBlock> = blocks
             .0
             .iter()
-            .map(|block| block.relocated(self.blocks.get(block.key())))
+            .map(|block| block.relocated(self.tiers.blocks.get(block.key())))
             .collect();
         let runs = relocated
             .chunk_by(|a, b| a.key().index() + 1 == b.key().index())

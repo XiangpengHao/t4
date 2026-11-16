@@ -70,12 +70,15 @@ fn read_fetching(cache: &ObjectCache, file: &CacheableFile<'static>, fill: bool)
     if fill {
         block_on(cache.take_fetched(&mut read, 0..FILE_SIZE, &contents(file.path))).unwrap();
     }
-    cache.pending.wait_for_idle();
+    cache.tiers.pending.wait_for_idle();
     true
 }
 
 fn location(cache: &ObjectCache, file: &CacheableFile<'_>) -> Option<Location> {
-    cache.blocks.get(BlockKey::new(file.version().id(), 0))
+    cache
+        .tiers
+        .blocks
+        .get(BlockKey::new(file.version().id(), 0))
 }
 
 fn memory_chunk(cache: &ObjectCache, file: &CacheableFile<'_>) -> Option<ChunkId> {
@@ -157,7 +160,7 @@ fn racing_fills_of_one_block_take_one_chunk() {
         let a = resolve(&cache, b"a");
         join_all((0..3).map(|_| spawn(&cache, move |cache| read(cache, &a, true))));
         cache.check_at_rest().unwrap();
-        assert_eq!(cache.memory.free_count(), 2);
+        assert_eq!(cache.tiers.memory.free_count(), 2);
         read(&cache, &a, false);
         assert!(memory_chunk(&cache, &a).is_some());
     });
@@ -176,7 +179,7 @@ fn a_read_racing_eviction_and_reuse_reads_its_bytes_or_reads_remote() {
             read(cache, &a, false);
         });
         let evictor = spawn(&cache, move |cache| {
-            assert!(cache.evict_from_memory(chunk));
+            assert!(cache.tiers.evict_from_memory(chunk));
             read(cache, &b, true);
         });
         join_all([reader, evictor]);
@@ -193,7 +196,9 @@ fn eviction_racing_a_refill_keeps_entries_and_chunks_in_step() {
         read(&cache, &a, true);
         let chunk = memory_chunk(&cache, &a).unwrap();
         join_all([
-            spawn(&cache, move |cache| assert!(cache.evict_from_memory(chunk))),
+            spawn(&cache, move |cache| {
+                assert!(cache.tiers.evict_from_memory(chunk))
+            }),
             spawn(&cache, move |cache| read(cache, &a, true)),
             spawn(&cache, move |cache| read(cache, &a, false)),
         ]);
@@ -209,14 +214,14 @@ fn of_two_evictions_of_one_chunk_one_evicts() {
         read(&cache, &a, true);
         let chunk = memory_chunk(&cache, &a).unwrap();
         let evictors: Vec<_> = (0..2)
-            .map(|_| spawn(&cache, move |cache| cache.evict_from_memory(chunk)))
+            .map(|_| spawn(&cache, move |cache| cache.tiers.evict_from_memory(chunk)))
             .collect();
         let reader = spawn(&cache, move |cache| read(cache, &a, false));
         let evicted = join_all(evictors).into_iter().filter(|&e| e).count();
         reader.join().unwrap();
         assert_eq!(evicted, 1);
         assert_eq!(
-            cache.memory.free_count(),
+            cache.tiers.memory.free_count(),
             1,
             "freed once, by the last to leave"
         );
@@ -238,6 +243,7 @@ fn a_read_racing_a_move_to_disk_reads_its_bytes() {
         let mover = spawn(&cache, move |cache| {
             assert!(
                 cache
+                    .tiers
                     .pending
                     .enqueue(chunk, BlockKey::new(a.version().id(), 0))
             );
@@ -259,13 +265,14 @@ fn a_move_racing_an_eviction_from_memory_keeps_the_tiers_in_step() {
         let mover = spawn(&cache, move |cache| {
             assert!(
                 cache
+                    .tiers
                     .pending
                     .enqueue(chunk, BlockKey::new(a.version().id(), 0))
             );
             cache.wait_for_disk_writes();
         });
         let evictor = spawn(&cache, move |cache| {
-            cache.evict_from_memory(chunk);
+            cache.tiers.evict_from_memory(chunk);
         });
         let reader = spawn(&cache, move |cache| read(cache, &a, false));
         join_all([mover, evictor, reader]);
@@ -288,6 +295,7 @@ fn concurrent_requests_to_move_one_block_leave_one_disk_copy() {
             spawn(&cache, move |cache| {
                 assert!(
                     cache
+                        .tiers
                         .pending
                         .enqueue(chunk, BlockKey::new(a.version().id(), 0))
                 );
@@ -296,7 +304,11 @@ fn concurrent_requests_to_move_one_block_leave_one_disk_copy() {
         }));
         assert!(disk_chunk(&cache, &a).is_some());
         cache.check_at_rest().unwrap();
-        assert_eq!(cache.disk.chunks().free_count(), 1, "one copy on disk");
+        assert_eq!(
+            cache.tiers.disk.chunks().free_count(),
+            1,
+            "one copy on disk"
+        );
     });
 }
 
@@ -316,6 +328,7 @@ fn concurrent_requests_to_move_distinct_blocks_use_distinct_disk_chunks() {
                     spawn(&cache, move |cache| {
                         assert!(
                             cache
+                                .tiers
                                 .pending
                                 .enqueue(chunk, BlockKey::new(file.version().id(), 0))
                         );
@@ -330,7 +343,7 @@ fn concurrent_requests_to_move_distinct_blocks_use_distinct_disk_chunks() {
         assert!(!read_fetching(&cache, &a, false));
         assert!(!read_fetching(&cache, &b, false));
         cache.check_at_rest().unwrap();
-        assert_eq!(cache.disk.chunks().free_count(), 0);
+        assert_eq!(cache.tiers.disk.chunks().free_count(), 0);
     });
 }
 
@@ -348,7 +361,7 @@ fn a_read_racing_eviction_from_disk_and_reuse_reads_its_bytes_or_reads_remote() 
             read(cache, &a, false);
         });
         let evictor = spawn(&cache, move |cache| {
-            assert!(cache.evict_from_disk(on_disk));
+            assert!(cache.tiers.evict_from_disk(on_disk));
             // Straight to disk: full while the reader still holds the chunk.
             read(cache, &b, true);
         });
@@ -377,38 +390,39 @@ fn a_dropped_batch_keeps_its_chunks_until_its_io_completes() {
 
         assert!(
             cache
+                .tiers
                 .write_disk_batch(&[(chunk_a, key_a)])
                 .now_or_never()
                 .is_none()
         );
         pause.wait_until_started();
-        assert!(cache.evict_from_memory(chunk_a));
+        assert!(cache.tiers.evict_from_memory(chunk_a));
         assert_eq!(
-            cache.memory.free_count(),
+            cache.tiers.memory.free_count(),
             0,
             "the I/O still holds a's source"
         );
-        assert!(cache.memory.allocate().is_none());
+        assert!(cache.tiers.memory.allocate().is_none());
         assert_eq!(
-            cache.disk.chunks().free_count(),
+            cache.tiers.disk.chunks().free_count(),
             0,
             "the I/O still holds its destination"
         );
-        assert!(cache.allocate_disk().is_none());
+        assert!(cache.tiers.allocate_disk().is_none());
 
-        assert!(cache.pending.enqueue(chunk_b, key_b));
+        assert!(cache.tiers.pending.enqueue(chunk_b, key_b));
         cache.wait_for_disk_writes();
         assert_eq!(memory_chunk(&cache, &b), Some(chunk_b));
         assert_eq!(policy.queued(crate::cache::policy::Tier::Memory), [chunk_b]);
         pause.resume();
         let mut waits = 0;
-        while cache.disk.chunks().free_count() != 1 || cache.memory.free_count() != 1 {
+        while cache.tiers.disk.chunks().free_count() != 1 || cache.tiers.memory.free_count() != 1 {
             waits += 1;
             assert!(waits < 1000, "the completed I/O's chunks were not released");
             thread::yield_now();
         }
         assert_eq!(policy.pick_memory_victims(1).len(), 1);
-        assert!(cache.pending.enqueue(chunk_b, key_b));
+        assert!(cache.tiers.pending.enqueue(chunk_b, key_b));
         cache.wait_for_disk_writes();
         assert!(!read_fetching(&cache, &b, false));
         assert!(disk_chunk(&cache, &b).is_some());
@@ -438,13 +452,13 @@ fn giving_up_a_read_does_not_cancel_its_queued_write() {
         pause.wait_until_started();
         let chunk = memory_chunk(&cache, &a).unwrap();
         drop(read);
-        assert!(cache.evict_from_memory(chunk));
-        assert!(cache.memory.allocate().is_none());
-        assert!(cache.allocate_disk().is_none());
+        assert!(cache.tiers.evict_from_memory(chunk));
+        assert!(cache.tiers.memory.allocate().is_none());
+        assert!(cache.tiers.allocate_disk().is_none());
         pause.resume();
         cache.wait_for_disk_writes();
-        assert_eq!(cache.memory.free_count(), 1);
-        assert_eq!(cache.disk.chunks().free_count(), 1);
+        assert_eq!(cache.tiers.memory.free_count(), 1);
+        assert_eq!(cache.tiers.disk.chunks().free_count(), 1);
         assert_eq!(location(&cache, &a), None);
         cache.check_at_rest().unwrap();
     });
@@ -517,7 +531,7 @@ fn a_promotion_racing_an_eviction_from_disk_keeps_the_tiers_in_step() {
         join_all([
             spawn(&cache, move |cache| read(cache, &a, false)),
             spawn(&cache, move |cache| {
-                cache.evict_from_disk(on_disk);
+                cache.tiers.evict_from_disk(on_disk);
             }),
         ]);
         cache.check_at_rest().unwrap();
@@ -535,7 +549,7 @@ fn two_promotions_of_one_block_leave_one_copy() {
         join_all((0..2).map(|_| spawn(&cache, move |cache| read(cache, &a, false))));
         cache.check_at_rest().unwrap();
         assert!(memory_chunk(&cache, &a).is_some());
-        assert_eq!(cache.disk.chunks().free_count(), 1);
+        assert_eq!(cache.tiers.disk.chunks().free_count(), 1);
     });
 }
 
@@ -594,16 +608,16 @@ fn disk_admissions_wait_readably_in_memory_until_sixteen_are_ready() {
             );
             assert_eq!(read.into_bytes().unwrap(), bytes);
             let key = BlockKey::new(file.version().id(), 0);
-            let Some(Location::Memory(chunk)) = cache.blocks.get(key) else {
+            let Some(Location::Memory(chunk)) = cache.tiers.blocks.get(key) else {
                 panic!("the write is still paused");
             };
             assert_eq!(
-                &cache.memory.read(chunk, key).unwrap().bytes()[..bytes.len()],
+                &cache.tiers.memory.read(chunk, key).unwrap().bytes()[..bytes.len()],
                 bytes
             );
             if index < 15 {
                 assert_eq!(
-                    cache.disk.chunks().free_count(),
+                    cache.tiers.disk.chunks().free_count(),
                     32,
                     "no partial batch goes"
                 );
@@ -612,8 +626,8 @@ fn disk_admissions_wait_readably_in_memory_until_sixteen_are_ready() {
         release_writes.wait_until_started();
         release_writes.resume();
         cache.wait_for_disk_writes();
-        assert_eq!(cache.disk.chunks().free_count(), 16);
-        assert_eq!(cache.memory.free_count(), 16);
+        assert_eq!(cache.tiers.disk.chunks().free_count(), 16);
+        assert_eq!(cache.tiers.memory.free_count(), 16);
         cache.check_at_rest().unwrap();
     });
 }

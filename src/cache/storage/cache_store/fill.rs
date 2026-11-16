@@ -76,10 +76,10 @@ impl ObjectCache {
     }
 
     async fn landing(&self, key: BlockKey, admit: Admit, len: usize) -> Landing<'_> {
-        if self.blocks.get(key).is_some() {
+        if self.tiers.blocks.get(key).is_some() {
             return Landing::Nowhere;
         }
-        if matches!(admit, Admit::Disk) && !self.disk.takes_a_block() {
+        if matches!(admit, Admit::Disk) && !self.tiers.disk.takes_a_block() {
             return Landing::Nowhere;
         }
         let pages = u32::try_from(len.next_multiple_of(PAGE_SIZE_U32 as usize))
@@ -87,9 +87,9 @@ impl ObjectCache {
             .and_then(NonZeroU32::new)
             .expect("a block is a chunk's bytes or fewer, one or more");
         match admit {
-            Admit::Memory | Admit::Disk => match self.allocate_memory().await {
+            Admit::Memory | Admit::Disk => match self.tiers.allocate_memory().await {
                 Ok(Some(writer)) => {
-                    let (chunk, lent) = writer.lend_for_read(&self.memory, pages);
+                    let (chunk, lent) = writer.lend_for_read(&self.tiers.memory, pages);
                     Landing::Memory {
                         chunk,
                         lent,
@@ -113,11 +113,14 @@ impl ObjectCache {
                 // Published before the index names it: a read that finds the entry finds it open.
                 let reader = lent.publish(chunk, key);
                 if self
+                    .tiers
                     .blocks
                     .insert_if_absent(key, Location::Memory(reader.chunk()))
                 {
-                    if !to_disk || !self.pending.enqueue(reader.chunk(), key) {
-                        self.placement.on_admit(Tier::Memory, reader.chunk(), key);
+                    if !to_disk || !self.tiers.pending.enqueue(reader.chunk(), key) {
+                        self.tiers
+                            .placement
+                            .on_admit(Tier::Memory, reader.chunk(), key);
                     }
                 } else {
                     // Another fetch cached it first; the chunk goes back when `reader` drops.
@@ -220,7 +223,7 @@ impl FetchedBlocks<'_> {
             if let Some(claim) = claim {
                 match passed {
                     Some(bytes) => claim.passed(bytes),
-                    None => claim.ended(cache.blocks.get(key)),
+                    None => claim.ended(cache.tiers.blocks.get(key)),
                 }
             }
         });
