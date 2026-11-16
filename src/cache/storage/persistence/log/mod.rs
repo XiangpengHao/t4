@@ -3,7 +3,6 @@ mod boot_id;
 use std::collections::{BTreeMap, HashSet};
 
 pub(super) use boot_id::BootId;
-pub(in crate::cache) use boot_id::BootIdReader;
 
 use super::{CacheLayout, LogBase, LogReader, LogWriter, VersionOnDisk};
 use crate::cache::storage::index::{FileVersion, PathTable};

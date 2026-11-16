@@ -15,7 +15,7 @@ impl LogFixture {
         let path = directory.path().join("cache");
         let opened = File::create(&path).unwrap();
         Self {
-            file: PersistenceLog::beside(&path, &[opened], 4, Default::default())
+            file: PersistenceLog::beside(&path, &[opened], 4)
                 .unwrap()
                 .unwrap(),
             boot: BootId::current().unwrap(),

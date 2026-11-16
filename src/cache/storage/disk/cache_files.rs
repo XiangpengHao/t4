@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use super::allocation::{DriveHeadroom, FileAllocation};
 use super::disk_chunks::{DiskChunkReader, DiskChunks};
 use crate::cache::BLOCK_SIZE_U64;
-use crate::cache::storage::BootIdReader;
 use crate::cache::storage::persistence::PersistenceLog;
 use crate::io::aligned_buf::AlignedBuf;
 use crate::io::error::{Error, Result};
@@ -76,7 +75,6 @@ impl CacheFiles {
         queue_depth: NonZeroU32,
         direct_io: bool,
         allocation: FileAllocation,
-        boot_id_reader: BootIdReader,
     ) -> Result<Self> {
         let count = u32::try_from(files.len())
             .ok()
@@ -96,7 +94,7 @@ impl CacheFiles {
             })
             .collect::<Result<Vec<_>>>()?;
         let first_file = FileIdentity::of(&opened[0])?;
-        let log = PersistenceLog::beside(&files[0].path, &opened, chunks_per_file, boot_id_reader)?;
+        let log = PersistenceLog::beside(&files[0].path, &opened, chunks_per_file)?;
         let headroom = allocation.headroom(&opened)?;
         let mut files = Self::on(IoWorker::new(queue_depth, opened)?, count, chunks_per_file)?;
         files.first_file = Some(first_file);

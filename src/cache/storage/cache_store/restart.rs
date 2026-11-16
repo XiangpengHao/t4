@@ -37,15 +37,10 @@ impl ObjectCache {
     #[cfg(all(test, not(feature = "shuttle")))]
     pub(in crate::cache) fn replay_log(first: &std::path::Path, chunks: u32) -> Option<LogBase> {
         let file = std::fs::File::open(first).unwrap();
-        super::super::persistence::PersistenceLog::beside(
-            first,
-            &[file],
-            chunks,
-            Default::default(),
-        )
-        .unwrap()
-        .unwrap()
-        .inspect()
+        super::super::persistence::PersistenceLog::beside(first, &[file], chunks)
+            .unwrap()
+            .unwrap()
+            .inspect()
     }
 
     #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]

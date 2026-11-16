@@ -1,23 +1,5 @@
 use std::io;
 
-#[derive(Clone, Copy, Default)]
-pub(in crate::cache) enum BootIdReader {
-    #[default]
-    System,
-    #[cfg(all(test, feature = "shuttle"))]
-    Unreadable,
-}
-
-impl BootIdReader {
-    pub(in crate::cache::storage::persistence) fn read(self) -> io::Result<BootId> {
-        match self {
-            Self::System => BootId::current(),
-            #[cfg(all(test, feature = "shuttle"))]
-            Self::Unreadable => Err(io::ErrorKind::PermissionDenied.into()),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::cache::storage::persistence) struct BootId([u8; 16]);
 

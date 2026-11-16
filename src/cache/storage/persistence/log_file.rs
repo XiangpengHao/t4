@@ -4,7 +4,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
-use super::log::{BootId, BootIdReader, DiskLog, LogEntry};
+use super::log::{BootId, DiskLog, LogEntry};
 use super::{LogBase, LogReader, LogWriter, VersionOnDisk};
 use crate::cache::storage::FileIdentity;
 use crate::cache::storage::FileVersion;
@@ -24,12 +24,20 @@ impl PersistenceLog {
         first: &Path,
         opened: &[File],
         chunks_per_file: u32,
-        boot_id_reader: BootIdReader,
+    ) -> io::Result<Option<Self>> {
+        Self::beside_in_boot(first, opened, chunks_per_file, BootId::current().ok())
+    }
+
+    /// With no boot id, nothing could tell a later machine crash: no log, and none left behind.
+    pub(super) fn beside_in_boot(
+        first: &Path,
+        opened: &[File],
+        chunks_per_file: u32,
+        boot: Option<BootId>,
     ) -> io::Result<Option<Self>> {
         let mut path = first.as_os_str().to_owned();
         path.push(".log");
         let path = PathBuf::from(path);
-        let boot = boot_id_reader.read().ok();
         let files = opened.iter().map(FileStamp::of).collect::<Option<_>>();
         let (Some(boot), Some(files)) = (boot, files) else {
             match std::fs::remove_file(&path) {
