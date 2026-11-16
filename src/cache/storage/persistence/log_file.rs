@@ -81,11 +81,7 @@ impl PersistenceLog {
         written?;
         self.sync_directory()?;
         let file = File::options().append(true).open(&self.path)?;
-        *self.append.lock().unwrap() = Some(LogAppend::new(
-            file,
-            base,
-            self.layout.chunk_count().unwrap(),
-        ));
+        *self.append.lock().unwrap() = Some(LogAppend::new(file));
         Ok(())
     }
 
@@ -172,22 +168,20 @@ impl LogChanges<'_> {
         }
     }
 
+    /// The chunk table handed `chunk` out free, and the index names `block` there.
     pub(in crate::cache) fn add(&mut self, block: BlockKey, chunk: ChunkId) {
-        let append = self.0.as_mut().unwrap();
-        let held = &mut append.chunks[chunk.index() as usize];
-        assert!(held.is_none(), "a log add finds its chunk free");
-        *held = Some(block);
-        append.pending.push(LogEntry::Add {
-            version: block.file_version().get(),
-            index: block.index(),
-            chunk: chunk.index(),
-        });
+        if let Some(append) = self.0.as_mut() {
+            append.pending.push(LogEntry::Add {
+                version: block.file_version().get(),
+                index: block.index(),
+                chunk: chunk.index(),
+            });
+        }
     }
 
+    /// The index stopped naming `chunk`, under this lock, so each chunk is freed once.
     pub(in crate::cache) fn free(&mut self, chunk: ChunkId) {
-        if let Some(append) = self.0.as_mut()
-            && append.chunks[chunk.index() as usize].take().is_some()
-        {
+        if let Some(append) = self.0.as_mut() {
             append.pending.push(LogEntry::Free(chunk.index()));
         }
     }
@@ -196,27 +190,18 @@ impl LogChanges<'_> {
 struct LogAppend {
     file: File,
     pending: Vec<LogEntry>,
-    chunks: Vec<Option<BlockKey>>,
     failed: bool,
     abandoned: bool,
 }
 
 impl LogAppend {
-    fn new(file: File, base: &LogBase, chunks: u32) -> Self {
-        let mut append = Self {
+    fn new(file: File) -> Self {
+        Self {
             file,
             pending: Vec::new(),
-            chunks: vec![None; chunks as usize],
             failed: false,
             abandoned: false,
-        };
-        for version in base.versions() {
-            for &(index, chunk) in version.blocks() {
-                append.chunks[chunk.index() as usize] =
-                    Some(BlockKey::new(version.version().id(), index));
-            }
         }
-        append
     }
 
     fn write_pending(&mut self) -> io::Result<()> {
@@ -320,8 +305,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("log");
         File::create(&path).unwrap();
-        let mut append =
-            LogAppend::new(File::open(&path).unwrap(), &LogBase::new(0, Vec::new()), 1);
+        let mut append = LogAppend::new(File::open(&path).unwrap());
         append.pending.push(LogEntry::Clean(0));
         assert!(append.write_pending().is_err());
         append.file = File::options().append(true).open(&path).unwrap();
