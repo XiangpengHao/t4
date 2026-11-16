@@ -343,23 +343,32 @@ impl PersistenceProcess {
                 block_on(store.head(&path)).unwrap()
             })
             .collect();
-        let builder = T4Caching::builder(Arc::clone(&store) as Arc<dyn ObjectStore>)
-            .with_memory_capacity(16 * MIB)
-            .with_disk_file(dir.join("cache"), 32 * MIB);
+        let builder = || {
+            T4Caching::builder(Arc::clone(&store) as Arc<dyn ObjectStore>)
+                .with_memory_capacity(16 * MIB)
+                .with_disk_file(dir.join("cache"), 32 * MIB)
+        };
         let activity = Arc::new(PersistenceActivity::default());
         let recorded = Arc::clone(&activity);
         let cache = if loading {
-            builder
+            builder()
                 .with_placement_policy(move |sizes| PersistencePlacement::new(sizes, recorded))
                 .build()
                 .unwrap()
         } else {
-            builder
-                .with_placement_policy(|sizes| {
-                    crate::cache::policy::FixedPlacementPolicy::new(sizes, Admit::Disk)
-                })
-                .build()
-                .unwrap()
+            // A killed process's lock goes once its files close. On Linux, io_uring finishes the
+            // I/O it had in flight after the process is reaped, holding the files until then.
+            loop {
+                let built = builder()
+                    .with_placement_policy(|sizes| {
+                        crate::cache::policy::FixedPlacementPolicy::new(sizes, Admit::Disk)
+                    })
+                    .build();
+                match built {
+                    Err(crate::Error::Busy) => std::thread::yield_now(),
+                    built => break built.unwrap(),
+                }
+            }
         };
         store.take_asked();
         Self {
