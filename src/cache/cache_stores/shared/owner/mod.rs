@@ -128,6 +128,7 @@ impl Acceptor {
             let shut = std::sync::Arc::downgrade(&socket);
             let session = ClientSession {
                 socket,
+                stopping: std::sync::Arc::clone(&self.stopping),
                 cache: Arc::clone(&self.cache),
                 first_file: self.first_file,
             };
@@ -153,6 +154,8 @@ impl Acceptor {
 /// runs the reads, each a task ([`ClientReads`]), and sends their answers.
 struct ClientSession {
     socket: std::sync::Arc<FrameSocket>,
+    /// The listener's: set before it shuts any session's socket.
+    stopping: std::sync::Arc<AtomicBool>,
     cache: Arc<ObjectCache>,
     first_file: FileIdentity,
 }
@@ -233,6 +236,17 @@ impl ClientSession {
                 }
             }
             reads.run(&mut context);
+            // The owner going, its sessions end one by one. A session that
+            // ends hands its client's claims to the reads that wait on
+            // them, in other sessions; answered, their clients would fetch
+            // blocks an owner that's going can't take, then fetch them
+            // again from the remote. The flag is set before any socket is
+            // shut, so a session woken by another's end finds it, and ends
+            // with nothing sent: its client's reads go to the remote at once
+            // (decision 7).
+            if self.stopping.load(Ordering::Acquire) {
+                return Ok(());
+            }
             let outgoing: Vec<Vec<u8>> = reads
                 .take_outgoing()?
                 .iter()
