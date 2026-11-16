@@ -29,6 +29,12 @@ pub(super) struct SessionWaker {
 }
 
 impl SessionWaker {
+    /// Whether a wake is still waiting to be consumed by the session.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(super) fn has_pending_wake(&self) -> bool {
+        self.rung.load(Ordering::Acquire)
+    }
+
     /// The waker of the session whose thread this is.
     ///
     /// # Errors

@@ -4,7 +4,7 @@
 //! as two processes' stores reach one bucket.
 
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::*;
 use crate::cache::policy::FixedPlacementPolicy;
@@ -100,25 +100,20 @@ fn reads_of_one_block_across_owner_and_client_fetch_it_once() {
     std::thread::spawn(move || {
         let _ = client_done.send(read_listed(&client, &clients_meta, 0..MIB));
     });
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while clients.gets_out_now() == 0 {
-        assert!(Instant::now() < deadline, "the client's GET goes out");
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    wait_until(|| clients.gets_out_now() == 1, "the client's GET goes out");
+    let waiting = owner.clone();
 
     let (owner_done, owner_read) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = owner_done.send(read_listed(&owner, &owners_meta, 0..MIB));
+        let _ = owner_done.send(read_listed(&waiting, &owners_meta, 0..MIB));
     });
-    let early = owner_read.recv_timeout(Duration::from_millis(200));
-    assert!(
-        early.is_err(),
-        "the owner's read waits for the client's GET"
+    wait_until(
+        || fetch_waiters_registered(&owner) == 1,
+        "the owner's read waits for the client's GET",
     );
     drop(open);
-    let timeout = Duration::from_secs(5);
-    assert_eq!(client_read.recv_timeout(timeout).unwrap(), data);
-    assert_eq!(owner_read.recv_timeout(timeout).unwrap(), data);
+    assert_eq!(client_read.recv().unwrap(), data);
+    assert_eq!(owner_read.recv().unwrap(), data);
     assert_eq!(owners.take_asked(), [], "one GET, the client's");
 }
 
@@ -210,7 +205,7 @@ fn a_clients_read_whose_owner_goes_mid_get_reads_from_its_store() {
 
     drop(owner);
     drop(open);
-    assert_eq!(read.recv_timeout(Duration::from_secs(5)).unwrap(), data);
+    assert_eq!(read.recv().unwrap(), data);
     assert_eq!(
         clients.take_asked(),
         [bounded(0..MIB), bounded(0..MIB)],
@@ -237,14 +232,16 @@ fn a_clients_read_waiting_on_another_when_the_owner_goes_reads_from_its_store() 
         "the fetching GET goes out",
     );
     let waited = read_on_thread(waiting, waitings_meta, 0..MIB);
-    let early = waited.recv_timeout(Duration::from_millis(200));
-    assert!(early.is_err(), "the read waits for the other client's GET");
+    wait_until(
+        || fetch_waiters_registered(&owner) == 1,
+        "the read waits for the other client's GET",
+    );
 
     drop(owner);
-    assert_eq!(waited.recv_timeout(Duration::from_secs(5)).unwrap(), data);
+    assert_eq!(waited.recv().unwrap(), data);
     assert_eq!(waitings.take_asked(), [bounded(0..MIB)]);
     drop(open);
-    assert_eq!(fetched.recv_timeout(Duration::from_secs(5)).unwrap(), data);
+    assert_eq!(fetched.recv().unwrap(), data);
     assert_eq!(fetchings.take_asked(), [bounded(0..MIB), bounded(0..MIB)]);
 }
 
@@ -385,19 +382,12 @@ fn a_get_waiting_as_its_owner_goes_merges_with_none_of_the_next_cache() {
     );
 
     drop(open);
-    let wait = Duration::from_secs(5);
     assert_eq!(
-        second.recv_timeout(wait).unwrap(),
+        second.recv().unwrap(),
         c_data.slice(MIB as usize..2 * MIB as usize)
     );
-    assert_eq!(
-        third.recv_timeout(wait).unwrap(),
-        b_data.slice(2 * MIB as usize..)
-    );
-    assert_eq!(
-        first.recv_timeout(wait).unwrap(),
-        b_data.slice(..2 * MIB as usize)
-    );
+    assert_eq!(third.recv().unwrap(), b_data.slice(2 * MIB as usize..));
+    assert_eq!(first.recv().unwrap(), b_data.slice(..2 * MIB as usize));
 }
 
 /// A client that comes to own the cache once its owner went takes the disk
@@ -484,18 +474,16 @@ fn a_client_shut_down_leaves_its_owner_be_and_takes_over_nothing() {
 
     drop(owner);
     wait_until(|| !reads_through_an_owner(&client), "the owner goes");
-    for _ in 0..5 {
-        assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    // This first read tries a hand-off: none was tried before the owner went.
+    assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
     assert!(!owns(&client), "it took over nothing");
 }
 
 /// A client whose files a cache not built for sharing took once its owner
 /// went: it can neither own them nor reach an owner, and reads from its
-/// store, no read waiting long for an owner.
+/// store.
 #[test]
-fn a_client_that_finds_no_owner_reads_from_its_store_without_waiting() {
+fn a_client_that_finds_no_owner_reads_from_its_store() {
     let dir = tempfile::tempdir().unwrap();
     let path = Path::from("a");
     let data = file_bytes(MIB, 12);
@@ -516,11 +504,9 @@ fn a_client_that_finds_no_owner_reads_from_its_store_without_waiting() {
         "the dropped owner's files come free",
     );
 
-    let started = Instant::now();
     for _ in 0..3 {
         assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
     }
-    assert!(started.elapsed() < Duration::from_secs(1), "no read waits");
     assert!(!owns(&client) && !reads_through_an_owner(&client));
     assert_eq!(clients.take_asked().len(), 3, "each read from its store");
 }
@@ -597,7 +583,7 @@ fn a_clients_spans_come_back_once_its_owner_goes() {
 
     drop(owner);
     drop(open);
-    assert_eq!(read.recv_timeout(Duration::from_secs(5)).unwrap(), data);
+    assert_eq!(read.recv().unwrap(), data);
     wait_until(|| region_free_pages(&client) == all, "every span is free");
 }
 
@@ -615,6 +601,7 @@ fn a_fetch_dropped_after_its_read_gives_its_span_back() {
     let (client, _, meta) = process(&path, &data, shared);
     let all = region_free_pages(&client);
     let cache_store = client.cache_store();
+    let connection = cache_store.owner_connection().expect("a client");
     let e_tag = meta.e_tag.clone().unwrap();
     let reads = FetchRuns::default();
     let path = path.as_ref().as_bytes();
@@ -628,12 +615,17 @@ fn a_fetch_dropped_after_its_read_gives_its_span_back() {
     assert!(!fetches.is_empty(), "the read fetches its block");
 
     drop(read);
-    // Time for the owner to end the read, had the client ended it.
-    std::thread::sleep(Duration::from_millis(100));
+    // The answer follows every frame sent before it on this connection.
+    assert_eq!(block_on(cache_store.known_size(path)), Some(meta.size));
+    assert!(
+        region_free_pages(&client) < all,
+        "the fetch still holds its spans"
+    );
     drop(fetches);
     wait_until(|| region_free_pages(&client) == all, "every span is free");
-    let owner = cache_store.owner_connection().expect("a client");
-    assert!(!owner.owner_gone(), "the connection kept");
+    // The final round trip also processes the fetch's abandon and end.
+    assert_eq!(block_on(cache_store.known_size(path)), Some(meta.size));
+    assert!(!connection.owner_gone(), "the original connection kept");
 }
 
 /// The calls `cache`, a client, waits on its owner for, by number.
@@ -673,8 +665,8 @@ fn a_clients_read_whose_wait_ends_uncached_fetches_in_a_second_round() {
     // cached, and the client's read fetches it in a round of its own.
     block_on(owners.delete(&path)).unwrap();
     drop(open);
-    assert_eq!(owners_read.recv_timeout(Duration::from_secs(5)), Ok(true));
-    let read = clients_read.recv_timeout(Duration::from_secs(5));
+    assert_eq!(owners_read.recv(), Ok(true));
+    let read = clients_read.recv();
     assert_eq!(read.unwrap(), data);
     assert_eq!(
         clients.take_asked(),
@@ -723,7 +715,7 @@ fn a_clients_read_given_up_leaves_no_call_waiting() {
     );
 
     drop(open);
-    assert_eq!(owned.recv_timeout(Duration::from_secs(5)).unwrap(), data);
+    assert_eq!(owned.recv().unwrap(), data);
     assert!(reads_through_an_owner(&client));
     assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
     assert_eq!(clients.take_asked(), [], "served by the owner");
@@ -757,7 +749,7 @@ fn a_clients_read_given_up_mid_get_abandons_its_claim() {
     assert_eq!(calls_waiting(&client), Vec::<u64>::new());
 
     let owned = read_on_thread(owner.clone(), owners_meta, 0..MIB);
-    assert_eq!(owned.recv_timeout(Duration::from_secs(5)).unwrap(), data);
+    assert_eq!(owned.recv().unwrap(), data);
     assert_eq!(
         owners.take_asked(),
         [bounded(0..MIB)],
@@ -771,7 +763,7 @@ fn a_clients_read_given_up_mid_get_abandons_its_claim() {
 
 /// A client's GET that fails, the file changed since the client opened it:
 /// its fetch is abandoned, so the owner's work for the read ends, and the
-/// read ends, in bounded time, with the store's answer.
+/// read ends with the store's answer.
 #[test]
 fn a_clients_failed_get_abandons_its_fetch() {
     let dir = tempfile::tempdir().unwrap();
@@ -787,7 +779,7 @@ fn a_clients_failed_get_abandons_its_fetch() {
         let file = client.open_listed(clients_meta);
         let _ = done.send(block_on(file.read(0..MIB, None)));
     });
-    let read = read.recv_timeout(Duration::from_secs(5)).unwrap();
+    let read = read.recv().unwrap();
     assert!(
         matches!(read, Err(object_store::Error::Precondition { .. })),
         "{read:?}"

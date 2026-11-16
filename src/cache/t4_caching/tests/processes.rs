@@ -7,23 +7,25 @@
 //! starting at once.
 
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
 
 use super::*;
-
-/// The most a test waits for a child's marker, its read, or its exit.
-const PATIENCE: Duration = Duration::from_secs(10);
-
-/// The most a child waits for its parent, which may have died, before it
-/// exits: no test leaves a process behind for long.
-const CHILD_PATIENCE: Duration = Duration::from_secs(30);
 
 /// A child process of the test binary, playing `role` over a directory
 /// its parent shares with it ([`Self::spawn`]): killed, and reaped, as it
 /// drops, so that a failed test leaves none behind.
-struct ChildProcess(Child);
+struct ChildProcess {
+    child: Child,
+    stdin: Option<ChildStdin>,
+}
+
+impl From<Child> for ChildProcess {
+    fn from(mut child: Child) -> Self {
+        let stdin = Some(child.stdin.take().expect("a child with piped stdin"));
+        Self { child, stdin }
+    }
+}
 
 impl ChildProcess {
     /// The environment variables that name a child's role and directory.
@@ -33,14 +35,14 @@ impl ChildProcess {
     /// The test binary run as a child that plays `role` over `dir`: only
     /// [`a_child_process_plays_its_role`] runs in it.
     fn spawn(role: &str, dir: &std::path::Path) -> Self {
-        Self(Self::command(role, dir).spawn().unwrap())
+        Self::from(Self::command(role, dir).spawn().unwrap())
     }
 
     /// As [`Self::spawn`], with `temp_dir` the child's `TMPDIR`, as a shell
     /// that sets its own gives it.
     fn spawn_with_temp_dir(role: &str, dir: &std::path::Path, temp_dir: &std::path::Path) -> Self {
         let mut command = Self::command(role, dir);
-        Self(command.env("TMPDIR", temp_dir).spawn().unwrap())
+        Self::from(command.env("TMPDIR", temp_dir).spawn().unwrap())
     }
 
     fn command(role: &str, dir: &std::path::Path) -> Command {
@@ -51,33 +53,33 @@ impl ChildProcess {
             .args([test.as_str(), "--exact", "--nocapture", "--test-threads=1"])
             .env(Self::ROLE, role)
             .env(Self::DIR, dir)
+            .stdin(Stdio::piped())
             .stdout(Stdio::null());
         command
     }
 
     /// Kills the child, as `SIGKILL` does, and waits for it to end.
     fn kill(&mut self) {
-        self.0.kill().unwrap();
-        self.0.wait().unwrap();
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+    }
+
+    /// Ends the parent's hold on the child: EOF releases its stdin read,
+    /// as the parent's death does even when no destructor can run.
+    fn close_stdin(&mut self) {
+        drop(self.stdin.take());
     }
 
     /// Whether the child exited successfully, once it exits.
     fn exited_ok(&mut self) -> bool {
-        let deadline = Instant::now() + PATIENCE;
-        loop {
-            if let Some(status) = self.0.try_wait().unwrap() {
-                return status.success();
-            }
-            assert!(Instant::now() < deadline, "a child process exits");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        self.child.wait().unwrap().success()
     }
 }
 
 impl Drop for ChildProcess {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -101,25 +103,14 @@ impl Markers {
         std::fs::rename(aside, self.dir.join(name)).unwrap();
     }
 
-    /// What marker `name` says, once set; `None` if it isn't within
-    /// `patience`.
-    fn wait_for(&self, name: &str, patience: Duration) -> Option<String> {
-        let deadline = Instant::now() + patience;
+    /// What marker `name` says, once the process sets it.
+    fn said(&self, name: &str) -> String {
         loop {
             if let Ok(what) = std::fs::read_to_string(self.dir.join(name)) {
-                return Some(what);
+                return what;
             }
-            if Instant::now() >= deadline {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(2));
+            std::thread::yield_now();
         }
-    }
-
-    /// What marker `name` says, which a test waits [`PATIENCE`] for.
-    fn said(&self, name: &str) -> String {
-        self.wait_for(name, PATIENCE)
-            .unwrap_or_else(|| panic!("marker {name} is set"))
     }
 }
 
@@ -256,7 +247,8 @@ fn a_child_process_plays_its_role() {
             markers.set(&format!("fetched-{index}"), &fetched);
         }
     }
-    markers.wait_for("done", CHILD_PATIENCE);
+    // EOF means the parent finished, or died without running destructors.
+    std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink()).unwrap();
     drop(held);
 }
 
@@ -281,7 +273,7 @@ fn an_owner_killed_mid_read_leaves_its_client_the_cache() {
 
     owner.kill();
     drop(open);
-    assert_eq!(read.recv_timeout(PATIENCE).unwrap(), SharedProcess::data());
+    assert_eq!(read.recv().unwrap(), SharedProcess::data());
     wait_until(
         || {
             assert_eq!(client.read(0..SharedProcess::SIZE), SharedProcess::data());
@@ -345,14 +337,13 @@ fn a_client_killed_holding_a_claim_hands_it_to_its_waiter() {
     markers.said("get-out");
 
     let read = owner.read_on_thread(0..MIB);
-    let early = read.recv_timeout(Duration::from_millis(200));
-    assert!(
-        early.is_err(),
-        "the owner's read waits on the client's claim"
+    wait_until(
+        || fetch_waiters_registered(&owner.cache) == 1,
+        "the owner's read waits on the client's claim",
     );
     client.kill();
     assert_eq!(
-        read.recv_timeout(PATIENCE).unwrap(),
+        read.recv().unwrap(),
         SharedProcess::data().slice(..MIB as usize)
     );
     assert_eq!(owner.fetched_bytes(), MIB, "the owner's own GET");
@@ -380,7 +371,9 @@ fn eight_processes_starting_at_once_fetch_each_block_once() {
                 .unwrap()
         })
         .sum();
-    markers.set("done", "");
+    for reader in &mut readers {
+        reader.close_stdin();
+    }
 
     for reader in &mut readers {
         assert!(reader.exited_ok(), "each read its bytes right");

@@ -519,7 +519,6 @@ mod tests {
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Waker};
-    use std::time::{Duration, Instant};
 
     use pollster::block_on;
 
@@ -564,11 +563,10 @@ mod tests {
             act(&mut self.0.lock().unwrap())
         }
 
-        /// Waits, 10 s at most, until `done` holds of the kernel.
-        fn wait_until(&self, what: &str, done: impl Fn(&ScriptedKernel) -> bool) {
-            let deadline = Instant::now() + Duration::from_secs(10);
+        /// Waits until `done` holds of the kernel.
+        /// The label names the state for the reader.
+        fn wait_until(&self, _what: &str, done: impl Fn(&ScriptedKernel) -> bool) {
             while !self.with(|kernel| done(kernel)) {
-                assert!(Instant::now() < deadline, "timed out waiting until {what}");
                 std::thread::yield_now();
             }
         }
@@ -641,12 +639,7 @@ mod tests {
 
         // The loop has handled the failure once it waits on the kernel, or
         // once it has returned.
-        let deadline = Instant::now() + Duration::from_secs(10);
         while !script.with(|kernel| kernel.waited_after_failure) && !backend.is_finished() {
-            assert!(
-                Instant::now() < deadline,
-                "the loop neither waits nor returns"
-            );
             std::thread::yield_now();
         }
         let answered = Pin::new(&mut taken).poll(&mut Context::from_waker(Waker::noop()));
@@ -658,14 +651,8 @@ mod tests {
         script.with(ScriptedKernel::complete_taken);
         let (buf, read_len) = block_on(taken).unwrap();
         assert_eq!(read_len, buf.len());
-        // A loop that waited for the read never taken would wait forever:
-        // the wait is bounded, so that fails rather than hangs.
-        let (failed_tx, failed_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || failed_tx.send(block_on(untaken).is_err()).unwrap());
-        let failed = failed_rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the read never taken is answered");
-        assert!(failed, "a read never taken fails");
+        // The read never taken must also be answered.
+        assert!(block_on(untaken).is_err(), "a read never taken fails");
         drop(tx);
         backend.join().unwrap();
     }

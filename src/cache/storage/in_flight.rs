@@ -73,6 +73,16 @@ impl InFlight {
         self.fetches().is_empty()
     }
 
+    /// Wakers registered on fetches in flight. A read given up leaves its
+    /// waker registered until the fetch ends; this is not a live read count.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(in crate::cache::storage) fn fetch_waiters_registered(&self) -> usize {
+        self.fetches()
+            .values()
+            .map(|fetch| fetch.state().waiters.len())
+            .sum()
+    }
+
     /// `key`'s fetch in `fetches`, unless it has ended: an ended fetch stays
     /// until its thread removes it, and a read that found it would wait for
     /// nothing, and come back to it, until that thread runs.
