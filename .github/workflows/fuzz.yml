@@ -31,11 +31,20 @@ jobs:
       - name: Build
         run: nix develop -c cargo fuzz build ${{ matrix.target }}
 
-      # From an empty corpus: nothing is kept between runs.
+      # From an empty corpus: nothing is kept between runs. AddressSanitizer's
+      # own memory grows with every cache an input builds, past libFuzzer's
+      # limit within minutes, so the hour runs a minute at a time, each a
+      # fresh process on the corpus so far.
       - name: Fuzz for an hour
         env:
           TMPDIR: /dev/shm
-        run: nix develop -c cargo fuzz run ${{ matrix.target }} -- -max_total_time=3600 -timeout=10
+          TARGET: ${{ matrix.target }}
+        run: |
+          nix develop -c bash -c '
+            end=$((SECONDS + 3600))
+            while [ "$SECONDS" -lt "$end" ]; do
+              cargo fuzz run "$TARGET" -- -max_total_time=60 -timeout=10 -rss_limit_mb=8192 || exit 1
+            done'
 
       - name: Keep the failing input
         if: failure()
