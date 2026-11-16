@@ -9,3 +9,4 @@ fuzz/coverage
 bench/cold_reads
 
 bench/spiral_cache/results
+/result
