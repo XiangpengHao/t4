@@ -79,8 +79,8 @@ than the cache it replaces, nothing more.
 ## Verification
 
 Parts of the crate are written inside `verus!` and proven with
-[Verus](https://github.com/verus-lang/verus): the block arithmetic, where
-a bug would serve wrong bytes without failing.
+[Verus](https://github.com/verus-lang/verus): the block arithmetic and
+the free-chunk bitmap, where a bug would serve wrong bytes without failing.
 
 - Block keys (`src/cache/mod.rs`): a key gives back the file version and
   block number it was made of, and keys order by version, then block, so a
@@ -95,8 +95,13 @@ a bug would serve wrong bytes without failing.
 - Disk chunks (`src/cache/storage/disk/disk_chunks.rs`): no two chunks
   share a place in the cache files, and each ends within its file's
   `chunks_per_file` blocks.
+- Free chunks (`src/cache/storage/chunks/free_chunks.rs`): an allocation
+  hands out a free chunk of the tier and takes it from the free set, so no
+  chunk goes to two writers; a free returns one taken chunk; the free count
+  is the free set's size, so an allocation finds a chunk whenever the count
+  says one is free.
 
-The proofs cover that arithmetic only, not the OS, filesystem or
+The proofs cover that code only, not the OS, filesystem or
 hardware. Outside `verus!`, Verus compiles the code but checks nothing:
 the plan's list of blocks and the index scan that feeds it, which lean on
 the facts above. Verus checks a verified function's preconditions only

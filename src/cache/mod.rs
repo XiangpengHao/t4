@@ -27,20 +27,34 @@ const BLOCK_SIZE_U64: u64 = 1024 * 1024;
 
 const BLOCK_SIZE: usize = BLOCK_SIZE_U64 as usize;
 
+verus! {
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChunkId(u32);
 
-impl ChunkId {
-    pub fn new(index: u32) -> Self {
-        Self(index)
-    }
+impl View for ChunkId {
+    type V = u32;
 
-    pub fn index(self) -> u32 {
+    closed spec fn view(&self) -> u32 {
         self.0
     }
 }
 
-verus! {
+impl ChunkId {
+    pub fn new(index: u32) -> (chunk: Self)
+        ensures
+            chunk@ == index,
+    {
+        Self(index)
+    }
+
+    pub fn index(self) -> (index: u32)
+        ensures
+            index == self@,
+    {
+        self.0
+    }
+}
 
 /// `assert!(condition, message)`, which Verus can't verify: callers it
 /// verifies prove `condition`, and the others have it checked as they run.
