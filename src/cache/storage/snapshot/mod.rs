@@ -73,10 +73,7 @@ impl DiskSnapshot {
 
     fn encode(&self, layout: &CacheLayout) -> Vec<u8> {
         let mut out = SnapshotWriter::default();
-        out.raw(&Self::MAGIC);
-        out.u32(Self::FORMAT);
-        out.u32(BLOCK_SIZE as u32);
-        layout.encode(&mut out);
+        Self::encode_header(layout, &mut out);
         out.u64(self.next_id);
         out.u64(self.versions.len() as u64);
         for version in &self.versions {
@@ -91,6 +88,13 @@ impl DiskSnapshot {
             }
         }
         out.0
+    }
+
+    fn encode_header(layout: &CacheLayout, out: &mut SnapshotWriter) {
+        out.raw(&Self::MAGIC);
+        out.u32(Self::FORMAT);
+        out.u32(BLOCK_SIZE as u32);
+        layout.encode(out);
     }
 
     /// Rejects anything doubtful: starting cold costs refills, never wrong bytes.
@@ -140,6 +144,23 @@ impl DiskSnapshot {
             versions.push(VersionOnDisk::new(path, e_tag, version, blocks));
         }
         input.bytes.is_empty().then_some(Self { next_id, versions })
+    }
+}
+
+#[cfg(feature = "__fuzz")]
+impl DiskSnapshot {
+    pub(in crate::cache) fn fuzzed(body: &[u8], chunks: u32) -> Option<Self> {
+        let layout = CacheLayout::fuzzed(chunks);
+        let mut bytes = SnapshotWriter::default();
+        Self::encode_header(&layout, &mut bytes);
+        bytes.raw(body);
+        let snapshot = Self::decode(&bytes.0, &layout)?;
+        assert_eq!(
+            snapshot.encode(&layout),
+            bytes.0,
+            "{snapshot:?} encodes to other bytes"
+        );
+        Some(snapshot)
     }
 }
 

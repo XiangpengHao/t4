@@ -868,5 +868,10 @@ impl FrameReader {
     }
 }
 
+#[cfg(feature = "__fuzz")]
+mod fuzzing;
+#[cfg(feature = "__fuzz")]
+pub use fuzzing::FuzzedFrame;
+
 #[cfg(all(test, not(feature = "shuttle")))]
 mod tests;

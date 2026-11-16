@@ -4,6 +4,9 @@ mod frames;
 mod handshake;
 mod region;
 
+#[cfg(feature = "__fuzz")]
+pub use frames::FuzzedFrame;
+
 pub(super) use address::OwnerAddress;
 pub(super) use frame_socket::{FrameReceiver, FrameSender, FrameSocket};
 pub(super) use frames::{

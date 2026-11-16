@@ -15,6 +15,9 @@ mod client;
 mod owner;
 mod protocol;
 
+#[cfg(feature = "__fuzz")]
+pub use protocol::FuzzedFrame;
+
 use client::ClientRead;
 pub(super) use client::OwnerConnection;
 use owner::OwnerListener;

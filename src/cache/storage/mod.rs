@@ -6,6 +6,9 @@ mod index;
 mod memory;
 mod snapshot;
 
+#[cfg(feature = "__fuzz")]
+pub use cache_store::FuzzedSnapshot;
+
 pub(in crate::cache) use disk::{CacheFiles, DiskFile, FileAllocation, FileIdentity};
 
 pub(in crate::cache) use cache_store::{

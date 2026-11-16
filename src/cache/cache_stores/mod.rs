@@ -15,6 +15,9 @@ use crate::io::error::Result;
 mod in_process;
 mod shared;
 
+#[cfg(feature = "__fuzz")]
+pub use shared::FuzzedFrame;
+
 pub(super) use in_process::{InProcessCacheStore, PlacementMaker, TierSettings};
 #[cfg(all(test, not(feature = "shuttle")))]
 use shared::OwnerConnection;
