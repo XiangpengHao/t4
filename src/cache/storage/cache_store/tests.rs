@@ -1,4 +1,4 @@
-use crate::io::sync::Arc;
+use crate::io::sync::{Arc, Mutex};
 
 use shuttle::future::block_on;
 use tempfile::TempDir;
@@ -645,6 +645,59 @@ fn a_read_waiting_for_a_fetch_given_up_on_fetches_the_block_itself() {
             .unwrap();
         assert_eq!(waiting.fetches(), [0..MIB]);
         block_on(cache.take_fetched(&mut waiting, 0..MIB, &data)).unwrap();
+        let left = block_on(work.finish(&mut waiting)).unwrap();
+        assert!(left.is_empty(), "{left:?}");
+        assert_eq!(waiting.into_bytes().unwrap(), data);
+        cache.check_at_rest().unwrap();
+    });
+}
+
+/// A plan asked of the policy: the blocks it saw and each one's source.
+type HeardPlan = (Range<u32>, Vec<Option<BlockSource>>);
+
+#[derive(Default)]
+struct HeardPlans(Mutex<Vec<HeardPlan>>);
+
+impl ReadPolicy for HeardPlans {
+    fn plan(&self, read: &LocatedRead<'_>) -> ReadPlan {
+        let sources = read.blocks().map(|block| read.source(block)).collect();
+        self.0.lock().unwrap().push((read.blocks(), sources));
+        FetchRuns::default().plan(read)
+    }
+
+    fn on_io(&self, _event: &IoEvent<'_>) {}
+}
+
+#[test]
+fn a_retry_of_blocks_apart_is_planned_once() {
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let (_dir, cache, _policy) = cache(4, 1);
+        let reads = FetchRuns::default();
+        let data = file_bytes(3 * MIB);
+        let file = cache.resolve(b"a", Some("v1"), 3 * MIB).unwrap();
+        read_through(&cache, &file, &data, MIB..2 * MIB);
+        let given_up = block_on(cache.read(&file, 0..3 * MIB, None, &reads)).unwrap();
+        let (mut waiting, work) = cache
+            .start_planned_read(&file, 0..3 * MIB, None, &reads)
+            .unwrap();
+        drop(given_up);
+
+        let retry = block_on(work.finish(&mut waiting)).unwrap();
+        assert_eq!(retry.len(), 2, "blocks 0 and 2");
+        let heard = HeardPlans::default();
+        let work = cache
+            .retry_planned(&mut waiting, &file, 0..3 * MIB, None, retry, &heard)
+            .unwrap();
+        let (memory, remote) = (Some(BlockSource::Memory), Some(BlockSource::Remote));
+        assert_eq!(
+            *heard.0.lock().unwrap(),
+            [(0..3, vec![remote, memory, remote])]
+        );
+        assert_eq!(waiting.fetches(), [0..MIB, 2 * MIB..3 * MIB]);
+        for fetch in [0..MIB, 2 * MIB..3 * MIB] {
+            let fetched = &data[fetch.start as usize..fetch.end as usize];
+            block_on(cache.take_fetched(&mut waiting, fetch, fetched)).unwrap();
+        }
         let left = block_on(work.finish(&mut waiting)).unwrap();
         assert!(left.is_empty(), "{left:?}");
         assert_eq!(waiting.into_bytes().unwrap(), data);
