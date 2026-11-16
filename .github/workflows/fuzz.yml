@@ -17,7 +17,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [cache_equivalence, frames, snapshot]
+        include:
+          - target: cache_equivalence
+          - target: frames
+          - target: snapshot
+          # t4 on shuttle's primitives; scripts long from the start, as a short one shares
+          # little.
+          - target: shared_mode
+            features: --features shared-mode
+            options: -len_control=0 -max_len=1024
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -29,7 +37,7 @@ jobs:
         uses: DeterminateSystems/magic-nix-cache-action@v14
 
       - name: Build
-        run: nix develop -c cargo fuzz build ${{ matrix.target }}
+        run: nix develop -c cargo fuzz build ${{ matrix.target }} ${{ matrix.features }}
 
       # AddressSanitizer's memory grows with every cache an input builds, past
       # libFuzzer's limit in minutes: each half minute is a fresh process.
@@ -37,11 +45,13 @@ jobs:
         env:
           TMPDIR: /dev/shm
           TARGET: ${{ matrix.target }}
+          FEATURES: ${{ matrix.features }}
+          OPTIONS: ${{ matrix.options }}
         run: |
           nix develop -c bash -c '
             end=$((SECONDS + 3600))
             while [ "$SECONDS" -lt "$end" ]; do
-              cargo fuzz run "$TARGET" -- -max_total_time=30 -timeout=10 -rss_limit_mb=8192 || exit 1
+              cargo fuzz run "$TARGET" $FEATURES -- -max_total_time=30 -timeout=10 -rss_limit_mb=8192 $OPTIONS || exit 1
             done'
 
       - name: Keep the failing input
@@ -51,3 +61,36 @@ jobs:
           name: fuzz-${{ matrix.target }}
           path: fuzz/artifacts/${{ matrix.target }}
           if-no-files-found: ignore
+
+  # The PR gate runs two fixed seeds; this runs fresh ones, eight times the iterations. A seed is
+  # drawn here, never in the tests, so a failure names the seed that replays it.
+  shuttle-fresh-seeds:
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+
+      - name: Configure Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - name: Build
+        run: nix develop -c cargo test --locked --features shuttle --lib --no-run
+
+      # A run of the suite takes minutes at this budget: room for the last to finish.
+      - name: Every shuttle test on fresh seeds for 50 minutes
+        run: |
+          nix develop -c bash -c '
+            end=$((SECONDS + 3000))
+            while [ "$SECONDS" -lt "$end" ]; do
+              seed=0x$(od -An -N8 -tx8 /dev/urandom | tr -d " ")
+              echo "T4_SHUTTLE_SEED=$seed"
+              if ! T4_SHUTTLE_SEED=$seed T4_SHUTTLE_BUDGET=8 \
+                cargo test --locked --features shuttle --lib; then
+                echo "::error::shuttle failed on T4_SHUTTLE_SEED=$seed T4_SHUTTLE_BUDGET=8"
+                exit 1
+              fi
+            done'

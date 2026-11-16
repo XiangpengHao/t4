@@ -47,7 +47,8 @@ impl Remote {
         head.ok().map(|meta| meta.size)
     }
 
-    /// How many GETs that returned each block of each version: `If-Match` marks a cache's fetch.
+    /// How many fetches returned each block of each version: a cache's GETs carry `If-Match`, the
+    /// script's own reads none.
     pub(super) fn fetched(&self) -> BTreeMap<(Content, u64), u32> {
         self.fetched.lock().unwrap().clone()
     }

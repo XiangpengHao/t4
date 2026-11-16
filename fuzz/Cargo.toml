@@ -7,6 +7,10 @@ edition = "2024"
 [package.metadata]
 cargo-fuzz = true
 
+[features]
+# t4 on shuttle's primitives, which work only inside its runtime: for `shared_mode` alone.
+shared-mode = ["t4/shuttle"]
+
 [dependencies]
 arbitrary = "1"
 bytes = "1"
@@ -35,6 +39,14 @@ bench = false
 [[bin]]
 name = "snapshot"
 path = "fuzz_targets/snapshot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shared_mode"
+path = "fuzz_targets/shared_mode.rs"
+required-features = ["shared-mode"]
 test = false
 doc = false
 bench = false
