@@ -19,10 +19,19 @@ struct ListenerRegistration {
 pub(crate) struct Transport {
     clock: crate::io::time::Clock,
     listeners: Arc<Mutex<Vec<ListenerRegistration>>>,
+    loses_wakeups: bool,
 }
 impl Transport {
     pub(crate) fn clock(&self) -> &crate::io::time::Clock {
         &self.clock
+    }
+
+    /// A shutdown wakes no thread already waiting to read its own end, as macOS may lose that
+    /// wakeup (`doc/11-shared-mode.md`, decision 7): such a thread wakes as its peer closes, or
+    /// as it looks again once `FrameSocket::RECHECK` is up.
+    pub(crate) fn losing_shutdown_wakeups(mut self) -> Self {
+        self.loses_wakeups = true;
+        self
     }
 
     pub(in crate::cache::cache_stores::shared) fn listen(
@@ -49,7 +58,7 @@ impl Transport {
             .iter()
             .find(|listener| listener.file == file)
             .ok_or(io::ErrorKind::ConnectionRefused)?;
-        let (client, owner) = FrameSocket::pair_on(self.clock.clone())?;
+        let (client, owner) = FrameSocket::pair_on(self.clock.clone(), self.loses_wakeups)?;
         listener
             .connections
             .send(owner)
@@ -89,12 +98,16 @@ struct Pipe {
 struct PipeState {
     bytes: VecDeque<u8>,
     closed: bool,
+    /// Threads asleep on the pipe whose wakeup a shutdown lost, and when: one sees the shutdown
+    /// once a notify reaches it, or once its wait times out.
+    unnoticed: Vec<(thread::ThreadId, Duration)>,
     session: Option<thread::Thread>,
     readers: Vec<thread::Thread>,
     descriptors: Option<(File, Option<RegionDescriptor>)>,
 }
 impl Pipe {
-    fn notify(&self, state: &PipeState) {
+    fn notify(&self, state: &mut PipeState) {
+        state.unnoticed.clear();
         self.changed.notify_all();
         for reader in &state.readers {
             reader.unpark();
@@ -102,6 +115,11 @@ impl Pipe {
         if let Some(session) = &state.session {
             session.unpark();
         }
+    }
+
+    /// Wakes the peer's writers waiting for room, not this end's readers.
+    fn notify_writers(&self) {
+        self.changed.notify_all();
     }
 }
 
@@ -112,6 +130,7 @@ pub(in crate::cache::cache_stores::shared) struct FrameSocket {
     life: Arc<()>,
     clock: crate::io::time::Clock,
     timeout: Arc<Mutex<Option<Duration>>>,
+    loses_wakeups: bool,
 }
 impl FrameSocket {
     pub(super) fn read_into(&self, buffer: &mut bytes::BytesMut) -> io::Result<usize> {
@@ -130,9 +149,9 @@ impl FrameSocket {
     }
     #[cfg(test)]
     pub(in crate::cache::cache_stores::shared) fn pair() -> io::Result<(Self, Self)> {
-        Self::pair_on(Default::default())
+        Self::pair_on(Default::default(), false)
     }
-    fn pair_on(clock: crate::io::time::Clock) -> io::Result<(Self, Self)> {
+    fn pair_on(clock: crate::io::time::Clock, loses_wakeups: bool) -> io::Result<(Self, Self)> {
         let (a, b) = (Arc::new(Pipe::default()), Arc::new(Pipe::default()));
         Ok((
             Self {
@@ -141,6 +160,7 @@ impl FrameSocket {
                 life: Arc::new(()),
                 clock: clock.clone(),
                 timeout: Arc::new(Mutex::new(None)),
+                loses_wakeups,
             },
             Self {
                 incoming: b,
@@ -148,6 +168,7 @@ impl FrameSocket {
                 life: Arc::new(()),
                 clock: clock.clone(),
                 timeout: Arc::new(Mutex::new(None)),
+                loses_wakeups,
             },
         ))
     }
@@ -197,7 +218,7 @@ impl FrameSocket {
                 break;
             }
         }
-        self.outgoing.notify(&state);
+        self.outgoing.notify(&mut state);
         Ok(before - room)
     }
     #[cfg(target_vendor = "apple")]
@@ -215,13 +236,38 @@ impl FrameSocket {
         for pipe in [&self.incoming, &self.outgoing] {
             let mut state = pipe.state.lock().unwrap();
             state.closed = true;
-            pipe.notify(&state);
+            if self.loses_wakeups && Arc::ptr_eq(pipe, &self.incoming) {
+                let now = self.clock.now();
+                let asleep = state.readers.iter().chain(&state.session);
+                state.unnoticed = asleep.map(|thread| (thread.id(), now)).collect();
+                pipe.notify_writers();
+            } else {
+                pipe.notify(&mut state);
+            }
         }
+        // On another core, the peer woken runs at once: before the shutter's next step.
+        thread::yield_now();
     }
     pub(in crate::cache::cache_stores::shared) fn ready(&self) -> bool {
         let mut state = self.incoming.state.lock().unwrap();
         state.session = Some(thread::current());
-        !state.bytes.is_empty() || state.closed
+        !state.bytes.is_empty() || self.closed_for_me(&state, Some(Self::RECHECK))
+    }
+
+    /// Shuttle wakes a parked thread spuriously, which would show it a shutdown whose wakeup
+    /// was lost: such a thread sees it only once noticed, or once a wait of `timeout` is up.
+    fn closed_for_me(&self, state: &PipeState, timeout: Option<Duration>) -> bool {
+        let me = thread::current().id();
+        let now = self.clock.now();
+        let waiting = |since: Duration| timeout.is_none_or(|timeout| now < since + timeout);
+        state.closed
+            && !(state.unnoticed.iter()).any(|&(thread, since)| thread == me && waiting(since))
+    }
+
+    /// The thread wakes at the clock's next advance, to look again, as a `poll` that waits
+    /// `RECHECK` at most does.
+    pub(in crate::cache::cache_stores::shared) fn recheck_later(&self) {
+        self.clock.register_timer();
     }
     pub(in crate::cache::cache_stores::shared) fn send_descriptors(
         &self,
@@ -238,13 +284,10 @@ impl FrameSocket {
 }
 impl Read for &FrameSocket {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        let deadline = self
-            .timeout
-            .lock()
-            .unwrap()
-            .map(|timeout| self.clock.now() + timeout);
+        let timeout = *self.timeout.lock().unwrap();
+        let deadline = timeout.map(|timeout| self.clock.now() + timeout);
         let mut state = self.incoming.state.lock().unwrap();
-        while state.bytes.is_empty() && !state.closed {
+        while state.bytes.is_empty() && !self.closed_for_me(&state, timeout) {
             if let Some(deadline) = deadline {
                 self.clock.register_timer();
                 if self.clock.now() >= deadline {
@@ -267,7 +310,7 @@ impl Read for &FrameSocket {
         for byte in &mut bytes[..read] {
             *byte = state.bytes.pop_front().unwrap();
         }
-        self.incoming.notify(&state);
+        self.incoming.notify(&mut state);
         Ok(read)
     }
 }

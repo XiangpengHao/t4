@@ -21,7 +21,7 @@ pub use shared::FuzzedFrame;
 pub use shared::{FuzzedHello, FuzzedPath, FuzzedRead, FuzzedSession, FuzzedSpan, FuzzedStep};
 
 pub(super) use in_process::{InProcessCacheStore, PlacementMaker, TierSettings};
-#[cfg(test)]
+#[cfg(any(test, all(feature = "shuttle", t4_simulated)))]
 use shared::OwnerConnection;
 pub(super) use shared::SharedCacheStore;
 
@@ -45,12 +45,12 @@ pub(super) trait CacheStore: Send + Sync {
         None
     }
 
-    #[cfg(all(feature = "__fuzz", feature = "shuttle", t4_simulated))]
+    #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
     fn live_sessions(&self) -> usize {
         0
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, all(feature = "shuttle", t4_simulated)))]
     fn owner_connection(&self) -> Option<std::sync::Arc<OwnerConnection>> {
         None
     }

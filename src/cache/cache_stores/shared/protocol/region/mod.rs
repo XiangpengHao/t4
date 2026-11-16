@@ -248,7 +248,7 @@ impl ClientRegion {
         Arc::strong_count(&self.mapping) > 1
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, all(feature = "shuttle", t4_simulated)))]
     pub(in crate::cache::cache_stores::shared) fn free_pages(&self) -> u64 {
         self.free().runs.values().sum()
     }

@@ -69,7 +69,7 @@ impl OwnerListener {
     }
 
     /// A session's socket is gone once its thread has dropped it, the last of its reads with it.
-    #[cfg(all(feature = "__fuzz", feature = "shuttle", t4_simulated))]
+    #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
     pub(super) fn live_sessions(&self) -> usize {
         let sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
         let live = sessions

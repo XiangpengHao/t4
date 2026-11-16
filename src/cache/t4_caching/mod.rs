@@ -449,8 +449,12 @@ impl fmt::Debug for KnownFiles {
 
 mod file_handle;
 mod object_store_integration;
+#[cfg(all(feature = "shuttle", any(test, all(feature = "__fuzz", t4_simulated))))]
+mod shared_scenario;
 
 pub use file_handle::FileHandle;
+#[cfg(all(feature = "__fuzz", feature = "shuttle", t4_simulated))]
+pub use shared_scenario::{ScenarioRead, SharedOperation, SharedScenario, SharedSettings};
 
 #[cfg(test)]
 #[allow(dead_code, unused_imports)] // OS process tests use a subset of these fixtures.

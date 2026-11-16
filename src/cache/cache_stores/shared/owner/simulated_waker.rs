@@ -25,6 +25,7 @@ impl SessionWaker {
             if self.rung.swap(false, Ordering::AcqRel) || ready {
                 return Ok(ready);
             }
+            socket.recheck_later();
             thread::park();
         }
     }

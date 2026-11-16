@@ -723,6 +723,7 @@ session ending the last read before it takes the next's frames, 1 µs.
 | `src/cache/cache_stores/shared/protocol/region/` | the region, its spans, and the checks the owner makes of it (decision 5) | yes |
 | `src/cache/cache_stores/shared/fuzzing/` | a client the `shared_owner` fuzz target scripts frame by frame against an owner, beside a well-behaved client (decisions 5, 8) | yes |
 | `src/cache/t4_caching/tests/sharing.rs`, `processes.rs` | an owner and its clients in one process, and in real ones (build step 3) | yes |
+| `src/cache/t4_caching/shared_scenario/` | an owner and its clients run by a script, under shuttle: the `shared_mode` fuzz target's, and fixed scripts in the shuttle suite (`12-seeded-concurrency-tests.md`) | yes |
 
 The seeded schedule corpus, replay instructions, and retained OS-test coverage
 are described in [doc/12](12-seeded-concurrency-tests.md).

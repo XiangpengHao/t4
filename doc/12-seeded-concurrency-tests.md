@@ -29,7 +29,11 @@ repeating it would explore nothing. Longer stress loops now repeat small cases
 under these schedules instead of relying on OS thread timing.
 
 A failure prints the seed, iteration budget, and shuttle's encoded schedule.
-Rerun just that test to repeat the corpus. To replay exactly the printed
+Rerun just that test to repeat the corpus. `T4_SHUTTLE_SEED` (hex) replaces
+the corpus's two seeds with one, and `T4_SHUTTLE_BUDGET` multiplies every
+test's iterations: the weekly fuzz workflow runs the whole suite so, on fresh
+seeds it draws and prints, at eight times the budget. The tests never draw a
+seed themselves. To replay exactly the printed
 schedule, join its lines and run on the failing revision:
 
 ```sh
@@ -51,7 +55,17 @@ allocator and ownership rules all run under shuttle. Only the boundaries differ:
   backpressure, descriptor handover and an explicitly owned listener registry.
   The test's builders receive that registry; there is no global registry.
 - `owner/simulated_waker.rs` models the socket bell with shuttle park tokens.
-  The real bell's tests also run against this implementation.
+  The real bell's tests also run against this implementation. Like the real
+  session's `poll`, it looks again at the clock's next advance.
+- A socket's shutdown yields: the peer it wakes would run at once on another
+  core, before the shutter's next step. Without it, PCT almost never
+  preempts the owner between two sessions' shutdowns, where 57bf283's race
+  was.
+- A transport built `losing_shutdown_wakeups` models the wakeup macOS loses
+  (`doc/11-shared-mode.md`, decision 7): a shutdown wakes no thread already
+  waiting to read its own end. Such a thread sees the shutdown once its
+  peer's close or new bytes wake it, or once its wait times out, as a fresh
+  `poll` would; shuttle's spurious wakeups don't show it sooner.
 - Region backing is one anonymous private allocation held by both simulated
   peers, rather than two kernel mappings. Spans, bounds checks, staged fetches,
   output buffers, and lending until `Ended` use the production code. The OS
@@ -83,8 +97,8 @@ check. There are no test sleeps, receive timeouts or elapsed-time assertions.
 
 ## The simulated world outside the tests
 
-The `shared_owner` fuzz target (`fuzz/README.md`) runs a real owner and two
-clients over the modeled transport, so it needs the shuttle build of the
+The `shared_owner` and `shared_mode` fuzz targets (`fuzz/README.md`) run a
+real owner and its clients over the modeled transport, so they need the shuttle build of the
 library in a binary that isn't the unit-test one. `--cfg t4_simulated` builds
 it there, as `--cfg loom` builds loom's: the gates that pick the simulated
 socket, region, bell, address, clock, I/O driver and primitives read
@@ -93,11 +107,38 @@ lint job builds the library with `--all-features`, and would lint only the
 simulated world. Test-only helpers keep `all(test, feature = "shuttle")`. The
 `shuttle` feature alone still changes nothing outside the tests: the fuzz crate
 turns it on for every target, to build shuttle in, and passes the cfg for
-`shared_owner` only.
+those two only.
 
 Each fuzz input is one PCT run at depth 3 from a seed the input picks
 (`TestSchedule::fuzzed`), so that an input replays exactly; the corpus's
 seeds above stay the tests'.
+
+## Scenarios an input writes
+
+`t4_caching/shared_scenario/` builds an owner and its clients in one process
+on this transport and clock, and runs a script against them: reads of every
+shape, on the script's thread or on threads of their own, some given up;
+writes behind the caches' backs; processes dropped, killed, dropped
+mid-read, shut down and built again. It checks each read's bytes against the
+versions the process's cache may trust, the owner's tiers, calls, spans and
+sessions once no read is in flight, and how often each block is fetched. A
+thread of its own advances the clock while every other thread waits, so
+that waits which look again come due; it stops once the script makes no
+progress for 64 rounds, so that a hang ends in a deadlock shuttle reports.
+
+The `shared_mode` fuzz target writes the scripts, and each input's seed picks
+its one PCT schedule. Five fixed scripts run in this suite under the corpus,
+each the shape of a past bug. Reverting the fix:
+
+| Fix | The fixed script | Schedules to fail |
+|---|---|---|
+| a1c1f69, GETs merged across caches | wrong bytes read | the first |
+| 059f38c, the lost wakeup | deadlock (lossy transport) | the first |
+| 57bf283, a going owner hands claims on | a block fetched 3 times | about 1 in 220 |
+
+The corpus's 32 schedules don't reach 57bf283's race; the focused test below
+does. a1c1f69's race needs a killed owner: one that drops keeps a snapshot,
+whose next version id the next owner resumes from, so ids no longer repeat.
 
 ## Real-OS coverage retained
 
@@ -150,6 +191,8 @@ window between two sessions' shutdowns, out of thousands of steps.
 
 An independent `shuttle` matrix job runs the entire feature build on Linux and
 macOS, regardless of the lint/proof jobs' result, with a five-minute step limit.
+On Mondays, `.github/workflows/fuzz.yml` runs it on Linux on fresh seeds for
+50 minutes, and fuzzes `shared_mode` for an hour.
 Both platforms are useful: their production socket/region adapters differ,
 while the modeled protocol is required to work on each host. Ordinary test
 jobs retain real-OS coverage on both platforms, also with five-minute test-step

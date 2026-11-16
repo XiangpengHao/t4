@@ -56,7 +56,7 @@ verify = true
 [lints.rust]
 # Verus sets `verus_only` while it verifies; ghost-only imports sit behind it.
 # `t4_simulated` builds the shuttle tests' simulated world outside the test binary, for the
-# `shared_owner` fuzz target (`fuzz/README.md`).
+# `shared_owner` and `shared_mode` fuzz targets (`fuzz/README.md`).
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)', 'cfg(t4_simulated)'] }
 
 [lints.clippy]

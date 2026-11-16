@@ -1,4 +1,5 @@
-//! The checked-in schedule corpus. Never draw scheduler seeds from entropy.
+//! The checked-in schedule corpus. Never draw scheduler seeds from entropy here: a seed comes
+//! from this file or from the caller, who prints it, so every failure replays.
 #[cfg(feature = "shuttle")]
 use shuttle::scheduler::PctScheduler;
 #[cfg(all(test, feature = "shuttle"))]
@@ -47,6 +48,8 @@ impl TestSchedule {
         .run(test);
     }
 
+    /// `T4_SHUTTLE_SEED` (hex) replaces the corpus's seeds, and `T4_SHUTTLE_BUDGET` multiplies
+    /// the iterations: the weekly run's fresh seeds, at a higher budget.
     #[cfg(all(test, feature = "shuttle"))]
     pub(crate) fn iterations(iterations: usize, test: impl Fn() + Send + Sync + 'static) {
         if let Ok(schedule) = std::env::var("T4_SHUTTLE_REPLAY") {
@@ -54,8 +57,17 @@ impl TestSchedule {
                 .run(test);
             return;
         }
+        let seeds = match std::env::var("T4_SHUTTLE_SEED") {
+            Ok(seed) => vec![Self::parsed_seed(&seed)],
+            Err(_) => Self::SEEDS.to_vec(),
+        };
+        let budget = std::env::var("T4_SHUTTLE_BUDGET").map_or(1, |budget| {
+            (budget.trim().parse())
+                .unwrap_or_else(|_| panic!("T4_SHUTTLE_BUDGET={budget}: not a count"))
+        });
+        let iterations = iterations * budget;
         let test = std::sync::Arc::new(test);
-        for seed in Self::SEEDS {
+        for seed in seeds {
             eprintln!(
                 "shuttle: pct seed={seed:#x}, depth={}, iterations={iterations}",
                 Self::PCT_DEPTH
@@ -68,6 +80,14 @@ impl TestSchedule {
             .run(move || test());
         }
     }
+
+    #[cfg(all(test, feature = "shuttle"))]
+    fn parsed_seed(seed: &str) -> u64 {
+        let digits = seed.trim().trim_start_matches("0x");
+        u64::from_str_radix(digits, 16)
+            .unwrap_or_else(|_| panic!("T4_SHUTTLE_SEED={seed}: not hex"))
+    }
+
     #[cfg(feature = "shuttle")]
     fn config() -> shuttle::Config {
         let mut config = shuttle::Config::new();

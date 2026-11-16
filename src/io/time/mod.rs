@@ -54,7 +54,7 @@ impl Clock {
             timer.unpark();
         }
     }
-    #[cfg(all(test, feature = "shuttle"))]
+    #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
     pub(crate) fn timers_waiting(&self) -> usize {
         self.0.lock().unwrap().timers.len()
     }

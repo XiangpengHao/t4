@@ -30,6 +30,8 @@ pub mod __fuzz {
     pub use crate::cache::{
         FuzzedHello, FuzzedPath, FuzzedRead, FuzzedSession, FuzzedSpan, FuzzedStep,
     };
+    #[cfg(all(feature = "shuttle", t4_simulated))]
+    pub use crate::cache::{ScenarioRead, SharedOperation, SharedScenario, SharedSettings};
 }
 
 verus! {

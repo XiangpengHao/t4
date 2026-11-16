@@ -236,6 +236,15 @@ impl OwnerConnection {
         self.region.as_ref().map(|region| region.free_pages())
     }
 
+    /// Every span free: none lent to the owner, none held by a caller's bytes.
+    #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
+    pub(in crate::cache) fn region_all_free(&self) -> bool {
+        let all = ClientRegion::BYTES / crate::PAGE_SIZE_U64;
+        self.region
+            .as_ref()
+            .is_none_or(|region| region.free_pages() == all)
+    }
+
     #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::cache::cache_stores::shared) fn region(
         &self,
@@ -259,7 +268,7 @@ impl OwnerConnection {
             .is_some_and(|region| region.holds(bytes))
     }
 
-    #[cfg(all(test, feature = "shuttle"))]
+    #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
     pub(in crate::cache) fn calls_waiting(&self) -> Vec<u64> {
         let mut waiting: Vec<u64> = self.calls.calls().waiting.keys().copied().collect();
         waiting.sort_unstable();

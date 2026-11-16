@@ -47,5 +47,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "shared_mode"
+path = "fuzz_targets/shared_mode.rs"
+test = false
+doc = false
+bench = false
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(t4_simulated)'] }

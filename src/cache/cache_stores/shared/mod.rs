@@ -237,13 +237,13 @@ impl CacheStore for SharedCacheStore {
         self.owned.get().map(|owned| &**owned.store.cache())
     }
 
-    #[cfg(all(feature = "__fuzz", feature = "shuttle", t4_simulated))]
+    #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
     fn live_sessions(&self) -> usize {
         let listener = self.owned.get().and_then(|owned| owned._listener.as_ref());
         listener.map_or(0, OwnerListener::live_sessions)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, all(feature = "shuttle", t4_simulated)))]
     fn owner_connection(&self) -> Option<std::sync::Arc<OwnerConnection>> {
         let client = self.client.read().unwrap_or_else(PoisonError::into_inner);
         client.as_ref().map(std::sync::Arc::clone)
