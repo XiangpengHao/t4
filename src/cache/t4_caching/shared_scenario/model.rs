@@ -10,8 +10,9 @@ use bytes::Bytes;
 use object_store::GetRange;
 
 use crate::cache::BLOCK_SIZE_U64;
+use crate::cache::seeded_bytes::SeededBytes;
 
-/// Each byte a hash of the id and offset, so no two contents agree for long.
+/// Its bytes are seeded by its id, so no two contents agree for long.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Content {
     id: u64,
@@ -22,22 +23,33 @@ impl Content {
     pub(super) fn size(self) -> u64 {
         self.size
     }
+}
 
-    pub(super) fn bytes(self) -> Bytes {
-        (0..self.size).map(|offset| self.byte(offset)).collect()
+/// A content and its bytes, made once as it is written: a read is checked against a slice of them.
+#[derive(Clone)]
+pub(super) struct Version {
+    content: Content,
+    bytes: Bytes,
+}
+
+impl Version {
+    fn of(content: Content) -> Self {
+        let bytes = SeededBytes::new(content.id).over(0..content.size).into();
+        Self { content, bytes }
     }
 
-    fn byte(self, offset: u64) -> u8 {
-        let word = ((offset / 8) ^ self.id.wrapping_mul(0x9E37_79B9_7F4A_7C15))
-            .wrapping_mul(0xD1B5_4A32_D192_ED03);
-        word.to_le_bytes()[(offset % 8) as usize]
+    pub(super) fn content(&self) -> Content {
+        self.content
     }
 
-    fn holds(self, range: &Range<u64>, bytes: &[u8]) -> bool {
-        range.end - range.start == bytes.len() as u64
-            && (range.start..range.end)
-                .zip(bytes)
-                .all(|(offset, &byte)| self.byte(offset) == byte)
+    pub(super) fn bytes(&self) -> &Bytes {
+        &self.bytes
+    }
+}
+
+impl fmt::Debug for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.content.fmt(f)
     }
 }
 
@@ -48,16 +60,20 @@ pub(super) enum Answer {
 }
 
 impl Answer {
-    /// Whether `content` read over `asked` answers this.
-    fn is_of(&self, content: Option<Content>, asked: Option<&GetRange>) -> bool {
-        let range = match (content, asked) {
-            (None, _) => return *self == Self::Failed,
-            (Some(content), None) => Ok(0..content.size),
-            (Some(content), Some(asked)) => asked.as_range(content.size),
+    /// Whether `version` read over `asked` answers this.
+    fn is_of(&self, version: Option<&Version>, asked: Option<&GetRange>) -> bool {
+        let Some(version) = version else {
+            return *self == Self::Failed;
+        };
+        let size = version.content.size;
+        let range = match asked {
+            None => Ok(0..size),
+            Some(asked) => asked.as_range(size),
         };
         match (self, range) {
             (Self::Bytes { range, bytes }, Ok(expected)) => {
-                *range == expected && content.is_some_and(|content| content.holds(range, bytes))
+                *range == expected
+                    && version.bytes[range.start as usize..range.end as usize] == bytes[..]
             }
             (Self::Failed, Err(_)) => true,
             _ => false,
@@ -85,35 +101,39 @@ pub(super) struct Model {
     next_id: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Written {
     step: usize,
-    content: Option<Content>,
+    version: Option<Version>,
 }
 
 impl Model {
     pub(super) const FILES: usize = 3;
 
-    pub(super) fn write(&mut self, file: usize, step: usize, size: Option<u64>) -> Option<Content> {
-        let content = size.map(|size| {
+    pub(super) fn write(&mut self, file: usize, step: usize, size: Option<u64>) -> Option<Version> {
+        let version = size.map(|size| {
             self.next_id += 1;
-            Content {
+            Version::of(Content {
                 id: self.next_id,
                 size,
-            }
+            })
         });
-        self.files[file].push(Written { step, content });
-        content
+        let written = Written {
+            step,
+            version: version.clone(),
+        };
+        self.files[file].push(written);
+        version
     }
 
     pub(super) fn current(&self, file: usize) -> Option<Content> {
-        self.files[file].last().and_then(|written| written.content)
+        self.files[file].last()?.content()
     }
 
     /// The blocks of the largest version of `file` written so far.
     pub(super) fn most_blocks(&self, file: usize) -> u64 {
         (self.files[file].iter())
-            .filter_map(|written| written.content)
+            .filter_map(Written::content)
             .map(|content| content.size.div_ceil(BLOCK_SIZE_U64))
             .max()
             .unwrap_or(0)
@@ -134,13 +154,13 @@ impl Model {
         let since_built = current_at(built).unwrap_or(0);
         let known = versions[since_built..]
             .iter()
-            .filter_map(|written| written.content)
-            .any(|content| answer.is_of(Some(content), asked));
+            .filter_map(|written| written.version.as_ref())
+            .any(|version| answer.is_of(Some(version), asked));
         let gone = match current_at(started) {
             None => true,
             Some(at) => versions[at..]
                 .iter()
-                .any(|written| written.content.is_none()),
+                .any(|written| written.version.is_none()),
         };
         known || (gone && answer.is_of(None, asked))
     }
@@ -148,11 +168,19 @@ impl Model {
     /// When `content` was written, if its file was written that once: the owner holds a path's
     /// one version, which a read of another version of the file replaces.
     pub(super) fn written_once(&self, content: Content) -> Option<usize> {
-        let file = (self.files.iter())
-            .find(|file| file.iter().any(|written| written.content == Some(content)))?;
+        let file = (self.files.iter()).find(|file| {
+            file.iter()
+                .any(|written| written.content() == Some(content))
+        })?;
         match file.as_slice() {
             [written] => Some(written.step),
             _ => None,
         }
+    }
+}
+
+impl Written {
+    fn content(&self) -> Option<Content> {
+        self.version.as_ref().map(Version::content)
     }
 }

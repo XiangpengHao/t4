@@ -195,8 +195,8 @@ impl<'s> ScenarioRun<'s> {
             SharedOperation::WriteBehind { file, size } => {
                 let file = file % Model::FILES;
                 let size = size.map(|size| size.min(SharedScenario::MOST_FILE_BYTES));
-                let content = self.model.write(file, step, size);
-                block_on(self.remote.write(file, content));
+                let version = self.model.write(file, step, size);
+                block_on(self.remote.write(file, version));
             }
             SharedOperation::Drop { process } => self.drop_process(process, step),
             SharedOperation::Kill { process } => {

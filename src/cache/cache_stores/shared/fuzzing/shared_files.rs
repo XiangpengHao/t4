@@ -8,6 +8,7 @@ use shuttle::future::block_on;
 
 use crate::PAGE_SIZE_U64;
 use crate::cache::BLOCK_SIZE_U64;
+use crate::cache::seeded_bytes::SeededBytes;
 use crate::io::sync::Arc;
 
 /// Each byte is a function of its path and offset, so that a client lands a fetch's true bytes
@@ -15,6 +16,8 @@ use crate::io::sync::Arc;
 pub(super) struct SharedFiles {
     store: Arc<InMemory>,
     metas: Vec<ObjectMeta>,
+    /// Each file's, made once: a read is checked against a slice of them.
+    bytes: Vec<Bytes>,
 }
 
 impl SharedFiles {
@@ -30,16 +33,21 @@ impl SharedFiles {
 
     pub(super) fn put() -> Self {
         let store = Arc::new(InMemory::new());
-        let metas = Self::FILES
+        let (metas, bytes) = Self::FILES
             .iter()
             .map(|&(name, size)| {
                 let path = Path::from(name);
-                let bytes = Self::bytes(path.as_ref().as_bytes(), 0..size);
-                block_on(store.put(&path, Bytes::from(bytes).into())).expect("an in-memory put");
-                block_on(store.head(&path)).expect("the file just put")
+                let bytes = Bytes::from(Self::bytes(path.as_ref().as_bytes(), 0..size));
+                block_on(store.put(&path, bytes.clone().into())).expect("an in-memory put");
+                let meta = block_on(store.head(&path)).expect("the file just put");
+                (meta, bytes)
             })
-            .collect();
-        Self { store, metas }
+            .unzip();
+        Self {
+            store,
+            metas,
+            bytes,
+        }
     }
 
     pub(super) fn store(&self) -> Arc<dyn ObjectStore> {
@@ -79,14 +87,21 @@ impl SharedFiles {
     }
 
     pub(super) fn bytes(path: &[u8], range: Range<u64>) -> Vec<u8> {
-        let salt = path.iter().fold(0x51_7cc1_b727_220a_u64, |salt, &byte| {
-            (salt ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3)
+        Self::seeded(path).over(range)
+    }
+
+    /// Whether `read` is the bytes of `meta`'s file over `range`.
+    pub(super) fn hold(&self, meta: &ObjectMeta, range: Range<u64>, read: &[u8]) -> bool {
+        let file = (self.metas.iter())
+            .position(|held| held.location == meta.location)
+            .expect("a file the store holds");
+        self.bytes[file].get(range.start as usize..range.end as usize) == Some(read)
+    }
+
+    fn seeded(path: &[u8]) -> SeededBytes {
+        let seed = path.iter().fold(0x51_7cc1_b727_220a_u64, |seed, &byte| {
+            (seed ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3)
         });
-        range
-            .map(|at| {
-                let mixed = (at ^ salt).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-                (mixed >> 56) as u8
-            })
-            .collect()
+        SeededBytes::new(seed)
     }
 }
