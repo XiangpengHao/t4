@@ -8,6 +8,8 @@ use bytes::BytesMut;
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::net::{SendAncillaryBuffer, SendFlags};
 
+use crate::cache::cache_stores::shared::spin_wait::SpinWait;
+
 /// A send to a gone peer fails rather than raise `SIGPIPE`, which the process, a user's app,
 /// may not ignore.
 pub(in crate::cache::cache_stores::shared) struct FrameSocket {
@@ -111,13 +113,22 @@ impl FrameSocket {
         self.stream.set_write_timeout(timeout)
     }
 
+    pub(super) fn spin_until_readable(&self) -> io::Result<()> {
+        SpinWait::BEFORE_SLEEP
+            .until(|| self.poll(PollFlags::IN, &Timespec::default()))
+            .map(drop)
+    }
+
     fn wait(&self, ready: PollFlags) -> io::Result<()> {
+        self.poll(ready, &Self::recheck()).map(drop)
+    }
+
+    fn poll(&self, ready: PollFlags, timeout: &Timespec) -> io::Result<bool> {
         let mut socket = [PollFd::new(&self.stream, ready)];
-        let recheck = Self::recheck();
         loop {
-            match rustix::event::poll(&mut socket, Some(&recheck)) {
+            match rustix::event::poll(&mut socket, Some(timeout)) {
                 Err(rustix::io::Errno::INTR) => {}
-                waited => return waited.map(drop).map_err(io::Error::from),
+                polled => return Ok(polled? > 0),
             }
         }
     }

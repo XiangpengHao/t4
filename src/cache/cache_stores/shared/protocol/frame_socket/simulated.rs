@@ -139,6 +139,11 @@ impl FrameSocket {
         Ok(read)
     }
 
+    /// Simulated time stands still while a thread spins: a read here sleeps at once.
+    pub(super) fn spin_until_readable(&self) -> io::Result<()> {
+        Ok(())
+    }
+
     pub(in crate::cache::cache_stores::shared) const MOST_BYTES: u64 = 1 << 31;
     pub(in crate::cache::cache_stores::shared) const RECHECK: Duration = Duration::from_secs(1);
     const CAPACITY: usize = 64 << 10;

@@ -4,9 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Wake;
 use std::thread::{self, ThreadId};
 
-use rustix::event::{PollFd, PollFlags};
+use rustix::event::{PollFd, PollFlags, Timespec};
 
 use crate::cache::cache_stores::shared::protocol::FrameSocket;
+use crate::cache::cache_stores::shared::spin_wait::SpinWait;
 
 pub(super) struct SessionWaker {
     session: ThreadId,
@@ -33,12 +34,9 @@ impl SessionWaker {
             PollFd::new(socket, PollFlags::IN),
             PollFd::new(&self.bell, PollFlags::IN),
         ];
-        let recheck = FrameSocket::recheck();
-        loop {
-            match rustix::event::poll(&mut ready, Some(&recheck)) {
-                Err(rustix::io::Errno::INTR) => {}
-                waited => break waited.map(drop).map_err(io::Error::from)?,
-            }
+        let now = Timespec::default();
+        if !SpinWait::BEFORE_SLEEP.until(|| Self::poll(&mut ready, &now))? {
+            Self::poll(&mut ready, &FrameSocket::recheck())?;
         }
         let [socket, bell] = ready.map(|ready| !ready.revents().is_empty());
         if bell {
@@ -49,6 +47,15 @@ impl SessionWaker {
         // Wakes from here on ring again; those before are the session's to run next.
         self.rung.store(false, Ordering::Release);
         Ok(socket)
+    }
+
+    fn poll(ready: &mut [PollFd<'_>], timeout: &Timespec) -> io::Result<bool> {
+        loop {
+            match rustix::event::poll(ready, Some(timeout)) {
+                Err(rustix::io::Errno::INTR) => {}
+                polled => return Ok(polled? > 0),
+            }
+        }
     }
 }
 

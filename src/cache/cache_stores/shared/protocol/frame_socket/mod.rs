@@ -45,6 +45,7 @@ impl FrameReceiver {
             if let Some(body) = self.next_frame(most)? {
                 return Ok(Some(body));
             }
+            self.socket.spin_until_readable()?;
             if !self.fill()? {
                 return match self.read.is_empty() {
                     true => Ok(None),

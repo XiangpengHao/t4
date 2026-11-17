@@ -66,8 +66,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)', 'cfg(t4_simu
 # `foo.rs` beside a `foo/`: one place to look for a module.
 self_named_module_files = "deny"
 
-# A hot read's time through a shared cache's owner and its client
-# (`doc/11-shared-mode.md`, Cost).
+# A hot read's time through an unshared cache, and a shared cache's owner
+# and its client (`doc/11-shared-mode.md`, Cost).
 [[bench]]
 name = "shared_reads"
 harness = false
