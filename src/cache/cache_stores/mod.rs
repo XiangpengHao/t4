@@ -38,8 +38,6 @@ pub(super) trait CacheStore: Send + Sync {
 
     fn known_size<'s>(&'s self, path: &'s [u8]) -> BoxFuture<'s, Option<u64>>;
 
-    fn shut_down(&self) -> Result<()>;
-
     #[cfg(any(test, feature = "__fuzz"))]
     fn owned(&self) -> Option<&ObjectCache> {
         None

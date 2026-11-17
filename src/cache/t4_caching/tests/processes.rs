@@ -97,25 +97,11 @@ impl SharedProcess {
     }
 
     fn start(dir: &std::path::Path) -> Self {
-        Self::start_with(dir, |builder| builder)
-    }
-
-    fn start_on_disk(dir: &std::path::Path) -> Self {
-        Self::start_with(dir, |builder| {
-            builder.with_placement_policy(|sizes| {
-                crate::cache::policy::FixedPlacementPolicy::new(sizes, Admit::Disk)
-            })
-        })
-    }
-
-    fn start_with(
-        dir: &std::path::Path,
-        customize: impl FnOnce(T4CachingBuilder) -> T4CachingBuilder,
-    ) -> Self {
         let store = Arc::new(CountingStore::default());
         let path = Path::from("shared");
         put(store.as_ref(), &path, &Self::data());
-        let cache = customize(builder(&store, dir).with_multiprocess_sharing())
+        let cache = builder(&store, dir)
+            .with_multiprocess_sharing()
             .build()
             .unwrap();
         let meta = block_on(store.head(&path)).unwrap();
@@ -169,22 +155,13 @@ fn a_child_process_plays_its_role() {
         PersistenceProcess::load(&dir);
         return;
     }
-    let process = match role.as_str() {
-        "shut-down-owner" => SharedProcess::start_on_disk(&dir),
-        _ => SharedProcess::start(&dir),
-    };
+    let process = SharedProcess::start(&dir);
     // Held till the process ends, so the gated GET is never answered.
     let mut held = None;
     match role.as_str() {
         "owner" => {
             assert!(process.owns());
             markers.set("owning", "");
-        }
-        "shut-down-owner" => {
-            assert!(process.owns());
-            assert_eq!(process.read(0..SharedProcess::SIZE), SharedProcess::data());
-            process.cache.shut_down().unwrap();
-            markers.set("shut-down", "");
         }
         "stalled-client" => {
             assert!(!process.owns());
@@ -239,24 +216,6 @@ fn an_owner_killed_mid_read_leaves_its_client_the_cache() {
     client.store.take_asked();
     assert_eq!(client.read(0..SharedProcess::SIZE), SharedProcess::data());
     assert_eq!(client.fetched_bytes(), 0, "the read that took over cached");
-}
-
-#[test]
-fn an_owner_shut_down_then_killed_leaves_its_disk_tier() {
-    let dir = tempfile::tempdir().unwrap();
-    let markers = Markers::new(dir.path());
-    let mut owner = ChildProcess::spawn("shut-down-owner", dir.path());
-    markers.said("shut-down");
-    owner.kill();
-
-    let next = SharedProcess::start_on_disk(dir.path());
-    wait_until(
-        || next.owns() || (next.read(0..1) == SharedProcess::data().slice(..1) && next.owns()),
-        "the next cache owns the files",
-    );
-    next.fetched_bytes();
-    assert_eq!(next.read(0..SharedProcess::SIZE), SharedProcess::data());
-    assert_eq!(next.fetched_bytes(), 0, "the killed owner's disk tier");
 }
 
 /// As a terminal's shell that sets its own `TMPDIR` and a desktop app's differ.

@@ -1,6 +1,6 @@
-//! Times a clean restart of t4's disk tier: the log finished as the cache shuts down,
-//! and replayed and rebased as the next builds (doc/13-persistence.md). A last build
-//! with the log removed is the cold baseline. A partial batch stays in memory.
+//! Times a restart of t4's disk tier: the cache dropped, appending its last adds, and its log
+//! replayed and rebased as the next builds (doc/13-persistence.md). A last build with the log
+//! removed is the cold baseline. A partial batch stays in memory.
 //!
 //! ```text
 //! cargo build --release -p t4-bench --bin disk_restart
@@ -192,7 +192,6 @@ impl RestartBench {
 struct RestartRow {
     restart: String,
     log_bytes: u64,
-    shut_down: Option<Duration>,
     drop: Option<Duration>,
     build: Duration,
     gets_after_build: u64,
@@ -200,7 +199,7 @@ struct RestartRow {
 
 impl RestartRow {
     const CSV_COLUMNS: &str = "label,restart,blocks,file_blocks,cache_files,\
-                               log_bytes,shut_down_ms,drop_ms,build_ms,gets_after_build";
+                               log_bytes,drop_ms,build_ms,gets_after_build";
 
     fn csv(&self, label: &str, bench: &RestartBench) -> String {
         let millis = |time: Option<Duration>| {
@@ -209,13 +208,12 @@ impl RestartRow {
             })
         };
         format!(
-            "{label},{},{},{},{},{},{},{},{},{}",
+            "{label},{},{},{},{},{},{},{},{}",
             self.restart,
             bench.blocks,
             bench.file_blocks,
             bench.cache_files.len(),
             self.log_bytes,
-            millis(self.shut_down),
             millis(self.drop),
             millis(Some(self.build)),
             self.gets_after_build,
@@ -248,7 +246,6 @@ async fn main() -> Result<(), Error> {
     write_row(RestartRow {
         restart: "first".to_owned(),
         log_bytes: 0,
-        shut_down: None,
         drop: None,
         build: cold_build,
         gets_after_build: 0,
@@ -256,19 +253,15 @@ async fn main() -> Result<(), Error> {
 
     for restart in 1..=args.restarts {
         let start = Instant::now();
-        cache.shut_down()?;
-        let shut_down = start.elapsed();
-        let log_bytes = bench.log_bytes();
-        let start = Instant::now();
         drop(cache);
         let dropped = start.elapsed();
+        let log_bytes = bench.log_bytes();
         let build;
         (cache, build) = bench.timed_build()?;
         let gets_after_build = bench.check_taken_back(&cache).await?;
         write_row(RestartRow {
             restart: restart.to_string(),
             log_bytes,
-            shut_down: Some(shut_down),
             drop: Some(dropped),
             build,
             gets_after_build,
@@ -284,7 +277,6 @@ async fn main() -> Result<(), Error> {
     write_row(RestartRow {
         restart: "no-log".to_owned(),
         log_bytes: 0,
-        shut_down: None,
         drop: None,
         build,
         gets_after_build: bench.gets.counts().gets() - gets_before,

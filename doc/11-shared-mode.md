@@ -347,12 +347,11 @@ decision 9).
      from its own GETs would take an output in the client, a copy more
      for every read, for a read the owner's going costs one GET more.
      The next read tries the lock: the client that wins
-     owns the cache, with the disk tier its last owner kept as it dropped
-     or shut down (`10-spiral-integration.md`, decision 7), or cold after a
-     crash; the others connect to it. A client that shut its cache down
-     tries the next owner only, never the lock: it is exiting. A version id names a version only in the
-     cache that gave it, and the next owner, cold after a crash, gives its
-     ids again, to other files: so a client's GETs still waiting under the last owner merge
+     owns the cache, with the disk tier its last owner's log kept, dropped
+     or killed, within one boot (`13-persistence.md`, decision 5); the
+     others connect to it. A version id names a version only in the
+     cache that gave it, and the next owner may give its ids again, to
+     other files (`13-persistence.md`, decision 11): so a client's GETs still waiting under the last owner merge
      with none of the next's, each keyed by its id and the cache it came
      from, the client's own or the owner on a numbered connection
      (`FileVersionKey`). Merged, a read of one file would take another's

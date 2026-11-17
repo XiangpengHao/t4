@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Runs on the dev box (bench/devbox/create.sh): times t4's clean restart, the log finished at
-# shutdown and replayed at build (disk_restart, doc/13-persistence.md), on the box's
+# Runs on the dev box (bench/devbox/create.sh): times t4's restart, the cache dropped and its
+# log replayed and rebased at build (disk_restart, doc/13-persistence.md), on the box's
 # local SSDs at /mnt/t4/<n>, OS defaults throughout.
 #
 #   nix develop -c bench/disk_restart/run.sh <results dir>
@@ -9,8 +9,8 @@
 #   desktop-small-files  20 GiB in 1 MiB files: a path and e_tag a block, the log's worst
 #   server               256 GiB in 64 MiB files, a cache file on each of three SSDs
 #
-# Each again under strace, timing only the syscalls that make the log durable, so the time
-# splits into waiting on the drives and the rest. Writes <run>.csv, <run>.log, drives.txt,
+# Each again under strace, timing the syscalls that sync or replace files: none should sync,
+# so a sync there is a regression. Writes <run>.csv, <run>.log, drives.txt,
 # build.log, and done at the end, or failed if a step fails.
 set -euo pipefail
 

@@ -5,7 +5,9 @@ replay, disk writes off the read path, and live appends across a kill.
 Step 4, measurement on Linux, is left. Stage 1, a clean restart, is built
 (`10-spiral-integration.md`, decision 7, 2 Nov 2026) and measured here.
 Stage 2, a log that keeps the disk tier across a killed process, is the
-design below, now built.
+design below, now built. Revised 17 Nov 2026: the disk tier lasts one boot,
+so nothing syncs and there is no clean mark or `T4Caching::shut_down`
+(decision 5).
 
 t4 is a cache: the object store holds the true data, so the cache may lose
 any block, but never returns wrong bytes (`03-cache.md`). Persistence keeps
@@ -16,9 +18,9 @@ bytes.
 
 | The process ends by | stage 1, built | stage 2 |
 |---|---|---|
-| a clean exit: a drop, or `T4Caching::shut_down` | warm | warm |
+| a drop | warm | warm |
 | a kill or a crash | cold | warm, but for 32 MiB at most |
-| a machine crash: power lost, a kernel panic | cold | cold |
+| either, then a reboot, planned or not | warm after a drop, else cold | cold |
 
 ## Terms
 
@@ -27,7 +29,7 @@ bytes.
 | **Log** | `<first cache file>.log`, beside the cache files: a header, a base, then records |
 | **Base** | the index's disk half, whole, in stage 1's snapshot format: each file version with blocks on disk, each of those blocks' chunk, and the next file version id |
 | **Record** | entries appended together: its length, a CRC32C, its entries |
-| **Entry** | a path's version (path, e_tag, size, id), a block added (version id, block, chunk), a chunk freed (chunk), or the clean mark a clean exit appends |
+| **Entry** | a path's version (path, e_tag, size, id), a block added (version id, block, chunk), or a chunk freed (chunk) |
 | **Batch** | 16 blocks written to disk together, one batch at a time |
 
 ## Decisions
@@ -37,7 +39,7 @@ bytes.
    bytes than the block it names. It could in two ways: naming a chunk
    before its block is written, or still naming it once the chunk is
    written again. Each decision below closes one of the two. Nothing is
-   synced while the cache runs.
+   ever synced (decision 5).
 
 2. **A log replaces the snapshot.** Stage 1 writes a snapshot as the cache
    ends and removes it as the next builds, so a crash finds none. The log
@@ -63,27 +65,30 @@ bytes.
    entry is queued as the cache names a new version, under the log's lock
    that adds take too, so no add names a version before its path.
 
-4. **No sync while the cache runs.** A process's death loses nothing it
-   wrote: the kernel holds the log's appended bytes, and a direct-I/O write,
-   once done, is on the drive. A kill loses the batch in flight and the
-   blocks waiting, 32 MiB at most to fetch again.
+4. **No sync.** A process's death loses nothing it wrote: the kernel
+   holds the log's appended bytes, and a direct-I/O write, once done, is on
+   the drive. A kill loses the batch in flight and the blocks waiting, 32
+   MiB at most to fetch again.
 
-5. **A machine crash starts cold.** It may lose pages the kernel had not
-   written, or the drive's reordered writes, so neither order of decision 3
-   holds after one. The log's header holds the boot id
-   (`/proc/sys/kernel/random/boot_id`; `kern.bootsessionuuid` on macOS).
-   The next cache takes the log back if it ends in a clean mark, or was
-   written in this boot; else it starts cold.
+5. **The disk tier lasts one boot** (the user, 17 Nov 2026). A machine
+   crash may lose pages the kernel had not written, or the drive's
+   reordered writes, so neither order of decision 3 holds after one. The
+   log's header holds the boot id (`/proc/sys/kernel/random/boot_id`;
+   `kern.bootsessionuuid` on macOS). The next cache takes the log back only
+   if it was written in this boot; else it starts cold. A planned reboot
+   starts cold too: telling it from a crash would take a clean exit that
+   syncs the cache files and marks the log, and Studio, the desktop app
+   this is for, never exits cleanly: Tauri ends its process without
+   dropping the cache, which sits in libspiral behind a C ABI with no call
+   to end it (`10-spiral-integration.md`, decision 7).
 
-6. **The only syncs: as the cache ends, and as the next builds.**
-   - As the cache drops or shuts down, its tier closed and its cache files
-     flushed as in stage 1, it appends the adds it holds and a clean mark,
-     and flushes the log. The log isn't written again: it only grows.
+6. **A drop appends what it holds; the next build rebases.**
+   - As the cache drops, its tier closed and its writer joined, it appends
+     the entries it holds: the last batch's adds, which a kill loses.
    - As the next cache builds, it takes the log back, then writes it again
-     as a base alone with its own boot id, renamed into place and flushed,
-     before it writes a chunk. This is the log's only compaction, and it
-     must be durable: the old log, ending clean, would outlive a machine
-     crash and name chunks reused since.
+     as a base alone with its own boot id, renamed into place, before it
+     writes a chunk, so that each record appended after applies to it.
+     This is the log's only compaction.
 
 7. **Replay checks every field, as stage 1 checks the snapshot.** The
    header must match: format, block size, chunks per file, and each cache
@@ -115,10 +120,10 @@ bytes.
    and uses one-block batches; larger capacities use 16. Raising a caller's
    memory budget silently would break the fixed-capacity contract.
    A batch not full waits for its next block; its
-   blocks are memory's meanwhile and, as memory's, not written at shutdown.
+   blocks are memory's meanwhile and, as memory's, not written at a drop.
    One owned writer thread waits on a condition variable, submits a whole
    batch, and parks until its I/O completes. It holds the index and the
-   tiers (`Tiers`), which reads share, not the cache; shutdown closes the
+   tiers (`Tiers`), which reads share, not the cache; a drop closes the
    tier and joins it.
    At most 16 blocks wait behind the batch in flight. With no free memory,
    a fill may go uncached; it never waits for the writer to make room.
@@ -137,18 +142,24 @@ bytes.
     a record cut short ends replay before any of its entries. Unknown
     entries start cold.
     A path may replace a path, in record order, but never reuse an id,
-    including any id below the base's next id. The clean mark carries the
-    next id too, including ids a racing resolution allocated and wasted.
+    including any id below the base's next id. An id a racing resolution
+    wasted, or one whose path a kill lost, may be given again after a
+    restart: an id names a version only in the cache that gave it
+    (`11-shared-mode.md`, decision 7).
 
 12. **Failure stops reuse.** A failed log append closes the disk tier
     before its batch writes; nothing appends past a possibly torn record.
     Reads keep using memory, disk and the remote. A failed data write is
     never added. An unreadable boot UUID or missing creation times discard any old log
-    durably and disable persistence. The cache builds and serves normally;
+    and disable persistence. The cache builds and serves normally;
     a restart is cold.
     The file is `<first cache file>.log`; old `.snapshot` files are ignored.
 
 ## Measured: stage 1's restart
+
+Stage 1 synced at each clean exit; stage 2 never syncs, so the shut-down
+times below, the cache files' `fdatasync`, are gone. Stage 2's restart is
+build order step 4, not yet measured.
 
 On the dev box (16 Nov 2026): a z3-highmem-22-highlssd, XFS on local SSDs
 that report no volatile write cache. `bench/src/bin/disk_restart.rs`
@@ -192,9 +203,14 @@ build with the snapshot removed is the baseline.
   and a path come twice. A log that only grows, compacted as the next
   cache builds, is simpler (the user, 16 Nov 2026), and grows slowly
   (decision 8).
-- **Writing the log again as a base at a clean exit.** Its next build
-  does it anyway; a clean mark appended does what a clean flag in a
-  rewritten header would.
+- **Writing the log again as a base at a drop.** Its next build does it
+  anyway.
+- **A clean mark, keeping the disk tier across a planned reboot** (built
+  16 Nov 2026, removed 17 Nov 2026, the user). A drop or
+  `T4Caching::shut_down` synced the cache files, then appended a mark that
+  let a later boot take the log back. It cost a sync at each exit and an
+  API for processes that end without a drop, and Studio could make
+  neither (decision 5).
 - **A log of adds alone, the next record confirming the batch before it.**
   A freed chunk keeps its bytes until written again, so a free needs no
   entry; but a batch's adds must then go before its writes and count only
@@ -202,14 +218,16 @@ build with the snapshot removed is the baseline.
   Explicit frees are simpler (the user, 16 Nov 2026).
 - **A checksum on each block, as Kismet's CRC32.** Checked on a block's
   first read after a restart, it catches both ways of decision 1, so it
-  would survive a machine crash with no order and no boot id, at a hash of
-  each block written and each taken back. Later, if machine crashes turn
-  out to matter.
+  would keep the disk tier across any reboot with no order and no boot id.
+  It costs a CRC32C of each block written, 4 bytes in its add, and a whole
+  block read at its first read after a restart, where t4 otherwise reads
+  the pages asked for. Considered again 17 Nov 2026 and left (the user):
+  a cold start after a reboot is accepted.
 
 ## Later
 
-- **A 64-bit hash of each block in its add,** if laptops losing power
-  make cold starts costly (Rejected).
+- **A checksum of each block in its add,** if cold starts after reboots
+  turn out costly (Rejected).
 - **A bound on the log while the cache runs,** if a long-lived server's
   log grows too large or its replay at the next build too slow (decision
   8).
@@ -221,13 +239,13 @@ build with the snapshot removed is the baseline.
 1. **The log's format:** header, base, records and their CRC, replay and
    its checks. Tests: each entry's checks, as the snapshot's
    (`storage/persistence/tests.rs`); a record cut short is dropped, a
-   complete corrupted record starts cold; a log from another boot, not
-   clean, starts the cache cold.
+   complete corrupted record starts cold; a log from another boot starts
+   the cache cold.
 2. **Batched disk writes off the read path** (decision 9), with no log
    yet. Tests: a read returns once its block is in memory; a batch goes at
    16 blocks; the shuttle suite's eviction and promotion races.
-3. **The log written as batches go, shutdown and build** (decisions 3 to
-   8). Tests: a process killed at random through fills, promotions and
+3. **The log written as batches go, at a drop and as the next builds**
+   (decisions 3 to 8). Tests: a process killed at random through fills, promotions and
    evictions keeps the blocks whose adds it appended and no block whose
    chunk was written after, each read back right with no GET (real
    processes); the fuzz target appends and replays between operations.

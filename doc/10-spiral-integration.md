@@ -10,7 +10,9 @@ through its owner, `11-shared-mode.md` (decision 8); the lock is built
 (plan step 3), and shared mode with it. Revised 2 Nov 2026: the disk tier
 survives a clean restart, built (decision 7, stage 1). Revised 16 Nov
 2026: a log in its place keeps it across a killed process too, built
-(`13-persistence.md`). A
+(`13-persistence.md`). Revised 17 Nov 2026: it lasts one boot, and
+`T4Caching::shut_down` is gone, so Studio calls nothing as it exits
+(decision 7). A
 user's machine's cache file is allocated on demand, built (decision 9).
 Revised 16 Nov 2026: every cache file allocated on demand, a server's
 too; the eager allocation and `with_on_demand_disk_allocation` gone
@@ -150,7 +152,7 @@ nothing; Kismet's non-unix fallbacks have no user.
 | no HEAD for a file Spiral already knows | `open_listed` takes the file's size and e_tag from the caller and asks nothing |
 | fetches through Spiral's own GET | t4 GETs from its inner store, carrying each read's `GetOptions::extensions` |
 | fetch-once | yes, within a process |
-| survives a restart | clean or killed: the disk tier, kept in a log beside the cache files (`13-persistence.md`, built 16 Nov 2026); a machine crash loses it |
+| survives a restart | dropped or killed: the disk tier, kept in a log beside the cache files (`13-persistence.md`, built 16 Nov 2026); a reboot of any kind loses it |
 | several processes, one cache | shared mode: one process owns the cache and the others read through it (`11-shared-mode.md`, built); a cache not built for sharing on owned files fails to build, `Error::Busy` |
 | a laptop's footprint | cache files allocated on demand, each write leaving its drive Kismet's room (decision 9, built 2 Nov 2026); a memory capacity is required |
 | a disk error served from the remote | yes: a failed cache-file read goes to the inner store |
@@ -278,6 +280,14 @@ hosts is one.
    (`13-persistence.md`, which measures the first). Stage 2's log has
    replaced stage 1's snapshot (16 Nov 2026); the stage 1 bullets below
    record it as it was built.
+
+   Since 17 Nov 2026 the disk tier lasts one boot, and the shutdown below
+   is gone (the user; `13-persistence.md`, decision 5). A killed process's
+   log is taken back within its boot, so Studio needs no call as it exits.
+   One couldn't reach the cache anyway: on develop (spiraldb #10373, 12 Nov
+   2026) Studio's cache sits in libspiral behind the C ABI, set by
+   `ScandalConfig.diskCache`, with no call to end it. Any reboot starts
+   cold, where Kismet, checking a CRC32 on each block, stays warm.
 
    - **As the cache drops,** once nothing reads through it (in a shared
      cache, once its owner's listener and sessions are gone), and before
@@ -568,7 +578,8 @@ Phase 1, t4 in Kismet's place:
    held 0.1.4.
 
    Then, the same day, t4 by git at abb641e (bbtree 0.2.0 with it), and
-   the shutdown wired (decision 7): `T4Cache::shut_down`,
+   the shutdown wired (decision 7; dropped 17 Nov 2026, so the port onto
+   develop leaves it out): `T4Cache::shut_down`,
    `SharedCache::shut_down`, `StorageTransports::shut_down_disk_caches`,
    `EmbeddedScandal::shut_down_disk_cache`, `DesktopScandal`'s, called from
    Studio's `RunEvent::Exit`, and `spiral connect`'s after its serve. Tests:
@@ -716,7 +727,8 @@ Phase 1, t4 in Kismet's place:
    shut down, then killed, leaves its disk tier
    (`an_owner_shut_down_then_killed_leaves_its_disk_tier`, real
    processes). Stage 2, the log in the snapshot's place: built 16 Nov
-   2026, `13-persistence.md`, its build order.
+   2026, `13-persistence.md`, its build order. `T4Caching::shut_down` and
+   its tests removed 17 Nov 2026, with the clean mark (decision 7).
 5. **The cache file allocated on demand, in t4** (decision 9). Built 2
    Nov 2026; every cache file since 16 Nov 2026. Tests: a file is sized
    but takes room only as blocks are written

@@ -132,29 +132,18 @@ fn a_complete_record_with_a_bad_crc_starts_cold_in_the_middle_or_at_the_end() {
 }
 
 #[test]
-fn another_boot_needs_a_final_clean_mark() {
+fn a_log_of_another_boot_starts_cold() {
     let fixture = LogFixture::new();
     let mut other_boot = fixture.base();
+    assert_eq!(fixture.replay(&other_boot), Some(LogFixture::sample_base()));
     other_boot[12] ^= 1;
     assert_eq!(fixture.replay(&other_boot), None);
-    other_boot.extend(DiskLog::record(&[LogEntry::Clean(3)]));
-    assert_eq!(fixture.replay(&other_boot), Some(LogFixture::sample_base()));
-    let clean = other_boot.clone();
-    other_boot.extend(DiskLog::record(&[LogEntry::Free(0)]));
-    assert_eq!(fixture.replay(&other_boot), None);
-    assert_eq!(
-        fixture.replay(&[&clean[..], &[9, 0, 0]].concat()),
-        Some(LogFixture::sample_base())
-    );
 }
 
 #[test]
 fn replay_rejects_impossible_ownership_and_reused_version_ids() {
     let fixture = LogFixture::new();
     let impossible = [
-        vec![LogEntry::Clean(2)],
-        vec![LogEntry::Clean(FileVersionId::LIMIT + 1)],
-        vec![LogEntry::Clean(8), LogFixture::path(7, b"b")],
         vec![LogFixture::add(1, 1, 0)],
         vec![LogFixture::add(1, 0, 1)],
         vec![LogFixture::add(2, 0, 1)],

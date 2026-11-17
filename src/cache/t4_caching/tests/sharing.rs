@@ -455,34 +455,6 @@ fn a_client_asks_its_owner_the_size_it_knows() {
     });
 }
 
-#[test]
-fn a_client_shut_down_leaves_its_owner_be_and_takes_over_nothing() {
-    crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = CacheDirectory::new();
-        let transport = crate::cache::cache_stores::TestTransport::default();
-        let path = Path::from("a");
-        let data = file_bytes(MIB, 19);
-        let shared = |inner: &Arc<CountingStore>| sharing_builder(inner, &dir, &transport);
-        let (owner, owners, owners_meta) = process(&path, &data, shared);
-        let (client, clients, clients_meta) = process(&path, &data, shared);
-        client.shut_down().unwrap();
-        assert!(reads_through_an_owner(&client));
-
-        assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
-        assert_eq!(clients.take_asked(), [bounded(0..MIB)]);
-        assert_eq!(read_listed(&owner, &owners_meta, 0..MIB), data);
-        assert_eq!(owners.take_asked(), [], "the owner caches still");
-
-        drop(owner);
-        wait_until(|| !reads_through_an_owner(&client), "the owner goes");
-        for _ in 0..5 {
-            assert_eq!(read_listed(&client, &clients_meta, 0..MIB), data);
-            transport.clock().advance(Duration::from_millis(20));
-        }
-        assert!(!owns(&client), "it took over nothing");
-    });
-}
-
 /// A cache not built for sharing takes the files once the owner goes.
 #[test]
 fn a_client_that_finds_no_owner_reads_from_its_store_without_waiting() {

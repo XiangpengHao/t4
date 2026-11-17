@@ -143,14 +143,14 @@ chunk table the frame table.
 
 ### Persistence
 
-9. **A restart keeps the disk tier, clean or killed; a machine crash
-   loses it.** The index lives in memory. A log beside the first cache
-   file keeps its disk half: a base, then the blocks added and the chunks
-   freed as batches go to disk, appended with no sync, and a clean mark
-   as the cache ends. The next cache on those files replays it
-   (`13-persistence.md`, built 16 Nov 2026; before it, a snapshot at a
-   clean exit, `10-spiral-integration.md`, decision 7). After a machine
-   crash the cache starts cold, every chunk free, and refills from the
+9. **A restart keeps the disk tier, dropped or killed, within one boot.**
+   The index lives in memory. A log beside the first cache file keeps its
+   disk half: a base, then the blocks added and the chunks freed as
+   batches go to disk, appended with no sync. The next cache on those
+   files replays it if it was written in this boot (`13-persistence.md`,
+   built 16 Nov 2026; before it, a snapshot at a clean exit,
+   `10-spiral-integration.md`, decision 7). After any reboot the cache
+   starts cold, every chunk free, and refills from the
    object store, which costs time and egress, never correctness. A block
    reaches disk only when memory evicts it or the policy admits it there,
    in a batch of plain writes; no `O_DSYNC`.

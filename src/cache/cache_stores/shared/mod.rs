@@ -47,7 +47,6 @@ struct HandOff {
     reads: Arc<dyn ReadPolicy>,
     next_try: Duration,
     connections: u64,
-    shut_down: bool,
 }
 
 enum Server<'s> {
@@ -78,7 +77,6 @@ impl SharedCacheStore {
                 reads,
                 next_try: clock.now(),
                 connections: 0,
-                shut_down: false,
             }),
         };
         let deadline = store.clock.now() + wait;
@@ -139,15 +137,13 @@ impl SharedCacheStore {
     }
 
     fn try_once(&self, hand_off: &mut HandOff) -> Result<bool> {
-        if !hand_off.shut_down {
-            match InProcessCacheStore::open(&mut hand_off.tiers) {
-                Ok(store) => {
-                    self.own(store);
-                    return Ok(true);
-                }
-                Err(Error::Busy) => {}
-                Err(error) => return Err(error),
+        match InProcessCacheStore::open(&mut hand_off.tiers) {
+            Ok(store) => {
+                self.own(store);
+                return Ok(true);
             }
+            Err(Error::Busy) => {}
+            Err(error) => return Err(error),
         }
         hand_off.connections += 1;
         let first_file = hand_off.tiers.first_file();
@@ -215,16 +211,6 @@ impl CacheStore for SharedCacheStore {
                     .await?
                     .map(|round| Box::new(round) as Box<dyn ReadRound<'s> + 's>))
             }),
-        }
-    }
-
-    /// Set under the hand-off's lock, which a process takes the cache under: a hand-off is done
-    /// before it or never comes.
-    fn shut_down(&self) -> Result<()> {
-        self.hand_off().shut_down = true;
-        match self.owned.get() {
-            Some(owned) => owned.store.shut_down(),
-            None => Ok(()),
         }
     }
 

@@ -62,24 +62,13 @@ impl FileSystem {
         std::fs::remove_file(path)
     }
 
-    /// Made, or truncated, and its bytes on the drive once this returns.
-    pub(crate) fn write_durably(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let mut file = File::create(path)?;
-        file.write_all(bytes)?;
-        file.sync_data()
+    /// Made, or truncated: nothing the cache writes is synced (`doc/13-persistence.md`).
+    pub(crate) fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        std::fs::write(path, bytes)
     }
 
     pub(crate) fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         std::fs::rename(from, to)
-    }
-
-    /// Makes a rename or remove in `path`'s directory durable.
-    pub(crate) fn sync_directory_of(&self, path: &Path) -> io::Result<()> {
-        let directory = match path.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent,
-            _ => Path::new("."),
-        };
-        File::open(directory)?.sync_all()
     }
 
     /// The machine's boot, as a UUID's text: a log written in another may have lost what no
@@ -147,10 +136,6 @@ impl OpenFile {
     pub(crate) fn created(&self) -> Option<Duration> {
         let created = self.0.metadata().ok()?.created().ok()?;
         created.duration_since(UNIX_EPOCH).ok()
-    }
-
-    pub(crate) fn sync_data(&self) -> io::Result<()> {
-        self.0.sync_data()
     }
 
     /// On a file opened to append.
