@@ -168,6 +168,53 @@ On mimalloc t4 takes 83 times fewer faults, and passes the page cache:
 preloaded, did worse, 24.8 GiB/s; unexplored.) At 56 streams the page
 cache passes it again ("At 56 streams").
 
+**Only a disk read's pages are populated** (17 Nov 2026). The populate was
+first made as the output was: a system call a read, whatever tier served
+it. A read from memory copies its bytes on its own task and so faults in
+its own pages; the call bought it nothing. Now the pages lent to a disk
+read are populated as they are lent (`ReadOutput::lend_to_disk_read`), and
+no others. One hot read from memory at a time (`benches/shared_reads.rs`,
+the median of 100 reads) on an i7i.24xlarge (Xeon 8559C, Linux 7.0, glibc
+2.42):
+
+| Hot read from memory | Populated as made | As lent to a disk read |
+|---|---|---|
+| 4 KiB, unshared | 1.013 µs | 0.749 µs |
+| 1 MiB, unshared | 38.9 µs | 28.1 µs |
+| 4 KiB, a shared cache's owner | 1.042 µs | 0.755 µs |
+| 1 MiB, a shared cache's owner | 39.1 µs | 29.3 µs |
+| 4 KiB, its client | 7.94 µs | 8.09 µs |
+| 1 MiB, its client, into its span | 48.2 µs | 37.5 µs |
+| System calls a read, unshared | 1 | 0 |
+| Page faults a read, unshared | 0 | 0 |
+
+The output's pages were mapped already, glibc handing the same ones to
+read after read, so the call walked their page table for nothing: 0.26 µs
+for one page, 42 ns a page for 256. A client's span is the same, mapped in
+its owner from its first read on. A client's 4 KiB read is a round trip to
+its owner, 8 µs, and shows no change. On mimalloc the 1 MiB read gains
+less, 25.1 to 23.8 µs, the 4 KiB as much (1.010 to 0.721 µs through an
+owner); why the walk is cheaper there is not checked.
+
+The disk tier reads as before: `cold_reads --cache t4`, 128 GiB of 1 MiB
+blocks read cold, 128 at once, on the box's six SSDs as one RAID0; passes
+1 to 4 of 5, the first taking the drives' burst.
+
+| Allocator | Populated | GB/s | Slowest read | CPU-s a GB |
+|---|---|---|---|---|
+| mimalloc | as made | 25.84 – 27.24 | 9.8 – 10.2 ms | 0.047 – 0.050 |
+| mimalloc | as lent | 25.86 – 26.95 | 9.9 – 10.3 ms | 0.042 – 0.045 |
+| glibc | as made | 25.34 – 25.51 | 8.4 – 16.2 ms | 0.104 – 0.125 |
+| glibc | as lent | 26.01 – 26.14 | 8.0 – 11.5 ms | 0.102 – 0.108 |
+
+A disk read makes one `madvise` either way (`strace -c`, 8,192 blocks
+filled and read once: 16,581 calls before, 8,349 after, on glibc). The
+half that went was the fill's: its reads' bytes are copied in. Not
+measured: reads from memory, many at once, on glibc. It gives a read fresh
+pages there (7 to 11 million faults a pass above, populated or not), and
+the copy then takes them a page at a time where the populate took them in
+one call.
+
 The one I/O worker shows a whole CPU at 56 streams, but it spins while I/O
 is in flight. A flamegraph of it splits its time: `io_uring_enter` about
 half (the NVMe driver's queueing 16%, pinning each read's pages, `gup`,
