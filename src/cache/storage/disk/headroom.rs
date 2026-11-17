@@ -24,7 +24,7 @@ impl DriveHeadroom {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(super) fn set_keep_free(&mut self, keep_free: u64) {
         self.keep_free = keep_free;
     }

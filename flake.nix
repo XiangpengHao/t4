@@ -212,6 +212,8 @@
                 // {
                   cargoArtifacts = shuttleArtifacts;
                   cargoClippyExtraArgs = "--all-targets --all-features -- -D warnings";
+                  # Code used only by feature-gated tests is dead without the features.
+                  postBuild = "cargoWithProfile clippy ${commonArgs.cargoExtraArgs} --all-targets -- -D warnings";
                 }
               );
               tests = craneLib.cargoTest (checkArgs // { inherit cargoArtifacts; });
