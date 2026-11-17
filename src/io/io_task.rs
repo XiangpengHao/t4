@@ -82,6 +82,14 @@ impl<T> TaskCompletion<T> {
         }
     }
 
+    /// Never blocks: a completion held by its completer just then reads as not ready.
+    pub(crate) fn is_ready(&self) -> bool {
+        matches!(
+            self.inner.try_lock().as_deref(),
+            Ok(TaskCompletionState::Ready(_))
+        )
+    }
+
     pub(crate) fn poll_result(&self, cx: &mut Context<'_>) -> Poll<Result<T>> {
         let mut inner = self
             .inner

@@ -2,6 +2,7 @@ use crate::io::sync::Mutex;
 use crate::io::sync::atomic::{AtomicU64, Ordering};
 use crate::io::sync::thread::{self, JoinHandle};
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::future::Future;
 use std::io;
 use std::path::Path;
@@ -16,6 +17,7 @@ use crate::cache::cache_stores::shared::protocol::{
     ClientFrame, ClientRegion, FrameReader, FrameReceiver, FrameSender, FrameSocket, Hello,
     OwnerAddress, OwnerFrame, PROTOCOL_VERSION, RegionSpan,
 };
+use crate::cache::cache_stores::shared::spin_wait::SpinWait;
 use crate::cache::policy::{Io, IoEvent, ReadPolicy};
 use crate::io::error::{Error, Result};
 use crate::io::file_system::FileSystem;
@@ -383,7 +385,9 @@ pub(super) struct WaitingCall {
 impl Future for WaitingCall {
     type Output = Result<OwnerFrame>;
 
+    /// Waits a while before it leaves the task to sleep: answered meanwhile, it needs no wakeup.
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let _ = SpinWait::BEFORE_SLEEP.until(|| Ok::<_, Infallible>(self.answer.is_ready()));
         self.answer.poll_result(cx)
     }
 }

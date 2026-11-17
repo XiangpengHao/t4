@@ -17,6 +17,7 @@ mod client;
 mod fuzzing;
 mod owner;
 mod protocol;
+mod spin_wait;
 
 #[cfg(all(feature = "__fuzz", feature = "shuttle", t4_simulated))]
 pub use fuzzing::{FuzzedHello, FuzzedPath, FuzzedRead, FuzzedSession, FuzzedSpan, FuzzedStep};

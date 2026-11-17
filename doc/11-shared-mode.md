@@ -518,6 +518,40 @@ to 2 µs inside the syscall, the caller's `EndRead` among them, 1.9 µs as
 its bytes drop; the client's reader waking its caller, 3 µs; and the
 session ending the last read before it takes the next's frames, 1 µs.
 
+**On Linux, and polling before sleeping** (17 Nov 2026). The same bench,
+an unshared cache now beside the owner and its client, on an on-demand
+c7i.8xlarge (Xeon 8488C, 32 vCPUs, one socket, Linux 7.0, OS defaults);
+median of 1,000 hot reads, five processes of each version, interleaved:
+
+| a hot read of | unshared | the owner's own | its client's, sleeping at once | its client's, polling first |
+|---|---|---|---|---|
+| 4 KiB | 1.15 to 1.23 µs | 1.18 to 1.26 µs | 21.5 to 21.9 µs | 8.6 to 8.8 µs |
+| 1 MiB | 41.9 to 44.7 µs | 42.2 to 44.6 µs | 363 to 462 µs, 77 µs in one process | 53.3 to 54.7 µs |
+
+- **Sharing costs the owner nothing.**
+- **Sleeping at once, a client's read woke three threads:** the owner's
+  session, the client's reader and the caller, 3.3 context switches a
+  read, no page fault. A thread woken ran 4 to 6 µs later at the median,
+  but 30 to 40% waited over 100 µs, the p90 175 µs (`perf sched`): the
+  guest's idle states include C6, 190 µs to leave, which a CPU idle
+  through a 1 MiB read's 40 µs copy often took. C6 disabled, as a
+  diagnostic only, the 1 MiB read took 77 to 82 µs and no wakeup waited
+  100 µs; every thread on one CPU, the 4 KiB read took 13.7 µs.
+- **Each of the three waits now polls for 100 µs before it sleeps**
+  (`SpinWait`): the session and the client's reader `poll` their
+  sockets with no timeout, the caller its call's answer, each without
+  taking it. A read of hits then sleeps nowhere: 4 context switches in
+  10,000 reads, against 32,900. 100 µs is past a hot 1 MiB read's whole
+  round; a disk read or a GET is longer, and its waiters sleep.
+- **The cost is CPU while reads run:** 98 µs of CPU a read against 70,
+  the three threads busy through each read. Idle, a thread polls 100 µs
+  after its last frame, then sleeps as before.
+- **The slowest reads stay** 370 to 930 µs in each version: not
+  explained.
+
+Under shuttle no wait polls: simulated time stands still while a thread
+spins.
+
 ## Rejected
 
 - **A server process apart from the apps** (doc/02's `t4-server`):
@@ -555,8 +589,9 @@ session ending the last read before it takes the next's frames, 1 µs.
   (`09-vortex-integration.md`, decision 3); a Vortex change, which helps
   any store. In a client, Vortex's arrays would then hold region space as
   long as they live.
-- **Polling, and the owner reading sockets on its io_uring loop,** if the
-  round trip measures too slow (doc/02's step 4).
+- **The owner reading sockets on its io_uring loop,** if the round trip
+  measures too slow still (doc/02's step 4); polling first is built
+  (Cost).
 - **A client's fetch landed from its region at commit,** saving the copy
   into the staging span (decision 5): the client lands each piece in its
   output and a block's buffer in its region, and the owner copies a
@@ -709,7 +744,11 @@ session ending the last read before it takes the next's frames, 1 µs.
 5. **Polling,** only if measured (Later). Measured 30 Oct 2026 (Cost):
    a client's round trip is thread wakeups, cut first by fewer round
    trips (`Finish` with `StartRead`, built: a read of hits is one); not
-   polling, which would spin a desktop's CPU.
+   polling, which would spin a desktop's CPU. Measured on Linux 17 Nov
+   2026: the wakeups, and a deep idle state's exit behind them, held a
+   client's hot 1 MiB read at 363 to 462 µs. Built the same day: each
+   wait polls 100 µs, then sleeps (`shared/spin_wait.rs`, Cost), and
+   spins no idle desktop.
 
 ## Code map
 
@@ -721,7 +760,7 @@ session ending the last read before it takes the next's frames, 1 µs.
 | `src/cache/t4_caching/` | the front end: a read through both halves (`read_through`), and `with_multiprocess_sharing` (decision 1) | yes |
 | `src/cache/cache_stores/` | the `CacheStore` trait the fetch half reads through, one of two picked at build (decision 2); `FileVersionKey`, a version told apart across the caches a client reads through (decision 7) | yes |
 | `src/cache/cache_stores/in_process.rs` | a cache read by its process alone: the lock taken, the tiers made, no socket (decision 1) | yes |
-| `src/cache/cache_stores/shared/` | shared mode: this process the owner or a client, and the hand-off once the owner goes (decisions 1, 7) | yes |
+| `src/cache/cache_stores/shared/` | shared mode: this process the owner or a client, and the hand-off once the owner goes (decisions 1, 7); its waits, polling 100 µs before they sleep (`spin_wait.rs`, Cost) | yes |
 | `src/cache/cache_stores/shared/owner/` | the owner's listener and a session for each client (decisions 1, 5); a client's reads, each a task of its session's (`client_reads.rs`, decision 5); what wakes a session's thread, waiting on its client's socket and its reads at once (`session_waker.rs`, Cost) | yes |
 | `src/cache/cache_stores/shared/client/` | a client's connection to its owner and its calls (`connection/`), its reads through it (`read.rs`), and their fetches (`fetch.rs`) (decisions 5 to 7) | yes |
 | `src/cache/cache_stores/shared/protocol/frames/` | the frames, each checked as it arrives (decision 5) | yes |
