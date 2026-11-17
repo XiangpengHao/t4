@@ -3,7 +3,7 @@
 //! A read may answer a version written over behind the cache's back: the cache may still trust
 //! it (`doc/03-cache.md`, decision 11).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::num::NonZeroU8;
 use std::ops::Range;
@@ -46,9 +46,9 @@ struct Scenario {
 #[derive(Clone, Debug)]
 struct CacheSettings {
     memory_blocks: u64,
-    /// The smallest cache file's; each other is a block larger, room the tier leaves unused.
+    /// Cache file 0's; file n is n blocks larger, room a tier on a smaller file leaves unused.
     disk_blocks: u64,
-    disk_files: u64,
+    disk_files: CacheFileNames,
     queue_depth: u32,
     policy: PolicyChoice,
     reads: ReadsChoice,
@@ -62,7 +62,7 @@ impl<'a> Arbitrary<'a> for Scenario {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let memory_blocks = u.int_in_range(1..=4)?;
         let disk_blocks = u.int_in_range(1..=6)?;
-        let disk_files = u.int_in_range(1..=3)?;
+        let disk_files = u.arbitrary()?;
         let queue_depth = u.int_in_range(1..=8)?;
         let policy = if u.arbitrary()? {
             PolicyChoice::Clock
@@ -104,6 +104,26 @@ enum ReadsChoice {
     Scripted(Vec<u8>),
 }
 
+/// The cache files a build opens, by number, in order: its log lies beside the first.
+#[derive(Clone, Debug)]
+struct CacheFileNames(Vec<u64>);
+
+impl CacheFileNames {
+    const COUNT: u64 = 3;
+}
+
+impl<'a> Arbitrary<'a> for CacheFileNames {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let mut left: Vec<u64> = (0..Self::COUNT).collect();
+        let mut names = Vec::new();
+        for _ in 0..u.int_in_range(1..=Self::COUNT)? {
+            let picked = u.choose_index(left.len())?;
+            names.push(left.remove(picked));
+        }
+        Ok(Self(names))
+    }
+}
+
 #[derive(Debug)]
 enum Operation {
     Put { file: FileName, size: FileSize },
@@ -117,8 +137,20 @@ enum Operation {
     Get(Read),
     GetAtOnce([Read; 3]),
     GiveUp { read: Read, polls: u8 },
-    Restart,
-    Kill,
+    Restart { on: Option<CacheFileNames> },
+    Kill { on: Option<CacheFileNames> },
+}
+
+impl Operation {
+    /// One restart in three builds on the cache files it names, which another build may have
+    /// written.
+    fn moved_to(u: &mut Unstructured<'_>) -> arbitrary::Result<Option<CacheFileNames>> {
+        Ok(if u.ratio(1u8, 3u8)? {
+            Some(u.arbitrary()?)
+        } else {
+            None
+        })
+    }
 }
 
 impl<'a> Arbitrary<'a> for Operation {
@@ -156,8 +188,12 @@ impl<'a> Arbitrary<'a> for Operation {
             },
             10..=12 => Self::Get(u.arbitrary()?),
             13 | 14 => Self::GetAtOnce(u.arbitrary()?),
-            17 => Self::Restart,
-            18 => Self::Kill,
+            17 => Self::Restart {
+                on: Self::moved_to(u)?,
+            },
+            18 => Self::Kill {
+                on: Self::moved_to(u)?,
+            },
             _ => Self::GiveUp {
                 read: u.arbitrary()?,
                 polls: u.int_in_range(1..=4)?,
@@ -332,6 +368,8 @@ impl ModelFile {
 struct Model {
     files: [ModelFile; FileName::COUNT],
     next_content: u64,
+    /// Every version the store has held, by path and e-tag.
+    versions: HashMap<(String, String), Content>,
 }
 
 impl Model {
@@ -401,10 +439,10 @@ impl Harness {
 
     fn build(&mut self) -> t4::Result<()> {
         let settings = &self.settings;
-        let builder = (0..settings.disk_files)
+        let builder = (settings.disk_files.0.iter())
             .fold(
                 T4Caching::builder(Arc::clone(&self.store) as Arc<dyn ObjectStore>),
-                |builder, file| {
+                |builder, &file| {
                     let path = self.dir.path().join(format!("cache{file}"));
                     builder.with_disk_file(path, (settings.disk_blocks + file) * BLOCK)
                 },
@@ -445,8 +483,38 @@ impl Harness {
         for operation in operations {
             self.apply(operation).await;
             self.check_model().await;
+            self.learn_versions().await;
             let in_use = self.at_rest(operation);
             self.check_policy_can_pick(&in_use, operation);
+            self.check_what_a_kill_keeps(operation).await;
+        }
+    }
+
+    /// A read after an operation sees the store as it is then, so this learns every version
+    /// the cache can name.
+    async fn learn_versions(&mut self) {
+        for (index, file) in self.model.files.iter().enumerate() {
+            let (path, Some(content)) = (FileName(index).path(), file.current) else {
+                continue;
+            };
+            let meta = self.store.head(&path).await.unwrap();
+            let e_tag = meta.e_tag.expect("the store gives each version an e-tag");
+            self.model
+                .versions
+                .insert((path.to_string(), e_tag), content);
+        }
+    }
+
+    /// Each block a build after a kill now would serve from disk is the block's own.
+    async fn check_what_a_kill_keeps(&self, after: &Operation) {
+        let versions = &self.model.versions;
+        let expected = |path: &[u8], e_tag: &str, size: u64, range: Range<u64>| {
+            let path = std::str::from_utf8(path).ok()?.to_owned();
+            let content = versions.get(&(path, e_tag.to_owned()))?;
+            (content.size == size).then(|| content.bytes(range))
+        };
+        if let Err(error) = self.cache().check_what_a_kill_keeps(&expected).await {
+            panic!("after {after:?}, a build after a kill: {error}");
         }
     }
 
@@ -565,12 +633,15 @@ impl Harness {
                     }
                 }
             }
-            Operation::Restart | Operation::Kill => {
-                if matches!(operation, Operation::Kill) {
+            Operation::Restart { ref on } | Operation::Kill { ref on } => {
+                if matches!(operation, Operation::Kill { .. }) {
                     self.cache().abandon_persistence();
                 }
                 // Dropped first, so its files' lock is free for the rebuild.
                 self.cache = None;
+                if let Some(on) = on {
+                    self.settings.disk_files = on.clone();
+                }
                 self.build().unwrap();
                 self.model.restart();
             }

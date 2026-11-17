@@ -7,7 +7,7 @@ mod memory;
 mod persistence;
 
 #[cfg(feature = "__fuzz")]
-pub use cache_store::{FuzzedLogBase, FuzzedVersion};
+pub use cache_store::{FuzzedLogBase, FuzzedVersion, VersionBytes};
 
 pub(in crate::cache) use disk::{CacheFiles, DiskFile};
 

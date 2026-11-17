@@ -75,6 +75,13 @@ impl FileSystem {
         Ok("00000000-0000-0000-0000-000000000000".to_owned())
     }
 
+    /// Counted, not random, so a schedule replays: never given twice on this disk.
+    pub(crate) fn unique_id(&self) -> io::Result<[u8; 16]> {
+        let mut disk = self.disk();
+        disk.ids_made += 1;
+        Ok(u128::from(disk.ids_made).to_le_bytes())
+    }
+
     /// Another name for the file `existing` names: a lock is the file's, by any name.
     #[cfg(test)]
     pub(crate) fn link(&self, existing: &Path, link: &Path) -> io::Result<()> {
@@ -105,6 +112,7 @@ struct Disk {
     inodes: BTreeMap<u64, Inode>,
     inodes_made: u64,
     opens: u64,
+    ids_made: u64,
 }
 
 impl Disk {

@@ -370,6 +370,19 @@ impl T4Caching {
         }
     }
 
+    /// For the fuzz target, not part of the API.
+    #[cfg(feature = "__fuzz")]
+    #[doc(hidden)]
+    pub async fn check_what_a_kill_keeps(
+        &self,
+        expected: &super::storage::VersionBytes<'_>,
+    ) -> Result<(), String> {
+        match self.cache_store.owned() {
+            Some(cache) => cache.check_what_a_kill_keeps(expected).await,
+            None => Err("a client holds no cache: its owner does".to_owned()),
+        }
+    }
+
     #[cfg(feature = "__fuzz")]
     #[doc(hidden)]
     pub fn abandon_persistence(&self) {

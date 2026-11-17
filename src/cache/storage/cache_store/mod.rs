@@ -29,7 +29,7 @@ mod tier_work;
 
 pub(in crate::cache) use fill::FetchedBlocks;
 #[cfg(feature = "__fuzz")]
-pub use fuzzing::{FuzzedLogBase, FuzzedVersion};
+pub use fuzzing::{FuzzedLogBase, FuzzedVersion, VersionBytes};
 pub(in crate::cache) use located_run::LocatedRun;
 pub(in crate::cache) use partial_read::PartialRead;
 pub(in crate::cache) use tier_work::{HeldRun, TierWork};
@@ -69,13 +69,10 @@ impl ObjectCache {
 
     pub(in crate::cache) fn new(
         memory_chunks: NonZeroU32,
-        disk: CacheFiles,
+        mut disk: CacheFiles,
         placement: Arc<dyn PlacementPolicy>,
     ) -> Result<Self> {
-        let kept = match disk.log() {
-            Some(log) => log.take()?,
-            None => None,
-        };
+        let kept = disk.take_kept();
         let tiers = Arc::new(Tiers {
             paths: PathTable::new(),
             blocks: BlockTable::new(),

@@ -38,7 +38,8 @@ drives, and t4 drives them itself, not through md RAID (`00-meta.md`:
 
 2. **The tier keeps one chunk space, striped over the files by chunk
    number:** chunk `c` is file `c mod n`'s chunk `c / n`, at byte `(c / n)
-   MiB` of it. The tier stays one array of chunks (`03-cache.md`, decision
+   MiB` of it past the file's first page, its owner
+   (`13-persistence.md`, decision 13). The tier stays one array of chunks (`03-cache.md`, decision
    2), so the index (`Disk(chunk)`), the policy, eviction and the check at
    rest don't change; only where a chunk's bytes are does.
 
@@ -310,5 +311,5 @@ reading nothing off the drives differ by up to a third between runs (7,
 |---|---|---|
 | `src/io/` | the worker and its drivers over several files, an I/O naming its file (`FilePosition`) | 4 |
 | `src/cache/storage/disk/cache_files.rs` | `CacheFiles`: the tier's files, each sized to the smallest, and the worker | 2, 3 |
-| `src/cache/storage/disk/disk_chunks.rs` | a chunk's position: file `c mod n`, offset `(c / n) MiB` | 2 |
+| `src/cache/storage/disk/disk_chunks.rs` | a chunk's position: file `c mod n`, offset a page plus `(c / n) MiB` | 2 |
 | `src/cache/t4_caching/` | `with_disk_file` | 1 |

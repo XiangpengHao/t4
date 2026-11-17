@@ -1,16 +1,20 @@
 use std::path::Path;
 
 use super::*;
+use crate::cache::storage::disk::CacheFileOwner;
 use crate::io::file_system::{FileSystem, OpenFile};
 
 const MIB: u64 = 1 << 20;
 
+/// Claimed by one build, as a cache's files are before its log names them.
 fn opened(dir: &Path, names: &[&str]) -> Vec<OpenFile> {
     let file_system = FileSystem::default();
-    names
+    let files: Vec<_> = names
         .iter()
         .map(|name| file_system.open_cache_file(&dir.join(name), false).unwrap())
-        .collect()
+        .collect();
+    CacheFileOwner::new([7; 16]).claim(&files).unwrap();
+    files
 }
 
 fn on_disk(path: &[u8], id: u64, size: u64, blocks: &[(u32, u32)]) -> VersionOnDisk {
@@ -50,13 +54,32 @@ fn a_log_is_replayed_and_rebased_on_each_build() {
     assert_eq!(place.path(), dir.path().join("cache0.log"));
 
     place.seed(&sample_base()).unwrap();
-    assert_eq!(place.take().unwrap(), Some(sample_base()));
-    assert!(place.path().exists(), "rebased");
-    assert_eq!(place.take().unwrap(), Some(sample_base()));
+    let kept = place.replay();
+    assert_eq!(kept, Some(sample_base()));
+    place.rebase(kept.as_ref()).unwrap();
+    assert_eq!(place.replay(), Some(sample_base()), "rebased");
 }
 
 #[test]
-fn a_log_of_other_cache_files_is_rebased_cold() {
+fn a_log_keeps_nothing_once_another_build_claims_one_of_its_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("cache0");
+    let files = opened(dir.path(), &["cache0", "cache1"]);
+    let log = |files: &[OpenFile]| {
+        PersistenceLog::beside(&FileSystem::default(), &first, files, 4)
+            .unwrap()
+            .unwrap()
+    };
+    log(&files).seed(&sample_base()).unwrap();
+    assert_eq!(log(&files).replay(), Some(sample_base()));
+
+    // A build of `cache1` alone, which then writes its chunks.
+    CacheFileOwner::new([8; 16]).claim(&files[1..]).unwrap();
+    assert_eq!(log(&files).replay(), None);
+}
+
+#[test]
+fn a_log_of_other_cache_files_keeps_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let first = dir.path().join("cache0");
     let files = opened(dir.path(), &["cache0", "cache1"]);
@@ -74,9 +97,7 @@ fn a_log_of_other_cache_files_is_rebased_cold() {
     ];
     for other in others {
         keep(&files);
-        let other = other.unwrap().unwrap();
-        assert_eq!(other.take().unwrap(), None);
-        assert!(other.path().exists());
+        assert_eq!(other.unwrap().unwrap().replay(), None);
     }
 
     // The first file made again, at the same path: another file.
@@ -87,8 +108,7 @@ fn a_log_of_other_cache_files_is_rebased_cold() {
     let other = PersistenceLog::beside(&FileSystem::default(), &first, &remade, 4)
         .unwrap()
         .unwrap();
-    assert_eq!(other.take().unwrap(), None);
-    assert!(other.path().exists());
+    assert_eq!(other.replay(), None);
 }
 
 #[test]
@@ -136,8 +156,7 @@ fn bytes_no_cache_could_have_kept_are_no_base() {
     }
 
     std::fs::write(place.path(), b"no log").unwrap();
-    assert_eq!(place.take().unwrap(), None);
-    assert!(place.path().exists());
+    assert_eq!(place.replay(), None);
 }
 
 #[test]
@@ -155,7 +174,9 @@ fn a_log_only_grows_until_its_next_build_rebases_it() {
     .unwrap()
     .unwrap();
     log.seed(&sample_base()).unwrap();
-    assert_eq!(log.take().unwrap(), Some(sample_base()));
+    let kept = log.replay();
+    assert_eq!(kept, Some(sample_base()));
+    log.rebase(kept.as_ref()).unwrap();
     let base = std::fs::read(log.path()).unwrap();
     let inode = std::fs::metadata(log.path()).unwrap().ino();
     let version = FileVersion::named(FileVersionId::new(9), MIB).unwrap();
@@ -174,11 +195,12 @@ fn a_log_only_grows_until_its_next_build_rebases_it() {
     let appended = std::fs::read(log.path()).unwrap();
     assert!(appended.starts_with(&base));
     assert_eq!(std::fs::metadata(log.path()).unwrap().ino(), inode);
-    let replayed = log.inspect().unwrap();
+    let replayed = log.replay().unwrap();
     assert_eq!(replayed.next_id(), 10);
     assert_eq!(replayed.versions()[0].blocks(), &[(1, ChunkId::new(0))]);
     assert_eq!(replayed.versions()[2].blocks(), &[(0, ChunkId::new(1))]);
-    assert_eq!(log.take().unwrap(), Some(replayed));
+    log.rebase(Some(&replayed)).unwrap();
+    assert_eq!(log.replay(), Some(replayed));
     assert!(std::fs::metadata(log.path()).unwrap().len() < appended.len() as u64);
     assert_ne!(std::fs::metadata(log.path()).unwrap().ino(), inode);
 }

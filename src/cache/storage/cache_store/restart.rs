@@ -30,7 +30,7 @@ impl ObjectCache {
         super::super::persistence::PersistenceLog::beside(&file_system, first, &[file], chunks)
             .unwrap()
             .unwrap()
-            .inspect()
+            .replay()
     }
 
     #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]

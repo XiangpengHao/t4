@@ -2,10 +2,11 @@ use std::future::Future;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
+use super::CacheFileOwner;
 use super::disk_chunks::{DiskChunkReader, DiskChunks};
 use super::headroom::DriveHeadroom;
 use crate::cache::BLOCK_SIZE_U64;
-use crate::cache::storage::persistence::PersistenceLog;
+use crate::cache::storage::persistence::{LogBase, PersistenceLog};
 use crate::io::aligned_buf::AlignedBuf;
 use crate::io::error::{Error, Result};
 use crate::io::file_system::{FileIdentity, FileSystem, OpenFile};
@@ -35,12 +36,15 @@ pub(in crate::cache) struct CacheFiles {
     /// Names its owner's address (`doc/11-shared-mode.md`, decision 6).
     first_file: Option<FileIdentity>,
     log: Option<PersistenceLog>,
+    /// The log's blocks, till the cache takes them.
+    kept: Option<LogBase>,
     headroom: Option<DriveHeadroom>,
 }
 
 impl CacheFiles {
     /// No `O_DSYNC`: a kill loses no write already done, and a log of another boot is never
-    /// taken back (`doc/13-persistence.md`).
+    /// taken back (`doc/13-persistence.md`). Files whose log it doesn't take back it claims, so
+    /// that no other log can name their chunks once it writes them.
     pub(in crate::cache) fn open(
         file_system: &FileSystem,
         files: &[DiskFile],
@@ -56,19 +60,37 @@ impl CacheFiles {
         let smallest = files.iter().map(|file| file.capacity).min().unwrap_or(0);
         let chunks_per_file =
             (smallest / BLOCK_SIZE_U64).clamp(1, u64::from(u32::MAX / count)) as u32;
-        let len = u64::from(chunks_per_file) * BLOCK_SIZE_U64;
+        let len = CacheFileOwner::PAGE + u64::from(chunks_per_file) * BLOCK_SIZE_U64;
         let opened = files
             .iter()
             .map(|file| Self::open_file(file_system, &file.path, len, direct_io))
             .collect::<Result<Vec<_>>>()?;
+        let first = &files[0].path;
+        let log = PersistenceLog::beside(file_system, first, &opened, chunks_per_file)?;
+        let kept = log.as_ref().and_then(PersistenceLog::replay);
+        let log = match kept {
+            Some(_) => log,
+            None => {
+                CacheFileOwner::fresh(file_system)?.claim(&opened)?;
+                PersistenceLog::beside(file_system, first, &opened, chunks_per_file)?
+            }
+        };
+        if let Some(log) = &log {
+            log.rebase(kept.as_ref())?;
+        }
         let first_file = opened[0].identity()?;
-        let log = PersistenceLog::beside(file_system, &files[0].path, &opened, chunks_per_file)?;
         let headroom = DriveHeadroom::of(&opened)?;
         let mut files = Self::on(IoWorker::new(queue_depth, opened)?, count, chunks_per_file)?;
         files.first_file = Some(first_file);
         files.log = log;
+        files.kept = kept;
         files.headroom = Some(headroom);
         Ok(files)
+    }
+
+    /// The blocks the log kept, which the cache takes back once.
+    pub(in crate::cache) fn take_kept(&mut self) -> Option<LogBase> {
+        self.kept.take()
     }
 
     #[cfg(test)]
@@ -103,6 +125,7 @@ impl CacheFiles {
             chunks: Arc::new(DiskChunks::new(files, chunks_per_file)?),
             first_file: None,
             log: None,
+            kept: None,
             headroom: None,
         })
     }
@@ -137,6 +160,19 @@ impl CacheFiles {
         into: AlignedBuf,
     ) -> Result<AlignedBuf> {
         self.io.read_exact_at(into, reader.position()).await
+    }
+
+    /// The bytes `chunk` holds, whether or not the index names it.
+    #[cfg(feature = "__fuzz")]
+    pub(in crate::cache) async fn read_whole_chunk(
+        &self,
+        chunk: crate::cache::ChunkId,
+    ) -> Result<AlignedBuf> {
+        let block = NonZeroU32::new(BLOCK_SIZE_U64 as u32).expect("a block holds bytes");
+        let into = AlignedBuf::new_zeroed(block)?;
+        self.io
+            .read_exact_at(into, self.chunks.position(chunk))
+            .await
     }
 
     /// Submits now, not when polled, so reads started together run at once.

@@ -1,4 +1,5 @@
 use super::*;
+use crate::cache::storage::disk::CacheFileOwner;
 use crate::cache::storage::persistence::PersistenceLog;
 use crate::io::file_system::FileSystem;
 
@@ -14,6 +15,9 @@ impl LogFixture {
         let path = directory.path().join("cache");
         let file_system = FileSystem::default();
         let opened = file_system.open_cache_file(&path, false).unwrap();
+        CacheFileOwner::new([7; 16])
+            .claim(std::slice::from_ref(&opened))
+            .unwrap();
         Self {
             file: PersistenceLog::beside(&file_system, &path, &[opened], 4)
                 .unwrap()

@@ -8,7 +8,9 @@ Stage 2, a log that keeps the disk tier across a killed process, is the
 design below, now built. Revised 17 Nov 2026: the disk tier lasts one boot,
 so nothing syncs and there is no clean mark or `T4Caching::shut_down`
 (decision 5); and a block bound for disk waits for the writer to make room
-rather than go uncached (decision 9).
+rather than go uncached (decision 9). Revised again 17 Nov 2026: a build
+claims the files whose log it doesn't take back, so a log of other files
+can't name their chunks (decision 13).
 
 t4 is a cache: the object store holds the true data, so the cache may lose
 any block, but never returns wrong bytes (`03-cache.md`). Persistence keeps
@@ -32,6 +34,7 @@ bytes.
 | **Record** | entries appended together: its length, a CRC32C, its entries |
 | **Entry** | a path's version (path, e_tag, size, id), a block added (version id, block, chunk), or a chunk freed (chunk) |
 | **Batch** | 16 blocks written to disk together, one batch at a time |
+| **Owner** | a cache file's first page: 16 bytes naming the build that last claimed the file; its chunks follow |
 
 ## Decisions
 
@@ -89,11 +92,13 @@ bytes.
    - As the next cache builds, it takes the log back, then writes it again
      as a base alone with its own boot id, renamed into place, before it
      writes a chunk, so that each record appended after applies to it.
-     This is the log's only compaction.
+     This is the log's only compaction. A build that can't take the log
+     back claims its files first (decision 13), then writes an empty base.
 
 7. **Replay checks every field, as stage 1 checks the snapshot.** The
    header must match: format, block size, chunks per file, and each cache
-   file, in order, by device, inode and creation time. An add must find its
+   file, in order, by device, inode, creation time and owner (decision
+   13). An add must find its
    chunk free, a free its chunk held, a path a version id never given
    before. No base is written while the cache runs (decision 8), so no
    entry races one. A record whose 8-byte header or declared body runs
@@ -167,6 +172,23 @@ bytes.
     a restart is cold.
     The file is `<first cache file>.log`; old `.snapshot` files are ignored.
 
+13. **A build claims the files whose log it doesn't take back** (17 Nov
+    2026). A log lies beside its first file only, so a cache built on other
+    files writes their chunks without touching it. Found 17 Nov 2026, in
+    one boot: a cache on files `a` and `b` logs to `a.log`; a cache on `b`
+    alone finds no `b.log`, starts cold and writes over `b`'s chunks; a
+    third on `a` and `b` again found `a.log` matching and served `b`'s new
+    bytes as its old blocks, with no GET. So each cache file starts with
+    a page naming its owner, 16 random bytes, and its chunks follow. A
+    build that takes back no log writes a fresh owner into each of its
+    files before it writes a chunk, and its base records each file's owner
+    (decision 7). A log then matches only files that no other build has
+    claimed since. A kill between the claims and the new base leaves the
+    old log naming owners the files no longer hold: the next build starts
+    cold. Base format 2 moved chunks a page in, so a format 1 log starts
+    cold. The fuzz target checks this after every step: what a kill there
+    would keep is read back and compared (`fuzz/README.md`).
+
 ## Measured: stage 1's restart
 
 Stage 1 synced at each clean exit; stage 2 never syncs, so the shut-down
@@ -235,6 +257,14 @@ build with the snapshot removed is the baseline.
   block read at its first read after a restart, where t4 otherwise reads
   the pages asked for. Considered again 17 Nov 2026 and left (the user):
   a cold start after a reboot is accepted.
+- **Making a cold build's files anew,** so no old log matches them
+  (decision 13; the user, 17 Nov 2026, for the owner page). It needs write
+  access to each cache file's directory, replaces a path that is a
+  symlink with a plain file, and unlinks large files at each cold start,
+  which takes seconds on ext4.
+- **The owner in an extended attribute,** so that chunks don't move. Not
+  every file system keeps user attributes (tmpfs only since Linux 6.6),
+  and where none is kept there would be no log.
 
 ## Later
 
@@ -268,6 +298,7 @@ build with the snapshot removed is the baseline.
 | Where | What it is | Decisions |
 |---|---|---|
 | `src/cache/storage/persistence/` | the base, `LogBase`, and its checks; `log/` frames and replays entries; `log_file.rs` appends, finishes and rebases the file | 2, 6, 7 |
+| `src/cache/storage/disk/owner.rs`, `cache_files.rs` | each file's owner page; the log taken back, or the files claimed, as the cache files open | 6, 13 |
 | `src/cache/storage/cache_store/restart.rs` | the disk tier closed and its log finished, and restored as the next builds | 6 |
 | `src/cache/storage/cache_store/disk_writer/`, `eviction.rs` | one writer on `Tiers`, batches, and adds and frees ordered with chunk ownership; a version's path logged where `Tiers::resolve` names it | 3, 9 |
 | `bench/src/bin/disk_restart.rs`, `bench/disk_restart/` | the restart's cost | Measured |

@@ -3,6 +3,7 @@ use std::num::NonZeroU32;
 
 use vstd::prelude::*;
 
+use super::CacheFileOwner;
 use crate::cache::storage::chunks::{ChunkLease, ChunkPin, ChunkTable, ChunkTier};
 use crate::cache::{BLOCK_SIZE_U64, BlockKey, ChunkId};
 use crate::io::error::{Error, Result};
@@ -79,9 +80,9 @@ impl DiskChunks {
         })
     }
 
-    fn position(&self, chunk: ChunkId) -> FilePosition {
+    pub(super) fn position(&self, chunk: ChunkId) -> FilePosition {
         let (file, offset) = self.striping.position(chunk.index());
-        FilePosition::new(file, offset)
+        FilePosition::new(file, CacheFileOwner::PAGE + offset)
     }
 }
 
@@ -211,14 +212,14 @@ mod tests {
             .map(|writer| (writer.chunk().index(), writer.position()))
             .collect();
         positions.sort_unstable_by_key(|&(chunk, _)| chunk);
-        let block = BLOCK_SIZE_U64;
+        let (page, block) = (CacheFileOwner::PAGE, BLOCK_SIZE_U64);
         assert_eq!(
             positions,
             [
-                (0, FilePosition::new(0, 0)),
-                (1, FilePosition::new(1, 0)),
-                (2, FilePosition::new(0, block)),
-                (3, FilePosition::new(1, block)),
+                (0, FilePosition::new(0, page)),
+                (1, FilePosition::new(1, page)),
+                (2, FilePosition::new(0, page + block)),
+                (3, FilePosition::new(1, page + block)),
             ]
         );
     }
@@ -239,7 +240,10 @@ mod tests {
         let block = BlockKey::new(FileVersionId::new(1), 0);
         let chunk = chunks.allocate().unwrap().publish(block).chunk();
         let reader = chunks.read(chunk, block).unwrap();
-        assert_eq!(reader.position(), FilePosition::new(0, 0));
+        assert_eq!(
+            reader.position(),
+            FilePosition::new(0, CacheFileOwner::PAGE)
+        );
 
         assert!(chunks.pin_for_eviction(chunk).unwrap().unpublish());
         assert!(chunks.read(chunk, block).is_none());

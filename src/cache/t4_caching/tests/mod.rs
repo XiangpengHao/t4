@@ -460,7 +460,8 @@ fn the_disk_tier_stripes_over_its_files() {
         assert_eq!(tiers.disk_chunks().get(), 6);
         for file in [&small, &large] {
             let opened = dir.file_system.open_existing(file, false).unwrap();
-            assert_eq!(opened.size().unwrap(), 3 * MIB);
+            // Its owner's page, then its chunks.
+            assert_eq!(opened.size().unwrap(), crate::PAGE_SIZE_U64 + 3 * MIB);
         }
 
         // More blocks than memory holds, so most go to disk.
