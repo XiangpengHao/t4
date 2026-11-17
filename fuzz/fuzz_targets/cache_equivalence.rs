@@ -416,6 +416,8 @@ struct Harness {
 }
 
 impl Harness {
+    const MOST_WAIT: Duration = Duration::from_millis(512);
+
     /// `None` where io_uring isn't allowed.
     fn new(scenario: &Scenario) -> Option<Self> {
         let mut harness = Self {
@@ -437,7 +439,32 @@ impl Harness {
         }
     }
 
+    /// A build refused for want of threads or io_uring rings, which the kernel retires a while
+    /// after the last cache drops, is tried again for about a second: a fork run's workers start
+    /// out building caches thousands of times a second.
     fn build(&mut self) -> t4::Result<()> {
+        let mut wait = Duration::from_millis(1);
+        loop {
+            match self.build_once() {
+                Err(t4::Error::Io(error))
+                    if Self::short_of_resources(&error) && wait <= Self::MOST_WAIT =>
+                {
+                    std::thread::sleep(wait);
+                    wait *= 2;
+                }
+                built => return built,
+            }
+        }
+    }
+
+    fn short_of_resources(error: &std::io::Error) -> bool {
+        matches!(
+            error.raw_os_error(),
+            Some(libc::EAGAIN | libc::ENOMEM | libc::EMFILE | libc::ENFILE)
+        )
+    }
+
+    fn build_once(&mut self) -> t4::Result<()> {
         let settings = &self.settings;
         let builder = (settings.disk_files.0.iter())
             .fold(
