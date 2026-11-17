@@ -60,7 +60,6 @@ impl ReadOutput {
     fn over_memory(asked: Range<u64>, memory: OutputMemory) -> Result<Self> {
         let start = asked.start / PAGE_SIZE_U64 * PAGE_SIZE_U64;
         let end = start + Self::padded_len(&asked);
-        memory.fault_in();
         // Nothing reads into the rounding's bytes: zero them so the buffer ends initialized.
         // SAFETY: both runs lie within the allocation, which nothing else holds yet.
         unsafe {
@@ -97,6 +96,16 @@ impl ReadOutput {
             AlignedBuf::lent(at, len, Arc::clone(&self.memory) as _)
         };
         Ok(buffer)
+    }
+
+    /// Faulted in on the reading task: a direct read pins its pages on the one I/O worker,
+    /// and zeroing every read's fresh pages there caps the disk tier
+    /// (`doc/04-multi-device.md`, "Measured"). A copy faults in its own.
+    pub(super) fn lend_to_disk_read(&mut self, pages: Range<u64>) -> Result<AlignedBuf> {
+        let lent = self.lend(pages.clone())?;
+        self.memory
+            .fault_in(Self::index(pages.start - self.start), lent.len());
+        Ok(lent)
     }
 
     pub(super) fn pages_over(&self, bytes: Range<u64>) -> Option<Range<u64>> {
@@ -226,15 +235,14 @@ impl OutputMemory {
         })
     }
 
-    /// Faulted in on the reading task: on the one I/O worker, zeroing every read's fresh
-    /// pages caps the disk tier (`doc/04-multi-device.md`, "Measured").
-    fn fault_in(&self) {
+    #[cfg_attr(not(target_os = "linux"), expect(unused_variables))]
+    fn fault_in(&self, at: usize, len: usize) {
         #[cfg(target_os = "linux")]
         // SAFETY: the output's own pages; populating them changes none of their bytes.
         unsafe {
             libc::madvise(
-                self.ptr.as_ptr().cast(),
-                self.len,
+                self.ptr.add(at).as_ptr().cast(),
+                len,
                 libc::MADV_POPULATE_WRITE,
             );
         }
@@ -269,7 +277,7 @@ mod tests {
     fn copies_and_lent_reads_land_where_their_bytes_go() {
         let mut output = ReadOutput::new(100..3 * PAGE + 50).unwrap();
         output.copy_in(100, &[1; PAGE as usize - 100]);
-        let mut lent = output.lend(PAGE..3 * PAGE).unwrap();
+        let mut lent = output.lend_to_disk_read(PAGE..3 * PAGE).unwrap();
         // SAFETY: the lent pages are this test's to write, as a read would.
         unsafe { lent.as_mut_ptr().write_bytes(2, 2 * PAGE as usize) };
         drop(lent);

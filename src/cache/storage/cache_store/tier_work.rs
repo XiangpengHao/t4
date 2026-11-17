@@ -35,7 +35,7 @@ impl ObjectCache {
         let start = block.object_range().start;
         let into = read
             .output
-            .lend(start + u64::from(pages.start)..start + u64::from(pages.end))?;
+            .lend_to_disk_read(start + u64::from(pages.start)..start + u64::from(pages.end))?;
         self.tiers.disk.read_into(on_disk, pages.start, into)
     }
 }
