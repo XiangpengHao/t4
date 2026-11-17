@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(any(test, feature = "__fuzz"))]
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::any::Any;
 use std::num::NonZeroU32;
@@ -6,7 +6,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::PAGE_SIZE;
-#[cfg(test)]
+#[cfg(any(test, feature = "__fuzz"))]
 use crate::io::error::{Error, Result};
 
 #[derive(Debug)]
@@ -18,7 +18,7 @@ pub struct AlignedBuf {
 
 #[derive(Debug)]
 enum BufMemory {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "__fuzz"))]
     Owned(Layout),
     Lent {
         _guard: Arc<dyn Any + Send + Sync>,
@@ -29,7 +29,7 @@ enum BufMemory {
 unsafe impl Send for AlignedBuf {}
 
 impl AlignedBuf {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "__fuzz"))]
     pub(crate) fn new_zeroed(len_u32: NonZeroU32) -> Result<Self> {
         let len = len_u32.get() as usize;
         let layout = Layout::from_size_align(len, PAGE_SIZE)
@@ -80,7 +80,7 @@ impl AlignedBuf {
         self.ptr.as_ptr()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "__fuzz"))]
     pub fn as_slice(&self) -> &[u8] {
         debug_assert!(
             self.is_owned(),
@@ -114,7 +114,7 @@ impl AlignedBuf {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "__fuzz"))]
     fn is_owned(&self) -> bool {
         matches!(self.memory, BufMemory::Owned(_))
     }
@@ -123,7 +123,7 @@ impl AlignedBuf {
 impl Drop for AlignedBuf {
     fn drop(&mut self) {
         match self.memory {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "__fuzz"))]
             BufMemory::Owned(layout) => unsafe { dealloc(self.ptr.as_ptr(), layout) },
             BufMemory::Lent { .. } => {}
         }

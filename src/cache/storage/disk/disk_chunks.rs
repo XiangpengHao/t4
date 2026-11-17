@@ -79,7 +79,7 @@ impl DiskChunks {
         })
     }
 
-    fn position(&self, chunk: ChunkId) -> FilePosition {
+    pub(super) fn position(&self, chunk: ChunkId) -> FilePosition {
         let (file, offset) = self.striping.position(chunk.index());
         FilePosition::new(file, offset)
     }

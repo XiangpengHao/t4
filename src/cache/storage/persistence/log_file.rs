@@ -109,7 +109,7 @@ impl PersistenceLog {
         }
     }
 
-    #[cfg(all(test, not(feature = "shuttle")))]
+    #[cfg(any(all(test, not(feature = "shuttle")), feature = "__fuzz"))]
     pub(in crate::cache) fn inspect(&self) -> Option<LogBase> {
         DiskLog::replay(
             &self.file_system.read(&self.path).ok()?,

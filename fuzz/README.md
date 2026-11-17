@@ -20,9 +20,11 @@ Random sequences of operations on `T4Caching` over an in-memory
 - restarts: the cache dropped, keeping its disk tier in a log, and built
   again on its files, replaying and rebasing it. A simulated kill leaves
   the last batch's adds unappended before rebuilding, so the next build
-  replays the live appends alone. Where the cache
-  files' file system reports no creation time, the cache keeps none, and a
-  restart starts cold.
+  replays the live appends alone. One restart in three moves to other cache
+  files, one to three of the same three in any order, so a build may find
+  files another build wrote and a log beside a file that is no longer
+  first. Where the cache files' file system reports no creation time, the
+  cache keeps none, and a restart starts cold.
 
 Its tiers are 1 to 4 blocks of memory and 1 to 6 on disk, and its files up
 to four blocks, so eviction, moves to disk and promotions start within a few
@@ -43,7 +45,12 @@ It checks that:
   feature);
 - the scripted policy can still pick every chunk that holds a block: the
   cache frees each victim, or gives it back;
-- the cache never names a chunk past its tier's to the policy.
+- the cache never names a chunk past its tier's to the policy;
+- after every operation, what a build after a kill there would serve from
+  disk: the log as it is on disk replays, and each chunk it names holds its
+  block's bytes, of a version the store held
+  (`T4Caching::check_what_a_kill_keeps`). A kill is checked at every step,
+  not only where a scenario has one.
 
 Where io_uring is refused (`EPERM` or `ENOSYS`), it skips every scenario and
 passes. GitHub's runners allow io_uring, as CI's tests use it; a runner that

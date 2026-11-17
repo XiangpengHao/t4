@@ -139,6 +139,19 @@ impl CacheFiles {
         self.io.read_exact_at(into, reader.position()).await
     }
 
+    /// The bytes `chunk` holds, whether or not the index names it.
+    #[cfg(feature = "__fuzz")]
+    pub(in crate::cache) async fn read_whole_chunk(
+        &self,
+        chunk: crate::cache::ChunkId,
+    ) -> Result<AlignedBuf> {
+        let block = NonZeroU32::new(BLOCK_SIZE_U64 as u32).expect("a block holds bytes");
+        let into = AlignedBuf::new_zeroed(block)?;
+        self.io
+            .read_exact_at(into, self.chunks.position(chunk))
+            .await
+    }
+
     /// Submits now, not when polled, so reads started together run at once.
     pub(in crate::cache) fn read_into(
         &self,
