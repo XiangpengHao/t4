@@ -164,7 +164,7 @@ fn a_read_given_up_on_hands_its_block_to_the_read_waiting() {
 }
 
 #[test]
-fn fills_bound_for_disk_share_one_memory_chunk() {
+fn fills_bound_for_disk_leave_memory_alone() {
     explore(|| {
         let (cache, policy) = cache(1, 4);
         policy.set_admit(Admit::Disk);
@@ -415,7 +415,10 @@ fn a_dropped_batch_keeps_its_chunks_until_its_io_completes() {
         assert!(
             cache
                 .tiers
-                .write_disk_batch(&[(chunk_a, key_a)])
+                .write_disk_batch(vec![super::disk_writer::PendingWrite::Victim {
+                    chunk: chunk_a,
+                    block: key_a,
+                }])
                 .now_or_never()
                 .is_none()
         );
@@ -472,16 +475,17 @@ fn giving_up_a_read_does_not_cancel_its_queued_write() {
                 .is_ok()
         );
         pause.wait_until_started();
-        let chunk = memory_chunk(&cache, &a).unwrap();
         drop(read);
-        assert!(cache.tiers.evict_from_memory(chunk));
-        assert!(cache.tiers.memory.allocate().is_none());
-        assert!(cache.tiers.allocate_disk().is_none());
+        assert_eq!(location(&cache, &a), None, "on disk once written");
+        assert!(
+            !read_fetching(&cache, &a, false),
+            "read from its own pages meanwhile"
+        );
         pause.resume();
         cache.wait_for_disk_writes();
-        assert_eq!(cache.tiers.memory.free_count(), 1);
-        assert_eq!(cache.tiers.disk.chunks().free_count(), 1);
-        assert_eq!(location(&cache, &a), None);
+        assert!(disk_chunk(&cache, &a).is_some());
+        assert_eq!(cache.tiers.memory.free_count(), 1, "memory untouched");
+        assert!(!read_fetching(&cache, &a, false));
         cache.check_at_rest().unwrap();
     });
 }
@@ -605,49 +609,74 @@ fn racing_resolutions_of_two_versions_never_share_an_id() {
 }
 
 #[test]
-fn disk_admissions_wait_readably_in_memory_until_sixteen_are_ready() {
+fn fills_bound_for_disk_land_beside_a_one_chunk_memory_until_the_queue_is_full() {
     TestSchedule::check(|| {
         let (disk, release_writes) = paused_disk(16, 32);
         let policy = Arc::new(TestPolicy::new());
         policy.set_admit(Admit::Disk);
-        let cache = ObjectCache::new(NonZeroU32::new(16).unwrap(), disk, policy).unwrap();
-        for index in 0..16 {
-            let path = format!("{index}");
-            let file = cache
-                .resolve(path.as_bytes(), Some("v1"), FILE_SIZE)
-                .unwrap();
+        let cache = ObjectCache::new(NonZeroU32::MIN, disk, policy).unwrap();
+        let paths: Vec<String> = (0..18u8).map(|index| format!("{index}")).collect();
+        let files: Vec<_> = (0..18u8)
+            .zip(&paths)
+            .map(|(index, path)| {
+                let file = cache.resolve(path.as_bytes(), Some("v1"), FILE_SIZE);
+                (index, file.unwrap())
+            })
+            .collect();
+        let fill = |index: u8, file: &CacheableFile<'_>| {
             let mut read =
-                block_on(cache.read(&file, 0..FILE_SIZE, None, &FetchRuns::default())).unwrap();
-            let bytes = vec![index as u8; FILE_SIZE as usize];
-            assert!(
-                cache
-                    .take_fetched(&mut read, 0..FILE_SIZE, &bytes)
-                    .now_or_never()
-                    .unwrap()
-                    .is_ok()
-            );
-            assert_eq!(read.into_bytes().unwrap(), bytes);
-            let key = BlockKey::new(file.version().id(), 0);
-            let Some(Location::Memory(chunk)) = cache.tiers.blocks.get(key) else {
-                panic!("the write is still paused");
-            };
-            assert_eq!(
-                &cache.tiers.memory.read(chunk, key).unwrap().bytes()[..bytes.len()],
-                bytes
-            );
-            if index < 15 {
-                assert_eq!(
-                    cache.tiers.disk.chunks().free_count(),
-                    32,
-                    "no partial batch goes"
-                );
+                block_on(cache.read(file, 0..FILE_SIZE, None, &FetchRuns::default())).unwrap();
+            let bytes = vec![index; FILE_SIZE as usize];
+            let landed = cache
+                .take_fetched(&mut read, 0..FILE_SIZE, &bytes)
+                .now_or_never();
+            (landed.is_some(), read)
+        };
+        // The first is written, its write paused; sixteen more wait behind it.
+        for (index, file) in &files[..17] {
+            let (landed, read) = fill(*index, file);
+            assert!(landed, "block {index} found room");
+            assert_eq!(read.into_bytes().unwrap(), vec![*index; FILE_SIZE as usize]);
+            if *index == 0 {
+                release_writes.wait_until_started();
             }
         }
-        release_writes.wait_until_started();
+        let (index, last) = &files[17];
+        let mut read =
+            block_on(cache.read(last, 0..FILE_SIZE, None, &FetchRuns::default())).unwrap();
+        let bytes = vec![*index; FILE_SIZE as usize];
+        let mut waiting = Box::pin(cache.take_fetched(&mut read, 0..FILE_SIZE, &bytes));
+        assert!(
+            waiting.as_mut().now_or_never().is_none(),
+            "the queue is full"
+        );
+        for (index, file) in &files[..17] {
+            assert_eq!(
+                location(&cache, file),
+                None,
+                "block {index} not yet written"
+            );
+            let again =
+                block_on(cache.read(file, 0..FILE_SIZE, None, &FetchRuns::default())).unwrap();
+            assert!(
+                again.fetches().is_empty(),
+                "block {index} is read as it waits"
+            );
+            assert_eq!(
+                again.into_bytes().unwrap(),
+                vec![*index; FILE_SIZE as usize]
+            );
+        }
+        assert_eq!(cache.tiers.memory.free_count(), 1, "memory untouched");
+
         release_writes.resume();
+        block_on(waiting).unwrap();
+        drop(read);
         cache.wait_for_disk_writes();
-        assert_eq!(cache.tiers.disk.chunks().free_count(), 16);
-        assert_eq!(cache.tiers.memory.free_count(), 16);
+        for (_, file) in &files {
+            assert!(disk_chunk(&cache, file).is_some());
+        }
+        assert_eq!(cache.tiers.disk.chunks().free_count(), 32 - 18);
         cache.check_at_rest().unwrap();
     });
 }

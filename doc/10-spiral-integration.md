@@ -261,9 +261,9 @@ hosts is one.
      tier, not the OS's page cache; a memory tier of one chunk, the least
      t4 takes. The disk tier is what survives a restart (decision 7), so
      admitting straight to it loses nothing at exit. A block bound for disk
-     lands in a memory chunk until written; until 17 Nov 2026 one that
-     found none free went uncached, so this tier kept one block of each GET
-     (`13-persistence.md`, decision 9). Buffered, as this
+     lands in pages of its own until written, not in this one chunk; when
+     it landed in memory chunks, about nine in ten blocks of concurrent
+     GETs went uncached (`13-persistence.md`, decision 9). Buffered, as this
      profile first ran, t4 took 1.45 times Kismet's time from disk on
      Linux: a buffered read's page-cache work runs on the thread that
      submits it, there t4's one io_uring thread (plan step 2).

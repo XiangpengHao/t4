@@ -132,8 +132,8 @@ chunk table the frame table.
    eight, never more than a sixteenth of the tier, so a small tier isn't
    emptied for one block; up to four rounds, as a victim's chunk goes free
    only once its readers leave); a block that still finds no room isn't
-   cached, unless it is bound for disk and the writer is taking blocks out
-   of memory (`13-persistence.md`, decision 9).
+   cached. A block bound for disk lands in pages of its own, not a memory
+   chunk (`13-persistence.md`, decision 9).
    Memory's moves to disk write at once, and may make the disk evict; disk
    victims are dropped, so it ends there. A chunk table, indexed by chunk
    number, holds each chunk's owner (its block's key) and a count of its

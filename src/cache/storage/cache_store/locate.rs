@@ -1,6 +1,8 @@
 use std::num::NonZeroU8;
 use std::ops::Range;
 
+use bytes::Bytes;
+
 use crate::cache::BlockKey;
 use crate::cache::policy::{Admit, BlockRead, ReadIntent};
 use crate::cache::storage::disk::DiskChunkReader;
@@ -23,12 +25,12 @@ impl ObjectCache {
                 HeldBlock::Remote => {}
             }
             if let Some(fetch) = self.in_flight.get(key) {
-                return Located::InFlight(fetch);
+                return Located::in_flight(fetch);
             }
             let admit = self.tiers.placement.on_remote_read(context);
             let claim = match self.in_flight.claim(key, admit) {
                 Ok(claim) => claim,
-                Err(fetch) => return Located::InFlight(fetch),
+                Err(fetch) => return Located::in_flight(fetch),
             };
             // A fetch may have cached the block since `hold` found it remote;
             // the stale entry `hold` gave up on doesn't count.
@@ -119,9 +121,20 @@ pub(super) enum HeldBlock<'cache> {
 pub(super) enum Located<'c> {
     Memory(MemoryChunkReader<'c>),
     Disk(DiskChunkReader<'c>),
+    /// Fetched and bound for disk, its write not yet done.
+    Landed(Bytes),
     InFlight(Arc<BlockFetch>),
     Remote {
         admit: Admit,
         claim: Option<FetchClaim>,
     },
+}
+
+impl Located<'_> {
+    fn in_flight(fetch: Arc<BlockFetch>) -> Self {
+        match fetch.landed() {
+            Some(bytes) => Self::Landed(bytes),
+            None => Self::InFlight(fetch),
+        }
+    }
 }

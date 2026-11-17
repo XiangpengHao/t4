@@ -101,6 +101,10 @@ impl<'c> TierWork<'c> {
                     self.take_disk_hit(read, block, reader)?;
                     (BlockSource::Disk, None)
                 }
+                Located::Landed(bytes) => {
+                    read.place_from_chunk(block, &bytes);
+                    (BlockSource::Memory, None)
+                }
                 Located::InFlight(fetch) => (
                     BlockSource::InFlight {
                         requests: fetch.requests(),

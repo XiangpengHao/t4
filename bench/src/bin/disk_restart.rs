@@ -50,6 +50,9 @@ struct Args {
     /// The run's name in the CSV.
     #[arg(long, default_value = "t4")]
     label: String,
+    /// The memory tier: Spiral's user-machine profile runs one 1 MiB chunk.
+    #[arg(long, default_value_t = 64)]
+    memory_mib: u64,
 }
 
 struct RestartBench {
@@ -61,12 +64,11 @@ struct RestartBench {
     objects: Arc<SyntheticObjects>,
     gets: Arc<RequestCounter>,
     store: Arc<dyn ObjectStore>,
+    memory: u64,
 }
 
 impl RestartBench {
     const BLOCK: u64 = 1 << 20;
-    /// Disk admissions wait in memory until their batch goes.
-    const MEMORY: u64 = 64 << 20;
 
     fn new(args: &Args) -> Self {
         let files = args.blocks.div_ceil(args.file_blocks);
@@ -96,6 +98,7 @@ impl RestartBench {
             objects,
             gets,
             store,
+            memory: args.memory_mib << 20,
         }
     }
 
@@ -119,7 +122,7 @@ impl RestartBench {
 
     fn build(&self) -> Result<T4Caching, Error> {
         let mut builder = T4Caching::builder(Arc::clone(&self.store))
-            .with_memory_capacity(Self::MEMORY)
+            .with_memory_capacity(self.memory)
             .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk));
         for path in &self.cache_files {
             builder = builder.with_disk_file(path, self.file_capacity);
