@@ -8,12 +8,10 @@ use crate::io::sync::mpsc;
 use crate::io::sync::thread::{JoinHandle, spawn};
 use crate::{Error, Result};
 use core::fmt;
-use std::fs::File;
 use std::num::NonZeroU32;
 
+use crate::io::file_system::OpenFile;
 use crate::io::new_backend;
-#[cfg(all(feature = "shuttle", test))]
-use crate::io::simulated::{self, SimDisk};
 
 /// The last clone's drop joins the thread, so its files are closed once the drop returns.
 #[derive(Clone)]
@@ -42,16 +40,11 @@ impl fmt::Debug for IoWorker {
 }
 
 impl IoWorker {
-    pub fn new(queue_depth: NonZeroU32, files: Vec<File>) -> Result<Self> {
+    pub fn new(queue_depth: NonZeroU32, files: Vec<OpenFile>) -> Result<Self> {
         if files.is_empty() {
             return Err(Error::InvalidArgument("an I/O worker needs a file"));
         }
         Self::start(move |rx| new_backend(files, queue_depth.get(), rx))
-    }
-
-    #[cfg(all(feature = "shuttle", test))]
-    pub(crate) fn simulated(queue_depth: NonZeroU32, disks: Vec<SimDisk>) -> Result<Self> {
-        Self::start(move |rx| Ok(simulated::new_backend_on(disks, queue_depth.get(), rx)))
     }
 
     fn start<D: IoDriver>(
@@ -107,17 +100,19 @@ impl IoWorker {
 
 #[cfg(test)]
 mod test {
-    #[cfg(feature = "shuttle")]
-    use std::fs::File;
     use std::num::NonZero;
+    #[cfg(feature = "shuttle")]
+    use std::path::Path;
 
     #[cfg(not(feature = "shuttle"))]
     use pollster::block_on;
     #[cfg(feature = "shuttle")]
     use shuttle::future::block_on;
-    use tempfile::tempfile;
 
     use crate::io::aligned_buf::AlignedBuf;
+    #[cfg(feature = "shuttle")]
+    use crate::io::file_system::FileSystem;
+    use crate::io::file_system::OpenFile;
     use crate::io::io_task::{FilePosition, PageWrite};
     use crate::{PAGE_SIZE_NZ_U32, PAGE_SIZE_U64};
 
@@ -129,11 +124,27 @@ mod test {
         buf
     }
 
+    /// On the simulated disk under shuttle, else files the OS removes once closed.
+    fn scratch_files(count: usize) -> Vec<OpenFile> {
+        #[cfg(feature = "shuttle")]
+        let open = {
+            let file_system = FileSystem::default();
+            move |file: usize| {
+                let path = file.to_string();
+                file_system
+                    .open_cache_file(Path::new(&path), false)
+                    .unwrap()
+            }
+        };
+        #[cfg(not(feature = "shuttle"))]
+        let open = |_| OpenFile::from(tempfile::tempfile().unwrap());
+        (0..count).map(open).collect()
+    }
+
     #[test]
     fn basic_io_worker_test() {
         crate::io::test_schedule::TestSchedule::check(|| {
-            let tmp_file = tempfile().unwrap();
-            let io_worker = IoWorker::new(NonZero::new(12).unwrap(), vec![tmp_file]).unwrap();
+            let io_worker = IoWorker::new(NonZero::new(12).unwrap(), scratch_files(1)).unwrap();
             let start = FilePosition::new(0, 0);
 
             block_on(
@@ -156,8 +167,7 @@ mod test {
     #[test]
     fn one_worker_reads_and_writes_several_files() {
         crate::io::test_schedule::TestSchedule::check(|| {
-            let files = vec![tempfile().unwrap(), tempfile().unwrap()];
-            let io_worker = IoWorker::new(NonZero::new(4).unwrap(), files).unwrap();
+            let io_worker = IoWorker::new(NonZero::new(4).unwrap(), scratch_files(2)).unwrap();
             let writes = ["zero", "one"]
                 .iter()
                 .enumerate()
@@ -188,9 +198,8 @@ mod test {
             const PAGES_PER_THREAD: u64 = 8;
             const QUEUE_DEPTH: u32 = 32;
 
-            let tmp_file = tempfile().unwrap();
             let io_worker =
-                IoWorker::new(NonZero::new(QUEUE_DEPTH).unwrap(), vec![tmp_file]).unwrap();
+                IoWorker::new(NonZero::new(QUEUE_DEPTH).unwrap(), scratch_files(1)).unwrap();
 
             let marker = |t: u64, i: u64| format!("t{t}-p{i}");
 
@@ -234,16 +243,10 @@ mod test {
         crate::io::test_schedule::TestSchedule::check(|| {
             const READS: u32 = 64;
             const MIB: u32 = 1 << 20;
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("file");
-            let file = File::options()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&path)
-                .unwrap();
-            file.set_len(u64::from(READS * MIB)).unwrap();
+            let file_system = FileSystem::default();
+            let path = Path::new("file");
+            let file = file_system.open_cache_file(path, false).unwrap();
+            file.set_size(u64::from(READS * MIB)).unwrap();
             file.try_lock().unwrap();
             let io_worker = IoWorker::new(NonZero::new(READS).unwrap(), vec![file]).unwrap();
             let reads: Vec<_> = (0..READS)
@@ -256,7 +259,7 @@ mod test {
 
             drop(io_worker);
 
-            let reopened = File::open(&path).unwrap();
+            let reopened = file_system.open_existing(path, false).unwrap();
             reopened
                 .try_lock()
                 .expect("the worker's file is closed once it drops");

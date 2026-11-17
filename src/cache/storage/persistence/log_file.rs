@@ -1,37 +1,39 @@
-use std::fs::File;
-use std::io::{self, Write};
-use std::os::unix::fs::MetadataExt;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
 use super::log::{BootId, DiskLog, LogEntry};
 use super::{LogBase, LogReader, LogWriter, VersionOnDisk};
-use crate::cache::storage::FileIdentity;
 use crate::cache::storage::FileVersion;
 use crate::cache::{BlockKey, ChunkId};
+use crate::io::file_system::{FileIdentity, FileSystem, OpenFile};
 use crate::io::sync::{Mutex, MutexGuard};
 
 pub(in crate::cache) struct PersistenceLog {
+    file_system: FileSystem,
     path: PathBuf,
     layout: CacheLayout,
     boot: BootId,
-    cache_files: Vec<File>,
+    cache_files: Vec<OpenFile>,
     append: Mutex<Option<LogAppend>>,
 }
 
 impl PersistenceLog {
     pub(in crate::cache) fn beside(
+        file_system: &FileSystem,
         first: &Path,
-        opened: &[File],
+        opened: &[OpenFile],
         chunks_per_file: u32,
     ) -> io::Result<Option<Self>> {
-        Self::beside_in_boot(first, opened, chunks_per_file, BootId::current().ok())
+        let boot = BootId::current(file_system).ok();
+        Self::beside_in_boot(file_system, first, opened, chunks_per_file, boot)
     }
 
     /// With no boot id, nothing could tell a later machine crash: no log, and none left behind.
     pub(super) fn beside_in_boot(
+        file_system: &FileSystem,
         first: &Path,
-        opened: &[File],
+        opened: &[OpenFile],
         chunks_per_file: u32,
         boot: Option<BootId>,
     ) -> io::Result<Option<Self>> {
@@ -40,19 +42,20 @@ impl PersistenceLog {
         let path = PathBuf::from(path);
         let files = opened.iter().map(FileStamp::of).collect::<Option<_>>();
         let (Some(boot), Some(files)) = (boot, files) else {
-            match std::fs::remove_file(&path) {
+            match file_system.remove(&path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
             }
-            Self::sync_parent(&path)?;
+            file_system.sync_directory_of(&path)?;
             return Ok(None);
         };
         let cache_files = opened
             .iter()
-            .map(File::try_clone)
+            .map(OpenFile::try_clone)
             .collect::<io::Result<_>>()?;
         Ok(Some(Self {
+            file_system: file_system.clone(),
             path,
             layout: CacheLayout {
                 chunks_per_file,
@@ -66,7 +69,7 @@ impl PersistenceLog {
 
     /// The old clean mark must be durably gone before a chunk can be overwritten.
     pub(in crate::cache) fn take(&self) -> io::Result<Option<LogBase>> {
-        let bytes = match std::fs::read(&self.path) {
+        let bytes = match self.file_system.read(&self.path) {
             Ok(bytes) => Some(bytes),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
@@ -81,14 +84,16 @@ impl PersistenceLog {
         let mut temporary = self.path.as_os_str().to_owned();
         temporary.push(".tmp");
         let temporary = PathBuf::from(temporary);
-        let written = Self::write_whole(&temporary, &DiskLog::base(base, &self.layout, self.boot))
-            .and_then(|()| std::fs::rename(&temporary, &self.path));
+        let base = DiskLog::base(base, &self.layout, self.boot);
+        let written = (self.file_system)
+            .write_durably(&temporary, &base)
+            .and_then(|()| self.file_system.rename(&temporary, &self.path));
         if written.is_err() {
-            let _ = std::fs::remove_file(&temporary);
+            let _ = self.file_system.remove(&temporary);
         }
         written?;
-        self.sync_directory()?;
-        let file = File::options().append(true).open(&self.path)?;
+        self.file_system.sync_directory_of(&self.path)?;
+        let file = self.file_system.open_to_append(&self.path)?;
         *self.append.lock().unwrap() = Some(LogAppend::new(file));
         Ok(())
     }
@@ -122,31 +127,17 @@ impl PersistenceLog {
 
     #[cfg(all(test, not(feature = "shuttle")))]
     pub(in crate::cache) fn inspect(&self) -> Option<LogBase> {
-        DiskLog::replay(&std::fs::read(&self.path).ok()?, &self.layout, self.boot)
+        DiskLog::replay(
+            &self.file_system.read(&self.path).ok()?,
+            &self.layout,
+            self.boot,
+        )
     }
 
     #[cfg(all(test, not(feature = "shuttle")))]
     pub(super) fn seed(&self, base: &LogBase) -> io::Result<()> {
         self.replace_base(base)?;
         self.finish(base.next_id())
-    }
-
-    fn write_whole(path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let mut file = File::create(path)?;
-        file.write_all(bytes)?;
-        file.sync_data()
-    }
-
-    fn sync_directory(&self) -> io::Result<()> {
-        Self::sync_parent(&self.path)
-    }
-
-    fn sync_parent(path: &Path) -> io::Result<()> {
-        let directory = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        File::open(directory)?.sync_all()
     }
 
     #[cfg(all(test, not(feature = "shuttle")))]
@@ -196,14 +187,14 @@ impl LogChanges<'_> {
 }
 
 struct LogAppend {
-    file: File,
+    file: OpenFile,
     pending: Vec<LogEntry>,
     failed: bool,
     abandoned: bool,
 }
 
 impl LogAppend {
-    fn new(file: File) -> Self {
+    fn new(file: OpenFile) -> Self {
         Self {
             file,
             pending: Vec::new(),
@@ -221,7 +212,7 @@ impl LogAppend {
         if self.pending.is_empty() {
             return Ok(());
         }
-        if let Err(error) = self.file.write_all(&DiskLog::record(&self.pending)) {
+        if let Err(error) = self.file.append(&DiskLog::record(&self.pending)) {
             self.failed = true;
             return Err(error);
         }
@@ -294,12 +285,10 @@ struct FileStamp {
 }
 
 impl FileStamp {
-    fn of(file: &File) -> Option<Self> {
-        let meta = file.metadata().ok()?;
-        let created = meta.created().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    fn of(file: &OpenFile) -> Option<Self> {
         Some(Self {
-            identity: FileIdentity::new(meta.dev(), meta.ino()),
-            created,
+            identity: file.identity().ok()?,
+            created: file.created()?,
         })
     }
 }
@@ -312,12 +301,13 @@ mod tests {
     fn a_failed_append_never_appends_past_the_doubtful_record() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("log");
-        File::create(&path).unwrap();
-        let mut append = LogAppend::new(File::open(&path).unwrap());
+        let file_system = FileSystem::default();
+        file_system.write_durably(&path, &[]).unwrap();
+        let mut append = LogAppend::new(file_system.open_existing(&path, false).unwrap());
         append.pending.push(LogEntry::Clean(0));
         assert!(append.write_pending().is_err());
-        append.file = File::options().append(true).open(&path).unwrap();
+        append.file = file_system.open_to_append(&path).unwrap();
         assert!(append.write_pending().is_err());
-        assert!(std::fs::read(path).unwrap().is_empty());
+        assert!(file_system.read(&path).unwrap().is_empty());
     }
 }

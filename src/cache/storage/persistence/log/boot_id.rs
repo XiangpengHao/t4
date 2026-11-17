@@ -1,11 +1,15 @@
 use std::io;
 
+use crate::io::file_system::FileSystem;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::cache::storage::persistence) struct BootId([u8; 16]);
 
 impl BootId {
-    pub(in crate::cache::storage::persistence) fn current() -> io::Result<Self> {
-        let text = Self::read()?;
+    pub(in crate::cache::storage::persistence) fn current(
+        file_system: &FileSystem,
+    ) -> io::Result<Self> {
+        let text = file_system.boot_id()?;
         Self::parse(text.trim()).ok_or_else(|| io::ErrorKind::InvalidData.into())
     }
 
@@ -32,37 +36,6 @@ impl BootId {
         }
         Some(Self(bytes))
     }
-
-    #[cfg(target_os = "linux")]
-    fn read() -> io::Result<String> {
-        std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
-    }
-
-    #[cfg(target_os = "macos")]
-    fn read() -> io::Result<String> {
-        let mut bytes = [0u8; 64];
-        let mut len = bytes.len();
-        // SAFETY: the name is terminated and both output pointers describe live storage.
-        if unsafe {
-            libc::sysctlbyname(
-                c"kern.bootsessionuuid".as_ptr(),
-                bytes.as_mut_ptr().cast(),
-                &mut len,
-                std::ptr::null_mut(),
-                0,
-            )
-        } == -1
-        {
-            return Err(io::Error::last_os_error());
-        }
-        let text = std::str::from_utf8(&bytes[..len]).map_err(|_| io::ErrorKind::InvalidData)?;
-        Ok(text.trim_end_matches('\0').to_owned())
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    fn read() -> io::Result<String> {
-        Err(io::ErrorKind::Unsupported.into())
-    }
 }
 
 #[cfg(test)]
@@ -81,6 +54,8 @@ mod tests {
         ] {
             assert_eq!(BootId::parse(invalid), None);
         }
-        assert_eq!(BootId::current().unwrap(), BootId::current().unwrap());
+        let file_system = FileSystem::default();
+        let current = || BootId::current(&file_system).unwrap();
+        assert_eq!(current(), current());
     }
 }

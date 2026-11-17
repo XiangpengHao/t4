@@ -153,6 +153,7 @@ impl SharedCacheStore {
         let first_file = hand_off.tiers.first_file();
         let reads = Arc::clone(&hand_off.reads);
         let Some(owner) = OwnerConnection::connect(
+            hand_off.tiers.file_system(),
             first_file,
             reads,
             hand_off.connections,

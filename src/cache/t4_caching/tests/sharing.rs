@@ -35,7 +35,7 @@ fn read_listed(cache: &T4Caching, meta: &ObjectMeta, range: Range<u64>) -> Bytes
 #[test]
 fn a_clients_cold_read_is_cached_for_its_owner() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(2 * MIB, 1);
@@ -63,7 +63,7 @@ fn a_clients_cold_read_is_cached_for_its_owner() {
 #[test]
 fn a_block_the_owner_holds_is_served_to_its_client() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(2 * MIB, 2);
@@ -83,7 +83,7 @@ fn a_block_the_owner_holds_is_served_to_its_client() {
 #[test]
 fn reads_of_one_block_across_owner_and_client_fetch_it_once() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(MIB, 3);
@@ -124,7 +124,7 @@ fn reads_of_one_block_across_owner_and_client_fetch_it_once() {
 #[test]
 fn a_clients_read_policy_hears_its_gets_and_its_owners_disk_reads() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("on_disk");
         let data = file_bytes(MIB, 4);
@@ -166,7 +166,7 @@ fn a_clients_read_policy_hears_its_gets_and_its_owners_disk_reads() {
 #[test]
 fn a_client_whose_owner_went_reads_from_its_store() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(MIB, 6);
@@ -195,7 +195,7 @@ fn read_on_thread(cache: T4Caching, meta: ObjectMeta, range: Range<u64>) -> mpsc
 #[test]
 fn a_clients_read_whose_owner_goes_mid_get_reads_from_its_store() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(MIB, 7);
@@ -220,7 +220,7 @@ fn a_clients_read_whose_owner_goes_mid_get_reads_from_its_store() {
 #[test]
 fn a_clients_read_waiting_on_another_when_the_owner_goes_reads_from_its_store() {
     crate::io::test_schedule::TestSchedule::iterations(16, || {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(MIB, 8);
@@ -261,7 +261,7 @@ fn reads_through_an_owner(cache: &T4Caching) -> bool {
 #[test]
 fn a_client_whose_owner_went_comes_to_own_the_cache() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(MIB, 9);
@@ -295,7 +295,7 @@ fn a_client_whose_owner_went_comes_to_own_the_cache() {
 #[test]
 fn two_clients_whose_owner_went_one_owns_and_the_other_reads_through_it() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(MIB, 10);
@@ -341,7 +341,7 @@ fn two_clients_whose_owner_went_one_owns_and_the_other_reads_through_it() {
 #[test]
 fn a_get_waiting_as_its_owner_goes_merges_with_none_of_the_next_cache() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let (b, c) = (Path::from("b"), Path::from("c"));
         let (b_data, c_data) = (file_bytes(3 * MIB, 13), file_bytes(3 * MIB, 14));
@@ -369,7 +369,7 @@ fn a_get_waiting_as_its_owner_goes_merges_with_none_of_the_next_cache() {
         );
 
         drop(owner);
-        std::fs::remove_file(log_at(&dir)).unwrap();
+        dir.file_system.remove(&dir.log()).unwrap();
         wait_until(
             || {
                 assert_eq!(read_listed(&client, &long_meta, 0..10), long_data);
@@ -397,7 +397,7 @@ fn a_get_waiting_as_its_owner_goes_merges_with_none_of_the_next_cache() {
 #[test]
 fn a_client_that_comes_to_own_the_cache_takes_its_owners_disk_tier() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(2 * MIB, 16);
@@ -436,7 +436,7 @@ fn a_client_that_comes_to_own_the_cache_takes_its_owners_disk_tier() {
 #[test]
 fn a_client_asks_its_owner_the_size_it_knows() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(MIB + 3, 18);
@@ -458,7 +458,7 @@ fn a_client_asks_its_owner_the_size_it_knows() {
 #[test]
 fn a_client_shut_down_leaves_its_owner_be_and_takes_over_nothing() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(MIB, 19);
@@ -487,7 +487,7 @@ fn a_client_shut_down_leaves_its_owner_be_and_takes_over_nothing() {
 #[test]
 fn a_client_that_finds_no_owner_reads_from_its_store_without_waiting() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(MIB, 12);
@@ -500,7 +500,7 @@ fn a_client_that_finds_no_owner_reads_from_its_store_without_waiting() {
         let mut _unshared = None;
         wait_until(
             || {
-                _unshared = builder(&others, &dir).build().ok();
+                _unshared = dir.builder(&others).build().ok();
                 _unshared.is_some()
             },
             "the dropped owner's files come free",
@@ -534,7 +534,7 @@ fn in_region(cache: &T4Caching, bytes: &Bytes) -> bool {
 #[test]
 fn a_clients_reads_are_served_in_its_region() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(3 * MIB, 21);
@@ -567,7 +567,7 @@ fn a_clients_reads_are_served_in_its_region() {
 #[test]
 fn a_clients_spans_come_back_once_its_owner_goes() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(MIB, 22);
@@ -592,7 +592,7 @@ fn a_clients_spans_come_back_once_its_owner_goes() {
 #[test]
 fn a_fetch_dropped_after_its_read_gives_its_span_back() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(MIB, 23);
@@ -629,7 +629,7 @@ fn calls_waiting(cache: &T4Caching) -> Vec<u64> {
 #[test]
 fn a_clients_read_whose_wait_ends_uncached_fetches_in_a_second_round() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(MIB, 17);
@@ -669,7 +669,7 @@ fn a_clients_read_whose_wait_ends_uncached_fetches_in_a_second_round() {
 #[test]
 fn a_clients_read_given_up_leaves_no_call_waiting() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(MIB, 13);
@@ -709,7 +709,7 @@ fn a_clients_read_given_up_leaves_no_call_waiting() {
 #[test]
 fn a_clients_read_given_up_mid_get_abandons_its_claim() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(MIB, 14);
@@ -748,7 +748,7 @@ fn a_clients_read_given_up_mid_get_abandons_its_claim() {
 #[test]
 fn a_clients_failed_get_abandons_its_fetch() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let transport = crate::cache::cache_stores::TestTransport::default();
         let path = Path::from("a");
         let data = file_bytes(MIB, 15);
@@ -772,10 +772,10 @@ fn a_clients_failed_get_abandons_its_fetch() {
 
 fn sharing_builder(
     inner: &Arc<CountingStore>,
-    dir: &TempDir,
+    dir: &CacheDirectory,
     transport: &crate::cache::cache_stores::TestTransport,
 ) -> T4CachingBuilder {
-    builder(inner, dir)
+    dir.builder(inner)
         .with_multiprocess_sharing()
         .with_test_transport(transport.clone())
 }

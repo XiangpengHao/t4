@@ -6,6 +6,7 @@ use crossbeam_channel::{Receiver, Select, Sender, bounded, unbounded};
 
 use crate::io::common::{BackendLoop, CompletionEvent, IoDriver, SubmissionEntry};
 use crate::io::error::{Error, Result};
+use crate::io::file_system::OpenFile;
 use crate::io::io_task::WorkerRequest;
 use crate::io::sync::mpsc;
 
@@ -120,11 +121,11 @@ fn worker_loop(job_rx: Receiver<IoJob>, completion_tx: Sender<CompletionEvent>) 
 }
 
 pub(crate) fn new_backend(
-    files: Vec<File>,
+    files: Vec<OpenFile>,
     queue_depth: u32,
     rx: mpsc::Receiver<WorkerRequest>,
 ) -> Result<BackendLoop<GenericIoDriver>> {
     let queue_depth = queue_depth as usize;
-    let driver = GenericIoDriver::new(files, queue_depth)?;
+    let driver = GenericIoDriver::new(files.into_iter().map(File::from).collect(), queue_depth)?;
     Ok(BackendLoop::new(queue_depth, rx, driver))
 }

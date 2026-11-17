@@ -70,13 +70,38 @@ allocator and ownership rules all run under shuttle. Only the boundaries differ:
   peers, rather than two kernel mappings. Spans, bounds checks, staged fetches,
   output buffers, and lending until `Ended` use the production code. The OS
   tests retain seals, descriptor and mapping checks.
-- The existing simulated I/O driver schedules submission and completion. Its
-  optional file backing performs synchronous file operations at completion;
-  retaining the file also retains its lock. This preserves logs, restart
-  bytes and allocation checks without starting a kernel I/O worker. The
-  focused storage races still use entirely in-memory `SimDisk`s. Nonblocking
-  file-lock and metadata syscalls are serial side effects under shuttle, not
-  modeled kernel operations; process tests cover their OS semantics.
+- The simulated I/O driver schedules submission and completion, and reads or
+  writes the simulated disk as an I/O completes.
+- The disk tier's files and log live on a simulated disk in memory
+  (`io/file_system/simulated.rs`), never on the OS's file system: the shuttle
+  tests and the two simulated fuzz targets make no file system call.
+  `FileSystem` and the `OpenFile`s it opens stand for the OS's file system in
+  both builds (`io/file_system/os.rs` is production's), and every operation
+  the cache makes on its disk goes through them: a cache file's reads,
+  writes, syncs, size, lock, identity and free room; the log's read, appends,
+  syncs, and its base's write, rename and removal; directory syncs; and the
+  boot id the log is stamped with. So they are where a disk failure would be
+  injected. The simulated disk keeps what real files gave the tests:
+  - bytes by path that outlive the process that wrote them, so that a process
+    built again on its files finds their blocks and its log;
+  - `flock`'s exclusion: a lock is an open's, shared by its clones and gone
+    once the last drops; two opens of a file conflict, in one process too;
+  - a stable identity, an inode number never given twice, which names the
+    owner's address;
+  - files sized, not allocated: only the pages written take room, which the
+    headroom and allocation checks see;
+  - direct I/O's alignment: a file opened for it refuses an I/O off 4 KiB
+    pages, as Linux's `O_DIRECT` does;
+  - one boot for the disk's life, so a log replays as after a kill.
+
+  The test owns the disk and hands it to each builder that shares it
+  (`with_test_file_system`), as it does the transport; there is no global
+  disk, and a builder given none gets one of its own. Each operation takes
+  the disk under a `std` mutex, whole, as a system call does: it adds no
+  point where shuttle may switch threads. Nothing fails, and a write is
+  durable at once: what a crash would lose isn't modeled. A test may hold an
+  open file's next write until it says (`OpenFile::pausing_next_write`). The
+  process tests cover the OS's own locks.
 
 `io::time::Clock` owns an epoch. Production clones share the same monotonic
 clock; shuttle clones share manual time. The builder passes it to the network,
@@ -101,7 +126,7 @@ The `shared_owner` and `shared_mode` fuzz targets (`fuzz/README.md`) run a
 real owner and its clients over the modeled transport, so they need the shuttle build of the
 library in a binary that isn't the unit-test one. `--cfg t4_simulated` builds
 it there, as `--cfg loom` builds loom's: the gates that pick the simulated
-socket, region, bell, address, clock, I/O driver and primitives read
+socket, region, bell, address, clock, disk, I/O driver and primitives read
 `all(feature = "shuttle", any(test, t4_simulated))`. A feature couldn't: the
 lint job builds the library with `--all-features`, and would lint only the
 simulated world. Test-only helpers keep `all(test, feature = "shuttle")`. The

@@ -1,13 +1,12 @@
 //! Bounded in-process byte streams. Only the transport changes: frames, sender,
 //! client connection and owner sessions are the production implementations.
 use std::collections::VecDeque;
-use std::fs::File;
 use std::io::{self, Read};
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::super::region::RegionDescriptor;
-use crate::cache::storage::FileIdentity;
+use crate::io::file_system::{FileIdentity, OpenFile};
 use crate::io::sync::{Condvar, Mutex, mpsc, thread};
 
 struct ListenerRegistration {
@@ -103,7 +102,7 @@ struct PipeState {
     unnoticed: Vec<(thread::ThreadId, Duration)>,
     session: Option<thread::Thread>,
     readers: Vec<thread::Thread>,
-    descriptors: Option<(File, Option<RegionDescriptor>)>,
+    descriptors: Option<(OpenFile, Option<RegionDescriptor>)>,
 }
 impl Pipe {
     fn notify(&self, state: &mut PipeState) {
@@ -271,14 +270,14 @@ impl FrameSocket {
     }
     pub(in crate::cache::cache_stores::shared) fn send_descriptors(
         &self,
-        file: File,
+        file: OpenFile,
         region: Option<RegionDescriptor>,
     ) {
         self.outgoing.state.lock().unwrap().descriptors = Some((file, region));
     }
     pub(in crate::cache::cache_stores::shared) fn take_descriptors(
         &self,
-    ) -> Option<(File, Option<RegionDescriptor>)> {
+    ) -> Option<(OpenFile, Option<RegionDescriptor>)> {
         self.incoming.state.lock().unwrap().descriptors.take()
     }
 }

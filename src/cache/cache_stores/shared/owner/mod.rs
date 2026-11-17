@@ -12,8 +12,9 @@ use super::protocol::{
     ClientFrame, FrameReceiver, FrameSocket, Hello, OwnerAddress, OwnerFrame, OwnerRegion,
     PROTOCOL_VERSION,
 };
-use crate::cache::storage::{FileIdentity, ObjectCache};
+use crate::cache::storage::ObjectCache;
 use crate::io::error::Result;
+use crate::io::file_system::FileIdentity;
 use crate::io::sync::Arc;
 
 mod client_reads;

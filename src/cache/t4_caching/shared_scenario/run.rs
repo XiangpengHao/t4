@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
@@ -17,12 +16,13 @@ use crate::cache::BLOCK_SIZE_U64;
 use crate::cache::cache_stores::TestTransport;
 use crate::cache::policy::{Admit, FixedPlacementPolicy};
 use crate::cache::t4_caching::T4Caching;
+use crate::io::file_system::FileSystem;
 use crate::io::sync::Arc;
 use crate::io::sync::thread::{self, JoinHandle};
 
 pub(super) struct ScenarioRun<'s> {
     settings: &'s SharedSettings,
-    dir: PathBuf,
+    file_system: FileSystem,
     transport: TestTransport,
     remote: Arc<Remote>,
     model: Model,
@@ -63,7 +63,10 @@ impl<'s> ScenarioRun<'s> {
     /// priority below theirs.
     const SETTLE_STEPS: usize = 32;
 
-    pub(super) fn start(settings: &'s SharedSettings, dir: PathBuf) -> Self {
+    /// Every process's cache file is `cache`.
+    const CACHE_FILE: &'static str = "cache";
+
+    pub(super) fn start(settings: &'s SharedSettings) -> Self {
         let transport = match settings.loses_wakeups {
             true => TestTransport::default().losing_shutdown_wakeups(),
             false => TestTransport::default(),
@@ -77,7 +80,7 @@ impl<'s> ScenarioRun<'s> {
             .collect();
         let mut run = Self {
             settings,
-            dir,
+            file_system: FileSystem::default(),
             ticker: Ticker::start(transport.clock().clone()),
             transport,
             remote,
@@ -116,16 +119,14 @@ impl<'s> ScenarioRun<'s> {
         let store = Arc::clone(&self.slots[slot].store) as Arc<dyn ObjectStore>;
         let builder = T4Caching::builder(store)
             .with_memory_capacity(settings.memory_blocks * BLOCK_SIZE_U64)
-            .with_disk_file(
-                self.dir.join("cache"),
-                settings.disk_blocks * BLOCK_SIZE_U64,
-            )
+            .with_disk_file(Self::CACHE_FILE, settings.disk_blocks * BLOCK_SIZE_U64)
             .with_network_rate(
                 settings.network_blocks * BLOCK_SIZE_U64,
                 Duration::from_secs(1),
             )
             .with_multiprocess_sharing()
-            .with_test_transport(self.transport.clone());
+            .with_test_transport(self.transport.clone())
+            .with_test_file_system(self.file_system.clone());
         let builder = match settings.on_disk {
             true => {
                 builder.with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))

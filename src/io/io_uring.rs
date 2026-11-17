@@ -5,6 +5,7 @@ use io_uring::{IoUring, opcode, types};
 
 use crate::io::common::{BackendLoop, CompletionEvent, IoDriver, SubmissionEntry};
 use crate::io::error::{Error, Result};
+use crate::io::file_system::OpenFile;
 use crate::io::io_task::{FilePosition, WorkerRequest};
 use crate::io::sync::mpsc;
 
@@ -112,11 +113,11 @@ impl IoDriver for UringDriver {
 }
 
 pub(crate) fn new_backend(
-    files: Vec<File>,
+    files: Vec<OpenFile>,
     queue_depth: u32,
     rx: mpsc::Receiver<WorkerRequest>,
 ) -> Result<BackendLoop<UringDriver>> {
-    let driver = UringDriver::new(files, queue_depth)?;
+    let driver = UringDriver::new(files.into_iter().map(File::from).collect(), queue_depth)?;
     Ok(BackendLoop::new(queue_depth as usize, rx, driver))
 }
 

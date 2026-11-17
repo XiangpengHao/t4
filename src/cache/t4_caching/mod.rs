@@ -25,6 +25,7 @@ use super::policy::{
 };
 use super::storage::DiskFile;
 use super::{BLOCK_SIZE_U64, InsertOrAbort};
+use crate::io::file_system::FileSystem;
 use crate::io::sync::Arc;
 
 /// A cache of an [`ObjectStore`]'s reads, in memory and on disk, and an [`ObjectStore`] itself.
@@ -53,6 +54,7 @@ pub struct T4CachingBuilder {
     clock: crate::io::time::Clock,
     #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
     transport: crate::cache::cache_stores::TestTransport,
+    file_system: FileSystem,
     inner: Arc<dyn ObjectStore>,
     memory_capacity: Option<u64>,
     disk_files: Vec<DiskFile>,
@@ -80,6 +82,14 @@ impl T4CachingBuilder {
     ) -> Self {
         self.clock = transport.clock().clone();
         self.transport = transport;
+        self
+    }
+
+    /// The simulated disk the cache's files and log live on, shared with the other
+    /// processes a test builds, or built again, on its files.
+    #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
+    pub(in crate::cache) fn with_test_file_system(mut self, file_system: FileSystem) -> Self {
+        self.file_system = file_system;
         self
     }
 
@@ -183,6 +193,7 @@ impl T4CachingBuilder {
             .take()
             .unwrap_or_else(|| Arc::new(RaceStragglers::default()));
         let mut tiers = TierSettings::new(
+            self.file_system,
             memory_chunks,
             self.disk_files,
             queue_depth,
@@ -247,6 +258,7 @@ impl T4Caching {
             clock: Default::default(),
             #[cfg(all(feature = "shuttle", any(test, t4_simulated)))]
             transport: Default::default(),
+            file_system: Default::default(),
             inner,
             memory_capacity: None,
             disk_files: Vec::new(),

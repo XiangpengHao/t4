@@ -15,14 +15,10 @@ mod scenario {
     use libfuzzer_sys::fuzz_target;
     use t4::__fuzz::{FuzzedHello, FuzzedPath, FuzzedRead, FuzzedSession, FuzzedSpan, FuzzedStep};
     use t4::policy::{PlannedGet, ReadIntent, ReadPlan};
-    use tempfile::TempDir;
 
     const MIB: u64 = 1 << 20;
 
-    fuzz_target!(|scenario: Scenario| {
-        let dir = TempDir::new().expect("a temporary directory");
-        scenario.0.check(dir.path());
-    });
+    fuzz_target!(|scenario: Scenario| scenario.0.check());
 
     struct Scenario(FuzzedSession);
 

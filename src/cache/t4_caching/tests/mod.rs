@@ -15,7 +15,6 @@ use object_store::{
 use pollster::block_on;
 #[cfg(feature = "shuttle")]
 use shuttle::future::block_on;
-use tempfile::TempDir;
 
 use super::*;
 use crate::cache::policy::{
@@ -288,9 +287,54 @@ fn builder(inner: &Arc<CountingStore>, dir: impl AsRef<std::path::Path>) -> T4Ca
         .with_disk_file(dir.as_ref().join("cache"), 8 * MIB)
 }
 
-#[cfg(feature = "shuttle")]
-fn log_at(dir: &TempDir) -> std::path::PathBuf {
-    dir.path().join("cache.log")
+/// Where a test's caches keep their files: a temporary directory, or under shuttle a simulated
+/// disk that every cache the test builds on it shares.
+struct CacheDirectory {
+    #[cfg(not(feature = "shuttle"))]
+    directory: tempfile::TempDir,
+    #[cfg(feature = "shuttle")]
+    file_system: crate::io::file_system::FileSystem,
+}
+
+impl CacheDirectory {
+    fn new() -> Self {
+        Self {
+            #[cfg(not(feature = "shuttle"))]
+            directory: tempfile::tempdir().unwrap(),
+            #[cfg(feature = "shuttle")]
+            file_system: Default::default(),
+        }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        #[cfg(not(feature = "shuttle"))]
+        let path = self.directory.path();
+        #[cfg(feature = "shuttle")]
+        let path = std::path::Path::new("/simulated");
+        path
+    }
+
+    /// The cache most tests build, on the file `cache` here.
+    fn builder(&self, inner: &Arc<CountingStore>) -> T4CachingBuilder {
+        self.holding(builder(inner, self.path()))
+    }
+
+    /// `builder`, with its files here.
+    fn holding(&self, builder: T4CachingBuilder) -> T4CachingBuilder {
+        #[cfg(feature = "shuttle")]
+        let builder = builder.with_test_file_system(self.file_system.clone());
+        builder
+    }
+
+    #[cfg(feature = "shuttle")]
+    fn holds_log(&self) -> bool {
+        self.file_system.read(&self.log()).is_ok()
+    }
+
+    #[cfg(feature = "shuttle")]
+    fn log(&self) -> std::path::PathBuf {
+        self.path().join("cache.log")
+    }
 }
 
 /// No deadline: shuttle fails a schedule that stalls here.
@@ -300,10 +344,10 @@ fn wait_until(mut done: impl FnMut() -> bool, _what: &str) {
     }
 }
 
-fn t4_caching() -> (TempDir, T4Caching, Arc<CountingStore>) {
-    let dir = tempfile::tempdir().unwrap();
+fn t4_caching() -> (CacheDirectory, T4Caching, Arc<CountingStore>) {
+    let dir = CacheDirectory::new();
     let inner = Arc::new(CountingStore::default());
-    let store = builder(&inner, &dir).build().unwrap();
+    let store = dir.builder(&inner).build().unwrap();
     (dir, store, inner)
 }
 
@@ -334,42 +378,49 @@ fn bounded(range: Range<u64>) -> Asked {
 #[test]
 fn a_builder_needs_a_memory_capacity_and_a_disk_file() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let inner = Arc::new(CountingStore::default());
-        let store = || T4Caching::builder(Arc::clone(&inner) as Arc<dyn ObjectStore>);
+        let store = || {
+            dir.holding(T4Caching::builder(
+                Arc::clone(&inner) as Arc<dyn ObjectStore>
+            ))
+        };
         let path = dir.path().join("cache");
         let incomplete = [
             store().with_disk_file(&path, MIB),
             store().with_memory_capacity(MIB),
-            builder(&inner, &dir).with_queue_depth(0),
-            builder(&inner, &dir).with_network_rate(0, Duration::from_secs(1)),
+            dir.builder(&inner).with_queue_depth(0),
+            dir.builder(&inner)
+                .with_network_rate(0, Duration::from_secs(1)),
         ];
         for builder in incomplete {
             let error = builder.build().unwrap_err();
             assert!(matches!(error, crate::Error::InvalidArgument(_)), "{error}");
         }
         // Less than a block is a block.
-        builder(&inner, &dir)
-            .with_memory_capacity(1)
-            .build()
-            .unwrap();
+        dir.builder(&inner).with_memory_capacity(1).build().unwrap();
     });
 }
 
-/// By any path that reaches the file, a symlink too.
+/// By any path that names the file, another link too.
 #[cfg(feature = "shuttle")]
 #[test]
 fn a_cache_file_has_one_owner() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let inner = Arc::new(CountingStore::default());
-        let first = builder(&inner, &dir).build().unwrap();
+        let first = dir.builder(&inner).build().unwrap();
 
-        let again = builder(&inner, &dir).build().unwrap_err();
+        let again = dir.builder(&inner).build().unwrap_err();
         assert!(matches!(again, crate::Error::Busy), "{again}");
         let link = dir.path().join("link");
-        std::os::unix::fs::symlink(dir.path().join("cache"), &link).unwrap();
-        let through_link = T4Caching::builder(Arc::clone(&inner) as Arc<dyn ObjectStore>)
+        dir.file_system
+            .link(&dir.path().join("cache"), &link)
+            .unwrap();
+        let through_link = dir
+            .holding(T4Caching::builder(
+                Arc::clone(&inner) as Arc<dyn ObjectStore>
+            ))
             .with_memory_capacity(MIB)
             .with_disk_file(dir.path().join("other"), MIB)
             .with_disk_file(&link, MIB)
@@ -378,7 +429,7 @@ fn a_cache_file_has_one_owner() {
         assert!(matches!(through_link, crate::Error::Busy), "{through_link}");
 
         drop(first);
-        builder(&inner, &dir).build().unwrap();
+        dir.builder(&inner).build().unwrap();
     });
 }
 
@@ -387,12 +438,15 @@ fn a_cache_file_has_one_owner() {
 #[test]
 fn the_disk_tier_stripes_over_its_files() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let inner = Arc::new(CountingStore::default());
         let sizes = Arc::new(Mutex::new(None));
         let seen = Arc::clone(&sizes);
         let (small, large) = (dir.path().join("small"), dir.path().join("large"));
-        let store = T4Caching::builder(Arc::clone(&inner) as Arc<dyn ObjectStore>)
+        let store = dir
+            .holding(T4Caching::builder(
+                Arc::clone(&inner) as Arc<dyn ObjectStore>
+            ))
             .with_memory_capacity(MIB)
             .with_disk_file(&small, 3 * MIB)
             .with_disk_file(&large, 5 * MIB)
@@ -405,7 +459,8 @@ fn the_disk_tier_stripes_over_its_files() {
         let tiers = sizes.lock().unwrap().expect("build made the policy");
         assert_eq!(tiers.disk_chunks().get(), 6);
         for file in [&small, &large] {
-            assert_eq!(std::fs::metadata(file).unwrap().len(), 3 * MIB);
+            let opened = dir.file_system.open_existing(file, false).unwrap();
+            assert_eq!(opened.size().unwrap(), 3 * MIB);
         }
 
         // More blocks than memory holds, so most go to disk.
@@ -426,11 +481,12 @@ fn the_disk_tier_stripes_over_its_files() {
 #[test]
 fn a_custom_policy_is_built_for_the_tiers() {
     crate::io::test_schedule::TestSchedule::check(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = CacheDirectory::new();
         let inner = Arc::new(CountingStore::default());
         let sizes = Arc::new(Mutex::new(None));
         let seen = Arc::clone(&sizes);
-        let store = builder(&inner, &dir)
+        let store = dir
+            .builder(&inner)
             .with_placement_policy(move |tiers: TierSizes| {
                 *seen.lock().unwrap() = Some(tiers);
                 ClockPolicy::new(tiers.memory_chunks(), tiers.disk_chunks())
@@ -908,12 +964,19 @@ impl PlacementPolicy for RecordingPlacement {
 fn planned_by(
     reads: &ScriptedReads,
     admit: Admit,
-) -> (TempDir, T4Caching, Arc<CountingStore>, RemoteReads, Bytes) {
-    let dir = tempfile::tempdir().unwrap();
+) -> (
+    CacheDirectory,
+    T4Caching,
+    Arc<CountingStore>,
+    RemoteReads,
+    Bytes,
+) {
+    let dir = CacheDirectory::new();
     let inner = Arc::new(CountingStore::default());
     let remote_reads = RemoteReads::default();
     let recorded = Arc::clone(&remote_reads);
-    let store = builder(&inner, &dir)
+    let store = dir
+        .builder(&inner)
         .with_placement_policy(move |tiers: TierSizes| RecordingPlacement {
             clock: ClockPolicy::new(tiers.memory_chunks(), tiers.disk_chunks()),
             admit,
@@ -1079,9 +1142,9 @@ fn raced_late_by(
     inner: &Arc<CountingStore>,
     reads: &ScriptedReads,
     sleep: Option<TestSleep>,
-) -> (TempDir, T4Caching, Bytes) {
-    let dir = tempfile::tempdir().unwrap();
-    let builder = builder(inner, &dir).with_read_policy(reads.clone());
+) -> (CacheDirectory, T4Caching, Bytes) {
+    let dir = CacheDirectory::new();
+    let builder = dir.builder(inner).with_read_policy(reads.clone());
     let builder = match sleep {
         Some(sleep) => builder.with_sleep(sleep),
         None => builder,
@@ -1309,9 +1372,14 @@ fn a_reads_gets_go_out_before_its_disk_reads_are_waited_on() {
 }
 
 /// `most` a second over GETs of a second caps the bytes in flight at `most`.
-fn capped(inner: &Arc<CountingStore>, most: u64, merged_up_to: u64) -> (TempDir, T4Caching, Bytes) {
-    let dir = tempfile::tempdir().unwrap();
-    let store = builder(inner, &dir)
+fn capped(
+    inner: &Arc<CountingStore>,
+    most: u64,
+    merged_up_to: u64,
+) -> (CacheDirectory, T4Caching, Bytes) {
+    let dir = CacheDirectory::new();
+    let store = dir
+        .builder(inner)
         .with_memory_capacity(8 * MIB)
         .with_network_rate(most, Duration::from_secs(1))
         .with_waiting_gets_merged(merged_up_to)
@@ -1417,8 +1485,9 @@ fn a_late_race_goes_beside_the_cap() {
             })
             .boxed()
         };
-        let dir = tempfile::tempdir().unwrap();
-        let store = builder(&inner, &dir)
+        let dir = CacheDirectory::new();
+        let store = dir
+            .builder(&inner)
             .with_read_policy(reads)
             .with_sleep(sleep)
             .with_network_rate(MIB, Duration::from_secs(1))

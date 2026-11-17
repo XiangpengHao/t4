@@ -8,9 +8,8 @@ use bytes::Bytes;
 use super::{ClientSession, FrameReceiver, FrameSocket};
 use crate::cache::cache_stores::shared::protocol::{ClientFrame, NextStep, OwnerFrame};
 use crate::cache::policy::{ClockPolicy, PlacementPolicy, PlannedGet, ReadPlan};
-use crate::cache::storage::{CacheFiles, FileIdentity, ObjectCache};
-use crate::io::io_worker::IoWorker;
-use crate::io::simulated::SimDisk;
+use crate::cache::storage::{CacheFiles, ObjectCache};
+use crate::io::file_system::FileIdentity;
 use crate::io::sync::{Arc, atomic::AtomicBool, thread};
 use crate::io::test_schedule::TestSchedule;
 
@@ -61,8 +60,7 @@ impl SessionPeer {
         });
     }
     fn cache() -> Arc<ObjectCache> {
-        let io = IoWorker::simulated(NonZeroU32::MIN, vec![SimDisk::new()]).unwrap();
-        let disk = CacheFiles::on(io, NonZeroU32::MIN, 1).unwrap();
+        let disk = CacheFiles::in_memory(NonZeroU32::MIN, NonZeroU32::MIN, 1).unwrap();
         let policy: Arc<dyn PlacementPolicy> =
             Arc::new(ClockPolicy::new(NonZeroU32::MIN, NonZeroU32::MIN));
         Arc::new(ObjectCache::new(NonZeroU32::MIN, disk, policy).unwrap())

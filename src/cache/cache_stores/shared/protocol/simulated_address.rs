@@ -1,7 +1,7 @@
 //! An explicitly owned listener registry: one per simulated group of processes.
 use super::{FrameSocket, Listener, Transport};
-use crate::cache::storage::FileIdentity;
 use crate::io::error::Result;
+use crate::io::file_system::FileIdentity;
 use std::io;
 
 pub(in crate::cache::cache_stores::shared) struct OwnerAddress {

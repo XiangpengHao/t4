@@ -1,6 +1,7 @@
 pub(crate) mod aligned_buf;
 mod common;
 pub(crate) mod error;
+pub(crate) mod file_system;
 pub(crate) mod io_task;
 pub(crate) mod io_worker;
 pub(crate) mod sync;

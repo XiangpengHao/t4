@@ -1,7 +1,6 @@
-use std::fs::File;
-
 use super::*;
 use crate::cache::storage::persistence::PersistenceLog;
+use crate::io::file_system::FileSystem;
 
 struct LogFixture {
     _directory: tempfile::TempDir,
@@ -13,12 +12,13 @@ impl LogFixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("cache");
-        let opened = File::create(&path).unwrap();
+        let file_system = FileSystem::default();
+        let opened = file_system.open_cache_file(&path, false).unwrap();
         Self {
-            file: PersistenceLog::beside(&path, &[opened], 4)
+            file: PersistenceLog::beside(&file_system, &path, &[opened], 4)
                 .unwrap()
                 .unwrap(),
-            boot: BootId::current().unwrap(),
+            boot: BootId::current(&file_system).unwrap(),
             _directory: directory,
         }
     }

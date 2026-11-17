@@ -1,7 +1,5 @@
-use std::fs::{File, OpenOptions, TryLockError};
 use std::future::Future;
 use std::num::NonZeroU32;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use super::disk_chunks::{DiskChunkReader, DiskChunks};
@@ -10,37 +8,10 @@ use crate::cache::BLOCK_SIZE_U64;
 use crate::cache::storage::persistence::PersistenceLog;
 use crate::io::aligned_buf::AlignedBuf;
 use crate::io::error::{Error, Result};
+use crate::io::file_system::{FileIdentity, FileSystem, OpenFile};
 use crate::io::io_task::PageWrite;
 use crate::io::io_worker::IoWorker;
 use crate::io::sync::Arc;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::cache) struct FileIdentity {
-    device: u64,
-    inode: u64,
-}
-
-impl FileIdentity {
-    pub(in crate::cache) fn new(device: u64, inode: u64) -> Self {
-        Self { device, inode }
-    }
-
-    pub(in crate::cache) fn of(file: &File) -> std::io::Result<Self> {
-        let meta = file.metadata()?;
-        Ok(Self {
-            device: meta.dev(),
-            inode: meta.ino(),
-        })
-    }
-
-    pub(in crate::cache) fn device(self) -> u64 {
-        self.device
-    }
-
-    pub(in crate::cache) fn inode(self) -> u64 {
-        self.inode
-    }
-}
 
 #[derive(Clone, Debug)]
 pub(in crate::cache) struct DiskFile {
@@ -71,6 +42,7 @@ impl CacheFiles {
     /// No `O_DSYNC`: a clean exit flushes the files before the log's clean mark, and a kill
     /// loses no write already done (`doc/13-persistence.md`).
     pub(in crate::cache) fn open(
+        file_system: &FileSystem,
         files: &[DiskFile],
         queue_depth: NonZeroU32,
         direct_io: bool,
@@ -87,16 +59,10 @@ impl CacheFiles {
         let len = u64::from(chunks_per_file) * BLOCK_SIZE_U64;
         let opened = files
             .iter()
-            .map(|file| {
-                let opened = Self::open_file(&file.path, direct_io)?;
-                if opened.metadata()?.len() < len {
-                    opened.set_len(len)?;
-                }
-                Ok(opened)
-            })
+            .map(|file| Self::open_file(file_system, &file.path, len, direct_io))
             .collect::<Result<Vec<_>>>()?;
-        let first_file = FileIdentity::of(&opened[0])?;
-        let log = PersistenceLog::beside(&files[0].path, &opened, chunks_per_file)?;
+        let first_file = opened[0].identity()?;
+        let log = PersistenceLog::beside(file_system, &files[0].path, &opened, chunks_per_file)?;
         let headroom = DriveHeadroom::of(&opened)?;
         let mut files = Self::on(IoWorker::new(queue_depth, opened)?, count, chunks_per_file)?;
         files.first_file = Some(first_file);
@@ -111,6 +77,20 @@ impl CacheFiles {
             headroom.set_keep_free(keep_free);
         }
         self
+    }
+
+    /// On a simulated disk of its own, with no log or headroom.
+    #[cfg(all(test, feature = "shuttle"))]
+    pub(in crate::cache) fn in_memory(
+        queue_depth: NonZeroU32,
+        files: NonZeroU32,
+        chunks_per_file: u32,
+    ) -> Result<Self> {
+        let file_system = FileSystem::default();
+        let opened = (0..files.get())
+            .map(|file| file_system.open_cache_file(Path::new(&file.to_string()), false))
+            .collect::<Result<Vec<_>>>()?;
+        Self::on(IoWorker::new(queue_depth, opened)?, files, chunks_per_file)
     }
 
     pub(in crate::cache) fn on(
@@ -180,34 +160,17 @@ impl CacheFiles {
         })
     }
 
-    /// `flock`, not `fcntl`: record locks don't conflict within a process and drop on any close.
-    fn open_file(path: &Path, direct_io: bool) -> Result<File> {
-        let mut open = OpenOptions::new();
-        open.read(true).write(true).create(true).truncate(false);
-        #[cfg(target_os = "linux")]
-        if direct_io {
-            use std::os::unix::fs::OpenOptionsExt;
-            open.custom_flags(libc::O_DIRECT);
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        if direct_io {
-            return Err(Error::InvalidArgument(
-                "direct_io not supported on target_os",
-            ));
-        }
-        let file = open.open(path)?;
-        file.try_lock().map_err(|error| match error {
-            TryLockError::WouldBlock => Error::Busy,
-            TryLockError::Error(error) => Error::Io(error),
-        })?;
-        // macOS has no O_DIRECT: it bypasses the page cache per descriptor.
-        #[cfg(target_os = "macos")]
-        if direct_io {
-            use std::os::fd::AsRawFd;
-            // SAFETY: `file` was just opened, so its descriptor is valid.
-            if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) } == -1 {
-                return Err(std::io::Error::last_os_error().into());
-            }
+    /// Locked, so that whoever holds the lock owns the files.
+    fn open_file(
+        file_system: &FileSystem,
+        path: &Path,
+        size: u64,
+        direct_io: bool,
+    ) -> Result<OpenFile> {
+        let file = file_system.open_cache_file(path, direct_io)?;
+        file.try_lock()?;
+        if file.size()? < size {
+            file.set_size(size)?;
         }
         Ok(file)
     }

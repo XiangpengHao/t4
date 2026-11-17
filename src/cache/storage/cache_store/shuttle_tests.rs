@@ -1,6 +1,7 @@
 //! Shuttle runs one thread at a time: it finds bad interleavings, not too-weak memory orderings.
 
 use std::num::NonZeroU32;
+use std::path::Path;
 
 use crate::io::test_schedule::TestSchedule;
 use futures_util::FutureExt;
@@ -12,8 +13,8 @@ use crate::cache::policy::{Admit, DiskHit, FetchRuns, PlacementPolicy};
 use crate::cache::storage::CacheFiles;
 use crate::cache::storage::index::Location;
 use crate::cache::{BlockKey, ChunkId};
+use crate::io::file_system::{FileSystem, WritePause};
 use crate::io::io_worker::IoWorker;
-use crate::io::simulated::SimDisk;
 use crate::io::sync::{Arc, thread};
 
 /// Enough to tell files apart, little to copy.
@@ -25,10 +26,9 @@ fn explore(test: impl Fn() + Send + Sync + 'static) {
 
 fn cache(memory_chunks: u32, disk_chunks: u32) -> (Arc<ObjectCache>, Arc<TestPolicy>) {
     let files = if disk_chunks.is_multiple_of(2) { 2 } else { 1 };
-    let disks = (0..files).map(|_| SimDisk::new()).collect();
-    let io = IoWorker::simulated(NonZeroU32::new(4).unwrap(), disks).unwrap();
     let files = NonZeroU32::new(files).unwrap();
-    let disk = CacheFiles::on(io, files, disk_chunks / files).unwrap();
+    let disk =
+        CacheFiles::in_memory(NonZeroU32::new(4).unwrap(), files, disk_chunks / files).unwrap();
     let policy = Arc::new(TestPolicy::new());
     let memory = NonZeroU32::new(memory_chunks).unwrap();
     let cache = ObjectCache::new(
@@ -37,6 +37,16 @@ fn cache(memory_chunks: u32, disk_chunks: u32) -> (Arc<ObjectCache>, Arc<TestPol
         Arc::clone(&policy) as Arc<dyn PlacementPolicy>,
     );
     (Arc::new(cache.unwrap()), policy)
+}
+
+/// One file, whose first write waits until the test resumes it.
+fn paused_disk(queue_depth: u32, chunks: u32) -> (CacheFiles, WritePause) {
+    let file = (FileSystem::default())
+        .open_cache_file(Path::new("cache"), false)
+        .unwrap();
+    let pause = file.pausing_next_write();
+    let io = IoWorker::new(NonZeroU32::new(queue_depth).unwrap(), vec![file]).unwrap();
+    (CacheFiles::on(io, NonZeroU32::MIN, chunks).unwrap(), pause)
 }
 
 fn resolve(cache: &ObjectCache, path: &'static [u8]) -> CacheableFile<'static> {
@@ -374,9 +384,7 @@ fn a_read_racing_eviction_from_disk_and_reuse_reads_its_bytes_or_reads_remote() 
 #[test]
 fn a_dropped_batch_keeps_its_chunks_until_its_io_completes() {
     explore(|| {
-        let (disk, pause) = SimDisk::with_paused_writes();
-        let io = IoWorker::simulated(NonZeroU32::new(4).unwrap(), vec![disk]).unwrap();
-        let disk = CacheFiles::on(io, NonZeroU32::MIN, 1).unwrap();
+        let (disk, pause) = paused_disk(4, 1);
         let policy = Arc::new(TestPolicy::new());
         let cache = ObjectCache::new(NonZeroU32::new(2).unwrap(), disk, policy.clone()).unwrap();
         let (a, b) = (resolve(&cache, b"a"), resolve(&cache, b"b"));
@@ -434,9 +442,7 @@ fn a_dropped_batch_keeps_its_chunks_until_its_io_completes() {
 #[test]
 fn giving_up_a_read_does_not_cancel_its_queued_write() {
     explore(|| {
-        let (disk, pause) = SimDisk::with_paused_writes();
-        let io = IoWorker::simulated(NonZeroU32::new(4).unwrap(), vec![disk]).unwrap();
-        let disk = CacheFiles::on(io, NonZeroU32::MIN, 1).unwrap();
+        let (disk, pause) = paused_disk(4, 1);
         let policy = Arc::new(TestPolicy::new());
         policy.set_admit(Admit::Disk);
         let cache = ObjectCache::new(NonZeroU32::MIN, disk, policy).unwrap();
@@ -585,9 +591,7 @@ fn racing_resolutions_of_two_versions_never_share_an_id() {
 #[test]
 fn disk_admissions_wait_readably_in_memory_until_sixteen_are_ready() {
     TestSchedule::check(|| {
-        let (disk, release_writes) = SimDisk::with_paused_writes();
-        let io = IoWorker::simulated(NonZeroU32::new(16).unwrap(), vec![disk]).unwrap();
-        let disk = CacheFiles::on(io, NonZeroU32::MIN, 32).unwrap();
+        let (disk, release_writes) = paused_disk(16, 32);
         let policy = Arc::new(TestPolicy::new());
         policy.set_admit(Admit::Disk);
         let cache = ObjectCache::new(NonZeroU32::new(16).unwrap(), disk, policy).unwrap();

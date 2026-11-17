@@ -36,8 +36,9 @@ impl ObjectCache {
 
     #[cfg(all(test, not(feature = "shuttle")))]
     pub(in crate::cache) fn replay_log(first: &std::path::Path, chunks: u32) -> Option<LogBase> {
-        let file = std::fs::File::open(first).unwrap();
-        super::super::persistence::PersistenceLog::beside(first, &[file], chunks)
+        let file_system = crate::io::file_system::FileSystem::default();
+        let file = file_system.open_existing(first, false).unwrap();
+        super::super::persistence::PersistenceLog::beside(&file_system, first, &[file], chunks)
             .unwrap()
             .unwrap()
             .inspect()
