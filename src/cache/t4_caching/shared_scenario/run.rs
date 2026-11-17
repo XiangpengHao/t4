@@ -233,6 +233,9 @@ impl<'s> ScenarioRun<'s> {
                 self.build(self.slot(process), step);
             }
             SharedOperation::MoveFiles { ref files } => {
+                // A read on a thread of its own holds its process, and that process's files,
+                // which the group on other files would find owned.
+                self.join_spawned();
                 for slot in 0..self.slots.len() {
                     self.drop_process(slot, step);
                 }
