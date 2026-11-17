@@ -164,6 +164,22 @@ fn a_read_given_up_on_hands_its_block_to_the_read_waiting() {
 }
 
 #[test]
+fn fills_bound_for_disk_share_one_memory_chunk() {
+    explore(|| {
+        let (cache, policy) = cache(1, 4);
+        policy.set_admit(Admit::Disk);
+        let files = [b"a", b"b", b"c"].map(|path| resolve(&cache, path));
+        join_all(files.map(|file| spawn(&cache, move |cache| read(cache, &file, true))));
+        cache.check_at_rest().unwrap();
+        for file in files {
+            read(&cache, &file, true);
+            assert!(disk_chunk(&cache, &file).is_some());
+        }
+        assert_eq!(cache.tiers.memory.free_count(), 1);
+    });
+}
+
+#[test]
 fn racing_fills_of_one_block_take_one_chunk() {
     explore(|| {
         let (cache, _policy) = cache(3, 1);

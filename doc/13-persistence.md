@@ -7,9 +7,10 @@ Step 4, measurement on Linux, is left. Stage 1, a clean restart, is built
 Stage 2, a log that keeps the disk tier across a killed process, is the
 design below, now built. Revised 17 Nov 2026: the disk tier lasts one boot,
 so nothing syncs and there is no clean mark or `T4Caching::shut_down`
-(decision 5). Revised again 17 Nov 2026: a build claims the files whose
-log it doesn't take back, so a log of other files can't name their chunks
-(decision 13).
+(decision 5); and a block bound for disk waits for the writer to make room
+rather than go uncached (decision 9). Revised again 17 Nov 2026: a build
+claims the files whose log it doesn't take back, so a log of other files
+can't name their chunks (decision 13).
 
 t4 is a cache: the object store holds the true data, so the cache may lose
 any block, but never returns wrong bytes (`03-cache.md`). Persistence keeps
@@ -131,7 +132,18 @@ bytes.
    tiers (`Tiers`), which reads share, not the cache; a drop closes the
    tier and joins it.
    At most 16 blocks wait behind the batch in flight. With no free memory,
-   a fill may go uncached; it never waits for the writer to make room.
+   a block bound for disk waits for the writer to take blocks out of
+   memory, and the batch it waits for goes even if not full; each of a
+   fetch's blocks is cached as its last byte lands, so the next block can
+   wait on its write. It goes uncached only if the writer has nothing to
+   write or a batch moves nothing, as a failed write does, so it never
+   waits on a writer making no room. Other fills go uncached, as before.
+   (The user, 17 Nov 2026: with a one-chunk memory tier, a GET cached one
+   of its blocks, and a block fetched while another's write was pending
+   none.) A block can't wait on another fetch's block still landing: a
+   shared cache's owner lands a client's fetches one frame at a time, so
+   that fetch might never finish. So concurrent fetches through a tier
+   smaller than them may still leave blocks uncached.
    Giving up a read does not cancel its queued batch. A batch's chunks
    stay pinned until its I/O completes, even if its future is dropped.
 
