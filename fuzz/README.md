@@ -77,11 +77,16 @@ input replays exactly. The script, each step aimed at any process:
 - a process dropped (an owner's files handed to the next to try them),
   killed (its appended log kept, less the last batch's adds), dropped
   mid-read, or built again on the same files;
+- every process dropped and built again on another ordered set of the three
+  cache files, as a machine whose config drops a drive and later adds it
+  back: a log may then lie beside files another build has written;
 - a process's GETs held until released, time passing, and the script's
   thread stepping aside so that the others run till they wait.
 
-The processes' tiers hold every block a script fetches, or a few. Blocks go
-to memory by CLOCK, or all to disk. A socket's shutdown may lose the wakeup
+The processes' tiers hold every block a script fetches; or 16 chunks of
+memory, the least that writes the disk in batches of 16, so that whole reads
+of two files of up to eight blocks write a full batch; or a few. Blocks go to memory by CLOCK,
+or all to disk. A socket's shutdown may lose the wakeup
 of a thread reading its own end, as macOS does; time passes while every
 thread waits, so a wait that looks again a second later comes due.
 
@@ -103,6 +108,9 @@ It checks that:
   and a block that finds no room isn't cached; for blocks bound for disk,
   where more were fetched than memory holds too, as each waits in memory
   till written (`doc/13-persistence.md`, decision 9);
+- once no read is in flight, a build after a kill then would serve only
+  right bytes: each chunk the owner's log on disk names holds its block's
+  bytes (`check_what_a_kill_keeps`);
 - no thread is left waiting once every process is dropped: shuttle reports
   a deadlock.
 

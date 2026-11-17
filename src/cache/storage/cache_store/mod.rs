@@ -27,9 +27,11 @@ mod partial_read;
 mod restart;
 mod tier_work;
 
+#[cfg(feature = "__fuzz")]
+pub use at_rest::VersionBytes;
 pub(in crate::cache) use fill::FetchedBlocks;
 #[cfg(feature = "__fuzz")]
-pub use fuzzing::{FuzzedLogBase, FuzzedVersion, VersionBytes};
+pub use fuzzing::{FuzzedLogBase, FuzzedVersion};
 pub(in crate::cache) use located_run::LocatedRun;
 pub(in crate::cache) use partial_read::PartialRead;
 pub(in crate::cache) use tier_work::{HeldRun, TierWork};

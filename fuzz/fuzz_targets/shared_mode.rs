@@ -25,6 +25,7 @@ mod scenario {
     impl Input {
         const MOST_OPERATIONS: usize = 32;
         const FILES: usize = 3;
+        const CACHE_FILES: usize = 3;
         const PROCESSES: usize = 4;
     }
 
@@ -51,12 +52,14 @@ mod scenario {
     }
 
     impl Input {
-        /// Tiers that hold every block a script fetches, so its fetches are counted, or small ones,
-        /// so that eviction, moves to disk and promotions start within a few reads.
+        /// Tiers that hold every block a script fetches, so its fetches are counted; a memory tier
+        /// of 16 chunks, the least that writes the disk in batches of 16; or small ones, so that
+        /// eviction, moves to disk and promotions start within a few reads.
         fn settings(u: &mut Unstructured<'_>) -> arbitrary::Result<SharedSettings> {
-            let (memory_blocks, disk_blocks) = match u.arbitrary()? {
-                true => (64, 64),
-                false => (u.int_in_range(1..=4)?, u.int_in_range(1..=6)?),
+            let (memory_blocks, disk_blocks) = match u.int_in_range(0..=2)? {
+                0 => (64, 64),
+                1 => (16, 64),
+                _ => (u.int_in_range(1..=4)?, u.int_in_range(1..=6)?),
             };
             let settings = SharedSettings::new(u.int_in_range(2..=Self::PROCESSES)?)
                 .with_tiers(memory_blocks, disk_blocks)
@@ -74,7 +77,7 @@ mod scenario {
         /// Reads two times in five, many on threads of their own.
         fn operation(u: &mut Unstructured<'_>) -> arbitrary::Result<SharedOperation> {
             let process = u.choose_index(Self::PROCESSES)?;
-            Ok(match u.choose_index(24)? {
+            Ok(match u.choose_index(25)? {
                 0..=3 => SharedOperation::Read {
                     process,
                     read: Self::read(u)?,
@@ -113,8 +116,22 @@ mod scenario {
                 17 | 18 => SharedOperation::HoldGets { process },
                 19 => SharedOperation::ReleaseGets,
                 20 => SharedOperation::Tick,
+                21 => SharedOperation::MoveFiles {
+                    files: Self::cache_files(u)?,
+                },
                 _ => SharedOperation::Settle,
             })
+        }
+
+        /// One to three of the cache files, each once, in any order: the log lies beside the
+        /// first.
+        fn cache_files(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<usize>> {
+            let mut left: Vec<usize> = (0..Self::CACHE_FILES).collect();
+            let mut files = Vec::new();
+            for _ in 0..u.int_in_range(1..=Self::CACHE_FILES)? {
+                files.push(left.remove(u.choose_index(left.len())?));
+            }
+            Ok(files)
         }
 
         fn read(u: &mut Unstructured<'_>) -> arbitrary::Result<ScenarioRead> {
@@ -131,14 +148,14 @@ mod scenario {
             Ok(ScenarioRead::new(file, range))
         }
 
-        /// Up to four blocks, often a block's edge or a page off it.
+        /// Up to eight blocks, often a block's edge or a page off it.
         fn size(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
-            let blocks: u64 = u.int_in_range(0..=3)?;
+            let blocks: u64 = u.int_in_range(0..=7)?;
             Ok(blocks * BLOCK + Self::within_block(u, 1)?)
         }
 
         fn offset(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
-            let block: u64 = u.int_in_range(0..=4)?;
+            let block: u64 = u.int_in_range(0..=8)?;
             Ok(block * BLOCK + Self::within_block(u, 0)?)
         }
 

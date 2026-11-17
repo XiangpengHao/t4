@@ -163,7 +163,7 @@ impl CacheFiles {
     }
 
     /// The bytes `chunk` holds, whether or not the index names it.
-    #[cfg(feature = "__fuzz")]
+    #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
     pub(in crate::cache) async fn read_whole_chunk(
         &self,
         chunk: crate::cache::ChunkId,
