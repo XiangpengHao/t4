@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::ops::Range;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
@@ -23,6 +24,8 @@ use crate::io::sync::thread::{self, JoinHandle};
 pub(super) struct ScenarioRun<'s> {
     settings: &'s SharedSettings,
     file_system: FileSystem,
+    /// Each process's cache files, by number, in order.
+    files: Vec<usize>,
     transport: TestTransport,
     remote: Arc<Remote>,
     model: Model,
@@ -62,8 +65,9 @@ impl<'s> ScenarioRun<'s> {
     /// priority below theirs.
     const SETTLE_STEPS: usize = 32;
 
-    /// Every process's cache file is `cache`.
-    const CACHE_FILE: &'static str = "cache";
+    /// Cache file n is `cache<n>`, n blocks larger than file 0: room a tier on a smaller file
+    /// leaves unused.
+    const CACHE_FILES: usize = 3;
 
     pub(super) fn start(settings: &'s SharedSettings) -> Self {
         let transport = match settings.loses_wakeups {
@@ -80,6 +84,7 @@ impl<'s> ScenarioRun<'s> {
         let mut run = Self {
             settings,
             file_system: FileSystem::default(),
+            files: vec![0],
             ticker: Ticker::start(transport.clock().clone()),
             transport,
             remote,
@@ -115,9 +120,12 @@ impl<'s> ScenarioRun<'s> {
     fn build(&mut self, slot: usize, step: usize) {
         let settings = self.settings;
         let store = Arc::clone(&self.slots[slot].store) as Arc<dyn ObjectStore>;
-        let builder = T4Caching::builder(store)
+        let builder = (self.files.iter()).fold(T4Caching::builder(store), |builder, &file| {
+            let blocks = settings.disk_blocks + file as u64;
+            builder.with_disk_file(format!("cache{file}"), blocks * BLOCK_SIZE_U64)
+        });
+        let builder = builder
             .with_memory_capacity(settings.memory_blocks * BLOCK_SIZE_U64)
-            .with_disk_file(Self::CACHE_FILE, settings.disk_blocks * BLOCK_SIZE_U64)
             .with_network_rate(
                 settings.network_blocks * BLOCK_SIZE_U64,
                 Duration::from_secs(1),
@@ -224,6 +232,15 @@ impl<'s> ScenarioRun<'s> {
                 self.drop_process(process, step);
                 self.build(self.slot(process), step);
             }
+            SharedOperation::MoveFiles { ref files } => {
+                for slot in 0..self.slots.len() {
+                    self.drop_process(slot, step);
+                }
+                self.files = Self::cache_files(files);
+                for slot in 0..self.slots.len() {
+                    self.build(slot, step);
+                }
+            }
             SharedOperation::HoldGets { process } => self.slots[self.slot(process)].store.hold(),
             SharedOperation::ReleaseGets => self.release_gets(),
             SharedOperation::Tick => self.transport.clock().advance(Ticker::TICK),
@@ -303,6 +320,40 @@ impl<'s> ScenarioRun<'s> {
             panic!("after step {step}, {after:?}, the processes never settle: {unsettled}");
         }
         self.check_fetches(step, after);
+        self.check_what_a_kill_keeps(step, after);
+    }
+
+    /// Each block the owner's log names, as a kill now would leave it, is the block's own.
+    fn check_what_a_kill_keeps(&self, step: usize, after: &SharedOperation) {
+        let expected = |path: &[u8], e_tag: &str, size: u64, range: Range<u64>| {
+            self.remote.bytes_of(path, e_tag, size, range)
+        };
+        for slot in &self.slots {
+            let Some(process) = &slot.process else {
+                continue;
+            };
+            let store = process.cache.cache_store();
+            let Some(owner) = store.owned() else {
+                continue;
+            };
+            if let Err(error) = block_on(owner.check_what_a_kill_keeps(&expected)) {
+                panic!("after step {step}, {after:?}, a build after a kill: {error}");
+            }
+        }
+    }
+
+    /// In order, each once; file 0 if none.
+    fn cache_files(named: &[usize]) -> Vec<usize> {
+        let mut files: Vec<usize> = Vec::new();
+        for file in named.iter().map(|file| file % Self::CACHE_FILES) {
+            if !files.contains(&file) {
+                files.push(file);
+            }
+        }
+        if files.is_empty() {
+            files.push(0);
+        }
+        files
     }
 
     /// The harness's own check, so any other failure is the cache's.

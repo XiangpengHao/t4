@@ -4,9 +4,11 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::poll_fn;
+use std::ops::Range;
 use std::task::{Poll, Waker};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -22,7 +24,8 @@ use crate::io::sync::{Arc, Mutex};
 #[derive(Debug, Default)]
 pub(super) struct Remote {
     store: InMemory,
-    versions: Mutex<BTreeMap<String, Content>>,
+    /// Each version put, by e-tag, with its file.
+    versions: Mutex<BTreeMap<String, (usize, Version)>>,
     fetched: Mutex<BTreeMap<(Content, u64), u32>>,
 }
 
@@ -39,10 +42,23 @@ impl Remote {
         };
         let put = self.store.put(&path, version.bytes().clone().into()).await;
         let e_tag = put.unwrap().e_tag.expect("the memory store tags every put");
-        self.versions
-            .lock()
-            .unwrap()
-            .insert(e_tag, version.content());
+        self.versions.lock().unwrap().insert(e_tag, (file, version));
+    }
+
+    /// `None` for a version the store never held at `path`, or of another size.
+    pub(super) fn bytes_of(
+        &self,
+        path: &[u8],
+        e_tag: &str,
+        size: u64,
+        range: Range<u64>,
+    ) -> Option<Bytes> {
+        let versions = self.versions.lock().unwrap();
+        let (file, version) = versions.get(e_tag)?;
+        let held = Self::path(*file).as_ref().as_bytes() == path
+            && version.content().size() == size
+            && range.end <= size;
+        held.then(|| (version.bytes()).slice(range.start as usize..range.end as usize))
     }
 
     pub(super) async fn size(&self, file: usize) -> Option<u64> {
@@ -60,12 +76,11 @@ impl Remote {
         let Some(e_tag) = &options.if_match else {
             return;
         };
-        let content = *self
-            .versions
-            .lock()
-            .unwrap()
+        let content = (self.versions.lock().unwrap())
             .get(e_tag)
-            .expect("an e_tag of a put");
+            .expect("an e_tag of a put")
+            .1
+            .content();
         let blocks = got.range.start / BLOCK_SIZE_U64..got.range.end.div_ceil(BLOCK_SIZE_U64);
         let mut fetched = self.fetched.lock().unwrap();
         for block in blocks {

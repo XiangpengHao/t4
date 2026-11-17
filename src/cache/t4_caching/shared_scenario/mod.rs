@@ -83,6 +83,12 @@ pub enum SharedOperation {
     Restart {
         process: usize,
     },
+    /// Every process dropped, and built again on these cache files, by number modulo three, in
+    /// order: a machine whose config drops a drive and later adds it back. A file named twice
+    /// counts once; none names file 0.
+    MoveFiles {
+        files: Vec<usize>,
+    },
     /// The process's GETs wait until `ReleaseGets`, or until the script waits on a read.
     HoldGets {
         process: usize,
@@ -101,8 +107,9 @@ pub struct ScenarioRead {
 }
 
 impl SharedScenario {
-    /// A file is four blocks at most.
-    const MOST_FILE_BYTES: u64 = 4 * BLOCK_SIZE_U64;
+    /// A file is eight blocks at most: whole reads of two make a disk batch, which a memory tier
+    /// of 16 chunks or more writes only once full.
+    const MOST_FILE_BYTES: u64 = 8 * BLOCK_SIZE_U64;
 
     pub fn new(settings: SharedSettings, operations: Vec<SharedOperation>) -> Self {
         Self {

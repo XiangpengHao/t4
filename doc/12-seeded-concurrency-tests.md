@@ -144,22 +144,26 @@ seeds above stay the tests'.
 on this transport and clock, and runs a script against them: reads of every
 shape, on the script's thread or on threads of their own, some given up;
 writes behind the caches' backs; processes dropped, killed, dropped
-mid-read, shut down and built again. It checks each read's bytes against the
-versions the process's cache may trust, the owner's tiers, calls, spans and
-sessions once no read is in flight, and how often each block is fetched. A
+mid-read and built again, and the whole group built again on another set of
+cache files. It checks each read's bytes against the versions the process's
+cache may trust; once no read is in flight, the owner's tiers, calls, spans
+and sessions, and that each chunk its log on disk names holds its block's
+bytes, as a build after a kill then would serve them; and how often each
+block is fetched. A
 thread of its own advances the clock while every other thread waits, so
 that waits which look again come due; it stops once the script makes no
 progress for 64 rounds, so that a hang ends in a deadlock shuttle reports.
 
 The `shared_mode` fuzz target writes the scripts, and each input's seed picks
-its one PCT schedule. Five fixed scripts run in this suite under the corpus,
-each the shape of a past bug. Reverting the fix:
+its one PCT schedule. Fixed scripts run in this suite under the corpus, each
+the shape of a past bug. Reverting the fix:
 
 | Fix | The fixed script | Schedules to fail |
 |---|---|---|
 | a1c1f69, GETs merged across caches | wrong bytes read | the first |
 | 059f38c, the lost wakeup | deadlock (lossy transport) | the first |
 | 57bf283, a going owner hands claims on | a block fetched 3 times | about 1 in 220 |
+| #56, a log beside files another build wrote | a chunk the log names holds other bytes | the first |
 
 The corpus's 32 schedules don't reach 57bf283's race; the focused test below
 does. a1c1f69's race needs an owner that leaves no log: one that keeps its

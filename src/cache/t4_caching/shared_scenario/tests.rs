@@ -294,3 +294,72 @@ fn a_read_given_up_holds_a_disk_chunk_while_its_write_goes_on() {
         .check();
     }
 }
+
+/// Moved off a cache file and back in one boot, the group finds its first file's log naming
+/// chunks another build wrote since: the check after each step reads them (the stale log of #56).
+#[test]
+fn a_group_moved_off_a_cache_file_and_back_keeps_none_of_its_chunks() {
+    SharedScenario::new(
+        SharedSettings::new(2).with_tiers(4, 2).on_disk(),
+        vec![
+            WriteBehind {
+                file: 0,
+                size: Some(4 * MIB),
+            },
+            WriteBehind {
+                file: 1,
+                size: Some(4 * MIB),
+            },
+            MoveFiles { files: vec![0, 1] },
+            Read {
+                process: 0,
+                read: whole(0),
+            },
+            MoveFiles { files: vec![1] },
+            Read {
+                process: 0,
+                read: whole(1),
+            },
+            MoveFiles { files: vec![0, 1] },
+            Read {
+                process: 1,
+                read: whole(0),
+            },
+        ],
+    )
+    .check();
+}
+
+/// Two whole files fill a disk batch of 16 blocks; its owner killed, the client that takes over
+/// replays a log that names each chunk only once its block is written.
+#[test]
+fn a_full_disk_batch_under_a_killed_owner_names_only_its_written_chunks() {
+    SharedScenario::new(
+        SharedSettings::new(2).with_tiers(16, 64).on_disk(),
+        vec![
+            WriteBehind {
+                file: 0,
+                size: Some(8 * MIB),
+            },
+            WriteBehind {
+                file: 1,
+                size: Some(8 * MIB),
+            },
+            Spawn {
+                process: 1,
+                read: whole(0),
+            },
+            Read {
+                process: 1,
+                read: whole(1),
+            },
+            Kill { process: 0 },
+            Join,
+            Read {
+                process: 1,
+                read: whole(0),
+            },
+        ],
+    )
+    .check();
+}
