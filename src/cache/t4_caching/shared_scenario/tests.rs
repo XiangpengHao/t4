@@ -232,6 +232,35 @@ fn a_shutdown_whose_wakeup_is_lost_hangs_no_process() {
     .check();
 }
 
+/// A block bound for disk waits in memory till written. With one memory chunk, a GET's first
+/// block takes it and its second finds no room, so goes uncached and is fetched again; with two,
+/// both go to disk and the second read fetches nothing (fuzz run 44102816849, 17 Nov 2026).
+#[test]
+fn a_gets_blocks_bound_for_disk_wait_in_memory() {
+    for memory_blocks in [1, 2] {
+        SharedScenario::new(
+            SharedSettings::new(2)
+                .with_tiers(memory_blocks, 2)
+                .on_disk(),
+            vec![
+                WriteBehind {
+                    file: 0,
+                    size: Some(2 * MIB),
+                },
+                Read {
+                    process: 0,
+                    read: whole(0),
+                },
+                Read {
+                    process: 0,
+                    read: whole(0),
+                },
+            ],
+        )
+        .check();
+    }
+}
+
 /// A read given up leaves its write to disk in flight, holding its chunk till done. With one
 /// chunk, the reads at once find no room, so each runs to its end without waiting and fetches
 /// the block; with two, they share one GET (fuzz run 43946954212, 16 Nov 2026).
