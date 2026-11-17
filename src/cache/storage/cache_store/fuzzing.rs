@@ -28,7 +28,7 @@ impl ObjectCache {
         let Some(log) = self.tiers.disk.log() else {
             return Ok(());
         };
-        let base = log.inspect().ok_or_else(|| {
+        let base = log.replay().ok_or_else(|| {
             "the log no longer replays: a build after a kill would start cold".to_owned()
         })?;
         for version in base.versions() {

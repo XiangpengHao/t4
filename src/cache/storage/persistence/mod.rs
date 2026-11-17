@@ -58,7 +58,8 @@ impl VersionOnDisk {
 
 impl LogBase {
     const MAGIC: [u8; 8] = *b"t4 disk\n";
-    const FORMAT: u32 = 1;
+    /// 2: chunks start after each file's owner page, and the layout names the owners.
+    const FORMAT: u32 = 2;
 
     pub(in crate::cache) fn new(next_id: u64, versions: Vec<VersionOnDisk>) -> Self {
         Self { next_id, versions }

@@ -69,13 +69,10 @@ impl ObjectCache {
 
     pub(in crate::cache) fn new(
         memory_chunks: NonZeroU32,
-        disk: CacheFiles,
+        mut disk: CacheFiles,
         placement: Arc<dyn PlacementPolicy>,
     ) -> Result<Self> {
-        let kept = match disk.log() {
-            Some(log) => log.take()?,
-            None => None,
-        };
+        let kept = disk.take_kept();
         let tiers = Arc::new(Tiers {
             paths: PathTable::new(),
             blocks: BlockTable::new(),

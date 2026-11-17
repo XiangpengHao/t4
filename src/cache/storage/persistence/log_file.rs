@@ -5,6 +5,7 @@ use std::time::Duration;
 use super::log::{BootId, DiskLog, LogEntry};
 use super::{LogBase, LogReader, LogWriter, VersionOnDisk};
 use crate::cache::storage::FileVersion;
+use crate::cache::storage::disk::CacheFileOwner;
 use crate::cache::{BlockKey, ChunkId};
 use crate::io::file_system::{FileIdentity, FileSystem, OpenFile};
 use crate::io::sync::{Mutex, MutexGuard};
@@ -28,7 +29,8 @@ impl PersistenceLog {
         Self::beside_in_boot(file_system, first, opened, chunks_per_file, boot)
     }
 
-    /// With no boot id, nothing could tell a log of another boot: no log, and none left behind.
+    /// With no boot id, nothing could tell a log of another boot, and without a file's creation
+    /// time or owner nothing could tell it from another: no log, and none left behind.
     pub(super) fn beside_in_boot(
         file_system: &FileSystem,
         first: &Path,
@@ -60,17 +62,18 @@ impl PersistenceLog {
         }))
     }
 
-    /// Rebased before a chunk is written, so each record appended after applies to the base.
-    pub(in crate::cache) fn take(&self) -> io::Result<Option<LogBase>> {
-        let bytes = match self.file_system.read(&self.path) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
-        };
-        let base = bytes.and_then(|bytes| DiskLog::replay(&bytes, &self.layout, self.boot));
+    /// The blocks a build may keep: `None` for a log of another boot or of other files, or
+    /// one that is absent, unreadable or doubtful.
+    pub(in crate::cache) fn replay(&self) -> Option<LogBase> {
+        let bytes = self.file_system.read(&self.path).ok()?;
+        DiskLog::replay(&bytes, &self.layout, self.boot)
+    }
+
+    /// Before a chunk is written, so each record appended after applies to the base: the blocks
+    /// kept, or none.
+    pub(in crate::cache) fn rebase(&self, kept: Option<&LogBase>) -> io::Result<()> {
         let empty = LogBase::new(0, Vec::new());
-        self.replace_base(base.as_ref().unwrap_or(&empty))?;
-        Ok(base)
+        self.replace_base(kept.unwrap_or(&empty))
     }
 
     fn replace_base(&self, base: &LogBase) -> io::Result<()> {
@@ -107,15 +110,6 @@ impl PersistenceLog {
         if let Some(append) = self.append.lock().unwrap().as_mut() {
             append.abandoned = true;
         }
-    }
-
-    #[cfg(any(all(test, not(feature = "shuttle")), feature = "__fuzz"))]
-    pub(in crate::cache) fn inspect(&self) -> Option<LogBase> {
-        DiskLog::replay(
-            &self.file_system.read(&self.path).ok()?,
-            &self.layout,
-            self.boot,
-        )
     }
 
     #[cfg(all(test, not(feature = "shuttle")))]
@@ -204,7 +198,8 @@ impl LogAppend {
     }
 }
 
-/// Creation times too: a file made again may reuse the inode.
+/// Creation times too: a file made again may reuse the inode. Owners too: a build of other files
+/// may have written these since, claiming them first.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct CacheLayout {
     chunks_per_file: u32,
@@ -226,6 +221,7 @@ impl CacheLayout {
             out.u64(file.identity.inode());
             out.u64(file.created.as_secs());
             out.u32(file.created.subsec_nanos());
+            out.raw(file.owner.id());
         }
     }
 
@@ -237,7 +233,12 @@ impl CacheLayout {
                 let (seconds, nanos) = (input.u64()?, input.u32()?);
                 // A nanosecond count past a second would carry, and could overflow.
                 let created = (nanos < 1_000_000_000).then(|| Duration::new(seconds, nanos))?;
-                Some(FileStamp { identity, created })
+                let owner = CacheFileOwner::new(input.take(16)?.try_into().ok()?);
+                Some(FileStamp {
+                    identity,
+                    created,
+                    owner,
+                })
             })
             .collect::<Option<_>>()?;
         Some(Self {
@@ -253,6 +254,7 @@ impl CacheLayout {
         let file = FileStamp {
             identity: FileIdentity::new(0, 0),
             created: Duration::ZERO,
+            owner: CacheFileOwner::new([1; 16]),
         };
         Self {
             chunks_per_file,
@@ -265,6 +267,7 @@ impl CacheLayout {
 struct FileStamp {
     identity: FileIdentity,
     created: Duration,
+    owner: CacheFileOwner,
 }
 
 impl FileStamp {
@@ -272,6 +275,7 @@ impl FileStamp {
         Some(Self {
             identity: file.identity().ok()?,
             created: file.created()?,
+            owner: CacheFileOwner::of(file).ok()??,
         })
     }
 }

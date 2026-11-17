@@ -847,7 +847,8 @@ fn a_cache_file_takes_room_as_blocks_are_written() {
         let path = Path::new("cache");
         let allocated = || file_system.allocated(path).unwrap();
         let size = file_system.open_existing(path, false).unwrap().size();
-        assert_eq!(size.unwrap(), 8 * MIB, "sized");
+        // Its owner's page, then its chunks.
+        assert_eq!(size.unwrap(), crate::PAGE_SIZE_U64 + 8 * MIB, "sized");
         assert!(allocated() < MIB, "not allocated: {}", allocated());
 
         let data = file_bytes(3 * MIB);

@@ -1,7 +1,7 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Write};
 use std::os::fd::{AsFd, BorrowedFd};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -103,6 +103,16 @@ impl FileSystem {
     pub(crate) fn boot_id(&self) -> io::Result<String> {
         Err(io::ErrorKind::Unsupported.into())
     }
+
+    /// Sixteen bytes from the OS's random source: no other call gives them.
+    pub(crate) fn unique_id(&self) -> io::Result<[u8; 16]> {
+        let mut id = [0; 16];
+        // SAFETY: `id` is live, writable storage of the length given.
+        if unsafe { libc::getentropy(id.as_mut_ptr().cast(), id.len()) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(id)
+    }
 }
 
 #[derive(Debug)]
@@ -136,6 +146,16 @@ impl OpenFile {
     pub(crate) fn created(&self) -> Option<Duration> {
         let created = self.0.metadata().ok()?.created().ok()?;
         created.duration_since(UNIX_EPOCH).ok()
+    }
+
+    /// Under `O_DIRECT`, a page-aligned buffer at a page-aligned offset.
+    pub(crate) fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        self.0.read_at(buf, offset)
+    }
+
+    /// Under `O_DIRECT`, page-aligned bytes at a page-aligned offset.
+    pub(crate) fn write_at(&self, bytes: &[u8], offset: u64) -> io::Result<usize> {
+        self.0.write_at(bytes, offset)
     }
 
     /// On a file opened to append.

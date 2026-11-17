@@ -121,3 +121,58 @@ fn a_file_written_over_between_caches_is_fetched_again() {
         assert_eq!(block_on(again.known_size(&path)), Some(3 * MIB));
     });
 }
+
+/// A cache on `b` alone writes over chunks that the log beside `a` names: it claims `b` first,
+/// so that log no longer matches its files.
+#[test]
+fn a_log_whose_files_another_cache_wrote_keeps_nothing() {
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = CacheDirectory::new();
+        let inner = Arc::new(CountingStore::default());
+        let (x, y) = (Path::from("x"), Path::from("y"));
+        let (x_data, y_data) = (file_bytes(4 * MIB, 31), file_bytes(2 * MIB, 32));
+        put(inner.as_ref(), &x, &x_data);
+        put(inner.as_ref(), &y, &y_data);
+        let x_meta = block_on(inner.head(&x)).unwrap();
+        let y_meta = block_on(inner.head(&y)).unwrap();
+        let on_files = |names: &[&str]| {
+            let builder = dir
+                .holding(T4Caching::builder(
+                    Arc::clone(&inner) as Arc<dyn ObjectStore>
+                ))
+                .with_memory_capacity(4 * MIB);
+            (names.iter())
+                .fold(builder, |builder, name| {
+                    builder.with_disk_file(dir.path().join(name), 2 * MIB)
+                })
+                .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
+                .build()
+                .unwrap()
+        };
+        // A block at a time, each on disk before the next.
+        let by_blocks = |cache: &T4Caching, meta: &ObjectMeta| {
+            let mut out = Vec::new();
+            for start in (0..meta.size).step_by(MIB as usize) {
+                let range = start..meta.size.min(start + MIB);
+                out.extend(block_on(cache.open_listed(meta.clone()).read(range, None)).unwrap());
+                cache.cache_store().owned().unwrap().wait_for_disk_writes();
+            }
+            out
+        };
+        let both = on_files(&["a", "b"]);
+        assert_eq!(by_blocks(&both, &x_meta), x_data);
+        drop(both);
+        let b_alone = on_files(&["b"]);
+        assert_eq!(by_blocks(&b_alone, &y_meta), y_data);
+        drop(b_alone);
+        inner.take_asked();
+
+        let again = on_files(&["a", "b"]);
+        assert!(
+            by_blocks(&again, &x_meta) == x_data,
+            "x served with other bytes"
+        );
+        let fetched = (0..4).map(|block| bounded(block * MIB..(block + 1) * MIB));
+        assert_eq!(inner.take_asked(), fetched.collect::<Vec<_>>());
+    });
+}
