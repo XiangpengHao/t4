@@ -579,6 +579,26 @@ spins.
 - **Every process opening the cache file,** with the index in shared
   memory or caught up from a log: doc/02's reasons, kept in
   `10-spiral-integration.md`'s Rejected.
+- **Frames through rings of shared memory,** the socket left to the
+  handshake, to waking an end asleep, and to deaths. Built and measured
+  17 Nov 2026, not merged: two 64 KiB byte rings, one each way, in
+  memory made and checked as the region is; two ends awake made no
+  system call to pass a frame.
+  - On a c7i.8xlarge a client's hot 4 KiB read took 5.1 to 5.2 µs,
+    against 8.4 to 8.8 µs through the socket, and its 1 MiB read 46.6
+    to 48.5 µs against 52.4 to 53.7. The socket's system calls were
+    3.5 µs a read, not the 7 predicted.
+  - What is left isn't the transport's: timestamps at each stage of the
+    4 KiB read put 1.2 µs in running the read on the session, and most
+    of the rest in moving it between three threads on other cores, its
+    cache lines with it. A 150-byte write to a ring took 0.6 µs, and
+    the whole read 4.1 µs with the threads on two cores' hyperthreads,
+    5.8 µs on four cores.
+  - Not worth a second transport, a sleep handshake to keep right, and
+    words in shared memory an owner can't trust, for 3.5 µs a read.
+  - No crate fit: iceoryx2 brings its own services and shared-memory
+    files beside t4's admission and region, shmem-ipc is Linux only,
+    and ipmpsc says it is unreliable on macOS.
 
 ## Later
 
