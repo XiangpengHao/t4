@@ -52,6 +52,10 @@ It checks that:
   (`T4Caching::check_what_a_kill_keeps`). A kill is checked at every step,
   not only where a scenario has one.
 
+A build the system refuses for want of threads or io_uring rings (`EAGAIN`,
+`ENOMEM`, `EMFILE`, `ENFILE`) is tried again for about a second, as the kernel
+retires the last scenario's: at a fork run's start, workers build and drop
+caches thousands of times a second, and every one of 14 once aborted together.
 Where io_uring is refused (`EPERM` or `ENOSYS`), it skips every scenario and
 passes. GitHub's runners allow io_uring, as CI's tests use it; a runner that
 didn't would make the Monday run pass without testing anything.

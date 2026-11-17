@@ -5,7 +5,7 @@ use crate::io::io_task::{
 };
 use crate::io::sync::Arc;
 use crate::io::sync::mpsc;
-use crate::io::sync::thread::{JoinHandle, spawn};
+use crate::io::sync::thread::{self, JoinHandle};
 use crate::{Error, Result};
 use core::fmt;
 use std::num::NonZeroU32;
@@ -53,19 +53,21 @@ impl IoWorker {
         let (tx, rx) = mpsc::channel::<WorkerRequest>();
         let (init_tx, init_rx) = mpsc::channel::<Result<()>>();
 
-        let thread = spawn(move || {
-            let backend = match backend(rx) {
-                Ok(backend) => {
-                    let _ = init_tx.send(Ok(()));
-                    backend
-                }
-                Err(err) => {
-                    let _ = init_tx.send(Err(err));
-                    return;
-                }
-            };
-            backend.run();
-        });
+        let thread = thread::Builder::new()
+            .name("t4-io-worker".into())
+            .spawn(move || {
+                let backend = match backend(rx) {
+                    Ok(backend) => {
+                        let _ = init_tx.send(Ok(()));
+                        backend
+                    }
+                    Err(err) => {
+                        let _ = init_tx.send(Err(err));
+                        return;
+                    }
+                };
+                backend.run();
+            })?;
 
         match init_rx.recv() {
             Ok(Ok(())) => Ok(Self {
