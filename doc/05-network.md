@@ -136,8 +136,10 @@ into the cache, each pass reading 8 MiB back from memory. A fetch's bytes
 now land as they come (`FetchedBlocks`): each piece of the answer, while
 the CPU's cache holds it, into the output's pages the fetch covers
 (lent, as a disk read's are) and into its block's chunk (lent, as a
-promotion's is), taken as the block's first byte comes; the blocks are
-cached once the last byte is in, and nothing is if the fetch ends short.
+promotion's is), taken as the block's first byte comes; each block is
+cached once its own last byte is in, and a block the fetch ends short of
+is not (since 17 Nov 2026; before, the fetch's blocks waited for its last
+byte, `13-persistence.md`, decision 9).
 Two copies of a byte, from cache, where there were three from memory.
 
 | Through t4 | before | huge pages | and streaming |

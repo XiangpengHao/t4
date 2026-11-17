@@ -397,6 +397,53 @@ fn a_block_admitted_to_disk_goes_straight_there() {
 }
 
 #[test]
+fn every_block_of_a_fetch_reaches_disk_through_one_memory_chunk() {
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let (cache, policy) = cache(1, 4);
+        policy.set_admit(Admit::Disk);
+        let size = 3 * MIB;
+        let data = file_bytes(size);
+        let file = cache.resolve(b"a", Some("v1"), size).unwrap();
+        let (_, fetches) = read_through(&cache, &file, &data, 0..size);
+        assert_eq!(fetches, [0..size]);
+        for index in 0..3 {
+            disk_chunk(&cache, &file, index);
+        }
+        assert_eq!(cache.tiers.memory.free_count(), 1);
+        let (out, fetches) = read_through(&cache, &file, &data, 0..size);
+        assert!(fetches.is_empty());
+        assert_eq!(out, data);
+        cache.check_at_rest().unwrap();
+    });
+}
+
+#[test]
+fn a_block_for_disk_waits_for_no_writer_that_makes_no_room() {
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let (cache, policy) = cache(1, 1);
+        policy.set_admit(Admit::Disk);
+        let data = file_bytes(3 * MIB);
+        let file = cache.resolve(b"a", Some("v1"), 3 * MIB).unwrap();
+        read_through(&cache, &file, &data, 0..MIB);
+        // A read in flight keeps the disk's one chunk, which eviction can't free.
+        let on_disk = disk_chunk(&cache, &file, 0);
+        let held = cache
+            .tiers
+            .disk
+            .chunks()
+            .read(on_disk, key(&file, 0))
+            .unwrap();
+
+        let (out, _) = read_through(&cache, &file, &data, MIB..3 * MIB);
+        assert_eq!(out, data[MIB as usize..]);
+        memory_chunk(&cache, &file, 1);
+        assert_eq!(location(&cache, &file, 2), None, "no room for it");
+        drop(held);
+        cache.check_at_rest().unwrap();
+    });
+}
+
+#[test]
 fn a_discarded_block_is_fetched_every_time() {
     crate::io::test_schedule::TestSchedule::check(|| {
         let (cache, policy) = cache(1, 1);

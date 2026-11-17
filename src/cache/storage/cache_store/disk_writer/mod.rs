@@ -1,4 +1,4 @@
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::task::{Context, Poll, Wake, Waker};
 
 use super::Tiers;
@@ -18,6 +18,10 @@ struct DiskQueue {
     blocks: Vec<(ChunkId, BlockKey)>,
     active: bool,
     stopping: bool,
+    batches_written: u64,
+    blocks_moved: u64,
+    /// Fills waiting for a batch, which goes even if not full while they wait.
+    waiting_fills: Vec<Waker>,
 }
 
 impl PendingDisk {
@@ -50,30 +54,69 @@ impl PendingDisk {
         true
     }
 
+    /// For a block bound for disk that found memory full: true once the writer has written a
+    /// batch, the one in flight or the next, and taken blocks out of memory since; false at
+    /// once if it has nothing to write or is stopping, or once its batch moved nothing, as a
+    /// failed write does, so that a fill never waits on a writer making no room.
+    pub(super) async fn moved_blocks(&self) -> bool {
+        let mut waited_for = None;
+        poll_fn(|context| {
+            let mut queue = self.queue.lock().unwrap();
+            if queue.stopping {
+                return Poll::Ready(false);
+            }
+            let (batch, moved_before) = match waited_for {
+                Some(waited_for) => waited_for,
+                None if !queue.active && queue.blocks.is_empty() => return Poll::Ready(false),
+                None => *waited_for.insert((queue.batches_written + 1, queue.blocks_moved)),
+            };
+            if queue.batches_written >= batch {
+                return Poll::Ready(queue.blocks_moved > moved_before);
+            }
+            queue.waiting_fills.push(context.waker().clone());
+            self.changed.notify_all();
+            Poll::Pending
+        })
+        .await
+    }
+
     fn take_batch(&self) -> Option<Vec<(ChunkId, BlockKey)>> {
         let mut queue = self.queue.lock().unwrap();
         loop {
             if queue.stopping {
                 return None;
             }
-            if queue.blocks.len() >= self.batch_size {
+            let fills_wait = !queue.waiting_fills.is_empty() && !queue.blocks.is_empty();
+            if queue.blocks.len() >= self.batch_size || fills_wait {
                 queue.active = true;
-                return Some(queue.blocks.drain(..self.batch_size).collect());
+                let size = queue.blocks.len().min(self.batch_size);
+                return Some(queue.blocks.drain(..size).collect());
             }
             queue = self.changed.wait(queue).unwrap();
         }
     }
 
-    fn completed(&self) {
-        let mut queue = self.queue.lock().unwrap();
-        queue.active = false;
-        self.changed.notify_all();
+    fn completed(&self, moved: usize) {
+        let waiting_fills = {
+            let mut queue = self.queue.lock().unwrap();
+            queue.active = false;
+            queue.batches_written += 1;
+            queue.blocks_moved += moved as u64;
+            self.changed.notify_all();
+            std::mem::take(&mut queue.waiting_fills)
+        };
+        waiting_fills.into_iter().for_each(Waker::wake);
     }
 
     fn abandon(&self) -> Vec<(ChunkId, BlockKey)> {
-        let mut queue = self.queue.lock().unwrap();
-        self.changed.notify_all();
-        std::mem::take(&mut queue.blocks)
+        let (blocks, waiting_fills) = {
+            let mut queue = self.queue.lock().unwrap();
+            self.changed.notify_all();
+            let blocks = std::mem::take(&mut queue.blocks);
+            (blocks, std::mem::take(&mut queue.waiting_fills))
+        };
+        waiting_fills.into_iter().for_each(Waker::wake);
+        blocks
     }
 
     #[cfg(any(test, feature = "__fuzz"))]
@@ -129,10 +172,11 @@ impl Tiers {
                     Poll::Pending => thread::park(),
                 }
             };
+            let moved = batch.len() - retry.len();
             for (chunk, block) in retry {
                 self.keep_in_memory(chunk, block);
             }
-            self.pending.completed();
+            self.pending.completed(moved);
         }
         for (chunk, block) in self.pending.abandon() {
             self.keep_in_memory(chunk, block);
