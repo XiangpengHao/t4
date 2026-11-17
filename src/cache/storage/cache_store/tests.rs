@@ -397,7 +397,7 @@ fn a_block_admitted_to_disk_goes_straight_there() {
 }
 
 #[test]
-fn every_block_of_a_fetch_reaches_disk_through_one_memory_chunk() {
+fn every_block_of_a_fetch_reaches_disk_beside_one_memory_chunk() {
     crate::io::test_schedule::TestSchedule::check(|| {
         let (cache, policy) = cache(1, 4);
         policy.set_admit(Admit::Disk);
@@ -418,7 +418,7 @@ fn every_block_of_a_fetch_reaches_disk_through_one_memory_chunk() {
 }
 
 #[test]
-fn a_block_for_disk_waits_for_no_writer_that_makes_no_room() {
+fn a_block_for_disk_with_no_room_there_goes_uncached() {
     crate::io::test_schedule::TestSchedule::check(|| {
         let (cache, policy) = cache(1, 1);
         policy.set_admit(Admit::Disk);
@@ -436,8 +436,9 @@ fn a_block_for_disk_waits_for_no_writer_that_makes_no_room() {
 
         let (out, _) = read_through(&cache, &file, &data, MIB..3 * MIB);
         assert_eq!(out, data[MIB as usize..]);
-        memory_chunk(&cache, &file, 1);
-        assert_eq!(location(&cache, &file, 2), None, "no room for it");
+        assert_eq!(location(&cache, &file, 1), None, "no room for it");
+        assert_eq!(location(&cache, &file, 2), None);
+        assert_eq!(cache.tiers.memory.free_count(), 1, "memory untouched");
         drop(held);
         cache.check_at_rest().unwrap();
     });

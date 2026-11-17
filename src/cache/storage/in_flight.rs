@@ -43,6 +43,7 @@ impl InFlight {
             state: Mutex::new(FetchState {
                 requests: 1,
                 ended: None,
+                landed: None,
                 waiters: Vec::new(),
             }),
         });
@@ -59,7 +60,8 @@ impl InFlight {
         self.fetches().is_empty()
     }
 
-    /// An ended fetch stays until its thread removes it; a read must not wait on it.
+    /// An ended fetch stays until its thread removes it; a read must not wait on it. A landed one
+    /// stays live until its write is done, so that no read fetches its block again meanwhile.
     fn live(fetches: &HashMap<u64, Arc<BlockFetch>>, key: BlockKey) -> Option<&Arc<BlockFetch>> {
         fetches
             .get(&key.packed())
@@ -96,6 +98,8 @@ pub(in crate::cache) struct BlockFetch {
 struct FetchState {
     requests: u32,
     ended: Option<FetchEnd>,
+    /// A block bound for disk, all in, waiting for its write.
+    landed: Option<Bytes>,
     waiters: Vec<Waker>,
 }
 
@@ -128,11 +132,19 @@ impl BlockFetch {
         }
     }
 
+    pub(in crate::cache) fn landed(&self) -> Option<Bytes> {
+        self.state().landed.clone()
+    }
+
+    /// A landed block ends a wait at once: its bytes are in, though not yet on disk.
     pub(in crate::cache) async fn ended(&self) -> FetchEnd {
         poll_fn(|cx| {
             let mut state = self.state();
             if let Some(ended) = &state.ended {
                 return Poll::Ready(ended.clone());
+            }
+            if let Some(landed) = &state.landed {
+                return Poll::Ready(FetchEnd::Passed(landed.clone()));
             }
             if !state
                 .waiters
@@ -201,6 +213,19 @@ impl FetchClaim {
 
     pub(in crate::cache) fn passed(mut self, bytes: Bytes) {
         self.end(Some(FetchEnd::Passed(bytes)));
+    }
+
+    /// Serves the block's waiting reads, and the reads that find it, from `bytes` until it ends.
+    pub(in crate::cache) fn landed(&self, bytes: Bytes) {
+        let waiters = {
+            let mut state = self.fetch.state();
+            if state.ended.is_some() {
+                return;
+            }
+            state.landed = Some(bytes);
+            std::mem::take(&mut state.waiters)
+        };
+        waiters.into_iter().for_each(Waker::wake);
     }
 
     fn end(&mut self, had: Option<FetchEnd>) {

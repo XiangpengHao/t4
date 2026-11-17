@@ -6,14 +6,16 @@ use bytes::Bytes;
 
 use crate::PAGE_SIZE_U32;
 use crate::cache::policy::{Admit, Tier};
+use crate::cache::read_output::ReadOutput;
 use crate::cache::storage::in_flight::FetchClaim;
 use crate::cache::storage::index::{FileVersion, Location};
-use crate::cache::storage::memory::{LentMemoryChunk, MemoryChunkWriter};
+use crate::cache::storage::memory::LentMemoryChunk;
 use crate::cache::{BLOCK_SIZE_U64, BlockKey, FileVersionId};
 use crate::io::aligned_buf::AlignedBuf;
 use crate::io::error::{Error, Result};
 
 use super::ObjectCache;
+use super::disk_writer::LandedBlock;
 use super::partial_read::{BlockFate, FetchBlockPlan, PartialRead, PlannedFetch};
 
 impl ObjectCache {
@@ -74,57 +76,50 @@ impl ObjectCache {
         blocks.finish().await
     }
 
+    /// A block bound for disk lands in pages of its own, outside the memory tier: every fetch
+    /// in flight lands its blocks however small the tier.
     async fn landing(&self, key: BlockKey, admit: Admit, len: usize) -> Landing<'_> {
         if self.tiers.blocks.get(key).is_some() {
             return Landing::Nowhere;
         }
-        if matches!(admit, Admit::Disk) && !self.tiers.disk.takes_a_block() {
-            return Landing::Nowhere;
-        }
-        let pages = u32::try_from(len.next_multiple_of(PAGE_SIZE_U32 as usize))
-            .ok()
-            .and_then(NonZeroU32::new)
-            .expect("a block is a chunk's bytes or fewer, one or more");
         match admit {
-            Admit::Memory | Admit::Disk => match self.memory_to_land_in(admit).await {
-                Some(writer) => {
-                    let (chunk, lent) = writer.lend_for_read(&self.tiers.memory, pages);
-                    Landing::Memory {
-                        chunk,
-                        lent,
-                        to_disk: matches!(admit, Admit::Disk),
+            Admit::Memory => {
+                let pages = u32::try_from(len.next_multiple_of(PAGE_SIZE_U32 as usize))
+                    .ok()
+                    .and_then(NonZeroU32::new)
+                    .expect("a block is a chunk's bytes or fewer, one or more");
+                // An eviction's failed write leaves the block uncached, not the read failed.
+                match self.tiers.allocate_memory().await {
+                    Ok(Some(writer)) => {
+                        let (chunk, lent) = writer.lend_for_read(&self.tiers.memory, pages);
+                        Landing::Memory { chunk, lent }
                     }
+                    Ok(None) | Err(_) => Landing::Nowhere,
                 }
-                None => Landing::Nowhere,
+            }
+            Admit::Disk if !self.tiers.disk.takes_a_block() => Landing::Nowhere,
+            Admit::Disk => match ReadOutput::new(0..len as u64) {
+                Ok(pages) => Landing::Disk(pages),
+                Err(_) => Landing::Nowhere,
             },
             Admit::Discard => Landing::Passing(Vec::with_capacity(len)),
         }
     }
 
-    /// A block bound for disk waits for the writer to take blocks out of memory rather than go
-    /// uncached, for as long as the writer makes room.
-    async fn memory_to_land_in(&self, admit: Admit) -> Option<MemoryChunkWriter<'_>> {
-        loop {
-            // An eviction's failed write leaves the block uncached, not the read failed.
-            let Ok(allocated) = self.tiers.allocate_memory().await else {
-                return None;
-            };
-            if allocated.is_some()
-                || admit != Admit::Disk
-                || !self.tiers.pending.moved_blocks().await
-            {
-                return allocated;
-            }
+    /// Ends its fetch once written; reads find it meanwhile, and the queue's room paces the
+    /// fetch.
+    async fn write_landed(&self, key: BlockKey, pages: ReadOutput, claim: Option<FetchClaim>) {
+        let Some(landed) = LandedBlock::new(key, pages, claim) else {
+            return;
+        };
+        if let Err(landed) = self.tiers.pending.enqueue_landed(landed).await {
+            self.tiers.leave_uncached(landed);
         }
     }
 
     async fn cache_landed(&self, key: BlockKey, landing: Landing<'_>) {
         match landing {
-            Landing::Memory {
-                chunk,
-                lent,
-                to_disk,
-            } => {
+            Landing::Memory { chunk, lent } => {
                 // Published before the index names it: a read that finds the entry finds it open.
                 let reader = lent.publish(chunk, key);
                 if self
@@ -132,17 +127,15 @@ impl ObjectCache {
                     .blocks
                     .insert_if_absent(key, Location::Memory(reader.chunk()))
                 {
-                    if !to_disk || !self.tiers.pending.enqueue(reader.chunk(), key) {
-                        self.tiers
-                            .placement
-                            .on_admit(Tier::Memory, reader.chunk(), key);
-                    }
+                    self.tiers
+                        .placement
+                        .on_admit(Tier::Memory, reader.chunk(), key);
                 } else {
                     // Another fetch cached it first; the chunk goes back when `reader` drops.
                     reader.unpublish();
                 }
             }
-            Landing::Due(_) | Landing::Passing(_) | Landing::Nowhere => {}
+            Landing::Due(_) | Landing::Disk(_) | Landing::Passing(_) | Landing::Nowhere => {}
         }
     }
 }
@@ -226,18 +219,19 @@ impl FetchedBlocks<'_> {
         // Released before caching: the read may take its bytes already.
         drop(block.output.take());
         let claim = block.claim.take();
-        let passed = match std::mem::replace(&mut block.landing, Landing::Nowhere) {
-            Landing::Passing(bytes) => Some(Bytes::from(bytes)),
+        match std::mem::replace(&mut block.landing, Landing::Nowhere) {
+            Landing::Passing(bytes) => {
+                if let Some(claim) = claim {
+                    claim.passed(Bytes::from(bytes));
+                }
+            }
+            Landing::Disk(pages) => self.cache.write_landed(key, pages, claim).await,
             landing => {
                 self.cache.cache_landed(key, landing).await;
-                None
-            }
-        };
-        // Ends with wherever a tier holds the block, even if another fetch put it there.
-        if let Some(claim) = claim {
-            match passed {
-                Some(bytes) => claim.passed(bytes),
-                None => claim.ended(self.cache.tiers.blocks.get(key)),
+                // Ends with wherever a tier holds the block, even if another fetch put it there.
+                if let Some(claim) = claim {
+                    claim.ended(self.cache.tiers.blocks.get(key));
+                }
             }
         }
     }
@@ -294,8 +288,8 @@ enum Landing<'c> {
     Memory {
         chunk: AlignedBuf,
         lent: LentMemoryChunk<'c>,
-        to_disk: bool,
     },
+    Disk(ReadOutput),
     /// A discarded block's bytes, kept for the reads waiting on its fetch.
     Passing(Vec<u8>),
     Nowhere,
@@ -305,6 +299,7 @@ impl Landing<'_> {
     fn copy_in(&mut self, at: usize, bytes: &[u8]) {
         match self {
             Self::Memory { chunk, .. } => chunk.copy_in(at, bytes),
+            Self::Disk(pages) => pages.copy_in(at as u64, bytes),
             Self::Passing(passing) => {
                 debug_assert_eq!(passing.len(), at, "a block's bytes come in order");
                 passing.extend_from_slice(bytes);

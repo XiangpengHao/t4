@@ -52,9 +52,11 @@ bytes.
    version id is the base's, raised past each path entry's id, so that no
    id is given twice (`03-cache.md`, decision 5).
 
-3. **Blocks go to disk in batches of 16, one batch at a time.** A block
-   bound for disk, a memory victim or a block the policy admits there,
-   waits in a memory chunk, read from there, until its batch goes. A batch:
+3. **Blocks go to disk in batches of 16, one batch at a time.** A memory
+   victim waits in its memory chunk until its batch goes. A block the
+   policy admits to disk waits in pages of its own, outside the memory
+   tier, and goes with the next batch however full; reads take it from
+   there meanwhile (decision 9). A batch:
    - takes its 16 chunks, evicting if it must;
    - appends a record of the chunks freed since the last record, by
      eviction or promotion, and the paths named since;
@@ -125,25 +127,28 @@ bytes.
    insertion path. A memory capacity under 16 chunks keeps its budget
    and uses one-block batches; larger capacities use 16. Raising a caller's
    memory budget silently would break the fixed-capacity contract.
-   A batch not full waits for its next block; its
-   blocks are memory's meanwhile and, as memory's, not written at a drop.
+   A batch of victims not full waits for its next block; its blocks are
+   memory's meanwhile and, as memory's, not written at a drop, as blocks
+   waiting in their own pages aren't.
    One owned writer thread waits on a condition variable, submits a whole
    batch, and parks until its I/O completes. It holds the index and the
    tiers (`Tiers`), which reads share, not the cache; a drop closes the
    tier and joins it.
-   At most 16 blocks wait behind the batch in flight. With no free memory,
-   a block bound for disk waits for the writer to take blocks out of
-   memory, and the batch it waits for goes even if not full; each of a
-   fetch's blocks is cached as its last byte lands, so the next block can
-   wait on its write. It goes uncached only if the writer has nothing to
-   write or a batch moves nothing, as a failed write does, so it never
-   waits on a writer making no room. Other fills go uncached, as before.
-   (The user, 17 Nov 2026: with a one-chunk memory tier, a GET cached one
-   of its blocks, and a block fetched while another's write was pending
-   none.) A block can't wait on another fetch's block still landing: a
-   shared cache's owner lands a client's fetches one frame at a time, so
-   that fetch might never finish. So concurrent fetches through a tier
-   smaller than them may still leave blocks uncached.
+   At most 16 blocks wait behind the batch in flight.
+   A block the policy admits to disk lands in pages of its own, not a
+   memory chunk, so every fetch in flight lands its blocks whatever the
+   memory tier's size: the memory budget is the cache's, and a landing is
+   the fetch's, bounded by the bytes in flight. (Landing in memory chunks,
+   a one-chunk tier left about nine in ten blocks of concurrent GETs
+   uncached: ClickBench through Spiral, 17 Nov 2026.) Once its last byte
+   is in, the block joins the queue, waiting while the queue is full,
+   which only the writer empties; its fetch stays open until it is
+   written, and serves the reads that find it from its pages, so none
+   fetches it again. Once written it is cached on disk; a block with no
+   disk room, or whose write fails, ends uncached. Waiting only on the
+   writer, never on another fetch, it can't wait on a client's fetch that
+   never finishes: a shared cache's owner lands those one frame at a
+   time.
    Giving up a read does not cancel its queued batch. A batch's chunks
    stay pinned until its I/O completes, even if its future is dropped.
 

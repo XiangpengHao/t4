@@ -9,6 +9,7 @@ use crate::cache::storage::memory::{MemoryChunkReader, MemoryChunkWriter};
 use crate::cache::{BlockKey, ChunkId};
 use crate::io::error::Result;
 
+use super::disk_writer::{LandedBlock, PendingWrite};
 use super::{ObjectCache, Tiers};
 
 impl ObjectCache {
@@ -129,27 +130,40 @@ impl Tiers {
         Ok(())
     }
 
+    /// Gives back the victims it couldn't move, for memory to keep.
     pub(super) async fn write_disk_batch(
         &self,
-        batch: &[(ChunkId, BlockKey)],
+        batch: Vec<PendingWrite>,
     ) -> Vec<(ChunkId, BlockKey)> {
         let mut moves = Vec::new();
         let mut writes = Vec::new();
-        let mut retry = Vec::new();
-        for &(chunk, block) in batch {
-            let Some(victim) = self.memory.read(chunk, block) else {
-                continue;
+        let mut kept = Vec::new();
+        for write in batch {
+            let moving = match write {
+                PendingWrite::Victim { chunk, block } => match self.memory.read(chunk, block) {
+                    Some(victim) => DiskMove::Victim(victim),
+                    None => continue,
+                },
+                PendingWrite::Landed(landed) if self.blocks.get(landed.block()).is_some() => {
+                    self.leave_uncached(landed);
+                    continue;
+                }
+                PendingWrite::Landed(landed) => DiskMove::Landed(landed),
             };
             let Some(writer) = self.allocate_disk() else {
-                retry.push((chunk, block));
+                self.leave_unmoved(moving, &mut kept);
                 continue;
             };
             let hold = writer.hold_for_write(self.disk.chunks());
+            let buf = match &moving {
+                DiskMove::Victim(victim) => victim.lend_for_write(&self.memory, hold),
+                DiskMove::Landed(landed) => landed.write_buffer(hold),
+            };
             writes.push(crate::io::io_task::PageWrite {
-                buf: victim.lend_for_write(&self.memory, hold),
+                buf,
                 at: writer.position(),
             });
-            moves.push((victim, writer));
+            moves.push((moving, writer));
         }
         let frees_logged = self
             .disk
@@ -159,32 +173,46 @@ impl Tiers {
             self.disk.chunks().close();
         }
         if !frees_logged || writes.is_empty() || self.disk.write_batch(writes).await.is_err() {
-            retry.extend(
-                moves
-                    .iter()
-                    .map(|(victim, _)| (victim.chunk(), victim.block())),
-            );
-            return retry;
+            for (moving, _) in moves {
+                self.leave_unmoved(moving, &mut kept);
+            }
+            return kept;
         }
         let mut changes = self.disk.log().map(|log| log.changes());
-        for (victim, writer) in moves {
-            let block = victim.block();
+        for (moving, writer) in moves {
+            let block = moving.block();
             let on_disk = writer.publish(block);
-            if self.blocks.replace_if(
-                block,
-                Location::Memory(victim.chunk()),
-                Location::Disk(on_disk.chunk()),
-            ) {
+            let to = Location::Disk(on_disk.chunk());
+            let cached = match &moving {
+                DiskMove::Victim(victim) => {
+                    self.blocks
+                        .replace_if(block, Location::Memory(victim.chunk()), to)
+                }
+                DiskMove::Landed(_) => self.blocks.insert_if_absent(block, to),
+            };
+            if cached {
                 if let Some(log) = &mut changes {
                     log.add(block, on_disk.chunk());
                 }
-                victim.unpublish();
+                if let DiskMove::Victim(victim) = &moving {
+                    victim.unpublish();
+                }
                 self.placement.on_admit(Tier::Disk, on_disk.chunk(), block);
             } else {
                 on_disk.unpublish();
             }
+            if let DiskMove::Landed(landed) = moving {
+                self.leave_uncached(landed);
+            }
         }
-        retry
+        kept
+    }
+
+    fn leave_unmoved(&self, moving: DiskMove<'_>, kept: &mut Vec<(ChunkId, BlockKey)>) {
+        match moving {
+            DiskMove::Victim(victim) => kept.push((victim.chunk(), victim.block())),
+            DiskMove::Landed(landed) => self.leave_uncached(landed),
+        }
     }
 
     pub(super) fn evict_from_memory(&self, chunk: ChunkId) -> bool {
@@ -218,4 +246,18 @@ impl Tiers {
 pub(super) enum Promotion<'cache> {
     InMemory(MemoryChunkReader<'cache>),
     NoRoom(DiskChunkReader<'cache>),
+}
+
+enum DiskMove<'c> {
+    Victim(MemoryChunkReader<'c>),
+    Landed(LandedBlock),
+}
+
+impl DiskMove<'_> {
+    fn block(&self) -> BlockKey {
+        match self {
+            Self::Victim(victim) => victim.block(),
+            Self::Landed(landed) => landed.block(),
+        }
+    }
 }
