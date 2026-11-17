@@ -39,8 +39,8 @@ pub(in crate::cache) struct CacheFiles {
 }
 
 impl CacheFiles {
-    /// No `O_DSYNC`: a clean exit flushes the files before the log's clean mark, and a kill
-    /// loses no write already done (`doc/13-persistence.md`).
+    /// No `O_DSYNC`: a kill loses no write already done, and a log of another boot is never
+    /// taken back (`doc/13-persistence.md`).
     pub(in crate::cache) fn open(
         file_system: &FileSystem,
         files: &[DiskFile],

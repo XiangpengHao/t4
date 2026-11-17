@@ -23,17 +23,6 @@ impl Tiers {
 }
 
 impl ObjectCache {
-    /// Closing and joining precede the clean mark: no chunk it names can be overwritten.
-    pub(in crate::cache) fn shut_down(&self) -> std::io::Result<()> {
-        let tiers = &self.tiers;
-        tiers.disk.chunks().close();
-        self.writer.stop();
-        match tiers.disk.log() {
-            Some(log) => log.finish(tiers.paths.next_id()),
-            None => Ok(()),
-        }
-    }
-
     #[cfg(all(test, not(feature = "shuttle")))]
     pub(in crate::cache) fn replay_log(first: &std::path::Path, chunks: u32) -> Option<LogBase> {
         let file_system = crate::io::file_system::FileSystem::default();
@@ -56,9 +45,14 @@ impl ObjectCache {
     }
 }
 
-/// The writer is joined before the log and its cache-file locks close.
+/// Joins the writer before the log and the cache files' locks close, then appends its last adds.
 impl Drop for ObjectCache {
     fn drop(&mut self) {
-        let _ = self.shut_down();
+        let tiers = &self.tiers;
+        tiers.disk.chunks().close();
+        self.writer.stop();
+        if let Some(log) = tiers.disk.log() {
+            let _ = log.finish();
+        }
     }
 }

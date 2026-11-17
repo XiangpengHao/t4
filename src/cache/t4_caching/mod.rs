@@ -297,12 +297,6 @@ impl T4Caching {
         self.cache_store.known_size(path).await
     }
 
-    /// Keeps the disk tier for the next cache on these files, as dropping does, for a process
-    /// that exits without dropping its cache. Reads go on; nothing more is written to disk.
-    pub fn shut_down(&self) -> crate::Result<()> {
-        self.cache_store.shut_down()
-    }
-
     fn bytes_of(range: &GetRange, file_size: u64) -> object_store::Result<Range<u64>> {
         range
             .as_range(file_size)

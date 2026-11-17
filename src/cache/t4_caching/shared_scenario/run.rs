@@ -34,7 +34,6 @@ pub(super) struct ScenarioRun<'s> {
     /// Chunks the reads given up may hold: a read's writes go on after it, each holding its
     /// chunk till done, and a tier with no other room caches nothing meanwhile.
     given_up_chunks: u64,
-    shut_down: bool,
     ticker: Ticker,
 }
 
@@ -89,7 +88,6 @@ impl<'s> ScenarioRun<'s> {
             spawned: Vec::new(),
             disruptions: Vec::new(),
             given_up_chunks: 0,
-            shut_down: false,
         };
         for slot in 0..run.slots.len() {
             run.build(slot, 0);
@@ -226,13 +224,6 @@ impl<'s> ScenarioRun<'s> {
                 self.drop_process(process, step);
                 self.build(self.slot(process), step);
             }
-            SharedOperation::ShutDown { process } => {
-                let Some(process) = self.process(process) else {
-                    return;
-                };
-                process.cache.shut_down().unwrap();
-                self.shut_down = true;
-            }
             SharedOperation::HoldGets { process } => self.slots[self.slot(process)].store.hold(),
             SharedOperation::ReleaseGets => self.release_gets(),
             SharedOperation::Tick => self.transport.clock().advance(Ticker::TICK),
@@ -365,8 +356,7 @@ impl<'s> ScenarioRun<'s> {
     fn check_fetches(&self, step: usize, after: &SharedOperation) {
         let fetched = self.remote.fetched();
         let evicted = fetched.len() as u64 + self.given_up_chunks > self.settings.tier_blocks();
-        // A shut-down cache writes no more to disk.
-        if evicted || (self.settings.on_disk && self.shut_down) {
+        if evicted {
             return;
         }
         for (&(content, block), &count) in &fetched {

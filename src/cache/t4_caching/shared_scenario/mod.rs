@@ -70,7 +70,7 @@ pub enum SharedOperation {
     Drop {
         process: usize,
     },
-    /// Gone as a crash goes: no disk tier kept, beyond what its last `ShutDown` kept.
+    /// Gone as a kill goes: its log keeps what it appended, less the last batch's adds.
     Kill {
         process: usize,
     },
@@ -81,9 +81,6 @@ pub enum SharedOperation {
     },
     /// Dropped, and built again on the same files.
     Restart {
-        process: usize,
-    },
-    ShutDown {
         process: usize,
     },
     /// The process's GETs wait until `ReleaseGets`, or until the script waits on a read.

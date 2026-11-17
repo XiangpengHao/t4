@@ -74,7 +74,7 @@ mod scenario {
         /// Reads two times in five, many on threads of their own.
         fn operation(u: &mut Unstructured<'_>) -> arbitrary::Result<SharedOperation> {
             let process = u.choose_index(Self::PROCESSES)?;
-            Ok(match u.choose_index(25)? {
+            Ok(match u.choose_index(24)? {
                 0..=3 => SharedOperation::Read {
                     process,
                     read: Self::read(u)?,
@@ -110,10 +110,9 @@ mod scenario {
                     polls: u.int_in_range(1..=4)?,
                 },
                 16 => SharedOperation::Restart { process },
-                17 => SharedOperation::ShutDown { process },
-                18 | 19 => SharedOperation::HoldGets { process },
-                20 => SharedOperation::ReleaseGets,
-                21 => SharedOperation::Tick,
+                17 | 18 => SharedOperation::HoldGets { process },
+                19 => SharedOperation::ReleaseGets,
+                20 => SharedOperation::Tick,
                 _ => SharedOperation::Settle,
             })
         }

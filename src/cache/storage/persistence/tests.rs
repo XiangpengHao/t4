@@ -36,7 +36,7 @@ fn sample_base() -> LogBase {
 }
 
 #[test]
-fn a_clean_log_is_replayed_and_rebased_on_each_build() {
+fn a_log_is_replayed_and_rebased_on_each_build() {
     let dir = tempfile::tempdir().unwrap();
     let files = opened(dir.path(), &["cache0", "cache1"]);
     let place = PersistenceLog::beside(
@@ -51,7 +51,7 @@ fn a_clean_log_is_replayed_and_rebased_on_each_build() {
 
     place.seed(&sample_base()).unwrap();
     assert_eq!(place.take().unwrap(), Some(sample_base()));
-    assert!(place.path().exists(), "replaced with an unclean base");
+    assert!(place.path().exists(), "rebased");
     assert_eq!(place.take().unwrap(), Some(sample_base()));
 }
 
@@ -170,7 +170,7 @@ fn a_log_only_grows_until_its_next_build_rebases_it() {
         changes.free(ChunkId::new(5));
         changes.flush().unwrap();
     }
-    log.finish(10).unwrap();
+    log.finish().unwrap();
     let appended = std::fs::read(log.path()).unwrap();
     assert!(appended.starts_with(&base));
     assert_eq!(std::fs::metadata(log.path()).unwrap().ino(), inode);
@@ -200,5 +200,8 @@ fn with_no_boot_id_no_log_is_kept_and_an_old_one_is_removed() {
             .unwrap()
             .is_none()
     );
-    assert!(!path.exists(), "an old log could outlive a machine crash");
+    assert!(
+        !path.exists(),
+        "a later cache would trust it, though chunks change meanwhile"
+    );
 }

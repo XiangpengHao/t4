@@ -172,7 +172,6 @@ fn owners_come_and_go_over_a_disk_tier_while_files_change() {
                 file: 0,
                 size: Some(MIB),
             },
-            ShutDown { process: 0 },
             Restart { process: 0 },
             Join,
             Tick,

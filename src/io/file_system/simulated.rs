@@ -52,7 +52,7 @@ impl FileSystem {
         Ok(())
     }
 
-    pub(crate) fn write_durably(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    pub(crate) fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         let mut disk = self.disk();
         let inode = disk.named_or_made(path);
         let inode = disk.inode_mut(inode);
@@ -67,11 +67,6 @@ impl FileSystem {
         if let Some(replaced) = disk.names.insert(to.to_owned(), inode) {
             disk.unname(replaced);
         }
-        Ok(())
-    }
-
-    /// Every name is durable once made.
-    pub(crate) fn sync_directory_of(&self, _path: &Path) -> io::Result<()> {
         Ok(())
     }
 
@@ -289,10 +284,6 @@ impl OpenFile {
     /// Every file is made at time zero: its inode, never reused, tells it apart.
     pub(crate) fn created(&self) -> Option<Duration> {
         Some(Duration::ZERO)
-    }
-
-    pub(crate) fn sync_data(&self) -> io::Result<()> {
-        Ok(())
     }
 
     pub(crate) fn free_bytes(&self) -> io::Result<u64> {

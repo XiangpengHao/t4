@@ -14,7 +14,6 @@ pub(in crate::cache) struct PersistenceLog {
     path: PathBuf,
     layout: CacheLayout,
     boot: BootId,
-    cache_files: Vec<OpenFile>,
     append: Mutex<Option<LogAppend>>,
 }
 
@@ -29,7 +28,7 @@ impl PersistenceLog {
         Self::beside_in_boot(file_system, first, opened, chunks_per_file, boot)
     }
 
-    /// With no boot id, nothing could tell a later machine crash: no log, and none left behind.
+    /// With no boot id, nothing could tell a log of another boot: no log, and none left behind.
     pub(super) fn beside_in_boot(
         file_system: &FileSystem,
         first: &Path,
@@ -47,13 +46,8 @@ impl PersistenceLog {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
             }
-            file_system.sync_directory_of(&path)?;
             return Ok(None);
         };
-        let cache_files = opened
-            .iter()
-            .map(OpenFile::try_clone)
-            .collect::<io::Result<_>>()?;
         Ok(Some(Self {
             file_system: file_system.clone(),
             path,
@@ -61,13 +55,12 @@ impl PersistenceLog {
                 chunks_per_file,
                 files,
             },
-            cache_files,
             boot,
             append: Mutex::new(None),
         }))
     }
 
-    /// The old clean mark must be durably gone before a chunk can be overwritten.
+    /// Rebased before a chunk is written, so each record appended after applies to the base.
     pub(in crate::cache) fn take(&self) -> io::Result<Option<LogBase>> {
         let bytes = match self.file_system.read(&self.path) {
             Ok(bytes) => Some(bytes),
@@ -86,13 +79,12 @@ impl PersistenceLog {
         let temporary = PathBuf::from(temporary);
         let base = DiskLog::base(base, &self.layout, self.boot);
         let written = (self.file_system)
-            .write_durably(&temporary, &base)
+            .write(&temporary, &base)
             .and_then(|()| self.file_system.rename(&temporary, &self.path));
         if written.is_err() {
             let _ = self.file_system.remove(&temporary);
         }
         written?;
-        self.file_system.sync_directory_of(&self.path)?;
         let file = self.file_system.open_to_append(&self.path)?;
         *self.append.lock().unwrap() = Some(LogAppend::new(file));
         Ok(())
@@ -102,20 +94,12 @@ impl PersistenceLog {
         LogChanges(self.append.lock().unwrap())
     }
 
-    pub(in crate::cache) fn finish(&self, next_id: u64) -> io::Result<()> {
-        let mut changes = self.changes();
-        let Some(append) = changes.0.as_mut() else {
-            return Ok(());
-        };
-        if append.abandoned || append.failed {
-            return Ok(());
+    /// Appends what the last batch left pending, which a kill loses.
+    pub(in crate::cache) fn finish(&self) -> io::Result<()> {
+        match self.changes().0.as_mut() {
+            Some(append) if !append.abandoned && !append.failed => append.write_pending(),
+            _ => Ok(()),
         }
-        for file in &self.cache_files {
-            file.sync_data()?;
-        }
-        append.pending.push(LogEntry::Clean(next_id));
-        append.write_pending()?;
-        append.file.sync_data()
     }
 
     #[cfg(any(all(test, feature = "shuttle"), feature = "__fuzz"))]
@@ -136,8 +120,7 @@ impl PersistenceLog {
 
     #[cfg(all(test, not(feature = "shuttle")))]
     pub(super) fn seed(&self, base: &LogBase) -> io::Result<()> {
-        self.replace_base(base)?;
-        self.finish(base.next_id())
+        self.replace_base(base)
     }
 
     #[cfg(all(test, not(feature = "shuttle")))]
@@ -302,9 +285,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("log");
         let file_system = FileSystem::default();
-        file_system.write_durably(&path, &[]).unwrap();
+        file_system.write(&path, &[]).unwrap();
         let mut append = LogAppend::new(file_system.open_existing(&path, false).unwrap());
-        append.pending.push(LogEntry::Clean(0));
+        append.pending.push(LogEntry::Free(0));
         assert!(append.write_pending().is_err());
         append.file = file_system.open_to_append(&path).unwrap();
         assert!(append.write_pending().is_err());

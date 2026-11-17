@@ -17,11 +17,10 @@ Random sequences of operations on `T4Caching` over an in-memory
   `Suffix`, some joined so they interleave at each I/O, and some given up
   on after a few polls, their futures dropped midway through a fetch, a
   fill, an eviction or a promotion;
-- shutdowns, after which the cache serves reads but writes no more to
-  disk, and restarts: the cache dropped, keeping its disk tier in a
-  log, and built again on its files, replaying and rebasing it. A simulated
-  kill suppresses the clean mark before rebuilding, so the next build
-  replays the live appends too. Where the cache
+- restarts: the cache dropped, keeping its disk tier in a log, and built
+  again on its files, replaying and rebasing it. A simulated kill leaves
+  the last batch's adds unappended before rebuilding, so the next build
+  replays the live appends alone. Where the cache
   files' file system reports no creation time, the cache keeps none, and a
   restart starts cold.
 
@@ -69,8 +68,8 @@ input replays exactly. The script, each step aimed at any process:
   after a few polls;
 - writes behind every cache's back, straight to the store;
 - a process dropped (an owner's files handed to the next to try them),
-  killed (its appended log kept, without a new clean mark), dropped mid-read,
-  shut down, or built again on the same files;
+  killed (its appended log kept, less the last batch's adds), dropped
+  mid-read, or built again on the same files;
 - a process's GETs held until released, time passing, and the script's
   thread stepping aside so that the others run till they wait.
 
@@ -94,8 +93,7 @@ It checks that:
   that still trusts another replaces it at each read; where more blocks
   were fetched than the tier holds beside those of the reads given up, as
   a given-up read's write to a tier goes on after it, holding its chunk,
-  and a block that finds no room isn't cached; and once a cache on disk
-  shut down;
+  and a block that finds no room isn't cached;
 - no thread is left waiting once every process is dropped: shuttle reports
   a deadlock.
 

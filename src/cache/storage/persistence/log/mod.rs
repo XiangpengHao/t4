@@ -38,12 +38,16 @@ impl DiskLog {
         out.0
     }
 
+    /// A log of another boot starts cold: a machine crash may lose a record whose later chunk
+    /// write landed.
     pub(super) fn replay(bytes: &[u8], layout: &CacheLayout, boot: BootId) -> Option<LogBase> {
         let mut input = LogReader { bytes };
-        if input.take(8)? != Self::MAGIC || input.u32()? != Self::FORMAT {
+        if input.take(8)? != Self::MAGIC
+            || input.u32()? != Self::FORMAT
+            || input.take(16)? != boot.as_bytes()
+        {
             return None;
         }
-        let same_boot = input.take(16)? == boot.as_bytes();
         let base_len = usize::try_from(input.u64()?).ok()?;
         let checksum = input.u32()?;
         let base = input.take(base_len)?;
@@ -63,7 +67,7 @@ impl DiskLog {
                 replay.apply(LogEntry::decode(&mut record)?)?;
             }
         }
-        (same_boot || replay.clean).then(|| replay.into_base())
+        Some(replay.into_base())
     }
 
     fn take_record<'b>(input: &mut LogReader<'b>) -> Option<(u32, &'b [u8])> {
@@ -82,7 +86,6 @@ pub(super) enum LogEntry {
         chunk: u32,
     },
     Free(u32),
-    Clean(u64),
 }
 
 impl LogEntry {
@@ -109,10 +112,6 @@ impl LogEntry {
                 out.raw(&[2]);
                 out.u32(*chunk);
             }
-            Self::Clean(next_id) => {
-                out.raw(&[3]);
-                out.u64(*next_id);
-            }
         }
     }
 
@@ -138,7 +137,6 @@ impl LogEntry {
                 chunk: input.u32()?,
             }),
             2 => Some(Self::Free(input.u32()?)),
-            3 => Some(Self::Clean(input.u64()?)),
             _ => None,
         }
     }
@@ -151,7 +149,6 @@ struct LogReplay {
     paths: BTreeMap<Box<[u8]>, u64>,
     chunks: Vec<Option<BlockKey>>,
     blocks: HashSet<BlockKey>,
-    clean: bool,
 }
 
 impl LogReplay {
@@ -163,7 +160,6 @@ impl LogReplay {
             paths: BTreeMap::new(),
             chunks: vec![None; chunks as usize],
             blocks: HashSet::new(),
-            clean: false,
         };
         for mut version in base.versions {
             for (index, chunk) in version.blocks.drain(..) {
@@ -180,7 +176,6 @@ impl LogReplay {
     }
 
     fn apply(&mut self, entry: LogEntry) -> Option<()> {
-        self.clean = matches!(entry, LogEntry::Clean(_));
         match entry {
             LogEntry::Path(version) => {
                 let id = version.version.id().get();
@@ -212,13 +207,6 @@ impl LogReplay {
             LogEntry::Free(chunk) => {
                 let key = self.chunks.get_mut(chunk as usize)?.take()?;
                 self.blocks.remove(&key);
-            }
-            LogEntry::Clean(next_id) => {
-                if next_id < self.next_id || next_id > FileVersionId::LIMIT {
-                    return None;
-                }
-                self.next_id = next_id;
-                self.minimum_new_id = next_id;
             }
         }
         Some(())
