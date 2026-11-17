@@ -363,3 +363,30 @@ fn a_full_disk_batch_under_a_killed_owner_names_only_its_written_chunks() {
     )
     .check();
 }
+
+/// A read on a thread of its own, its GETs held, keeps its owner and the owner's files: the group
+/// moved to files that share one waits for it rather than finding that file owned.
+#[test]
+fn a_group_moves_files_once_its_reads_on_threads_are_answered() {
+    SharedScenario::new(
+        roomy(2, 2),
+        vec![
+            WriteBehind {
+                file: 0,
+                size: Some(MIB),
+            },
+            HoldGets { process: 0 },
+            Spawn {
+                process: 0,
+                read: whole(0),
+            },
+            Settle,
+            MoveFiles { files: vec![1, 0] },
+            Read {
+                process: 1,
+                read: whole(0),
+            },
+        ],
+    )
+    .check();
+}

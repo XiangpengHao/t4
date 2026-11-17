@@ -83,9 +83,9 @@ pub enum SharedOperation {
     Restart {
         process: usize,
     },
-    /// Every process dropped, and built again on these cache files, by number modulo three, in
-    /// order: a machine whose config drops a drive and later adds it back. A file named twice
-    /// counts once; none names file 0.
+    /// Every process dropped, once the reads on threads of their own are answered, and built
+    /// again on these cache files, by number modulo three, in order: a machine whose config
+    /// drops a drive and later adds it back. A file named twice counts once; none names file 0.
     MoveFiles {
         files: Vec<usize>,
     },
