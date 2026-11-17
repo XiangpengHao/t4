@@ -3,13 +3,12 @@ use std::ops::Range;
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures_util::future::join_all;
 
 use crate::PAGE_SIZE_U32;
 use crate::cache::policy::{Admit, Tier};
 use crate::cache::storage::in_flight::FetchClaim;
 use crate::cache::storage::index::{FileVersion, Location};
-use crate::cache::storage::memory::LentMemoryChunk;
+use crate::cache::storage::memory::{LentMemoryChunk, MemoryChunkWriter};
 use crate::cache::{BLOCK_SIZE_U64, BlockKey, FileVersionId};
 use crate::io::aligned_buf::AlignedBuf;
 use crate::io::error::{Error, Result};
@@ -87,8 +86,8 @@ impl ObjectCache {
             .and_then(NonZeroU32::new)
             .expect("a block is a chunk's bytes or fewer, one or more");
         match admit {
-            Admit::Memory | Admit::Disk => match self.tiers.allocate_memory().await {
-                Ok(Some(writer)) => {
+            Admit::Memory | Admit::Disk => match self.memory_to_land_in(admit).await {
+                Some(writer) => {
                     let (chunk, lent) = writer.lend_for_read(&self.tiers.memory, pages);
                     Landing::Memory {
                         chunk,
@@ -96,10 +95,26 @@ impl ObjectCache {
                         to_disk: matches!(admit, Admit::Disk),
                     }
                 }
-                // An eviction's failed write leaves the block uncached, not the read failed.
-                Ok(None) | Err(_) => Landing::Nowhere,
+                None => Landing::Nowhere,
             },
             Admit::Discard => Landing::Passing(Vec::with_capacity(len)),
+        }
+    }
+
+    /// A block bound for disk waits for the writer to take blocks out of memory rather than go
+    /// uncached, for as long as the writer makes room.
+    async fn memory_to_land_in(&self, admit: Admit) -> Option<MemoryChunkWriter<'_>> {
+        loop {
+            // An eviction's failed write leaves the block uncached, not the read failed.
+            let Ok(allocated) = self.tiers.allocate_memory().await else {
+                return None;
+            };
+            if allocated.is_some()
+                || admit != Admit::Disk
+                || !self.tiers.pending.moved_blocks().await
+            {
+                return allocated;
+            }
         }
     }
 
@@ -188,56 +203,56 @@ impl FetchedBlocks<'_> {
             block.landing.copy_in(within, &piece[..taken]);
             piece = &piece[taken..];
             self.received += taken as u64;
+            if within + taken == self.block_len(index) {
+                self.settle(index).await;
+            }
         }
         Ok(())
     }
 
+    /// Every block is cached as its last byte lands; a fetch that brought fewer bytes than it
+    /// holds leaves its unfinished blocks uncached.
     pub(in crate::cache) async fn finish(self) -> Result<()> {
         if self.received != self.range.end - self.range.start {
             return Err(Self::wrong_length(&self.range, "fewer"));
         }
-        let Self {
-            cache,
-            version,
-            first,
-            blocks,
-            ..
-        } = self;
-        let cached = (first..).zip(blocks).map(|(index, block)| async move {
-            let FetchedBlock {
-                landing,
-                output,
-                claim,
-            } = block;
-            // Released before caching: the read may take its bytes already.
-            drop(output);
-            let key = BlockKey::new(version.id(), index);
-            let passed = match landing {
-                Landing::Passing(bytes) => Some(Bytes::from(bytes)),
-                landing => {
-                    cache.cache_landed(key, landing).await;
-                    None
-                }
-            };
-            // Ends with wherever a tier holds the block, even if another fetch put it there.
-            if let Some(claim) = claim {
-                match passed {
-                    Some(bytes) => claim.passed(bytes),
-                    None => claim.ended(cache.tiers.blocks.get(key)),
-                }
-            }
-        });
-        join_all(cached).await;
         Ok(())
+    }
+
+    /// Caches a block whose bytes are all in, so that it may go to disk while the fetch goes on.
+    async fn settle(&mut self, index: usize) {
+        let key = self.key(index);
+        let block = &mut self.blocks[index];
+        // Released before caching: the read may take its bytes already.
+        drop(block.output.take());
+        let claim = block.claim.take();
+        let passed = match std::mem::replace(&mut block.landing, Landing::Nowhere) {
+            Landing::Passing(bytes) => Some(Bytes::from(bytes)),
+            landing => {
+                self.cache.cache_landed(key, landing).await;
+                None
+            }
+        };
+        // Ends with wherever a tier holds the block, even if another fetch put it there.
+        if let Some(claim) = claim {
+            match passed {
+                Some(bytes) => claim.passed(bytes),
+                None => claim.ended(self.cache.tiers.blocks.get(key)),
+            }
+        }
     }
 
     async fn decide_landing(&mut self, index: usize) {
         if let Landing::Due(admit) = self.blocks[index].landing {
-            let number = self.first + u32::try_from(index).expect("a fetch's blocks fit a u32");
-            let key = BlockKey::new(self.version.id(), number);
+            let key = self.key(index);
             let landing = self.cache.landing(key, admit, self.block_len(index)).await;
             self.blocks[index].landing = landing;
         }
+    }
+
+    fn key(&self, index: usize) -> BlockKey {
+        let number = self.first + u32::try_from(index).expect("a fetch's blocks fit a u32");
+        BlockKey::new(self.version.id(), number)
     }
 
     fn block_len(&self, index: usize) -> usize {
