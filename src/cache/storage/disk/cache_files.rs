@@ -93,7 +93,7 @@ impl CacheFiles {
         self.kept.take()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::cache) fn keeping_free(mut self, keep_free: u64) -> Self {
         if let Some(headroom) = &mut self.headroom {
             headroom.set_keep_free(keep_free);
