@@ -3,6 +3,8 @@ mod io_report;
 mod network;
 pub mod policy;
 mod read_output;
+#[cfg(all(feature = "shuttle", any(test, all(feature = "__fuzz", t4_simulated))))]
+mod seeded_bytes;
 mod storage;
 mod t4_caching;
 

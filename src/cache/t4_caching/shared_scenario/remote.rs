@@ -15,7 +15,7 @@ use object_store::{
     ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 
-use super::model::Content;
+use super::model::{Content, Version};
 use crate::cache::BLOCK_SIZE_U64;
 use crate::io::sync::{Arc, Mutex};
 
@@ -31,15 +31,18 @@ impl Remote {
         Path::from(format!("file-{file}"))
     }
 
-    pub(super) async fn write(&self, file: usize, content: Option<Content>) {
+    pub(super) async fn write(&self, file: usize, version: Option<Version>) {
         let path = Self::path(file);
-        let Some(content) = content else {
+        let Some(version) = version else {
             self.store.delete(&path).await.unwrap();
             return;
         };
-        let put = self.store.put(&path, content.bytes().into()).await.unwrap();
-        let e_tag = put.e_tag.expect("the memory store tags every put");
-        self.versions.lock().unwrap().insert(e_tag, content);
+        let put = self.store.put(&path, version.bytes().clone().into()).await;
+        let e_tag = put.unwrap().e_tag.expect("the memory store tags every put");
+        self.versions
+            .lock()
+            .unwrap()
+            .insert(e_tag, version.content());
     }
 
     pub(super) async fn size(&self, file: usize) -> Option<u64> {

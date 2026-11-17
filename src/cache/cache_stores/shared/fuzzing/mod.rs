@@ -2,7 +2,6 @@
 //! beside it (`fuzz/README.md`, `shared_owner`).
 use std::ops::Range;
 
-use bytes::Bytes;
 use object_store::ObjectMeta;
 use shuttle::future::block_on;
 
@@ -200,7 +199,7 @@ impl FuzzedSession {
                     let meta = &files.read_by_both()[usize::from(read.file) % 2];
                     let start = read.range.start.min(meta.size - 1);
                     let range = start..read.range.end.clamp(start + 1, meta.size);
-                    Self::assert_reads(&reader, meta, range);
+                    Self::assert_reads(&files, &reader, meta, range);
                 }
             })
         };
@@ -220,7 +219,7 @@ impl FuzzedSession {
             Self::wait_until("the owner unmapped the region", || !region.lent_to_owner());
         }
         for meta in files.read_by_both() {
-            Self::assert_reads(&owner, meta, 0..meta.size);
+            Self::assert_reads(&files, &owner, meta, 0..meta.size);
         }
         let mut waits = 0;
         while let Err(error) = owner.check_at_rest() {
@@ -247,12 +246,14 @@ impl FuzzedSession {
             .build()
     }
 
-    fn assert_reads(cache: &T4Caching, meta: &ObjectMeta, range: Range<u64>) {
+    fn assert_reads(files: &SharedFiles, cache: &T4Caching, meta: &ObjectMeta, range: Range<u64>) {
         let read = block_on(cache.open_listed(meta.clone()).read(range.clone(), None));
-        let path = meta.location.as_ref().as_bytes();
-        let expected = Bytes::from(SharedFiles::bytes(path, range.clone()));
         match read {
-            Ok(bytes) => assert!(bytes == expected, "{} {range:?} read wrong", meta.location),
+            Ok(bytes) => assert!(
+                files.hold(meta, range.clone(), &bytes),
+                "{} {range:?} read wrong",
+                meta.location
+            ),
             Err(error) => panic!("{} {range:?} failed: {error}", meta.location),
         }
     }
