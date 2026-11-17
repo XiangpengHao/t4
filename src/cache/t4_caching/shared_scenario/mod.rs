@@ -169,10 +169,12 @@ impl SharedSettings {
         self
     }
 
-    /// Blocks the placement policy keeps in one tier: fetched no more than that, none was evicted.
+    /// Blocks the placement policy keeps in one tier: fetched no more than that, none was evicted
+    /// or found no room. A block bound for disk waits in memory till written, and goes uncached
+    /// if memory has no free chunk (`doc/13-persistence.md`, decision 9).
     fn tier_blocks(&self) -> u64 {
         match self.on_disk {
-            true => self.disk_blocks,
+            true => self.disk_blocks.min(self.memory_blocks),
             false => self.memory_blocks,
         }
     }

@@ -93,7 +93,9 @@ It checks that:
   that still trusts another replaces it at each read; where more blocks
   were fetched than the tier holds beside those of the reads given up, as
   a given-up read's write to a tier goes on after it, holding its chunk,
-  and a block that finds no room isn't cached;
+  and a block that finds no room isn't cached; for blocks bound for disk,
+  where more were fetched than memory holds too, as each waits in memory
+  till written (`doc/13-persistence.md`, decision 9);
 - no thread is left waiting once every process is dropped: shuttle reports
   a deadlock.
 
