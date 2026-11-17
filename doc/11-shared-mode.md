@@ -110,7 +110,10 @@ decision 9).
      The `HeldRun` holds the run's claims until `take_gets`, which checks
      the plan where it arrives (`LocatedRead::accepts`) and carries out
      the default's instead of one it can't: a `LocatedRun` is data alone,
-     and a client's plan is checked in the owner.
+     and a client's plan is checked in the owner. It walks a plan's blocks
+     only once its GETs are apart and in the file, so a plan naming
+     billions of blocks past the file is refused at once (fixed 17 Nov
+     2026: `shared_owner` timed out on one).
    - **A fetched block lands in its chunk on its first byte**
      (`ObjectCache::landing`): a memory chunk or a disk write buffer,
      allocated then, evicting if the tier is full. In the owner, landing

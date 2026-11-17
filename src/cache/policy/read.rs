@@ -89,6 +89,8 @@ impl<'r> LocatedRead<'r> {
         start.min(self.file_size)..(start + BLOCK_SIZE_U64).min(self.file_size)
     }
 
+    /// The walk of a plan's blocks comes last: only GETs apart and in the file bound it, by the
+    /// file's blocks, whatever a client's plan names (fuzzed: `shared_owner`).
     pub(in crate::cache) fn accepts(&self, plan: &ReadPlan) -> bool {
         let mut gets: Vec<Range<u32>> = plan.gets().iter().map(PlannedGet::blocks).collect();
         gets.sort_unstable_by_key(|blocks| blocks.start);
@@ -96,17 +98,23 @@ impl<'r> LocatedRead<'r> {
             .iter()
             .all(|blocks| blocks.start < blocks.end && blocks.end <= self.file_blocks());
         let apart = gets.windows(2).all(|pair| pair[0].end <= pair[1].start);
-        let covered = self.remote_runs().flatten().all(|block| {
-            let at = gets.partition_point(|blocks| blocks.start <= block);
-            at > 0 && gets[at - 1].contains(&block)
-        });
-        let races_in_flight = plan.gets().iter().all(|get| {
-            get.blocks().all(|block| match self.source(block) {
-                Some(BlockSource::InFlight { requests }) => requests < u32::from(get.race().get()),
-                _ => true,
+        let covered = || {
+            self.remote_runs().flatten().all(|block| {
+                let at = gets.partition_point(|blocks| blocks.start <= block);
+                at > 0 && gets[at - 1].contains(&block)
             })
-        });
-        in_file && apart && covered && races_in_flight
+        };
+        let races_in_flight = || {
+            plan.gets().iter().all(|get| {
+                get.blocks().all(|block| match self.source(block) {
+                    Some(BlockSource::InFlight { requests }) => {
+                        requests < u32::from(get.race().get())
+                    }
+                    _ => true,
+                })
+            })
+        };
+        in_file && apart && covered() && races_in_flight()
     }
 
     pub fn remote_runs(&self) -> impl Iterator<Item = Range<u32>> + '_ {
@@ -451,6 +459,10 @@ mod tests {
         assert!(!accepts(&[4..5]), "a remote block left out");
         assert!(!accepts(&[4..6, 5..7]), "a block fetched twice");
         assert!(!accepts(&[4..5, 6..12]), "past the file");
+        assert!(
+            !accepts(&[4..5, 6..u32::MAX]),
+            "past it by billions of blocks, at once"
+        );
         assert!(!accepts(&[4..5, 5..5, 6..7]), "an empty GET");
     }
 
