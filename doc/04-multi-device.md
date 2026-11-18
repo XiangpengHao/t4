@@ -173,7 +173,7 @@ first made as the output was: a system call a read, whatever tier served
 it. A read from memory copies its bytes on its own task and so faults in
 its own pages; the call bought it nothing. Now the pages lent to a disk
 read are populated as they are lent (`ReadOutput::lend_to_disk_read`), and
-no others. One hot read from memory at a time (`benches/shared_reads.rs`,
+no others. One hot read from memory at a time (`bench/benches/shared_reads.rs`,
 the median of 100 reads) on an i7i.24xlarge (Xeon 8559C, Linux 7.0, glibc
 2.42):
 

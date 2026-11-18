@@ -50,7 +50,6 @@ rustix = { version = "1.1.6", features = ["event", "fs", "mm", "net", "process",
 [dev-dependencies]
 pollster = "1.0"
 tempfile = "3"
-divan = "0.1.21"
 
 [package.metadata.verus]
 verify = true
@@ -65,9 +64,3 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)', 'cfg(t4_simu
 # A module with submodules is a `mod.rs` in its own directory, never a
 # `foo.rs` beside a `foo/`: one place to look for a module.
 self_named_module_files = "deny"
-
-# A hot read's time through an unshared cache, and a shared cache's owner
-# and its client (`doc/11-shared-mode.md`, Cost).
-[[bench]]
-name = "shared_reads"
-harness = false
