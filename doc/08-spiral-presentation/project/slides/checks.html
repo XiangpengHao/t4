@@ -1,0 +1,22 @@
+<section id="checks" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:56px">
+<div style="display:flex;flex-direction:column;gap:16px">
+<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-weight:500;font-size:72px;line-height:1.1;letter-spacing:-0.72px;color:#171716">How t4 is checked</h2>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">A cache may lose a block, never return wrong bytes</p>
+</div>
+<div style="flex:1;display:flex;gap:64px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;padding:32px 0px 0px 0px;border-top:1px solid #dfdfdd">
+<h3 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;letter-spacing:-0.4px;color:#171716">Proved</h3>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">Verus proves the chunk bookkeeping and block arithmetic.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;padding:32px 0px 0px 0px;border-top:1px solid #dfdfdd">
+<h3 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;letter-spacing:-0.4px;color:#171716">Replayable</h3>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">Every concurrent test runs on seeded schedules, so a failure replays exactly.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px;padding:32px 0px 0px 0px;border-top:1px solid #dfdfdd">
+<h3 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;letter-spacing:-0.4px;color:#171716">Fuzzed weekly</h3>
+<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">Reads, restarts and shared processes, checked against the object store.</p>
+</div>
+</div>
+<div id="deck-nav" style="position:absolute;left:128px;bottom:28px;width:1664px;display:flex;gap:8px"><p style="flex:1;border-top:4px solid #dfdfdd;padding-top:10px;font-size:24px;font-weight:400;line-height:1.2;color:#646462"><span style="color:#646462">0</span> Overview</p><p style="flex:1;border-top:4px solid #dfdfdd;padding-top:10px;font-size:24px;font-weight:400;line-height:1.2;color:#646462"><span style="color:#646462">1</span> Background</p><p style="flex:1;border-top:4px solid #dfdfdd;padding-top:10px;font-size:24px;font-weight:400;line-height:1.2;color:#646462"><span style="color:#646462">2</span> Disk I/O</p><p style="flex:1;border-top:4px solid #dfdfdd;padding-top:10px;font-size:24px;font-weight:400;line-height:1.2;color:#646462"><span style="color:#646462">3</span> Tiered cache</p><p style="flex:1;border-top:4px solid #dfdfdd;padding-top:10px;font-size:24px;font-weight:400;line-height:1.2;color:#646462"><span style="color:#646462">4</span> Optimizations</p><p style="flex:1;border-top:4px solid #1d0fed;padding-top:10px;font-size:24px;font-weight:500;line-height:1.2;color:#171716"><span style="color:#1d0fed">5</span> Evaluations</p></div>
+<aside>Speed only counts if the bytes are right. The rule: a cache may lose any block, since the object store has it, but it must never return wrong bytes. Proved: Verus proves the free-chunk bitmap and the block and page arithmetic, from a file's blocks to a read's pages (src/cache/storage/chunks, src/cache/storage/index). Replayable: every concurrent test runs under shuttle with seeded PCT schedules, the seeds checked in, on a simulated disk, socket and clock (doc/12-seeded-concurrency-tests.md). Fuzzed weekly: every Monday in CI, an hour per target from an empty corpus (.github/workflows/fuzz.yml). cache_equivalence checks every read against the store, through restarts on moving cache files and kills; shared_mode and shared_owner run an owner and its clients, one client sending whatever frames the input picks; frames and log_base fuzz the socket's frames and the log's base. The same job runs every shuttle test for 50 minutes on new seeds.</aside>
+</section>
