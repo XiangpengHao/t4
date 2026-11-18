@@ -415,7 +415,7 @@ owner. A read is one call however many blocks it spans, and calls are
 pipelined. The owner's own reads cost what they cost now.
 
 **Measured** on a MacBook (Apple silicon, a desktop's load, 30 Oct 2026;
-`benches/shared_reads.rs`, both caches in one process, the file gone from
+`bench/benches/shared_reads.rs`, both caches in one process, the file gone from
 the store so that only the cache can serve it), median of 100:
 
 | a hot read of | the owner's own | its client's |
@@ -638,7 +638,7 @@ spins.
       `T4Caching::read_through`, `fetch` and `turn` serve both with one
       copy of their logic. The boxes cost no measured time: an owner's
       hot 4 KiB read took 429 ns, against 421 ns through the enum,
-      within a run's spread (`benches/shared_reads.rs`, 2 Nov 2026).
+      within a run's spread (`bench/benches/shared_reads.rs`, 2 Nov 2026).
 3. **The socket, bytes in its frames,** on Linux and macOS: the owner
    listens, a client connects on `Busy`, the handshake, failures to the
    remote, a client coming to own the cache. Tests in one process (a

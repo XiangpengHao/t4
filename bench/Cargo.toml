@@ -56,4 +56,13 @@ default = ["mimalloc"]
 mimalloc = ["dep:mimalloc"]
 
 [dev-dependencies]
+divan = "0.1.21"
+pollster = "1.0"
+tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
+
+# A hot read's time through an unshared cache, and a shared cache's owner
+# and its client (`doc/11-shared-mode.md`, Cost).
+[[bench]]
+name = "shared_reads"
+harness = false

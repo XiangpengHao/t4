@@ -259,7 +259,7 @@
               pkgs.cargo-binutils
               verus
               verusfmt
-              # benches/read_throughput.rs's baseline, and its plot.
+              # fio, for the drives' baseline (doc/04); Python for plots.
               pkgs.fio
               (pkgs.python3.withPackages (ps: [ ps.matplotlib ]))
             ];
