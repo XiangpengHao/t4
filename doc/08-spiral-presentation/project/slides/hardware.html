@@ -1,16 +1,24 @@
-<section id="hardware" data-transition="fade" style="background:#fcfcf9;color:#171716;font-family:Inter, Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
-<div style="display:flex;flex-direction:column;gap:16px">
-<h2 style="font-family:'Acid Grotesk', Inter, sans-serif;font-size:72px;font-weight:500;line-height:1.1;letter-spacing:-0.72px;color:#171716">Price per GB: memory and SSD</h2>
-<p style="font-size:30px;font-weight:300;line-height:1.35;color:#3c3c3a">Since 2018, a GB of memory has cost 33 to 57 times a GB of SSD.</p>
-</div>
-<div style="display:flex;flex-direction:column;gap:16px">
-<div style="display:flex;gap:48px;align-items:center">
-<div style="display:flex;gap:12px;align-items:center"><div style="width:40px;height:4px;background:#8b83f6"></div><p style="font-size:24px;font-weight:400;line-height:1.2;color:#171716">Memory (DRAM)</p></div>
-<div style="display:flex;gap:12px;align-items:center"><div style="width:40px;height:4px;background:#1d0fed"></div><p style="font-size:24px;font-weight:400;line-height:1.2;color:#171716">SSD (series starts in 2013)</p></div>
-<p style="font-size:24px;font-weight:400;line-height:1.2;color:#646462">Lowest retail price each year · log scale</p>
-</div>
-<div style="position:relative;width:1664px;height:560px">
-<svg aria-label="Line chart, log scale, lowest retail price per GB by year. Memory fell from $74.50 in 2006 to $1.31 in 2023, then rose to $2.83 in 2026. SSD fell from $0.625 in 2013 to $0.03 in 2023 and was $0.05 in 2026. In 2026 memory costs 57 times as much per GB." style="position:absolute;left:0px;top:0px" width="1664" height="560" viewBox="0 0 1664 560">
+<section id="hardware" data-transition="fade" style="display:flex; flex-direction:column; gap:32px; padding:128px 128px 160px; background:#fcfcf9">
+  <div style="display:flex; flex-direction:column; gap:16px">
+    <h2 style="font-family:'Acid Grotesk', sans-serif; font-size:72px; font-weight:500; line-height:1.1; letter-spacing:-0.7px; color:#171716">Capacity per dollar: the gap is widening</h2>
+    <p style="font-family:Inter, Arial, sans-serif; font-size:30px; font-weight:300; line-height:1.35; color:#3c3c3a">Since 2018, a GB of memory has cost 33 to 57 times a GB of SSD.</p>
+  </div>
+  <div style="display:flex; flex-direction:column; gap:16px">
+    <div style="display:flex; flex-direction:row; gap:48px; align-items:center">
+      <div style="display:flex; flex-direction:row; gap:12px; align-items:center">
+        <div style="width:40px; height:4px; display:flex; flex-direction:column; background:#8b83f6">
+        </div>
+        <p style="font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#171716">Memory (DRAM)</p>
+      </div>
+      <div style="display:flex; flex-direction:row; gap:12px; align-items:center">
+        <div style="width:40px; height:4px; display:flex; flex-direction:column; background:#1d0fed">
+        </div>
+        <p style="font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#171716">SSD (series starts in 2013)</p>
+      </div>
+      <p style="font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#646462">Lowest retail price each year · log scale</p>
+    </div>
+    <div style="position:relative; width:1664px; height:560px; display:flex; flex-direction:column; align-self:stretch">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1664 560" aria-label="Line chart, log scale, lowest retail price per GB by year. Memory fell from $74.50 in 2006 to $1.31 in 2023, then rose to $2.83 in 2026. SSD fell from $0.625 in 2013 to $0.03 in 2023 and was $0.05 in 2026. In 2026 memory costs 57 times as much per GB." style="position:absolute; top:0; left:0; width:1664px; height:560px">
 <line x1="140" y1="20" x2="1464" y2="20" stroke="#ebebe8" stroke-width="2"/>
 <line x1="140" y1="140" x2="1464" y2="140" stroke="#ebebe8" stroke-width="2"/>
 <line x1="140" y1="260" x2="1464" y2="260" stroke="#ebebe8" stroke-width="2"/>
@@ -57,24 +65,31 @@
 <line x1="1488" y1="205.8" x2="1488" y2="416.1" stroke="#171716" stroke-width="2"/>
 <line x1="1476" y1="416.1" x2="1488" y2="416.1" stroke="#171716" stroke-width="2"/>
 </svg>
-<p style="position:absolute;left:0px;top:6px;width:124px;text-align:right;font-size:24px;font-weight:400;line-height:1.2;color:#646462">$100</p>
-<p style="position:absolute;left:0px;top:126px;width:124px;text-align:right;font-size:24px;font-weight:400;line-height:1.2;color:#646462">$10</p>
-<p style="position:absolute;left:0px;top:246px;width:124px;text-align:right;font-size:24px;font-weight:400;line-height:1.2;color:#646462">$1</p>
-<p style="position:absolute;left:0px;top:366px;width:124px;text-align:right;font-size:24px;font-weight:400;line-height:1.2;color:#646462">$0.10</p>
-<p style="position:absolute;left:0px;top:486px;width:124px;text-align:right;font-size:24px;font-weight:400;line-height:1.2;color:#646462">$0.01</p>
-<p style="position:absolute;left:90px;top:516px;width:100px;text-align:center;font-size:24px;font-weight:400;line-height:1.2;color:#646462">2006</p>
-<p style="position:absolute;left:355px;top:516px;width:100px;text-align:center;font-size:24px;font-weight:400;line-height:1.2;color:#646462">2010</p>
-<p style="position:absolute;left:620px;top:516px;width:100px;text-align:center;font-size:24px;font-weight:400;line-height:1.2;color:#646462">2014</p>
-<p style="position:absolute;left:884px;top:516px;width:100px;text-align:center;font-size:24px;font-weight:400;line-height:1.2;color:#646462">2018</p>
-<p style="position:absolute;left:1149px;top:516px;width:100px;text-align:center;font-size:24px;font-weight:400;line-height:1.2;color:#646462">2022</p>
-<p style="position:absolute;left:1414px;top:516px;width:100px;text-align:center;font-size:24px;font-weight:400;line-height:1.2;color:#646462">2026</p>
-<p style="position:absolute;left:1500px;top:191px;width:164px;font-size:24px;font-weight:500;line-height:1.2;color:#171716">$2.83</p>
-<p style="position:absolute;left:1500px;top:402px;width:164px;font-size:24px;font-weight:500;line-height:1.2;color:#171716">$0.05</p>
-<p style="position:absolute;left:1500px;top:285px;width:164px;font-family:'Acid Grotesk', Inter, sans-serif;font-size:40px;font-weight:500;line-height:1.1;color:#171716">57×</p>
-<p style="position:absolute;left:1500px;top:333px;width:164px;font-size:24px;font-weight:400;line-height:1.2;color:#646462">in 2026</p>
-</div>
-</div>
-<p style="position:absolute;left:128px;bottom:92px;width:1664px;font-family:'Geist Mono', 'Courier New', monospace;font-size:24px;font-weight:400;line-height:1.2;letter-spacing:0.5px;text-transform:none;color:#646462">2006–2024: J. C. MCCALLUM, NEWEGG · 2025–2026: STANFORD DAM, AMAZON · NOMINAL USD</p>
-<div id="deck-nav" style="position:absolute;left:128px;bottom:28px;width:1664px;display:flex;gap:8px"><p style="flex:1;border-top:4px solid #dfdfdd;padding-top:10px;font-size:24px;font-weight:400;line-height:1.2;color:#646462"><span style="color:#646462">0</span> Overview</p><p style="flex:1;border-top:4px solid #1d0fed;padding-top:10px;font-size:24px;font-weight:500;line-height:1.2;color:#171716"><span style="color:#1d0fed">1</span> Background</p><p style="flex:1;border-top:4px solid #dfdfdd;padding-top:10px;font-size:24px;font-weight:400;line-height:1.2;color:#646462"><span style="color:#646462">2</span> Disk I/O</p><p style="flex:1;border-top:4px solid #dfdfdd;padding-top:10px;font-size:24px;font-weight:400;line-height:1.2;color:#646462"><span style="color:#646462">3</span> Hybrid cache</p><p style="flex:1;border-top:4px solid #dfdfdd;padding-top:10px;font-size:24px;font-weight:400;line-height:1.2;color:#646462"><span style="color:#646462">4</span> Optimizations</p><p style="flex:1;border-top:4px solid #dfdfdd;padding-top:10px;font-size:24px;font-weight:400;line-height:1.2;color:#646462"><span style="color:#646462">5</span> Evaluations</p></div>
-<aside>Price per GB, nominal dollars, the lowest retail price recorded each year (price divided by labelled capacity). 2006 to July 2024: John C. McCallum's tables of NewEgg consumer listings, DRAM DIMMs and mostly SATA SSDs (web.archive.org/web/20250716092935/https://jcmit.net/memoryprice.htm and web.archive.org/web/20250716094252/https://jcmit.net/flashprice.htm; jcmit.net itself no longer serves them). 2025 and 2026 (January to September): Stanford DAM's price tracker, the cheapest Amazon listing via Keepa, NVMe drives only (dam.stanford.edu/memory-prices.html). The two baskets differ, so read the 2024 to 2025 step loosely. McCallum's SSD series starts in 2013; no sourced retail SSD price before that (one enterprise point: Intel X25-E, 2008, $21.7 per GB in 1,000-unit lots). Memory: $74.50 in 2006, $1.31 in 2023, $2.83 in 2026, the cheapest module of any generation (a DDR3 server module); DDR5 alone was $7.11. From September 2025 to September 2026 the cheapest DRAM went from $2.12 to $4.85 a GB and the cheapest DDR5 from $2.18 to $13.41. SSD: $0.625 in 2013, $0.0305 in 2023, $0.05 in 2026. The ratio memory over SSD: 7x in 2013, 33x to 57x every year since 2018.</aside>
+      <p style="position:absolute; top:6px; left:0; width:124px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">$100</p>
+      <p style="position:absolute; top:126px; left:0; width:124px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">$10</p>
+      <p style="position:absolute; top:246px; left:0; width:124px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">$1</p>
+      <p style="position:absolute; top:366px; left:0; width:124px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">$0.10</p>
+      <p style="position:absolute; top:486px; left:0; width:124px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:right; color:#646462">$0.01</p>
+      <p style="position:absolute; top:516px; left:90px; width:100px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">2006</p>
+      <p style="position:absolute; top:516px; left:355px; width:100px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">2010</p>
+      <p style="position:absolute; top:516px; left:620px; width:100px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">2014</p>
+      <p style="position:absolute; top:516px; left:884px; width:100px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">2018</p>
+      <p style="position:absolute; top:516px; left:1149px; width:100px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">2022</p>
+      <p style="position:absolute; top:516px; left:1414px; width:100px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; text-align:center; color:#646462">2026</p>
+      <p style="position:absolute; top:191px; left:1500px; width:164px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:500; line-height:1.2; color:#171716">$2.83</p>
+      <p style="position:absolute; top:402px; left:1500px; width:164px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:500; line-height:1.2; color:#171716">$0.05</p>
+      <p style="position:absolute; top:285px; left:1500px; width:164px; font-family:'Acid Grotesk', sans-serif; font-size:40px; font-weight:500; line-height:1.1; color:#171716">57×</p>
+      <p style="position:absolute; top:333px; left:1500px; width:164px; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#646462">in 2026</p>
+    </div>
+  </div>
+  <p style="position:absolute; bottom:92px; left:128px; width:1664px; font-family:'Geist Mono', 'Courier New', monospace; font-size:24px; font-weight:400; line-height:1.2; letter-spacing:0.5px; text-transform:none; color:#646462">2006–2024: J. C. MCCALLUM, NEWEGG · 2025–2026: STANFORD DAM, AMAZON · NOMINAL USD</p>
+  <div id="deck-nav" style="position:absolute; bottom:28px; left:128px; width:1664px; display:flex; flex-direction:row; gap:8px">
+    <p style="flex:1; padding:10px 0 0; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#646462; border-top:4px solid #dfdfdd"><span style="color:#646462">0</span> Overview</p>
+    <p style="flex:1; padding:10px 0 0; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:500; line-height:1.2; color:#171716; border-top:4px solid #1d0fed"><span style="color:#1d0fed">1</span> Background</p>
+    <p style="flex:1; padding:10px 0 0; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#646462; border-top:4px solid #dfdfdd"><span style="color:#646462">2</span> Disk I/O</p>
+    <p style="flex:1; padding:10px 0 0; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#646462; border-top:4px solid #dfdfdd"><span style="color:#646462">3</span> Tiered cache</p>
+    <p style="flex:1; padding:10px 0 0; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#646462; border-top:4px solid #dfdfdd"><span style="color:#646462">4</span> Optimizations</p>
+    <p style="flex:1; padding:10px 0 0; font-family:Inter, Arial, sans-serif; font-size:24px; font-weight:400; line-height:1.2; color:#646462; border-top:4px solid #dfdfdd"><span style="color:#646462">5</span> Evaluations</p>
+  </div>
+  <aside>Price per GB, nominal dollars, the lowest retail price recorded each year (price divided by labelled capacity). 2006 to July 2024: John C. McCallum's tables of NewEgg consumer listings, DRAM DIMMs and mostly SATA SSDs (web.archive.org/web/20250716092935/https://jcmit.net/memoryprice.htm and web.archive.org/web/20250716094252/https://jcmit.net/flashprice.htm; jcmit.net itself no longer serves them). 2025 and 2026 (January to September): Stanford DAM's price tracker, the cheapest Amazon listing via Keepa, NVMe drives only (dam.stanford.edu/memory-prices.html). The two baskets differ, so read the 2024 to 2025 step loosely. McCallum's SSD series starts in 2013; no sourced retail SSD price before that (one enterprise point: Intel X25-E, 2008, $21.7 per GB in 1,000-unit lots). Memory: $74.50 in 2006, $1.31 in 2023, $2.83 in 2026, the cheapest module of any generation (a DDR3 server module); DDR5 alone was $7.11. From September 2025 to September 2026 the cheapest DRAM went from $2.12 to $4.85 a GB and the cheapest DDR5 from $2.18 to $13.41. SSD: $0.625 in 2013, $0.0305 in 2023, $0.05 in 2026. The ratio memory over SSD: 7x in 2013, 33x to 57x every year since 2018.</aside>
 </section>

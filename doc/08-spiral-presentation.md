@@ -1,4 +1,4 @@
-This is the draft for the presentation at spiral on Oct 30
+This is the draft for the presentation at spiral, first given Oct 30 and refreshed Nov 18: persistence across restarts, shared mode for multi-process Python, how t4 is checked, "tiered cache" for section 3; Spiral numbers left out. The live deck is the claude.ai Slides artifact; these files are synced from it.
 
 Meta guide:
 1. at the bottom of each slide, show navigation (content structure), so that readers are not lost.

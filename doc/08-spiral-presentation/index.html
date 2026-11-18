@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>t4 slides</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@300;400;500&family=Inter:wght@300;400;500&display=swap">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0f0f0e; }
+  #stage { position: absolute; left: 50%; top: 50%; width: 1920px; height: 1080px; }
+  #stage *, #stage *::before, #stage *::after { box-sizing: border-box; }
+  #stage h1, #stage h2, #stage h3, #stage p, #stage ul, #stage ol { margin: 0; }
+  #stage section {
+    position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; overflow: hidden;
+    font-family: Inter, Arial, sans-serif; color: #171716;
+    visibility: hidden; opacity: 0; transition: opacity 280ms ease;
+  }
+  #stage section.current { visibility: visible; opacity: 1; }
+  #stage section.instant { transition: none; }
+  #stage aside { display: none; }
+  #notes {
+    display: none; position: fixed; left: 0; right: 0; bottom: 0; max-height: 40%; overflow: auto;
+    padding: 16px 24px; background: rgba(15, 15, 14, 0.94); color: #e8e8e4;
+    font: 16px/1.5 Inter, Arial, sans-serif;
+  }
+  body.show-notes #notes { display: block; }
+  #counter {
+    position: fixed; right: 16px; bottom: 10px; color: #8a8a86;
+    font: 13px Inter, Arial, sans-serif; pointer-events: none;
+  }
+  body.show-notes #counter { display: none; }
+  #error { color: #e8e8e4; font: 16px Inter, Arial, sans-serif; padding: 24px; }
+</style>
+</head>
+<body>
+<div id="stage" aria-live="polite"></div>
+<div id="notes"></div>
+<div id="counter"></div>
+<script>
+// Shows the Slides-artifact deck in project/: deck.json's order, one <section> per slide file.
+// Keys: arrows, space, PageUp/PageDown, Home/End; "s" shows the speaker notes.
+const SLIDE_WIDTH = 1920;
+const SLIDE_HEIGHT = 1080;
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+class Connector {
+  // <x-connector x1 y1 x2 y2 head style> draws a line in its parent's coordinates.
+  static replaceAll(section) {
+    for (const element of [...section.querySelectorAll("x-connector")]) {
+      element.replaceWith(Connector.svgFor(element));
+    }
+  }
+
+  static svgFor(element) {
+    const parent = element.parentElement;
+    if (parent && parent !== element.closest("section") && !/position\s*:/.test(parent.getAttribute("style") || "")) {
+      parent.style.position = "relative";
+    }
+    const style = element.style;
+    const color = style.color || "#171716";
+    const width = parseFloat(style.borderWidth) || 2;
+    const head = element.getAttribute("head") || "end";
+    const [x1, y1, x2, y2] = ["x1", "y1", "x2", "y2"].map((name) => parseFloat(element.getAttribute(name)) || 0);
+
+    const svg = document.createElementNS(SVG_NS, "svg");
+    if (element.id) svg.id = element.id;
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("width", "1");
+    svg.setAttribute("height", "1");
+    svg.style.cssText = "position:absolute;left:0;top:0;overflow:visible;pointer-events:none";
+
+    const line = document.createElementNS(SVG_NS, "line");
+    for (const [name, value] of Object.entries({ x1, y1, x2, y2 })) line.setAttribute(name, value);
+    line.setAttribute("stroke", color);
+    line.setAttribute("stroke-width", width);
+    if (style.borderStyle === "dashed") line.setAttribute("stroke-dasharray", `${width * 4} ${width * 3}`);
+    svg.append(line);
+
+    const arrowAt = (tipX, tipY, fromX, fromY) => {
+      const angle = Math.atan2(tipY - fromY, tipX - fromX);
+      const length = 6 + width * 3;
+      const spread = 0.45;
+      const point = (sign) =>
+        `${tipX - length * Math.cos(angle + sign * spread)},${tipY - length * Math.sin(angle + sign * spread)}`;
+      const arrow = document.createElementNS(SVG_NS, "polygon");
+      arrow.setAttribute("points", `${tipX},${tipY} ${point(1)} ${point(-1)}`);
+      arrow.setAttribute("fill", color);
+      svg.append(arrow);
+    };
+    if (head === "end" || head === "both") arrowAt(x2, y2, x1, y1);
+    if (head === "start" || head === "both") arrowAt(x1, y1, x2, y2);
+    return svg;
+  }
+}
+
+class Deck {
+  constructor(stage, notes, counter) {
+    this.stage = stage;
+    this.notes = notes;
+    this.counter = counter;
+    this.sections = [];
+    this.index = 0;
+  }
+
+  async load() {
+    const deck = await (await fetch("project/deck.json")).json();
+    const texts = await Promise.all(
+      deck.order.map(async (id) => (await fetch(`project/slides/${id}.html`)).text()),
+    );
+    for (const text of texts) {
+      const template = document.createElement("template");
+      // Acid Grotesk is the design system's licensed face, not published here; Inter stands in.
+      template.innerHTML = text.replaceAll("'Acid Grotesk', sans-serif", "'Acid Grotesk', Inter, sans-serif");
+      const section = template.content.querySelector("section");
+      if (!section) continue;
+      this.stage.append(section);
+      Connector.replaceAll(section);
+      this.sections.push(section);
+    }
+    const coverTitle = this.sections[0]?.querySelector("h1")?.textContent.trim();
+    if (coverTitle) document.title = coverTitle;
+    this.fit();
+    this.show(this.indexFromHash(), { animate: false });
+  }
+
+  indexFromHash() {
+    const match = /^#slide-(\d+)$/.exec(location.hash);
+    const number = match ? Number(match[1]) : 1;
+    return Math.min(Math.max(number, 1), this.sections.length) - 1;
+  }
+
+  fit() {
+    const scale = Math.min(innerWidth / SLIDE_WIDTH, innerHeight / SLIDE_HEIGHT);
+    this.scale = scale;
+    this.stage.style.transform = `translate(-50%, -50%) scale(${scale})`;
+  }
+
+  go(index) {
+    this.show(Math.min(Math.max(index, 0), this.sections.length - 1), { animate: true });
+  }
+
+  show(index, { animate }) {
+    const from = this.sections[this.index];
+    const to = this.sections[index];
+    if (!to) return;
+    const forward = index > this.index;
+    const transition = (forward ? from : to)?.dataset.transition;
+    const morph = animate && from !== to && transition === "magic";
+
+    const before = morph ? this.boxesById(from) : null;
+    for (const section of this.sections) {
+      section.classList.toggle("instant", !animate || morph);
+      section.classList.toggle("current", section === to);
+    }
+    if (morph) this.morph(to, before);
+
+    this.index = index;
+    history.replaceState(null, "", `#slide-${index + 1}`);
+    this.counter.textContent = `${index + 1} / ${this.sections.length}`;
+    this.notes.textContent = to.querySelector("aside")?.textContent.trim() || "";
+  }
+
+  boxesById(section) {
+    const boxes = new Map();
+    for (const element of section.querySelectorAll("[id]")) boxes.set(element.id, element.getBoundingClientRect());
+    return boxes;
+  }
+
+  // Elements sharing an id with the slide just left glide from where they were.
+  morph(section, before) {
+    for (const element of section.querySelectorAll("[id]")) {
+      const old = before.get(element.id);
+      const now = element.getBoundingClientRect();
+      if (!old || now.width === 0 || now.height === 0) {
+        element.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 320, easing: "ease-out" });
+        continue;
+      }
+      const dx = (old.left - now.left) / this.scale;
+      const dy = (old.top - now.top) / this.scale;
+      const sx = old.width / now.width;
+      const sy = old.height / now.height;
+      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(sx - 1) < 0.01 && Math.abs(sy - 1) < 0.01) continue;
+      element.animate(
+        [
+          { transformOrigin: "0 0", transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})` },
+          { transformOrigin: "0 0", transform: "none" },
+        ],
+        { duration: 520, easing: "cubic-bezier(0.4, 0, 0.2, 1)" },
+      );
+    }
+  }
+
+  bindInput() {
+    addEventListener("resize", () => this.fit());
+    addEventListener("hashchange", () => this.show(this.indexFromHash(), { animate: false }));
+    addEventListener("keydown", (event) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const next = ["ArrowRight", "ArrowDown", "PageDown", " ", "Enter"];
+      const previous = ["ArrowLeft", "ArrowUp", "PageUp", "Backspace"];
+      if (next.includes(event.key)) this.go(this.index + 1);
+      else if (previous.includes(event.key)) this.go(this.index - 1);
+      else if (event.key === "Home") this.go(0);
+      else if (event.key === "End") this.go(this.sections.length - 1);
+      else if (event.key === "s") document.body.classList.toggle("show-notes");
+      else return;
+      event.preventDefault();
+    });
+    addEventListener("click", (event) => {
+      if (event.target.closest("#notes, a")) return;
+      this.go(this.index + (event.clientX < innerWidth / 3 ? -1 : 1));
+    });
+    let touchStart = null;
+    addEventListener("touchstart", (event) => (touchStart = event.touches[0].clientX), { passive: true });
+    addEventListener("touchend", (event) => {
+      if (touchStart === null) return;
+      const distance = event.changedTouches[0].clientX - touchStart;
+      if (Math.abs(distance) > 40) this.go(this.index + (distance < 0 ? 1 : -1));
+      touchStart = null;
+    });
+  }
+}
+
+const deck = new Deck(
+  document.getElementById("stage"),
+  document.getElementById("notes"),
+  document.getElementById("counter"),
+);
+deck.bindInput();
+deck.load().catch((error) => {
+  document.getElementById("stage").remove();
+  const message = document.createElement("p");
+  message.id = "error";
+  message.textContent = `Could not load the deck: ${error.message}`;
+  document.body.prepend(message);
+});
+</script>
+</body>
+</html>

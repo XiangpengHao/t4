@@ -71,6 +71,8 @@
     "lifecycle-demote",
     "lifecycle-refill",
     "lifecycle-drop",
+    "restart-share",
+    "shared-mode",
     "vs-foyer-unit",
     "vs-foyer",
     "vs-kismet-files",
@@ -100,6 +102,7 @@
     "pq-i3en-tpch",
     "pq-i7ie-tpch",
     "pq-i7i-tpch",
+    "checks",
     "closing"
   ],
   "sections": {
@@ -112,11 +115,11 @@
       "start": "toc-disk-io"
     },
     "evaluation": {
-      "description": "A cost model, and ClickBench runs that agree with it",
+      "description": "A cost model, ClickBench runs that agree with it, and how t4 is checked",
       "start": "toc-evaluation"
     },
     "hybrid-cache": {
-      "description": "One bbtree over memory, disk and S3: where each block lives, and how it moves",
+      "description": "One bbtree over memory, disk and S3: where each block lives, how it moves, and how it outlives a restart",
       "start": "toc-hybrid-cache"
     },
     "optimizations": {

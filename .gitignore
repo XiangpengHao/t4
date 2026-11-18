@@ -10,3 +10,6 @@ bench/cold_reads
 
 bench/spiral_cache/results
 /result
+
+.claude/
+.impeccable/
