@@ -42,6 +42,15 @@
         ],
         "createdAt": "2026-10-28T21:17:52.125Z",
         "reason": "Claude triage: the flush child is the full-canvas svg that draws the tree edges and pointers (a 1920x1080 backdrop at 0,0); content sits inside the 128px margins"
+      },
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          "doc/08-spiral-presentation/project/slides/closing.html"
+        ],
+        "createdAt": "2026-11-18T18:34:37.580Z",
+        "reason": "Claude: #ffffffb8 nav text on #1d0fed composites to 5.05:1, passes AA; checker does not blend alpha"
       }
     ]
   }
