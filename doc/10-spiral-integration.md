@@ -152,7 +152,7 @@ nothing; Kismet's non-unix fallbacks have no user.
 | no HEAD for a file Spiral already knows | `open_listed` takes the file's size and e_tag from the caller and asks nothing |
 | fetches through Spiral's own GET | t4 GETs from its inner store, carrying each read's `GetOptions::extensions` |
 | fetch-once | yes, within a process |
-| survives a restart | dropped or killed: the disk tier, kept in a log beside the cache files (`13-persistence.md`, built 16 Nov 2026); a reboot of any kind loses it |
+| survives a restart | dropped or killed: the disk tier, kept in the log `with_log_file` names (`13-persistence.md`, built 16 Nov 2026; opt-in since 19 Nov); a reboot of any kind loses it |
 | several processes, one cache | shared mode: one process owns the cache and the others read through it (`11-shared-mode.md`, built); a cache not built for sharing on owned files fails to build, `Error::Busy` |
 | a laptop's footprint | cache files allocated on demand, each write leaving its drive Kismet's room (decision 9, built 2 Nov 2026); a memory capacity is required |
 | a disk error served from the remote | yes: a failed cache-file read goes to the inner store |

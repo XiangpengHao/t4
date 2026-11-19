@@ -19,28 +19,26 @@ pub(in crate::cache) struct PersistenceLog {
 }
 
 impl PersistenceLog {
-    pub(in crate::cache) fn beside(
+    pub(in crate::cache) fn at(
         file_system: &FileSystem,
-        first: &Path,
+        path: &Path,
         opened: &[OpenFile],
         chunks_per_file: u32,
     ) -> io::Result<Option<Self>> {
         let boot = BootId::current(file_system).ok();
-        Self::beside_in_boot(file_system, first, opened, chunks_per_file, boot)
+        Self::at_in_boot(file_system, path, opened, chunks_per_file, boot)
     }
 
     /// With no boot id, nothing could tell a log of another boot, and without a file's creation
     /// time or owner nothing could tell it from another: no log, and none left behind.
-    pub(super) fn beside_in_boot(
+    pub(super) fn at_in_boot(
         file_system: &FileSystem,
-        first: &Path,
+        path: &Path,
         opened: &[OpenFile],
         chunks_per_file: u32,
         boot: Option<BootId>,
     ) -> io::Result<Option<Self>> {
-        let mut path = first.as_os_str().to_owned();
-        path.push(".log");
-        let path = PathBuf::from(path);
+        let path = path.to_owned();
         let files = opened.iter().map(FileStamp::of).collect::<Option<_>>();
         let (Some(boot), Some(files)) = (boot, files) else {
             match file_system.remove(&path) {

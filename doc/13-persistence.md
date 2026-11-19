@@ -10,7 +10,9 @@ so nothing syncs and there is no clean mark or `T4Caching::shut_down`
 (decision 5); and a block bound for disk waits for the writer to make room
 rather than go uncached (decision 9). Revised again 17 Nov 2026: a build
 claims the files whose log it doesn't take back, so a log of other files
-can't name their chunks (decision 13).
+can't name their chunks (decision 13). Revised 19 Nov 2026: the log is
+opt-in; a cache built without `with_log_file` writes none and starts cold
+each build (decision 14).
 
 t4 is a cache: the object store holds the true data, so the cache may lose
 any block, but never returns wrong bytes (`03-cache.md`). Persistence keeps
@@ -29,7 +31,7 @@ bytes.
 
 | Term | What it is |
 |---|---|
-| **Log** | `<first cache file>.log`, beside the cache files: a header, a base, then records |
+| **Log** | the file `with_log_file` names, if it names one: a header, a base, then records |
 | **Base** | the index's disk half, whole, in stage 1's snapshot format: each file version with blocks on disk, each of those blocks' chunk, and the next file version id |
 | **Record** | entries appended together: its length, a CRC32C, its entries |
 | **Entry** | a path's version (path, e_tag, size, id), a block added (version id, block, chunk), or a chunk freed (chunk) |
@@ -175,7 +177,8 @@ bytes.
     never added. An unreadable boot UUID or missing creation times discard any old log
     and disable persistence. The cache builds and serves normally;
     a restart is cold.
-    The file is `<first cache file>.log`; old `.snapshot` files are ignored.
+    The file is the one `with_log_file` names; old `.snapshot` files are
+    ignored.
 
 13. **A build claims the files whose log it doesn't take back** (17 Nov
     2026). A log lies beside its first file only, so a cache built on other
@@ -193,6 +196,12 @@ bytes.
     cold. Base format 2 moved chunks a page in, so a format 1 log starts
     cold. The fuzz target checks this after every step: what a kill there
     would keep is read back and compared (`fuzz/README.md`).
+
+14. **The log is opt-in** (19 Nov 2026). `with_log_file` names the log;
+    unset, a build writes none, claims its files and starts cold, every
+    build. The log was `<first cache file>.log`, always. The owners are
+    what match a log to its files, not where it lies, so a log may go
+    anywhere, and a log named for other files keeps nothing.
 
 ## Measured: stage 1's restart
 

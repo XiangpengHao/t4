@@ -145,7 +145,7 @@ chunk table the frame table.
 ### Persistence
 
 9. **A restart keeps the disk tier, dropped or killed, within one boot.**
-   The index lives in memory. A log beside the first cache file keeps its
+   The index lives in memory. A log, if `with_log_file` names one, keeps its
    disk half: a base, then the blocks added and the chunks freed as
    batches go to disk, appended with no sync. The next cache on those
    files replays it if it was written in this boot (`13-persistence.md`,

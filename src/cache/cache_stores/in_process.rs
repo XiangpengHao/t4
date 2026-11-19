@@ -1,6 +1,6 @@
 use std::num::{NonZeroU8, NonZeroU32};
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -36,6 +36,7 @@ pub(in crate::cache) struct TierSettings {
     file_system: FileSystem,
     memory_chunks: NonZeroU32,
     disk_files: Vec<DiskFile>,
+    log_file: Option<PathBuf>,
     queue_depth: NonZeroU32,
     direct_io: bool,
     placement: PlacementSource,
@@ -50,6 +51,7 @@ impl TierSettings {
         file_system: FileSystem,
         memory_chunks: NonZeroU32,
         disk_files: Vec<DiskFile>,
+        log_file: Option<PathBuf>,
         queue_depth: NonZeroU32,
         direct_io: bool,
         placement: Option<PlacementMaker>,
@@ -59,6 +61,7 @@ impl TierSettings {
             file_system,
             memory_chunks,
             disk_files,
+            log_file,
             queue_depth,
             direct_io,
             placement: placement.map_or(PlacementSource::Clock, PlacementSource::Given),
@@ -97,6 +100,7 @@ impl InProcessCacheStore {
         let disk = CacheFiles::open(
             &tiers.file_system,
             &tiers.disk_files,
+            tiers.log_file.as_deref(),
             tiers.queue_depth,
             tiers.direct_io,
         )?;

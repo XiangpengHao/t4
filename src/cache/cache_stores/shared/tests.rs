@@ -41,6 +41,7 @@ fn shared(inner: &Arc<InMemory>, dir: &TestDirectory) -> T4CachingBuilder {
     let builder = T4Caching::builder(Arc::clone(inner) as Arc<dyn ObjectStore>)
         .with_memory_capacity(4 * MIB)
         .with_disk_file(dir.path().join("cache"), 8 * MIB)
+        .with_log_file(dir.path().join("cache.log"))
         .with_multiprocess_sharing();
     #[cfg(feature = "shuttle")]
     let builder = (builder.with_test_transport(dir.transport.clone()))

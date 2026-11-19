@@ -43,15 +43,11 @@ fn sample_base() -> LogBase {
 fn a_log_is_replayed_and_rebased_on_each_build() {
     let dir = tempfile::tempdir().unwrap();
     let files = opened(dir.path(), &["cache0", "cache1"]);
-    let place = PersistenceLog::beside(
-        &FileSystem::default(),
-        &dir.path().join("cache0"),
-        &files,
-        4,
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(place.path(), dir.path().join("cache0.log"));
+    let path = dir.path().join("elsewhere.log");
+    let place = PersistenceLog::at(&FileSystem::default(), &path, &files, 4)
+        .unwrap()
+        .unwrap();
+    assert_eq!(place.path(), path);
 
     place.seed(&sample_base()).unwrap();
     let kept = place.replay();
@@ -63,10 +59,10 @@ fn a_log_is_replayed_and_rebased_on_each_build() {
 #[test]
 fn a_log_keeps_nothing_once_another_build_claims_one_of_its_files() {
     let dir = tempfile::tempdir().unwrap();
-    let first = dir.path().join("cache0");
+    let log_path = dir.path().join("log");
     let files = opened(dir.path(), &["cache0", "cache1"]);
     let log = |files: &[OpenFile]| {
-        PersistenceLog::beside(&FileSystem::default(), &first, files, 4)
+        PersistenceLog::at(&FileSystem::default(), &log_path, files, 4)
             .unwrap()
             .unwrap()
     };
@@ -81,19 +77,19 @@ fn a_log_keeps_nothing_once_another_build_claims_one_of_its_files() {
 #[test]
 fn a_log_of_other_cache_files_keeps_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let first = dir.path().join("cache0");
+    let log_path = dir.path().join("log");
     let files = opened(dir.path(), &["cache0", "cache1"]);
     let keep = |files: &[OpenFile]| {
-        let place = PersistenceLog::beside(&FileSystem::default(), &first, files, 4)
+        let place = PersistenceLog::at(&FileSystem::default(), &log_path, files, 4)
             .unwrap()
             .unwrap();
         place.seed(&sample_base()).unwrap();
     };
     let reordered = opened(dir.path(), &["cache1", "cache0"]);
     let others = [
-        PersistenceLog::beside(&FileSystem::default(), &first, &files, 5),
-        PersistenceLog::beside(&FileSystem::default(), &first, &files[..1], 4),
-        PersistenceLog::beside(&FileSystem::default(), &first, &reordered, 4),
+        PersistenceLog::at(&FileSystem::default(), &log_path, &files, 5),
+        PersistenceLog::at(&FileSystem::default(), &log_path, &files[..1], 4),
+        PersistenceLog::at(&FileSystem::default(), &log_path, &reordered, 4),
     ];
     for other in others {
         keep(&files);
@@ -103,9 +99,9 @@ fn a_log_of_other_cache_files_keeps_nothing() {
     // The first file made again, at the same path: another file.
     keep(&files);
     drop((files, reordered));
-    std::fs::remove_file(&first).unwrap();
+    std::fs::remove_file(dir.path().join("cache0")).unwrap();
     let remade = opened(dir.path(), &["cache0", "cache1"]);
-    let other = PersistenceLog::beside(&FileSystem::default(), &first, &remade, 4)
+    let other = PersistenceLog::at(&FileSystem::default(), &log_path, &remade, 4)
         .unwrap()
         .unwrap();
     assert_eq!(other.replay(), None);
@@ -115,14 +111,9 @@ fn a_log_of_other_cache_files_keeps_nothing() {
 fn bytes_no_cache_could_have_kept_are_no_base() {
     let dir = tempfile::tempdir().unwrap();
     let files = opened(dir.path(), &["cache0", "cache1"]);
-    let place = PersistenceLog::beside(
-        &FileSystem::default(),
-        &dir.path().join("cache0"),
-        &files,
-        4,
-    )
-    .unwrap()
-    .unwrap();
+    let place = PersistenceLog::at(&FileSystem::default(), &dir.path().join("log"), &files, 4)
+        .unwrap()
+        .unwrap();
     let layout = place.layout();
     let whole = sample_base().encode(layout);
     assert_eq!(LogBase::decode(&whole, layout), Some(sample_base()));
@@ -165,14 +156,9 @@ fn a_log_only_grows_until_its_next_build_rebases_it() {
 
     let dir = tempfile::tempdir().unwrap();
     let files = opened(dir.path(), &["cache0", "cache1"]);
-    let log = PersistenceLog::beside(
-        &FileSystem::default(),
-        &dir.path().join("cache0"),
-        &files,
-        4,
-    )
-    .unwrap()
-    .unwrap();
+    let log = PersistenceLog::at(&FileSystem::default(), &dir.path().join("log"), &files, 4)
+        .unwrap()
+        .unwrap();
     log.seed(&sample_base()).unwrap();
     let kept = log.replay();
     assert_eq!(kept, Some(sample_base()));
@@ -209,8 +195,8 @@ fn a_log_only_grows_until_its_next_build_rebases_it() {
 fn with_no_boot_id_no_log_is_kept_and_an_old_one_is_removed() {
     let dir = tempfile::tempdir().unwrap();
     let files = opened(dir.path(), &["cache0", "cache1"]);
-    let first = dir.path().join("cache0");
-    let log = PersistenceLog::beside(&FileSystem::default(), &first, &files, 4)
+    let log_path = dir.path().join("log");
+    let log = PersistenceLog::at(&FileSystem::default(), &log_path, &files, 4)
         .unwrap()
         .unwrap();
     log.seed(&sample_base()).unwrap();
@@ -218,7 +204,7 @@ fn with_no_boot_id_no_log_is_kept_and_an_old_one_is_removed() {
     drop(log);
     assert!(path.exists());
     assert!(
-        PersistenceLog::beside_in_boot(&FileSystem::default(), &first, &files, 4, None)
+        PersistenceLog::at_in_boot(&FileSystem::default(), &log_path, &files, 4, None)
             .unwrap()
             .is_none()
     );

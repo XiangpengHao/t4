@@ -123,6 +123,7 @@ impl RestartBench {
     fn build(&self) -> Result<T4Caching, Error> {
         let mut builder = T4Caching::builder(Arc::clone(&self.store))
             .with_memory_capacity(self.memory)
+            .with_log_file(self.log_path())
             .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk));
         for path in &self.cache_files {
             builder = builder.with_disk_file(path, self.file_capacity);

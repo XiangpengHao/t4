@@ -125,6 +125,7 @@ impl<'s> ScenarioRun<'s> {
             builder.with_disk_file(format!("cache{file}"), blocks * BLOCK_SIZE_U64)
         });
         let builder = builder
+            .with_log_file(format!("cache{}.log", self.files[0]))
             .with_memory_capacity(settings.memory_blocks * BLOCK_SIZE_U64)
             .with_network_rate(
                 settings.network_blocks * BLOCK_SIZE_U64,
