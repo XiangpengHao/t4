@@ -1,12 +1,23 @@
 # `t4`
 
+[![crates.io](https://img.shields.io/crates/v/t4.svg)](https://crates.io/crates/t4)
+[![docs.rs](https://docs.rs/t4/badge.svg)](https://docs.rs/t4)
+[![CI](https://github.com/XiangpengHao/t4/actions/workflows/rust-ci.yml/badge.svg)](https://github.com/XiangpengHao/t4/actions/workflows/rust-ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 `t4` is a fast object store downloader and cache. 
 - Request prefetching, splitting, coalesencing, racing read; all handled automatically.
-- Hybrid memory and disk caching, customized read policy and placement policy.
-- `io_uring` for disks, multi-device stripping/racing/load-balancing.
-- Implements `object_store` trait, plug and play; async runtime agnostic. 
+- Customized cache policies. 
+- Multi-tier memory, disk, remote. Multi-device stripping/racing/load-balancing. 
+- `io_uring` yet async runtime agnostic.
+
+**Warning**: t4 gives you higher ceilings, but requires more understanding to get the best of it. Only use t4 when you're reasonably frustrated with existing solutions.
 
 ## Usage
+
+```bash
+cargo add t4
+```
 
 ```rust
 use std::sync::Arc;
@@ -18,8 +29,7 @@ let store = T4Caching::builder(s3)
     .with_memory_capacity(64 << 30)
     .with_disk_file("/mnt/nvme0/t4.cache", 3 << 40)
     .with_disk_file("/mnt/nvme1/t4.cache", 3 << 40)
-    // Keeps the disk tier across a restart; without it each build starts cold.
-    .with_log_file("/mnt/nvme0/t4.log")
+    .with_log_file("log/t4.log") // optional, for persistence
     .build()?;
 
 let footer = store
@@ -71,6 +81,12 @@ Run `cargo test --locked` and `cargo test --locked --features shuttle`.
 The latter runs every concurrent scenario on checked-in schedules; see
 [the seed and OS-coverage inventory](doc/12-seeded-concurrency-tests.md) for replay
 instructions and the real-OS exceptions.
+
+## Limitations
+
+1. T4 caches data at 1MB granularity. It can have high amplification if files are small (< 1MB), but there's a bigger problem if your files are like that. 
+
+2. it works on macOS, but not as tuned as on Linux.
 
 ## License
 
