@@ -38,41 +38,80 @@ let footer = store
 ```
 
 
-## Customized policy
+## Policies
 
-`t4` is fully customizable, you can roll your own `ReadPolicy` and `PlacementPolicy`.
-The default policies are built with the same public interfaces.
+`t4` has two policies, and you can roll your own of either: a `PlacementPolicy` decides
+where blocks live, and a `ReadPolicy` decides how a read reaches the object store. The
+built-in policies use the same public traits.
 
-```rust
-let store = T4Caching::builder(s3)
-    .with_placement_policy(...)
-    .with_read_policy(...)
-    .build()?;
-```
+### Placement policy: where blocks live
 
-```rust
-pub trait ReadPolicy: Send + Sync {
-    fn plan(&self, read: &LocatedRead<'_>) -> ReadPlan;
+Tiers are exclusive: a 1 MiB block is in memory or on disk, never both.
 
-    fn on_io(&self, event: &IoEvent<'_>);
-}
-```
-
+| Policy | What it does |
+|---|---|
+| `ClockPolicy` (default) | A CLOCK per tier. A disk block moves to memory on its second hit, so one scan doesn't push hot blocks out of memory. |
+| `FixedPlacementPolicy::new(sizes, admit)` | Every fetched block goes to the one tier `admit` names, and a disk hit stays on disk. |
 
 ```rust
 pub trait PlacementPolicy: Send + Sync {
+    /// Records a hit; it's on the hit path, so keep it cheap.
     fn on_memory_hit(&self, chunk: ChunkId, read: &BlockRead<'_>);
 
+    /// Stay on disk, or promote to memory.
     fn on_disk_hit(&self, chunk: ChunkId, read: &BlockRead<'_>) -> DiskHit;
 
+    /// Admit a fetched block to memory or disk, or discard it.
     fn on_remote_read(&self, read: &BlockRead<'_>) -> Admit;
 
     fn on_admit(&self, tier: Tier, chunk: ChunkId, block: BlockKey);
 
+    /// Each victim is moved to disk or dropped.
     fn pick_memory_victims(&self, count: usize) -> Vec<MemoryVictim>;
 
     fn pick_disk_victims(&self, count: usize) -> Vec<ChunkId>;
 }
+```
+
+### Read policy: how a read reaches the object store
+
+A read policy plans the GETs for the blocks the cache doesn't hold. A plan may split, widen
+or merge runs of blocks, and race a GET: send it several times at once and take the first
+answer, or send one more copy only if it is still running after a delay.
+
+| Policy | What it does |
+|---|---|
+| `RaceStragglers` (default, at the p90) | Plans as `FetchRuns`, then races a GET once more if it runs past the p90 of recent GET times. `RaceStragglers::at(q)` picks another quantile. |
+| `FetchRuns` | Splits a run into GETs of 4 MiB at most, so no one GET holds a read up, and races a Parquet or Vortex footer in a GET of its own. |
+
+```rust
+pub trait ReadPolicy: Send + Sync {
+    /// The GETs for the read's blocks the cache doesn't hold.
+    fn plan(&self, read: &LocatedRead<'_>) -> ReadPlan;
+
+    /// Each disk and remote I/O as it starts and ends, to learn from.
+    fn on_io(&self, event: &IoEvent<'_>);
+}
+```
+
+A caller may say what a read is for, a `ReadIntent` (`Latency`, `Throughput` or `Warm`),
+in `GetOptions::extensions`; a policy sees it in `LocatedRead::intent` and
+`BlockRead::intent`.
+
+### Configuring policies
+
+```rust
+use t4::policy::{Admit, FetchRuns, FixedPlacementPolicy, RaceStragglers};
+
+let store = T4Caching::builder(s3)
+    .with_memory_capacity(64 << 30)
+    .with_disk_file("/mnt/nvme0/t4.cache", 3 << 40)
+    // A closure: the policy needs the tiers' sizes, known once the files open.
+    .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
+    .with_read_policy(RaceStragglers::at(0.99).planning_as(FetchRuns::default()))
+    // t4 has no runtime of its own: without a timer, no GET is raced late.
+    .with_sleep(|after| Box::pin(tokio::time::sleep(after)))
+    .build()?;
 ```
 
 ## Tests
