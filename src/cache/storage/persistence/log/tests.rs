@@ -19,7 +19,7 @@ impl LogFixture {
             .claim(std::slice::from_ref(&opened))
             .unwrap();
         Self {
-            file: PersistenceLog::beside(&file_system, &path, &[opened], 4)
+            file: PersistenceLog::at(&file_system, &path.with_extension("log"), &[opened], 4)
                 .unwrap()
                 .unwrap(),
             boot: BootId::current(&file_system).unwrap(),

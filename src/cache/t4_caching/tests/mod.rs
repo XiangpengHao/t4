@@ -285,6 +285,7 @@ fn builder(inner: &Arc<CountingStore>, dir: impl AsRef<std::path::Path>) -> T4Ca
     T4Caching::builder(Arc::clone(inner) as Arc<dyn ObjectStore>)
         .with_memory_capacity(4 * MIB)
         .with_disk_file(dir.as_ref().join("cache"), 8 * MIB)
+        .with_log_file(dir.as_ref().join("cache.log"))
 }
 
 /// Where a test's caches keep their files: a temporary directory, or under shuttle a simulated
@@ -328,7 +329,12 @@ impl CacheDirectory {
 
     #[cfg(feature = "shuttle")]
     fn holds_log(&self) -> bool {
-        self.file_system.read(&self.log()).is_ok()
+        self.holds(&self.log())
+    }
+
+    #[cfg(feature = "shuttle")]
+    fn holds(&self, path: &std::path::Path) -> bool {
+        self.file_system.read(path).is_ok()
     }
 
     #[cfg(feature = "shuttle")]

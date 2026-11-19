@@ -48,6 +48,7 @@ impl CacheFiles {
     pub(in crate::cache) fn open(
         file_system: &FileSystem,
         files: &[DiskFile],
+        log_file: Option<&Path>,
         queue_depth: NonZeroU32,
         direct_io: bool,
     ) -> Result<Self> {
@@ -65,14 +66,17 @@ impl CacheFiles {
             .iter()
             .map(|file| Self::open_file(file_system, &file.path, len, direct_io))
             .collect::<Result<Vec<_>>>()?;
-        let first = &files[0].path;
-        let log = PersistenceLog::beside(file_system, first, &opened, chunks_per_file)?;
-        let kept = log.as_ref().and_then(PersistenceLog::replay);
+        let open_log = || match log_file {
+            Some(path) => PersistenceLog::at(file_system, path, &opened, chunks_per_file),
+            None => Ok(None),
+        };
+        let found = open_log()?;
+        let kept = found.as_ref().and_then(PersistenceLog::replay);
         let log = match kept {
-            Some(_) => log,
+            Some(_) => found,
             None => {
                 CacheFileOwner::fresh(file_system)?.claim(&opened)?;
-                PersistenceLog::beside(file_system, first, &opened, chunks_per_file)?
+                open_log()?
             }
         };
         if let Some(log) = &log {

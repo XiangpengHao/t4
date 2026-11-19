@@ -47,6 +47,49 @@ fn a_cache_built_again_serves_the_disk_tier_its_files_held() {
 }
 
 #[test]
+fn a_cache_keeps_its_disk_tier_only_through_a_log_it_names() {
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = CacheDirectory::new();
+        let inner = Arc::new(CountingStore::default());
+        let path = Path::from("a");
+        let data = file_bytes(2 * MIB, 22);
+        put(inner.as_ref(), &path, &data);
+        let meta = block_on(inner.head(&path)).unwrap();
+        let build = |log: Option<&std::path::Path>| {
+            let builder = dir
+                .holding(T4Caching::builder(
+                    Arc::clone(&inner) as Arc<dyn ObjectStore>
+                ))
+                .with_memory_capacity(4 * MIB)
+                .with_disk_file(dir.path().join("cache"), 8 * MIB)
+                .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk));
+            match log {
+                Some(log) => builder.with_log_file(log),
+                None => builder,
+            }
+            .build()
+            .unwrap()
+        };
+        for _ in 0..2 {
+            let unlogged = build(None);
+            assert_eq!(read_whole(&unlogged, &meta), data);
+            assert_ne!(inner.take_asked(), [], "cold");
+        }
+        assert!(!dir.holds_log(), "no log unless named");
+
+        let log = dir.path().join("named.log");
+        let first = build(Some(&log));
+        assert_eq!(read_whole(&first, &meta), data);
+        drop(first);
+        assert!(dir.holds(&log));
+        inner.take_asked();
+        let again = build(Some(&log));
+        assert_eq!(read_whole(&again, &meta), data);
+        assert_eq!(inner.take_asked(), [], "served from disk");
+    });
+}
+
+#[test]
 fn memorys_blocks_go_with_the_cache() {
     crate::io::test_schedule::TestSchedule::check(|| {
         let dir = CacheDirectory::new();
@@ -88,6 +131,7 @@ fn a_cache_of_another_capacity_starts_cold() {
             ))
             .with_memory_capacity(4 * MIB)
             .with_disk_file(dir.path().join("cache"), 16 * MIB)
+            .with_log_file(dir.log())
             .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
             .build()
             .unwrap();
@@ -145,6 +189,7 @@ fn a_log_whose_files_another_cache_wrote_keeps_nothing() {
                 .fold(builder, |builder, name| {
                     builder.with_disk_file(dir.path().join(name), 2 * MIB)
                 })
+                .with_log_file(dir.path().join(format!("{}.log", names[0])))
                 .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk))
                 .build()
                 .unwrap()

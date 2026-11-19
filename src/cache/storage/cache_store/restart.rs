@@ -24,10 +24,14 @@ impl Tiers {
 
 impl ObjectCache {
     #[cfg(all(test, not(feature = "shuttle")))]
-    pub(in crate::cache) fn replay_log(first: &std::path::Path, chunks: u32) -> Option<LogBase> {
+    pub(in crate::cache) fn replay_log(
+        log: &std::path::Path,
+        first: &std::path::Path,
+        chunks: u32,
+    ) -> Option<LogBase> {
         let file_system = crate::io::file_system::FileSystem::default();
         let file = file_system.open_existing(first, false).unwrap();
-        super::super::persistence::PersistenceLog::beside(&file_system, first, &[file], chunks)
+        super::super::persistence::PersistenceLog::at(&file_system, log, &[file], chunks)
             .unwrap()
             .unwrap()
             .replay()

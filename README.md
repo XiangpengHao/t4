@@ -18,6 +18,8 @@ let store = T4Caching::builder(s3)
     .with_memory_capacity(64 << 30)
     .with_disk_file("/mnt/nvme0/t4.cache", 3 << 40)
     .with_disk_file("/mnt/nvme1/t4.cache", 3 << 40)
+    // Keeps the disk tier across a restart; without it each build starts cold.
+    .with_log_file("/mnt/nvme0/t4.log")
     .build()?;
 
 let footer = store

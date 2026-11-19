@@ -474,6 +474,7 @@ impl Harness {
                     builder.with_disk_file(path, (settings.disk_blocks + file) * BLOCK)
                 },
             )
+            .with_log_file((self.dir.path()).join(format!("cache{}.log", settings.disk_files.0[0])))
             .with_memory_capacity(settings.memory_blocks * BLOCK)
             .with_queue_depth(settings.queue_depth)
             // So the cache files can be on tmpfs (`fuzz/README.md`).

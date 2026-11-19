@@ -306,6 +306,7 @@ impl PersistenceProcess {
             T4Caching::builder(Arc::clone(&store) as Arc<dyn ObjectStore>)
                 .with_memory_capacity(16 * MIB)
                 .with_disk_file(dir.join("cache"), 32 * MIB)
+                .with_log_file(dir.join("cache.log"))
         };
         let activity = Arc::new(PersistenceActivity::default());
         let recorded = Arc::clone(&activity);
@@ -434,8 +435,12 @@ fn kills_during_fills_promotions_and_evictions_keep_only_coherent_logged_blocks(
             std::thread::yield_now();
         }
         child.kill();
-        let kept =
-            crate::cache::storage::ObjectCache::replay_log(&dir.path().join("cache"), 32).unwrap();
+        let kept = crate::cache::storage::ObjectCache::replay_log(
+            &dir.path().join("cache.log"),
+            &dir.path().join("cache"),
+            32,
+        )
+        .unwrap();
         let blocks: usize = kept
             .versions()
             .iter()

@@ -24,6 +24,7 @@ fn cache(memory_chunks: u32, disk_chunks: u32) -> (ObjectCache, Arc<TestPolicy>)
     let disk = CacheFiles::open(
         &FileSystem::default(),
         &[file],
+        Some(std::path::Path::new("cache.log")),
         NonZeroU32::new(8).unwrap(),
         true,
     )
@@ -92,7 +93,9 @@ fn the_default_policy_streams_blocks_through_both_tiers() {
             .map(|name| DiskFile::new(name.into(), MIB))
             .collect();
         let queue_depth = NonZeroU32::new(8).unwrap();
-        let disk = CacheFiles::open(&FileSystem::default(), &files, queue_depth, true).unwrap();
+        let log = Some(std::path::Path::new("a.log"));
+        let disk =
+            CacheFiles::open(&FileSystem::default(), &files, log, queue_depth, true).unwrap();
         let (memory, disk_chunks) = (NonZeroU32::new(2).unwrap(), NonZeroU32::new(3).unwrap());
         let policy = Arc::new(crate::cache::policy::ClockPolicy::new(memory, disk_chunks));
         let cache = ObjectCache::new(memory, disk, policy).unwrap();
@@ -877,7 +880,8 @@ fn disk_admitting_cache(
     keep_free: u64,
 ) -> (ObjectCache, Arc<TestPolicy>) {
     let file = DiskFile::new("cache".into(), u64::from(disk_chunks) * MIB);
-    let disk = CacheFiles::open(file_system, &[file], NonZeroU32::new(8).unwrap(), true)
+    let log = Some(std::path::Path::new("cache.log"));
+    let disk = CacheFiles::open(file_system, &[file], log, NonZeroU32::new(8).unwrap(), true)
         .unwrap()
         .keeping_free(keep_free);
     let policy = Arc::new(TestPolicy::new());

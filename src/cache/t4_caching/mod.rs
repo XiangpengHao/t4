@@ -46,6 +46,7 @@ pub struct T4Caching {
 ///     .with_memory_capacity(64 << 30)
 ///     .with_disk_file("/mnt/nvme0/t4.cache", 3 << 40)
 ///     .with_disk_file("/mnt/nvme1/t4.cache", 3 << 40)
+///     .with_log_file("/mnt/nvme0/t4.log")
 ///     .build()?;
 /// # Ok(())
 /// # }
@@ -58,6 +59,7 @@ pub struct T4CachingBuilder {
     inner: Arc<dyn ObjectStore>,
     memory_capacity: Option<u64>,
     disk_files: Vec<DiskFile>,
+    log_file: Option<PathBuf>,
     queue_depth: u32,
     direct_io: bool,
     placement: Option<PlacementMaker>,
@@ -113,6 +115,15 @@ impl T4CachingBuilder {
     /// goes to disk only while every drive keeps 64 MiB and two blocks free.
     pub fn with_disk_file(mut self, path: impl Into<PathBuf>, capacity: u64) -> Self {
         self.disk_files.push(DiskFile::new(path.into(), capacity));
+        self
+    }
+
+    /// The disk tier's log, which lets a cache built again on the same files keep their blocks.
+    /// Unless set there is no log, and each build starts cold. Its directory must exist, and the
+    /// log is rewritten through `<log>.tmp` beside it. A log names its cache files, so a build
+    /// on other files never takes it back.
+    pub fn with_log_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.log_file = Some(path.into());
         self
     }
 
@@ -196,6 +207,7 @@ impl T4CachingBuilder {
             self.file_system,
             memory_chunks,
             self.disk_files,
+            self.log_file,
             queue_depth,
             self.direct_io,
             self.placement,
@@ -243,6 +255,7 @@ impl fmt::Debug for T4CachingBuilder {
             .field("inner", &self.inner)
             .field("memory_capacity", &self.memory_capacity)
             .field("disk_files", &self.disk_files)
+            .field("log_file", &self.log_file)
             .field("queue_depth", &self.queue_depth)
             .field("direct_io", &self.direct_io)
             .field("network_rate", &self.network_rate)
@@ -262,6 +275,7 @@ impl T4Caching {
             inner,
             memory_capacity: None,
             disk_files: Vec::new(),
+            log_file: None,
             queue_depth: 64,
             direct_io: true,
             placement: None,

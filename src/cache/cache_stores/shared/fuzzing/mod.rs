@@ -161,6 +161,7 @@ impl FuzzedRead {
 
 impl FuzzedSession {
     const CACHE_FILE: &str = "cache";
+    const LOG_FILE: &str = "cache.log";
     const MOST_WAITS: u32 = 10_000;
 
     /// `seed` picks the schedule: an input replays exactly.
@@ -240,6 +241,7 @@ impl FuzzedSession {
         T4Caching::builder(files.store())
             .with_memory_capacity(2 * BLOCK_SIZE_U64)
             .with_disk_file(Self::CACHE_FILE, 3 * BLOCK_SIZE_U64)
+            .with_log_file(Self::LOG_FILE)
             .with_multiprocess_sharing()
             .with_test_transport(transport.clone())
             .with_test_file_system(file_system.clone())
