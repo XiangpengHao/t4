@@ -49,12 +49,13 @@ impl ObjectCache {
     }
 }
 
-/// Joins the writer before the log and the cache files' locks close, then appends its last adds.
+/// Joins the writer, once it has written what waits, before the tier, the log and the cache
+/// files' locks close, then appends its last adds.
 impl Drop for ObjectCache {
     fn drop(&mut self) {
         let tiers = &self.tiers;
-        tiers.disk.chunks().close();
         self.writer.stop();
+        tiers.disk.chunks().close();
         if let Some(log) = tiers.disk.log() {
             let _ = log.finish();
         }
