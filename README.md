@@ -30,6 +30,9 @@ let store = T4Caching::builder(s3)
     .with_disk_file("/mnt/nvme0/t4.cache", 3 << 40)
     .with_disk_file("/mnt/nvme1/t4.cache", 3 << 40)
     .with_log_file("log/t4.log") // optional, for persistence
+    .with_placement_policy(|sizes| FixedPlacementPolicy::new(sizes, Admit::Disk)) 
+    .with_read_policy(RaceStragglers::at(0.99).planning_as(FetchRuns::default()))
+    .with_sleep(|after| Box::pin(tokio::time::sleep(after)))
     .build()?;
 
 let footer = store
@@ -38,42 +41,54 @@ let footer = store
 ```
 
 
-## Customized policy
+## Policies
 
-`t4` is fully customizable, you can roll your own `ReadPolicy` and `PlacementPolicy`.
-The default policies are built with the same public interfaces.
+`t4` has two policies: a `PlacementPolicy` decides where blocks live, and a `ReadPolicy` decides how a read reaches the object store. 
 
-```rust
-let store = T4Caching::builder(s3)
-    .with_placement_policy(...)
-    .with_read_policy(...)
-    .build()?;
-```
+### Placement policy: where blocks live
 
-```rust
-pub trait ReadPolicy: Send + Sync {
-    fn plan(&self, read: &LocatedRead<'_>) -> ReadPlan;
-
-    fn on_io(&self, event: &IoEvent<'_>);
-}
-```
+Tiers are exclusive: a 1 MiB block is in memory or on disk, never both.
 
 
 ```rust
 pub trait PlacementPolicy: Send + Sync {
+    /// Records a hit; it's on the hit path, so keep it cheap.
     fn on_memory_hit(&self, chunk: ChunkId, read: &BlockRead<'_>);
 
+    /// Stay on disk, or promote to memory.
     fn on_disk_hit(&self, chunk: ChunkId, read: &BlockRead<'_>) -> DiskHit;
 
+    /// Admit a fetched block to memory or disk, or discard it.
     fn on_remote_read(&self, read: &BlockRead<'_>) -> Admit;
 
     fn on_admit(&self, tier: Tier, chunk: ChunkId, block: BlockKey);
 
+    /// Each victim is moved to disk or dropped.
     fn pick_memory_victims(&self, count: usize) -> Vec<MemoryVictim>;
 
     fn pick_disk_victims(&self, count: usize) -> Vec<ChunkId>;
 }
 ```
+
+### Read policy: how a read reaches the object store
+
+A read policy plans the GETs for the blocks the cache doesn't hold. A plan may split, widen
+or merge runs of blocks, and race a GET: send it several times at once and take the first
+answer, or send one more copy only if it is still running after a delay.
+
+```rust
+pub trait ReadPolicy: Send + Sync {
+    /// The GETs for the read's blocks the cache doesn't hold.
+    fn plan(&self, read: &LocatedRead<'_>) -> ReadPlan;
+
+    /// Each disk and remote I/O as it starts and ends, to learn from.
+    fn on_io(&self, event: &IoEvent<'_>);
+}
+```
+
+A caller may say what a read is for, a `ReadIntent` (`Latency`, `Throughput` or `Warm`),
+in `GetOptions::extensions`; a policy sees it in `LocatedRead::intent` and
+`BlockRead::intent`.
 
 ## Tests
 
