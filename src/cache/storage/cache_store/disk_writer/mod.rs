@@ -96,17 +96,21 @@ impl PendingDisk {
     }
 
     /// A landed block goes at once, with whatever else waits: reads find it meanwhile, but a kill
-    /// loses it. Victims wait for a full batch.
+    /// loses it. Victims wait for a full batch, or for the writer to stop: a drop writes all.
     fn take_batch(&self) -> Option<Vec<PendingWrite>> {
         let mut queue = self.queue.lock().unwrap();
         loop {
-            if queue.stopping {
+            if queue.stopping && queue.blocks.is_empty() {
                 return None;
             }
             let landed = queue.blocks.iter().any(PendingWrite::is_landed);
-            if queue.blocks.len() >= self.batch_size || landed {
+            if queue.stopping || queue.blocks.len() >= self.batch_size || landed {
                 queue.active = true;
-                let most = if landed { Self::BATCH } else { self.batch_size };
+                let most = if landed || queue.stopping {
+                    Self::BATCH
+                } else {
+                    self.batch_size
+                };
                 let size = queue.blocks.len().min(most);
                 let batch = queue.blocks.drain(..size).collect();
                 let waiting = std::mem::take(&mut queue.waiting_landings);

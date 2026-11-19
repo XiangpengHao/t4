@@ -46,6 +46,28 @@ fn a_cache_built_again_serves_the_disk_tier_its_files_held() {
     });
 }
 
+/// Dropped as its read returns, with the writer yet to take the blocks.
+#[test]
+fn a_drop_writes_the_blocks_waiting_for_disk() {
+    crate::io::test_schedule::TestSchedule::check(|| {
+        let dir = CacheDirectory::new();
+        let inner = Arc::new(CountingStore::default());
+        let path = Path::from("a");
+        let data = file_bytes(3 * MIB + 5, 24);
+        put(inner.as_ref(), &path, &data);
+        let meta = block_on(inner.head(&path)).unwrap();
+        let first = on_disk(&inner, &dir).build().unwrap();
+        let read = block_on(first.open_listed(meta.clone()).read(0..meta.size, None)).unwrap();
+        assert_eq!(read, data);
+        drop(first);
+        inner.take_asked();
+
+        let again = on_disk(&inner, &dir).build().unwrap();
+        assert_eq!(read_whole(&again, &meta), data);
+        assert_eq!(inner.take_asked(), [], "served from disk");
+    });
+}
+
 #[test]
 fn a_cache_keeps_its_disk_tier_only_through_a_log_it_names() {
     crate::io::test_schedule::TestSchedule::check(|| {

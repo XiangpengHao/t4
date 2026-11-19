@@ -91,8 +91,9 @@ bytes.
    to end it (`10-spiral-integration.md`, decision 7).
 
 6. **A drop appends what it holds; the next build rebases.**
-   - As the cache drops, its tier closed and its writer joined, it appends
-     the entries it holds: the last batch's adds, which a kill loses.
+   - As the cache drops, its writer writes what waits for disk and is
+     joined, its tier closes, and it appends the entries it holds: the
+     last batch's adds, which a kill loses.
    - As the next cache builds, it takes the log back, then writes it again
      as a base alone with its own boot id, renamed into place, before it
      writes a chunk, so that each record appended after applies to it.
@@ -130,12 +131,15 @@ bytes.
    and uses one-block batches; larger capacities use 16. Raising a caller's
    memory budget silently would break the fixed-capacity contract.
    A batch of victims not full waits for its next block; its blocks are
-   memory's meanwhile and, as memory's, not written at a drop, as blocks
-   waiting in their own pages aren't.
+   memory's meanwhile.
    One owned writer thread waits on a condition variable, submits a whole
    batch, and parks until its I/O completes. It holds the index and the
-   tiers (`Tiers`), which reads share, not the cache; a drop closes the
-   tier and joins it.
+   tiers (`Tiers`), which reads share, not the cache; a drop stops the
+   queue, waits while the writer writes what waits in it, at most 16
+   blocks, joins it and closes the tier. A drop that wrote nothing waiting
+   lost the blocks of a read that had just returned, so a cache built
+   again fetched them again: a race a slow CI runner lost (Spiral's
+   restart tests, 19 Nov 2026).
    At most 16 blocks wait behind the batch in flight.
    A block the policy admits to disk lands in pages of its own, not a
    memory chunk, so every fetch in flight lands its blocks whatever the
